@@ -27,7 +27,10 @@ import { isToolReferenceBlock } from '../utils/searchExtraTools.js'
 import { getAPIMetadata, getExtraBodyParams } from './api/claude.js'
 import { getAnthropicClient } from './api/client.js'
 import { rethrowInvestigationAdmission } from './api/investigation.js'
-import { currentInvestigationScope, InvestigationAdmissionError } from '../world/investigation.js'
+import {
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+} from '../world/investigation.js'
 import {
   createTrace,
   endTrace,
@@ -154,11 +157,21 @@ export async function countMessagesTokensWithAPI(
   return withTokenCountVCR(messages, tools, async () => {
     try {
       const provider = getAPIProvider()
-      if (currentInvestigationScope() && (provider === 'openai' || provider === 'openaiResponses' || provider === 'grok')) {
-        throw new InvestigationAdmissionError('investigation_exact_input_count_unavailable')
+      if (
+        currentInvestigationScope() &&
+        (provider === 'openai' ||
+          provider === 'openaiResponses' ||
+          provider === 'grok')
+      ) {
+        throw new InvestigationAdmissionError(
+          'investigation_exact_input_count_unavailable',
+        )
       }
       if (provider === 'gemini') {
-        if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_exact_input_count_unavailable')
+        if (currentInvestigationScope())
+          throw new InvestigationAdmissionError(
+            'investigation_exact_input_count_unavailable',
+          )
         return roughTokenCountEstimationForAPIRequest(messages, tools)
       }
 
@@ -167,7 +180,10 @@ export async function countMessagesTokensWithAPI(
       const containsThinking = hasThinkingBlocks(messages)
 
       if (provider === 'bedrock') {
-        if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_exact_input_count_unavailable')
+        if (currentInvestigationScope())
+          throw new InvestigationAdmissionError(
+            'investigation_exact_input_count_unavailable',
+          )
         // @anthropic-sdk/bedrock-sdk doesn't support countTokens currently
         return countTokensWithBedrock({
           model: normalizeModelStringForAPI(model),
@@ -277,11 +293,21 @@ export async function countTokensViaHaikuFallback(
   tools: Anthropic.Beta.Messages.BetaToolUnion[],
 ): Promise<number | null> {
   const provider = getAPIProvider()
-  if (currentInvestigationScope() && (provider === 'openai' || provider === 'openaiResponses' || provider === 'grok')) {
-    throw new InvestigationAdmissionError('investigation_exact_input_count_unavailable')
+  if (
+    currentInvestigationScope() &&
+    (provider === 'openai' ||
+      provider === 'openaiResponses' ||
+      provider === 'grok')
+  ) {
+    throw new InvestigationAdmissionError(
+      'investigation_exact_input_count_unavailable',
+    )
   }
   if (provider === 'gemini') {
-    if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_exact_input_count_unavailable')
+    if (currentInvestigationScope())
+      throw new InvestigationAdmissionError(
+        'investigation_exact_input_count_unavailable',
+      )
     return roughTokenCountEstimationForAPIRequest(messages, tools)
   }
 

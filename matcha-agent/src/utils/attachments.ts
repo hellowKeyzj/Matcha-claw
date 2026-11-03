@@ -18,13 +18,21 @@ import {
 } from '@claude-code-best/builtin-tools/tools/FileReadTool/FileReadTool.js'
 import { FileTooLargeError, readFileInRange } from './readFileInRange.js'
 import {
-  InvestigationAdmissionError, currentInvestigationScope, investigationSignal,
-  requireInvestigationEffects, rethrowInvestigationAdmission, trackInvestigationOperation,
+  InvestigationAdmissionError,
+  currentInvestigationScope,
+  investigationSignal,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+  trackInvestigationOperation,
 } from '../world/investigation.js'
 import { expandPath } from './path.js'
 import { countCharInString } from './stringUtils.js'
 import { uniq } from './array.js'
-import { getFsImplementation, readSourceDirectory, statSourcePath } from './fsOperations.js'
+import {
+  getFsImplementation,
+  readSourceDirectory,
+  statSourcePath,
+} from './fsOperations.js'
 import type { IDESelection } from '../hooks/useIdeSelection.js'
 import { TODO_WRITE_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/TodoWriteTool/constants.js'
 import { TASK_CREATE_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/TaskCreateTool/constants.js'
@@ -257,7 +265,10 @@ import { removeTeammateFromTeamFile } from './swarm/teamHelpers.js'
 import { unassignTeammateTasks } from './tasks.js'
 import { getCompanionIntroAttachment } from '../buddy/prompt.js'
 
-function rethrowInvestigationAttachmentError(error: unknown, signal?: AbortSignal): void {
+function rethrowInvestigationAttachmentError(
+  error: unknown,
+  signal?: AbortSignal,
+): void {
   rethrowInvestigationAdmission(error)
   if (currentInvestigationScope()) {
     if (error instanceof Error && error.cause !== undefined) throw error
@@ -804,270 +815,279 @@ export async function getAttachments(
   // TODO: Compute attachments as the user types, not here (though we use this
   // function for slash command prompts too)
   const scoped = currentInvestigationScope() !== undefined
-  const abortController = scoped ? createChildAbortController(toolUseContext.abortController) : createAbortController()
-  const timeoutId = scoped ? undefined : setTimeout(ac => ac.abort(), 1000, abortController)
+  const abortController = scoped
+    ? createChildAbortController(toolUseContext.abortController)
+    : createAbortController()
+  const timeoutId = scoped
+    ? undefined
+    : setTimeout(ac => ac.abort(), 1000, abortController)
   const context = { ...toolUseContext, abortController }
   try {
+    const isMainThread = !toolUseContext.agentId
 
-  const isMainThread = !toolUseContext.agentId
-
-  // Attachments which are added in response to on user input
-  const userInputAttachments = input
-    ? [
-        maybe('at_mentioned_files', () =>
-          processAtMentionedFiles(input, context),
-        ),
-        maybe('mcp_resources', () =>
-          processMcpResourceAttachments(input, context),
-        ),
-        maybe('agent_mentions', () =>
-          Promise.resolve(
-            processAgentMentions(
-              input,
-              toolUseContext.options.agentDefinitions.activeAgents,
+    // Attachments which are added in response to on user input
+    const userInputAttachments = input
+      ? [
+          maybe('at_mentioned_files', () =>
+            processAtMentionedFiles(input, context),
+          ),
+          maybe('mcp_resources', () =>
+            processMcpResourceAttachments(input, context),
+          ),
+          maybe('agent_mentions', () =>
+            Promise.resolve(
+              processAgentMentions(
+                input,
+                toolUseContext.options.agentDefinitions.activeAgents,
+              ),
             ),
           ),
-        ),
-        // Skill discovery on turn 0 (user input as signal). Inter-turn
-        // discovery runs via startSkillDiscoveryPrefetch in query.ts,
-        // gated on write-pivot detection — see skillSearch/prefetch.ts.
-        // feature() here lets DCE drop the 'skill_discovery' string (and the
-        // function it calls) from external builds.
-        //
-        // skipSkillDiscovery gates out the SKILL.md-expansion path
-        // (getMessagesForPromptSlashCommand). When a skill is invoked, its
-        // SKILL.md content is passed as `input` here to extract @-mentions —
-        // but that content is NOT user intent and must not trigger discovery.
-        // Without this gate, a 110KB SKILL.md fires ~3.3s of chunked AKI
-        // queries on every skill invocation (session 13a9afae).
-        ...(feature('EXPERIMENTAL_SKILL_SEARCH') &&
-        skillSearchModules &&
-        !options?.skipSkillDiscovery
-          ? [
-              maybe('skill_discovery', async () => {
-                if (suppressNextDiscovery) {
-                  suppressNextDiscovery = false
-                  return []
-                }
-                const result =
-                  await skillSearchModules.prefetch.getTurnZeroSkillDiscovery(
-                    input,
-                    messages ?? [],
-                    context,
-                  )
-                return result ? [result] : []
-              }),
-            ]
-          : []),
-        // Tool discovery on turn 0. Inter-turn discovery runs via
-        // startSearchExtraToolsPrefetch in query.ts.
-        ...(feature('EXPERIMENTAL_SEARCH_EXTRA_TOOLS') &&
-        searchExtraToolsModules &&
-        !options?.skipSkillDiscovery
-          ? [
-              maybe('tool_discovery', async () => {
-                if (suppressNextDiscovery) {
-                  return []
-                }
-                const result =
-                  await searchExtraToolsModules.prefetch.getTurnZeroSearchExtraToolsPrefetch(
-                    input,
-                    context.options.tools ?? [],
-                  )
-                return result ? [result] : []
-              }),
-            ]
-          : []),
-      ]
-    : []
+          // Skill discovery on turn 0 (user input as signal). Inter-turn
+          // discovery runs via startSkillDiscoveryPrefetch in query.ts,
+          // gated on write-pivot detection — see skillSearch/prefetch.ts.
+          // feature() here lets DCE drop the 'skill_discovery' string (and the
+          // function it calls) from external builds.
+          //
+          // skipSkillDiscovery gates out the SKILL.md-expansion path
+          // (getMessagesForPromptSlashCommand). When a skill is invoked, its
+          // SKILL.md content is passed as `input` here to extract @-mentions —
+          // but that content is NOT user intent and must not trigger discovery.
+          // Without this gate, a 110KB SKILL.md fires ~3.3s of chunked AKI
+          // queries on every skill invocation (session 13a9afae).
+          ...(feature('EXPERIMENTAL_SKILL_SEARCH') &&
+          skillSearchModules &&
+          !options?.skipSkillDiscovery
+            ? [
+                maybe('skill_discovery', async () => {
+                  if (suppressNextDiscovery) {
+                    suppressNextDiscovery = false
+                    return []
+                  }
+                  const result =
+                    await skillSearchModules.prefetch.getTurnZeroSkillDiscovery(
+                      input,
+                      messages ?? [],
+                      context,
+                    )
+                  return result ? [result] : []
+                }),
+              ]
+            : []),
+          // Tool discovery on turn 0. Inter-turn discovery runs via
+          // startSearchExtraToolsPrefetch in query.ts.
+          ...(feature('EXPERIMENTAL_SEARCH_EXTRA_TOOLS') &&
+          searchExtraToolsModules &&
+          !options?.skipSkillDiscovery
+            ? [
+                maybe('tool_discovery', async () => {
+                  if (suppressNextDiscovery) {
+                    return []
+                  }
+                  const result =
+                    await searchExtraToolsModules.prefetch.getTurnZeroSearchExtraToolsPrefetch(
+                      input,
+                      context.options.tools ?? [],
+                    )
+                  return result ? [result] : []
+                }),
+              ]
+            : []),
+        ]
+      : []
 
-  // Process user input attachments first (includes @mentioned files)
-  // This ensures files are added to nestedMemoryAttachmentTriggers before nested_memory processes them
-  const userAttachmentResults = await Promise.all(userInputAttachments)
+    // Process user input attachments first (includes @mentioned files)
+    // This ensures files are added to nestedMemoryAttachmentTriggers before nested_memory processes them
+    const userAttachmentResults = await Promise.all(userInputAttachments)
 
-  // Thread-safe attachments available in sub-agents
-  // NOTE: These must be created AFTER userInputAttachments completes to ensure
-  // nestedMemoryAttachmentTriggers is populated before getNestedMemoryAttachments runs
-  const allThreadAttachments = [
-    // queuedCommands is already agent-scoped by the drain gate in query.ts —
-    // main thread gets agentId===undefined, subagents get their own agentId.
-    // Must run for all threads or subagent notifications drain into the void
-    // (removed from queue by removeFromQueue but never attached).
-    maybe('queued_commands', () => getQueuedCommandAttachments(queuedCommands)),
-    maybe('date_change', () =>
-      Promise.resolve(getDateChangeAttachments(messages)),
-    ),
-    maybe('ultrathink_effort', () =>
-      Promise.resolve(getUltrathinkEffortAttachment(input)),
-    ),
-    maybe('deferred_tools_delta', () =>
-      Promise.resolve(
-        getDeferredToolsDeltaAttachment(
-          toolUseContext.options.tools,
-          toolUseContext.options.mainLoopModel,
-          messages,
-          {
-            callSite: isMainThread
-              ? 'attachments_main'
-              : 'attachments_subagent',
-            querySource,
-          },
+    // Thread-safe attachments available in sub-agents
+    // NOTE: These must be created AFTER userInputAttachments completes to ensure
+    // nestedMemoryAttachmentTriggers is populated before getNestedMemoryAttachments runs
+    const allThreadAttachments = [
+      // queuedCommands is already agent-scoped by the drain gate in query.ts —
+      // main thread gets agentId===undefined, subagents get their own agentId.
+      // Must run for all threads or subagent notifications drain into the void
+      // (removed from queue by removeFromQueue but never attached).
+      maybe('queued_commands', () =>
+        getQueuedCommandAttachments(queuedCommands),
+      ),
+      maybe('date_change', () =>
+        Promise.resolve(getDateChangeAttachments(messages)),
+      ),
+      maybe('ultrathink_effort', () =>
+        Promise.resolve(getUltrathinkEffortAttachment(input)),
+      ),
+      maybe('deferred_tools_delta', () =>
+        Promise.resolve(
+          getDeferredToolsDeltaAttachment(
+            toolUseContext.options.tools,
+            toolUseContext.options.mainLoopModel,
+            messages,
+            {
+              callSite: isMainThread
+                ? 'attachments_main'
+                : 'attachments_subagent',
+              querySource,
+            },
+          ),
         ),
       ),
-    ),
-    maybe('agent_listing_delta', () =>
-      Promise.resolve(getAgentListingDeltaAttachment(toolUseContext, messages)),
-    ),
-    maybe('mcp_instructions_delta', () =>
-      Promise.resolve(
-        getMcpInstructionsDeltaAttachment(
-          toolUseContext.options.mcpClients,
-          toolUseContext.options.tools,
-          toolUseContext.options.mainLoopModel,
-          messages,
+      maybe('agent_listing_delta', () =>
+        Promise.resolve(
+          getAgentListingDeltaAttachment(toolUseContext, messages),
         ),
       ),
-    ),
-    ...(feature('BUDDY')
-      ? [
-          maybe('companion_intro', () =>
-            Promise.resolve(getCompanionIntroAttachment(messages)),
+      maybe('mcp_instructions_delta', () =>
+        Promise.resolve(
+          getMcpInstructionsDeltaAttachment(
+            toolUseContext.options.mcpClients,
+            toolUseContext.options.tools,
+            toolUseContext.options.mainLoopModel,
+            messages,
           ),
-        ]
-      : []),
-    maybe('changed_files', () => getChangedFiles(context)),
-    maybe('nested_memory', () => getNestedMemoryAttachments(context)),
-    // relevant_memories moved to async prefetch (startRelevantMemoryPrefetch)
-    maybe('dynamic_skill', () => getDynamicSkillAttachments(context)),
-    maybe('skill_listing', () => getSkillListingAttachments(context)),
-    // Inter-turn skill discovery now runs via startSkillDiscoveryPrefetch
-    // (query.ts, concurrent with the main turn). The blocking call that
-    // previously lived here was the assistant_turn signal — 97% of those
-    // Haiku calls found nothing in prod. Prefetch + await-at-collection
-    // replaces it; see src/services/skillSearch/prefetch.ts.
-    maybe('plan_mode', () => getPlanModeAttachments(messages, toolUseContext)),
-    maybe('plan_mode_exit', () => getPlanModeExitAttachment(toolUseContext)),
-    ...(feature('TRANSCRIPT_CLASSIFIER')
-      ? [
-          maybe('auto_mode', () =>
-            getAutoModeAttachments(messages, toolUseContext),
-          ),
-          maybe('auto_mode_exit', () =>
-            getAutoModeExitAttachment(toolUseContext),
-          ),
-        ]
-      : []),
-    maybe('todo_reminders', () =>
-      isTodoV2Enabled()
-        ? getTaskReminderAttachments(messages, toolUseContext)
-        : getTodoReminderAttachments(messages, toolUseContext),
-    ),
-    ...(isAgentSwarmsEnabled()
-      ? [
-          // Skip teammate mailbox for the session_memory forked agent.
-          // It shares AppState.teamContext with the leader, so isTeamLead resolves
-          // true and it reads+marks-as-read the leader's DMs as ephemeral attachments,
-          // silently stealing messages that should be delivered as permanent turns.
-          ...(querySource === 'session_memory'
-            ? []
-            : [
-                maybe('teammate_mailbox', async () =>
-                  getTeammateMailboxAttachments(toolUseContext),
+        ),
+      ),
+      ...(feature('BUDDY')
+        ? [
+            maybe('companion_intro', () =>
+              Promise.resolve(getCompanionIntroAttachment(messages)),
+            ),
+          ]
+        : []),
+      maybe('changed_files', () => getChangedFiles(context)),
+      maybe('nested_memory', () => getNestedMemoryAttachments(context)),
+      // relevant_memories moved to async prefetch (startRelevantMemoryPrefetch)
+      maybe('dynamic_skill', () => getDynamicSkillAttachments(context)),
+      maybe('skill_listing', () => getSkillListingAttachments(context)),
+      // Inter-turn skill discovery now runs via startSkillDiscoveryPrefetch
+      // (query.ts, concurrent with the main turn). The blocking call that
+      // previously lived here was the assistant_turn signal — 97% of those
+      // Haiku calls found nothing in prod. Prefetch + await-at-collection
+      // replaces it; see src/services/skillSearch/prefetch.ts.
+      maybe('plan_mode', () =>
+        getPlanModeAttachments(messages, toolUseContext),
+      ),
+      maybe('plan_mode_exit', () => getPlanModeExitAttachment(toolUseContext)),
+      ...(feature('TRANSCRIPT_CLASSIFIER')
+        ? [
+            maybe('auto_mode', () =>
+              getAutoModeAttachments(messages, toolUseContext),
+            ),
+            maybe('auto_mode_exit', () =>
+              getAutoModeExitAttachment(toolUseContext),
+            ),
+          ]
+        : []),
+      maybe('todo_reminders', () =>
+        isTodoV2Enabled()
+          ? getTaskReminderAttachments(messages, toolUseContext)
+          : getTodoReminderAttachments(messages, toolUseContext),
+      ),
+      ...(isAgentSwarmsEnabled()
+        ? [
+            // Skip teammate mailbox for the session_memory forked agent.
+            // It shares AppState.teamContext with the leader, so isTeamLead resolves
+            // true and it reads+marks-as-read the leader's DMs as ephemeral attachments,
+            // silently stealing messages that should be delivered as permanent turns.
+            ...(querySource === 'session_memory'
+              ? []
+              : [
+                  maybe('teammate_mailbox', async () =>
+                    getTeammateMailboxAttachments(toolUseContext),
+                  ),
+                ]),
+            maybe('team_context', async () =>
+              getTeamContextAttachment(messages ?? []),
+            ),
+          ]
+        : []),
+      maybe('agent_pending_messages', async () =>
+        getAgentPendingMessageAttachments(toolUseContext),
+      ),
+      maybe('critical_system_reminder', () =>
+        Promise.resolve(getCriticalSystemReminderAttachment(toolUseContext)),
+      ),
+      ...(feature('COMPACTION_REMINDERS')
+        ? [
+            maybe('compaction_reminder', () =>
+              Promise.resolve(
+                getCompactionReminderAttachment(
+                  messages ?? [],
+                  toolUseContext.options.mainLoopModel,
                 ),
-              ]),
-          maybe('team_context', async () =>
-            getTeamContextAttachment(messages ?? []),
-          ),
-        ]
-      : []),
-    maybe('agent_pending_messages', async () =>
-      getAgentPendingMessageAttachments(toolUseContext),
-    ),
-    maybe('critical_system_reminder', () =>
-      Promise.resolve(getCriticalSystemReminderAttachment(toolUseContext)),
-    ),
-    ...(feature('COMPACTION_REMINDERS')
+              ),
+            ),
+          ]
+        : []),
+      ...(feature('HISTORY_SNIP')
+        ? [
+            maybe('context_efficiency', () =>
+              Promise.resolve(getContextEfficiencyAttachment(messages ?? [])),
+            ),
+          ]
+        : []),
+    ]
+
+    // Attachments which are semantically only for the main conversation or don't have concurrency-safe implementations
+    const mainThreadAttachments = isMainThread
       ? [
-          maybe('compaction_reminder', () =>
+          maybe('ide_selection', async () =>
+            getSelectedLinesFromIDE(ideSelection, toolUseContext),
+          ),
+          maybe('ide_opened_file', async () =>
+            getOpenedFileFromIDE(ideSelection, toolUseContext),
+          ),
+          maybe('output_style', async () =>
+            Promise.resolve(getOutputStyleAttachment()),
+          ),
+          maybe('diagnostics', async () =>
+            getDiagnosticAttachments(toolUseContext),
+          ),
+          maybe('lsp_diagnostics', async () =>
+            getLSPDiagnosticAttachments(toolUseContext),
+          ),
+          maybe('unified_tasks', async () =>
+            getUnifiedTaskAttachments(toolUseContext),
+          ),
+          maybe('async_hook_responses', async () =>
+            getAsyncHookResponseAttachments(),
+          ),
+          maybe('token_usage', async () =>
             Promise.resolve(
-              getCompactionReminderAttachment(
+              getTokenUsageAttachment(
                 messages ?? [],
                 toolUseContext.options.mainLoopModel,
               ),
             ),
           ),
-        ]
-      : []),
-    ...(feature('HISTORY_SNIP')
-      ? [
-          maybe('context_efficiency', () =>
-            Promise.resolve(getContextEfficiencyAttachment(messages ?? [])),
-          ),
-        ]
-      : []),
-  ]
-
-  // Attachments which are semantically only for the main conversation or don't have concurrency-safe implementations
-  const mainThreadAttachments = isMainThread
-    ? [
-        maybe('ide_selection', async () =>
-          getSelectedLinesFromIDE(ideSelection, toolUseContext),
-        ),
-        maybe('ide_opened_file', async () =>
-          getOpenedFileFromIDE(ideSelection, toolUseContext),
-        ),
-        maybe('output_style', async () =>
-          Promise.resolve(getOutputStyleAttachment()),
-        ),
-        maybe('diagnostics', async () =>
-          getDiagnosticAttachments(toolUseContext),
-        ),
-        maybe('lsp_diagnostics', async () =>
-          getLSPDiagnosticAttachments(toolUseContext),
-        ),
-        maybe('unified_tasks', async () =>
-          getUnifiedTaskAttachments(toolUseContext),
-        ),
-        maybe('async_hook_responses', async () =>
-          getAsyncHookResponseAttachments(),
-        ),
-        maybe('token_usage', async () =>
-          Promise.resolve(
-            getTokenUsageAttachment(
-              messages ?? [],
-              toolUseContext.options.mainLoopModel,
+          maybe('budget_usd', async () =>
+            Promise.resolve(
+              getMaxBudgetUsdAttachment(toolUseContext.options.maxBudgetUsd),
             ),
           ),
-        ),
-        maybe('budget_usd', async () =>
-          Promise.resolve(
-            getMaxBudgetUsdAttachment(toolUseContext.options.maxBudgetUsd),
+          maybe('output_token_usage', async () =>
+            Promise.resolve(getOutputTokenUsageAttachment()),
           ),
-        ),
-        maybe('output_token_usage', async () =>
-          Promise.resolve(getOutputTokenUsageAttachment()),
-        ),
-        maybe('verify_plan_reminder', async () =>
-          getVerifyPlanReminderAttachment(messages, toolUseContext),
-        ),
-      ]
-    : []
+          maybe('verify_plan_reminder', async () =>
+            getVerifyPlanReminderAttachment(messages, toolUseContext),
+          ),
+        ]
+      : []
 
-  // Process thread and main thread attachments in parallel (no dependencies between them)
-  const [threadAttachmentResults, mainThreadAttachmentResults] =
-    await Promise.all([
-      Promise.all(allThreadAttachments),
-      Promise.all(mainThreadAttachments),
-    ])
+    // Process thread and main thread attachments in parallel (no dependencies between them)
+    const [threadAttachmentResults, mainThreadAttachmentResults] =
+      await Promise.all([
+        Promise.all(allThreadAttachments),
+        Promise.all(mainThreadAttachments),
+      ])
 
-  // Defensive: a getter leaking [undefined] crashes .map(a => a.type) below.
-  return (
-    [
-      ...userAttachmentResults.flat(),
-      ...threadAttachmentResults.flat(),
-      ...mainThreadAttachmentResults.flat(),
-    ] as Attachment[]
-  ).filter(a => a !== undefined && a !== null)
+    // Defensive: a getter leaking [undefined] crashes .map(a => a.type) below.
+    return (
+      [
+        ...userAttachmentResults.flat(),
+        ...threadAttachmentResults.flat(),
+        ...mainThreadAttachmentResults.flat(),
+      ] as Attachment[]
+    ).filter(a => a !== undefined && a !== null)
   } finally {
     clearTimeout(timeoutId)
     if (scoped) abortController.abort()
@@ -1096,7 +1116,11 @@ async function maybe<A>(label: string, f: () => Promise<A[]>): Promise<A[]> {
     }
     return result
   } catch (e) {
-    if (currentInvestigationScope() && (label === 'plan_mode' || label === 'plan_mode_exit')) throw e
+    if (
+      currentInvestigationScope() &&
+      (label === 'plan_mode' || label === 'plan_mode_exit')
+    )
+      throw e
     rethrowInvestigationAttachmentError(e)
     const duration = Date.now() - startTime
     // Log only 5% of events to reduce volume
@@ -1282,9 +1306,14 @@ async function getPlanModeAttachments(
   }
 
   const { planFilePath, planExists } = currentInvestigationScope()
-    ? await preparePlanAttachment(toolUseContext.agentId, toolUseContext.abortController.signal)
-    : { planFilePath: getPlanFilePath(toolUseContext.agentId),
-        planExists: getPlan(toolUseContext.agentId) !== null }
+    ? await preparePlanAttachment(
+        toolUseContext.agentId,
+        toolUseContext.abortController.signal,
+      )
+    : {
+        planFilePath: getPlanFilePath(toolUseContext.agentId),
+        planExists: getPlan(toolUseContext.agentId) !== null,
+      }
 
   const attachments: Attachment[] = []
 
@@ -1336,9 +1365,14 @@ async function getPlanModeExitAttachment(
   }
 
   const { planFilePath, planExists } = currentInvestigationScope()
-    ? await preparePlanAttachment(toolUseContext.agentId, toolUseContext.abortController.signal)
-    : { planFilePath: getPlanFilePath(toolUseContext.agentId),
-        planExists: getPlan(toolUseContext.agentId) !== null }
+    ? await preparePlanAttachment(
+        toolUseContext.agentId,
+        toolUseContext.abortController.signal,
+      )
+    : {
+        planFilePath: getPlanFilePath(toolUseContext.agentId),
+        planExists: getPlan(toolUseContext.agentId) !== null,
+      }
 
   // Clear the flag only after preparation succeeds.
   setNeedsPlanModeExitAttachment(false)
@@ -1833,16 +1867,18 @@ export function memoryFilesToAttachments(
           : memoryFile.parent
             ? 'include'
             : 'nested_traversal'
-        void trackInvestigationOperation(executeInstructionsLoadedHooks(
-          memoryFile.path,
-          memoryFile.type,
-          loadReason,
-          {
-            globs: memoryFile.globs,
-            triggerFilePath,
-            parentFilePath: memoryFile.parent,
-          },
-        ))
+        void trackInvestigationOperation(
+          executeInstructionsLoadedHooks(
+            memoryFile.path,
+            memoryFile.type,
+            loadReason,
+            {
+              globs: memoryFile.globs,
+              triggerFilePath,
+              parentFilePath: memoryFile.parent,
+            },
+          ),
+        )
       }
     }
   }
@@ -1874,7 +1910,13 @@ async function getNestedMemoryAttachmentsForFile(
 
   try {
     // Early return if path is not in allowed working path
-    if (!await pathInAllowedWorkingPathAsync(filePath, appState.toolPermissionContext, toolUseContext.abortController.signal)) {
+    if (
+      !(await pathInAllowedWorkingPathAsync(
+        filePath,
+        appState.toolPermissionContext,
+        toolUseContext.abortController.signal,
+      ))
+    ) {
       return attachments
     }
 
@@ -1931,7 +1973,10 @@ async function getNestedMemoryAttachmentsForFile(
       )
     }
   } catch (error) {
-    rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+    rethrowInvestigationAttachmentError(
+      error,
+      toolUseContext.abortController.signal,
+    )
     logError(error)
   }
 
@@ -1990,10 +2035,15 @@ async function processAtMentionedFiles(
 
         // Check if it's a directory
         try {
-          const stats = await statSourcePath(absoluteFilename, { signal: toolUseContext.abortController.signal })
+          const stats = await statSourcePath(absoluteFilename, {
+            signal: toolUseContext.abortController.signal,
+          })
           if (stats.isDirectory()) {
             try {
-              const entries = await readSourceDirectory(absoluteFilename, toolUseContext.abortController.signal)
+              const entries = await readSourceDirectory(
+                absoluteFilename,
+                toolUseContext.abortController.signal,
+              )
               const MAX_DIR_ENTRIES = 1000
               const truncated = entries.length > MAX_DIR_ENTRIES
               const names = entries.slice(0, MAX_DIR_ENTRIES).map(e => e.name)
@@ -2012,12 +2062,18 @@ async function processAtMentionedFiles(
                 displayPath: relative(getCwd(), absoluteFilename),
               }
             } catch (error) {
-              rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+              rethrowInvestigationAttachmentError(
+                error,
+                toolUseContext.abortController.signal,
+              )
               return null
             }
           }
         } catch (error) {
-          rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+          rethrowInvestigationAttachmentError(
+            error,
+            toolUseContext.abortController.signal,
+          )
           // If stat fails, continue with file logic
         }
 
@@ -2033,7 +2089,10 @@ async function processAtMentionedFiles(
           },
         )
       } catch (error) {
-        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+        rethrowInvestigationAttachmentError(
+          error,
+          toolUseContext.abortController.signal,
+        )
         logEvent('tengu_at_mention_extracting_filename_error', {})
       }
     }),
@@ -2107,7 +2166,10 @@ async function processMcpResourceAttachments(
         }
 
         try {
-          if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_mcp_resource_bound_unavailable')
+          if (currentInvestigationScope())
+            throw new InvestigationAdmissionError(
+              'investigation_mcp_resource_bound_unavailable',
+            )
           const result = await client.client.readResource({
             uri,
           })
@@ -2123,13 +2185,19 @@ async function processMcpResourceAttachments(
             content: result,
           }
         } catch (error) {
-          rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+          rethrowInvestigationAttachmentError(
+            error,
+            toolUseContext.abortController.signal,
+          )
           logEvent('tengu_at_mention_mcp_resource_error', {})
           logError(error)
           return null
         }
       } catch (error) {
-        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+        rethrowInvestigationAttachmentError(
+          error,
+          toolUseContext.abortController.signal,
+        )
         logEvent('tengu_at_mention_mcp_resource_error', {})
         return null
       }
@@ -2212,7 +2280,10 @@ export async function getChangedFiles(
               content: data,
             }
           } catch (compressionError) {
-            rethrowInvestigationAttachmentError(compressionError, toolUseContext.abortController.signal)
+            rethrowInvestigationAttachmentError(
+              compressionError,
+              toolUseContext.abortController.signal,
+            )
             logError(compressionError)
             logEvent('tengu_watched_file_compression_failed', {
               file: normalizedPath,
@@ -2225,7 +2296,10 @@ export async function getChangedFiles(
         // null so the map callback has no implicit-undefined path.
         return null
       } catch (err) {
-        rethrowInvestigationAttachmentError(err, toolUseContext.abortController.signal)
+        rethrowInvestigationAttachmentError(
+          err,
+          toolUseContext.abortController.signal,
+        )
         // Evict ONLY on ENOENT (file truly deleted). Transient stat
         // failures — atomic-save races (editor writes tmp→rename and
         // stat hits the gap), EACCES churn, network-FS hiccups — must
@@ -2489,21 +2563,23 @@ export function startRelevantMemoryPrefetch(
   // immediately, not just on [Symbol.dispose] when queryLoop exits.
   const controller = createChildAbortController(toolUseContext.abortController)
   const firedAt = Date.now()
-  const promise = trackInvestigationOperation(getRelevantMemoryAttachments(
-    input,
-    toolUseContext.options.agentDefinitions.activeAgents,
-    toolUseContext.readFileState,
-    collectRecentSuccessfulTools(messages, lastUserMessage),
-    controller.signal,
-    surfaced.paths,
-    toolUseContext.langfuseTrace,
-  ).catch(e => {
-    rethrowInvestigationAttachmentError(e, controller.signal)
-    if (!isAbortError(e)) {
-      logError(e)
-    }
-    return []
-  }))
+  const promise = trackInvestigationOperation(
+    getRelevantMemoryAttachments(
+      input,
+      toolUseContext.options.agentDefinitions.activeAgents,
+      toolUseContext.readFileState,
+      collectRecentSuccessfulTools(messages, lastUserMessage),
+      controller.signal,
+      surfaced.paths,
+      toolUseContext.langfuseTrace,
+    ).catch(e => {
+      rethrowInvestigationAttachmentError(e, controller.signal)
+      if (!isAbortError(e)) {
+        logError(e)
+      }
+      return []
+    }),
+  )
 
   const handle: MemoryPrefetch = {
     promise,
@@ -2519,11 +2595,14 @@ export function startRelevantMemoryPrefetch(
       })
     },
   }
-  void promise.then(() => {
-    handle.settledAt = Date.now()
-  }, () => {
-    handle.settledAt = Date.now()
-  })
+  void promise.then(
+    () => {
+      handle.settledAt = Date.now()
+    },
+    () => {
+      handle.settledAt = Date.now()
+    },
+  )
   return handle
 }
 
@@ -2664,7 +2743,10 @@ async function getDynamicSkillAttachments(
     const perDirResults = await Promise.all(
       Array.from(toolUseContext.dynamicSkillDirTriggers).map(async skillDir => {
         try {
-          const entries = await readSourceDirectory(skillDir, toolUseContext.abortController.signal)
+          const entries = await readSourceDirectory(
+            skillDir,
+            toolUseContext.abortController.signal,
+          )
           const candidates = entries
             .filter(e => e.isDirectory() || e.isSymbolicLink())
             .map(e => e.name)
@@ -2672,10 +2754,15 @@ async function getDynamicSkillAttachments(
           const checked = await Promise.all(
             candidates.map(async name => {
               try {
-                await statSourcePath(resolve(skillDir, name, 'SKILL.md'), { signal: toolUseContext.abortController.signal })
+                await statSourcePath(resolve(skillDir, name, 'SKILL.md'), {
+                  signal: toolUseContext.abortController.signal,
+                })
                 return name
               } catch (error) {
-                rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+                rethrowInvestigationAttachmentError(
+                  error,
+                  toolUseContext.abortController.signal,
+                )
                 return null // SKILL.md doesn't exist, skip this entry
               }
             }),
@@ -2685,7 +2772,10 @@ async function getDynamicSkillAttachments(
             skillNames: checked.filter((n): n is string => n !== null),
           }
         } catch (error) {
-          rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+          rethrowInvestigationAttachmentError(
+            error,
+            toolUseContext.abortController.signal,
+          )
           // Ignore errors reading skill directories (e.g., directory doesn't exist)
           return { skillDir, skillNames: [] }
         }
@@ -3113,7 +3203,10 @@ export async function tryGetPDFReference(
     return null
   }
   try {
-    if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_pdf_metadata_bound_unavailable')
+    if (currentInvestigationScope())
+      throw new InvestigationAdmissionError(
+        'investigation_pdf_metadata_bound_unavailable',
+      )
     const [stats, pageCount] = await Promise.all([
       getFsImplementation().stat(filename),
       getPDFPageCount(filename),
@@ -3172,14 +3265,23 @@ export async function generateFileAttachment(
   if (mode === 'at-mention') {
     if (currentInvestigationScope()) {
       try {
-        const stats = await statSourcePath(filename, { signal: toolUseContext.abortController.signal })
-        withinReadSizeLimit = stats.size <= getDefaultFileReadingLimits().maxSizeBytes
+        const stats = await statSourcePath(filename, {
+          signal: toolUseContext.abortController.signal,
+        })
+        withinReadSizeLimit =
+          stats.size <= getDefaultFileReadingLimits().maxSizeBytes
       } catch (error) {
-        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+        rethrowInvestigationAttachmentError(
+          error,
+          toolUseContext.abortController.signal,
+        )
         withinReadSizeLimit = false
       }
     } else {
-      withinReadSizeLimit = isFileWithinReadSizeLimit(filename, getDefaultFileReadingLimits().maxSizeBytes)
+      withinReadSizeLimit = isFileWithinReadSizeLimit(
+        filename,
+        getDefaultFileReadingLimits().maxSizeBytes,
+      )
     }
   }
   if (mode === 'at-mention' && !withinReadSizeLimit) {
@@ -3193,7 +3295,10 @@ export async function generateFileAttachment(
         } as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS)
         return null
       } catch (error) {
-        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+        rethrowInvestigationAttachmentError(
+          error,
+          toolUseContext.abortController.signal,
+        )
         // If we can't stat the file, proceed with normal reading (will fail later if file doesn't exist)
       }
     }
@@ -3248,7 +3353,10 @@ export async function generateFileAttachment(
         }
       }
     } catch (error) {
-      rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+      rethrowInvestigationAttachmentError(
+        error,
+        toolUseContext.abortController.signal,
+      )
       // If we can't stat the file, proceed with normal reading
     }
   }
@@ -3298,7 +3406,10 @@ export async function generateFileAttachment(
           displayPath: relative(getCwd(), filename),
         }
       } catch (error) {
-        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+        rethrowInvestigationAttachmentError(
+          error,
+          toolUseContext.abortController.signal,
+        )
         logEvent(errorEventName, {})
         return null
       }
@@ -3329,7 +3440,10 @@ export async function generateFileAttachment(
       throw error
     }
   } catch (error) {
-    rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+    rethrowInvestigationAttachmentError(
+      error,
+      toolUseContext.abortController.signal,
+    )
     logEvent(errorEventName, {})
     return null
   }

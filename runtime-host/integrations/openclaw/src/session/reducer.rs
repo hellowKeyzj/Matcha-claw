@@ -271,7 +271,7 @@ impl CanonicalChangeDebugSummary {
             CanonicalSessionChange::RecoveryRequired { .. } => {
                 self.recovery_required_count += 1;
             }
-            CanonicalSessionChange::ItemsReplaced { .. } => {},
+            CanonicalSessionChange::ItemsReplaced { .. } | CanonicalSessionChange::RunYielded { .. } => {},
             CanonicalSessionChange::TranscriptMessage { .. } => {
                 self.transcript_message_count += 1;
             }
@@ -524,6 +524,16 @@ impl SessionReducerActor {
             self.approvals = approvals;
         }
         result
+    }
+
+    pub(crate) fn image_task_tools(&self) -> &[sessions_module::state::ToolView] {
+        &self.cache.tools
+    }
+
+    pub(crate) fn update_image_task(&mut self, task: &super::image_tasks::ImageTask) -> Vec<sessions_module::state::ToolView> {
+        self.cache.tools.iter_mut().filter_map(|tool|
+            super::image_tasks::update_tool(tool, task).then(|| tool.clone())
+        ).collect()
     }
 
     pub(crate) fn reduce_transcript_message(&mut self, message: super::window::Message, source_epoch: Option<u64>) -> Option<CanonicalIngressResult> {
@@ -980,7 +990,7 @@ impl SessionReducerActor {
                 let run_id = chat.run_id.clone();
                 if chat.is_yielded() {
                     self.clear_active_run(&run_id);
-                    return produce_changes_debugged("chat_yielded", event, source_epoch, Vec::new());
+                    return produce_changes_debugged("chat_yielded", event, source_epoch, vec![CanonicalSessionChange::RunYielded { run_id }]);
                 }
                 let assistant_changes = self.assistant_snapshot_changes(
                     run_id.clone(), None, chat.message_text.as_deref(), chat.message_thinking.as_deref(),

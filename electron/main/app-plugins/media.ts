@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
-import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppTextModelRequest, AppTextModelResult, AppVideoTask, AppVideoTaskRequest, AppVideoTaskResult } from '../../../src/types/desktop/app-plugin-sdk';
+import { isAppVideoTask } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult } from '../../../src/types/desktop/app-plugin-sdk';
 import type { RuntimeHostDeliveryIssuer } from '../runtime-host-delivery/issuer';
 import { hasExactKeys, isRecord, sendLoopbackJsonDelivery } from '../runtime-host-delivery/transport/client';
 import { fetchLoopbackHttp } from '../../utils/loopback-http';
+import { isModelErrorCode } from './protocol';
 
 export const MAX_PLUGIN_TEXT_REQUEST_BYTES = 48 * 1024 * 1024;
 
@@ -47,8 +49,8 @@ export async function generatePluginText(
   signal.throwIfAborted();
   if (delivery.outcome !== 'response') throw new Error('Text generation outcome could not be observed; the provider request may already have occurred.');
   const { status, body: result } = delivery.response;
-  if (status !== 200 && isRecord(result) && result.success === false && typeof result.code === 'string'
-    && typeof result.error === 'string' && result.error.length > 0 && result.error.length <= 2000) throw new Error(result.error);
+  if (status !== 200 && isRecord(result) && result.success === false && isModelErrorCode(result.code)
+    && typeof result.error === 'string' && result.error.length > 0 && result.error.length <= 2000) throw Object.assign(new Error(result.error), { code: result.code });
   if (status !== 200 || !isRecord(result) || !hasExactKeys(result, ['text']) || typeof result.text !== 'string'
     || !result.text.trim() || Buffer.byteLength(result.text, 'utf8') > 1024 * 1024) throw new Error('Text generation failed. Check the configured text or image-understanding model and provider account.');
   return { text: result.text };
@@ -61,6 +63,31 @@ export async function generatePluginMedia(
   signal: AbortSignal,
 ): Promise<AppModelResult> {
   return mediaOutput(await requestPluginMedia(issuer, port, 'generate', request, signal));
+}
+
+type PluginAudioRequest = AppSpeechModelRequest | AppTranscriptionModelRequest | AppMusicModelRequest;
+
+export async function generatePluginAudio(
+  issuer: RuntimeHostDeliveryIssuer,
+  port: number,
+  kind: 'tts' | 'transcribe' | 'music',
+  request: PluginAudioRequest,
+  signal: AbortSignal,
+): Promise<AppModelResult> {
+  const keys = kind === 'tts' ? ['prompt', 'selectionId', 'voice', 'language']
+    : kind === 'transcribe' ? ['audio', 'selectionId', 'language'] : ['prompt', 'selectionId', 'durationSeconds'];
+  if (!isRecord(request) || Object.keys(request).some((key) => !keys.includes(key))
+    || (kind !== 'transcribe' && typeof request.prompt !== 'string')
+    || (request.selectionId !== undefined && !isSelectionId(request.selectionId))
+    || (request.voice !== undefined && typeof request.voice !== 'string')
+    || (request.language !== undefined && typeof request.language !== 'string')
+    || (request.durationSeconds !== undefined && (typeof request.durationSeconds !== 'number' || !Number.isSafeInteger(request.durationSeconds) || request.durationSeconds <= 0))
+    || (kind === 'transcribe' && (!isRecord(request.audio) || !hasExactKeys(request.audio, ['data', 'mimeType'])
+      || typeof request.audio.data !== 'string' || typeof request.audio.mimeType !== 'string'))) throw new Error('Invalid audio model request.');
+  const input = kind === 'transcribe'
+    ? { kind, prompt: '', ...(request as AppTranscriptionModelRequest) }
+    : { kind, ...(request as AppSpeechModelRequest | AppMusicModelRequest) };
+  return mediaOutput(await requestPluginMedia(issuer, port, 'generate', input, signal));
 }
 
 export async function listPluginMediaModels(
@@ -130,7 +157,7 @@ async function requestPluginMedia(
   issuer: RuntimeHostDeliveryIssuer,
   port: number,
   operation: keyof typeof MEDIA_PATHS,
-  request: AppModelRequest | AppMediaModelListRequest | AppVideoTaskRequest,
+  request: AppModelRequest | AppMediaModelListRequest | AppVideoTaskRequest | (PluginAudioRequest & { readonly kind: 'tts' | 'transcribe' | 'music'; readonly prompt: string }),
   signal: AbortSignal,
 ): Promise<unknown> {
   signal.throwIfAborted();
@@ -148,8 +175,8 @@ async function requestPluginMedia(
   signal.throwIfAborted();
   if (delivery.outcome !== 'response') throw new Error('Model generation outcome could not be observed; external effects may already have occurred.');
   const { status, body: result } = delivery.response;
-  if (status !== 200 && isRecord(result) && result.success === false && typeof result.code === 'string'
-    && typeof result.error === 'string' && result.error.length > 0 && result.error.length <= 2000) throw new Error(result.error);
+  if (status !== 200 && isRecord(result) && result.success === false && isModelErrorCode(result.code)
+    && typeof result.error === 'string' && result.error.length > 0 && result.error.length <= 2000) throw Object.assign(new Error(result.error), { code: result.code });
   if (status !== 200) throw new Error('Model generation failed. Check the configured model and provider account.');
   return result;
 }
@@ -168,31 +195,27 @@ function isSelectionId(value: unknown): value is string {
   return typeof value === 'string' && /^model-selection:v1:[0-9a-f]{64}$/.test(value);
 }
 
-function isVideoTask(value: unknown): value is AppVideoTask {
-  return isRecord(value) && hasExactKeys(value, ['kind', 'selectionId', 'accountId', 'modelId', 'endpointId', 'remoteId'])
-    && value.kind === 'openai-video' && isSelectionId(value.selectionId)
-    && typeof value.accountId === 'string' && value.accountId.length > 0 && Buffer.byteLength(value.accountId, 'utf8') <= 128
-    && typeof value.modelId === 'string' && value.modelId.length > 0 && Buffer.byteLength(value.modelId, 'utf8') <= 512
-    && typeof value.endpointId === 'string' && /^media-endpoint:v1:[0-9a-f]{64}$/.test(value.endpointId)
-    && typeof value.remoteId === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(value.remoteId);
-}
-
 function validateVideoTaskRequest(request: AppVideoTaskRequest): void {
-  if (!isRecord(request) || !hasExactKeys(request, ['task']) || !isVideoTask(request.task)) throw new Error('Video operations require the original provider task binding.');
+  if (!isRecord(request) || !hasExactKeys(request, ['task']) || !isAppVideoTask(request.task)) throw new Error('Video operations require the original provider task binding.');
 }
 
 function videoTaskOutput(result: unknown): AppVideoTaskResult {
   if (!isRecord(result) || !hasExactKeys(result, result.progress === undefined ? ['task', 'status'] : ['task', 'status', 'progress'])
-    || !isVideoTask(result.task) || typeof result.status !== 'string' || !['queued', 'in-progress', 'completed', 'failed', 'unknown'].includes(result.status)
+    || !isAppVideoTask(result.task) || typeof result.status !== 'string' || !['queued', 'in-progress', 'completed', 'failed', 'unknown'].includes(result.status)
     || (result.progress !== undefined && (typeof result.progress !== 'number' || !Number.isFinite(result.progress) || result.progress < 0 || result.progress > 100))) throw new Error('The provider returned an invalid video task.');
   return result as unknown as AppVideoTaskResult;
 }
 
 function mediaOutput(result: unknown): AppModelResult {
+  const maxBytes = 64 * 1024 * 1024;
+  let totalBytes = 0;
   if (!isRecord(result) || !hasExactKeys(result, ['outputs']) || !Array.isArray(result.outputs)
-    || !result.outputs.length || !result.outputs.every((output) => isRecord(output) && hasExactKeys(output, ['data', 'mimeType'])
-      && typeof output.data === 'string' && typeof output.mimeType === 'string')) {
-    throw new Error('Model generation failed. Check the configured model and provider account.');
-  }
+    || !result.outputs.length || result.outputs.length > 10 || !result.outputs.every((output) => {
+      if (!isRecord(output) || !hasExactKeys(output, ['data', 'mimeType']) || typeof output.data !== 'string'
+        || output.data.length > Math.ceil(maxBytes / 3) * 4 || output.data.length % 4 !== 0
+        || !/^[A-Za-z0-9+/]*={0,2}$/.test(output.data) || typeof output.mimeType !== 'string') return false;
+      totalBytes += output.data.length / 4 * 3 - (output.data.endsWith('==') ? 2 : output.data.endsWith('=') ? 1 : 0);
+      return totalBytes <= maxBytes;
+    })) throw new Error('The provider returned invalid media or exceeded the 64 MiB output limit.');
   return result as unknown as AppModelResult;
 }

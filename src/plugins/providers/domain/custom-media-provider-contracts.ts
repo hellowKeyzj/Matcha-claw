@@ -34,9 +34,9 @@ export const CUSTOM_MEDIA_CONTRACTS: readonly CustomMediaContract[] = [
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     defaultModelByCapability: {
       imageGenerate: 'gemini-3.1-flash-image-preview',
-      videoGenerate: 'veo-3.1-fast-generate-preview',
-      musicGenerate: 'lyria-3-clip-preview',
-      tts: 'gemini-3.1-flash-tts-preview',
+      videoGenerate: 'gemini-omni-1.1-flash',
+      musicGenerate: 'lyria-3.5',
+      tts: 'gemini-3.8-flash-tts',
     },
   },
   {
@@ -47,10 +47,23 @@ export const CUSTOM_MEDIA_CONTRACTS: readonly CustomMediaContract[] = [
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
     defaultModelByCapability: {
       imageGenerate: 'google/gemini-3.1-flash-image-preview',
-      videoGenerate: 'google/veo-3.1-fast',
-      tts: 'hexgrad/kokoro-82m',
-      transcribe: 'openai/whisper-large-v3-turbo',
     },
+  },
+  {
+    id: 'dashscope',
+    label: 'Alibaba Cloud DashScope',
+    runtimeApiProtocol: 'openai-completions',
+    capabilities: ['imageGenerate', 'videoGenerate', 'tts'],
+    defaultBaseUrl: 'https://dashscope.aliyuncs.com/api/v1',
+    defaultModelByCapability: {},
+  },
+  {
+    id: 'ark',
+    label: 'ByteDance Ark',
+    runtimeApiProtocol: 'openai-completions',
+    capabilities: ['imageGenerate', 'videoGenerate'],
+    defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    defaultModelByCapability: {},
   },
 ] as const;
 

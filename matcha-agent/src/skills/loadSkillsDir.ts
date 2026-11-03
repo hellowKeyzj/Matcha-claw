@@ -120,7 +120,8 @@ function rethrowSourceFailure(error: unknown): void {
     isAbortError(error) ||
     (error instanceof Error &&
       (error.name === 'TimeoutError' || error.cause !== undefined))
-  ) throw error
+  )
+    throw error
 }
 
 /**
@@ -668,7 +669,9 @@ const pendingSkillLoads = new WeakMap<
 
 export const getSkillDirCommands = memoize(
   (cwd: string): Promise<Command[]> => {
-    const loading = trackInvestigationOperation(getSkillDirCommandsUncached(cwd))
+    const loading = trackInvestigationOperation(
+      getSkillDirCommandsUncached(cwd),
+    )
     pendingSkillLoads.set(loading, currentInvestigationScope())
     void loading.then(
       () => {
@@ -692,11 +695,14 @@ export const getSkillDirCommands = memoize(
     if (currentInvestigationScope()) requireInvestigationEffects([])
     const cached = getSkillDirCommands.cache.get(cwd)
     const scope = currentInvestigationScope()
-    if (cached && scope !== undefined && (
-      pendingSkillLoads.has(cached)
+    if (
+      cached &&
+      scope !== undefined &&
+      (pendingSkillLoads.has(cached)
         ? pendingSkillLoads.get(cached) !== scope
-        : !fulfilledSkillLoads.has(cached)
-    )) getSkillDirCommands.cache.delete(cwd)
+        : !fulfilledSkillLoads.has(cached))
+    )
+      getSkillDirCommands.cache.delete(cwd)
     return cwd
   },
 )
@@ -960,7 +966,9 @@ export async function discoverSkillDirsForPaths(
           // git repo (exit 128 → false); the invocation-time trust dialog
           // is the actual security boundary.
           if (scoped) {
-            throw new InvestigationAdmissionError('investigation_git_ignore_source_unavailable')
+            throw new InvestigationAdmissionError(
+              'investigation_git_ignore_source_unavailable',
+            )
           }
           if (await isPathGitignored(currentDir, resolvedCwd)) {
             logForDebugging(

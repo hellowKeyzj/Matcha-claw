@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { copyFile, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, extname, join, relative } from 'node:path';
+import { SESSION_ATTACHMENT_TRANSPORT_MAX_BYTES } from '../../../src/types/session/attachments';
 import { getAttachmentStagingDir } from '../../utils/paths';
 
-const INLINE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
-const IMAGE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
+const INLINE_ATTACHMENT_MAX_BYTES = SESSION_ATTACHMENT_TRANSPORT_MAX_BYTES;
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
 
 const EXT_MIME_MAP: Record<string, string> = {
@@ -151,15 +151,21 @@ function safeFileName(value: string): string {
 }
 
 async function generateImagePreview(stagedPath: string, mimeType: string, fileSize: number): Promise<string | null> {
-  if (!mimeType.startsWith('image/') || fileSize > IMAGE_PREVIEW_MAX_BYTES) {
+  if (!mimeType.startsWith('image/') || fileSize > INLINE_ATTACHMENT_MAX_BYTES) return null;
+  if (mimeType === 'image/svg+xml') {
+    const buffer = await readFile(stagedPath);
+    return buffer.length <= INLINE_ATTACHMENT_MAX_BYTES ? `data:${mimeType};base64,${buffer.toString('base64')}` : null;
+  }
+  try {
+    const sharp = (await import('sharp')).default;
+    const preview = await sharp(stagedPath)
+      .resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true })
+      .png()
+      .toBuffer();
+    return `data:image/png;base64,${preview.toString('base64')}`;
+  } catch {
     return null;
   }
-
-  const buffer = await readFile(stagedPath);
-  if (buffer.length > IMAGE_PREVIEW_MAX_BYTES) {
-    return null;
-  }
-  return `data:${mimeType};base64,${buffer.toString('base64')}`;
 }
 
 function isFileNotFoundError(error: unknown): boolean {

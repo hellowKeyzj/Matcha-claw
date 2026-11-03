@@ -302,6 +302,8 @@ fn provider_media_api_protocol(
         "google" => Ok(ProviderMediaApiProtocol::Google),
         "openAi" => Ok(ProviderMediaApiProtocol::OpenAi),
         "openRouter" => Ok(ProviderMediaApiProtocol::OpenRouter),
+        "dashScope" => Ok(ProviderMediaApiProtocol::DashScope),
+        "ark" => Ok(ProviderMediaApiProtocol::Ark),
         _ => Err(InvalidProviderAccountDraft),
     }
 }
@@ -311,6 +313,8 @@ fn provider_media_api_protocol_name(value: ProviderMediaApiProtocol) -> &'static
         ProviderMediaApiProtocol::Google => "google",
         ProviderMediaApiProtocol::OpenAi => "openAi",
         ProviderMediaApiProtocol::OpenRouter => "openRouter",
+        ProviderMediaApiProtocol::DashScope => "dashScope",
+        ProviderMediaApiProtocol::Ark => "ark",
     }
 }
 

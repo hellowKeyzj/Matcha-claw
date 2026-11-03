@@ -1,25 +1,39 @@
 /**
- * Session activity indicators — idle tab detection.
+ * Session activity indicators — spinner animation & idle tab detection.
  *
- * Automatically detaches tabs that haven't received CDP commands for a
- * configurable period.
+ * Manages the visual "MatchaClaw Agent" tab-group spinner and automatically
+ * detaches tabs that haven't received CDP commands for a configurable period.
  *
  * Timer strategy (MV3 compatible):
+ *   - Spinner uses setInterval (200 ms). This is acceptable because the spinner
+ *     only runs while the relay WS is connected, which keeps the SW alive.
+ *     When the WS disconnects, stop() is called and the timer is cleared.
  *   - Idle check uses chrome.alarms (30 s) to survive SW suspension.
  */
 
 import { createLogger } from '../../logger.js'
+import { TAB_GROUP_TITLE } from './agent-group.js'
 
 const log = createLogger('indicators')
 
+const SPINNER_FRAMES = ['\u280B', '\u2819', '\u2839', '\u2838', '\u283C', '\u2834', '\u2826', '\u2827', '\u2807', '\u280F']
 const IDLE_DETACH_MS = 5 * 60 * 1000
+const SPINNER_INTERVAL_MS = 200
 
 const ALARM_IDLE_CHECK = 'relayIdleCheck'
 
 export class SessionIndicators {
+  /** @type {number|null} */
+  #spinnerTimer = null
+  #spinnerIdx = 0
   /** @type {Map<number, number>} tabId → last CDP command timestamp */
   #lastCommandTime = new Map()
 
+  /** @type {() => number[]} */
+  #getGroupIds
+  /** @type {Map<number, Promise<void>>} native title updates in flight */
+  #titleUpdates = new Map()
+  #animatedGroups = new Set()
   /** @type {() => IterableIterator<[number, {state: string}]>} */
   #getTabEntries
   /** @type {(tabId: number, reason: string) => void} */
@@ -27,10 +41,12 @@ export class SessionIndicators {
 
   /**
    * @param {object} opts
+   * @param {() => number[]} opts.getGroupIds — returns current owned agent group IDs
    * @param {() => IterableIterator<[number, {state: string}]>} opts.getTabEntries — returns iterable of [tabId, entry]
    * @param {(tabId: number, reason: string) => void} opts.detachTab — detach callback
    */
-  constructor({ getTabEntries, detachTab }) {
+  constructor({ getGroupIds, getTabEntries, detachTab }) {
+    this.#getGroupIds = getGroupIds
     this.#getTabEntries = getTabEntries
     this.#detachTab = detachTab
   }
@@ -43,27 +59,23 @@ export class SessionIndicators {
     this.#lastCommandTime.delete(tabId)
   }
 
-  moveTab(fromTabId, toTabId) {
-    if (!this.#lastCommandTime.has(fromTabId)) return
-    const lastCommand = this.#lastCommandTime.get(fromTabId)
-    this.#lastCommandTime.delete(fromTabId)
-    if (lastCommand !== undefined) {
-      this.#lastCommandTime.set(toTabId, lastCommand)
-    }
-  }
-
   clear() {
     this.#lastCommandTime.clear()
   }
 
   start() {
     this.stop()
+    this.#spinnerIdx = 0
+    this.#spinnerTimer = setInterval(() => this.#tickSpinner(), SPINNER_INTERVAL_MS)
+    // 30 s idle check via alarm (survives SW suspension)
     chrome.alarms.create(ALARM_IDLE_CHECK, { periodInMinutes: 0.5 })
   }
 
   stop() {
+    if (this.#spinnerTimer) { clearInterval(this.#spinnerTimer); this.#spinnerTimer = null }
     chrome.alarms.clear(ALARM_IDLE_CHECK)
     this.#lastCommandTime.clear()
+    this.#resetGroupTitle()
   }
 
   /**
@@ -79,6 +91,41 @@ export class SessionIndicators {
     return false
   }
 
+  #tickSpinner() {
+    const frame = SPINNER_FRAMES[this.#spinnerIdx % SPINNER_FRAMES.length]
+    this.#spinnerIdx++
+    const groupIds = this.#getGroupIds()
+    for (const groupId of this.#animatedGroups) {
+      if (!groupIds.includes(groupId)) this.#updateTitle(groupId, TAB_GROUP_TITLE)
+    }
+    for (const groupId of groupIds) {
+      this.#updateTitle(groupId, `${frame} ${TAB_GROUP_TITLE}`)
+    }
+  }
+
+  #updateTitle(groupId, title) {
+    if (this.#titleUpdates.has(groupId)) return
+    if (title !== TAB_GROUP_TITLE) this.#animatedGroups.add(groupId)
+    const update = Promise.resolve()
+      .then(() => chrome.tabGroups.update(groupId, { title }))
+      .catch(() => {})
+      .finally(() => {
+        if (this.#titleUpdates.get(groupId) !== update) return
+        this.#titleUpdates.delete(groupId)
+        if (title === TAB_GROUP_TITLE) this.#animatedGroups.delete(groupId)
+        if ((this.#spinnerTimer === null || !this.#getGroupIds().includes(groupId)) && title !== TAB_GROUP_TITLE) {
+          this.#updateTitle(groupId, TAB_GROUP_TITLE)
+        }
+      })
+    this.#titleUpdates.set(groupId, update)
+  }
+
+  #resetGroupTitle() {
+    for (const groupId of new Set([...this.#getGroupIds(), ...this.#animatedGroups])) {
+      this.#updateTitle(groupId, TAB_GROUP_TITLE)
+    }
+  }
+
   #checkIdleTabs() {
     const now = Date.now()
     const toDetach = []
@@ -89,7 +136,7 @@ export class SessionIndicators {
       if (now - lastCmd > IDLE_DETACH_MS) toDetach.push(tabId)
     }
     for (const tabId of toDetach) {
-      log.info(() => ['idle timeout: detaching tab', tabId, 'after', IDLE_DETACH_MS / 1000, 's'])
+      log.info('idle timeout: detaching tab', tabId, 'after', IDLE_DETACH_MS / 1000, 's')
       this.#detachTab(tabId, 'idle_timeout')
     }
   }

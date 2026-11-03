@@ -51,10 +51,40 @@ impl EventRouter {
             SessionReducerActor::new(SessionKey::try_new(identity.session_key.clone()).expect("validated observation key")))
     }
 
+    pub(crate) fn image_task_tools(&self, identity: &SessionIdentity, generation: u64) -> Vec<sessions_module::state::ToolView> {
+        self.actors.get(&(identity_key(identity), generation)).map(|actor|
+            actor.image_task_tools().iter().filter(|tool| super::image_tasks::task_id(tool).is_some()).cloned().collect()
+        ).unwrap_or_default()
+    }
+
+    pub(crate) async fn image_task(&mut self, identity: &SessionIdentity, generation: u64, task: &super::image_tasks::ImageTask, epoch: GatewayEpoch, cursor: Option<u64>, observations: &crate::gateway::observation::Observations) -> Result<Vec<sessions_module::state::ToolView>, RuntimeOperationFailure> {
+        if !task.matches(identity) { return Err(RuntimeOperationFailure::Unknown); }
+        let changes = self.actor(identity, generation).update_image_task(task).into_iter()
+            .map(|tool| sessions_module::state::SessionChange::ToolUpdated { tool }).collect::<Vec<_>>();
+        if !changes.is_empty() {
+            let binding = SessionEventBinding::observed(identity.clone(), generation, Some(epoch.as_u64()), false).ok_or(RuntimeOperationFailure::Unknown)?;
+            observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent {
+                binding, run_id: None, cursor, history_refresh: false, changes,
+            })).await?;
+        }
+        Ok(self.image_task_tools(identity, generation))
+    }
+
+    pub(crate) async fn task_refresh(&self, identity: &SessionIdentity, generation: u64, epoch: GatewayEpoch, observations: &crate::gateway::observation::Observations) {
+        if self.image_task_tools(identity, generation).is_empty() { return; }
+        let binding = SessionEventBinding::observed(identity.clone(), generation, Some(epoch.as_u64()), false).expect("validated observation binding");
+        let _ = observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent {
+            binding, run_id: None, cursor: None, history_refresh: true, changes: Vec::new(),
+        })).await;
+    }
+
     pub(crate) async fn route(&mut self, event: SessionEventEnvelope, epoch: GatewayEpoch, identity: SessionIdentity, generation: u64, observations: &Arc<crate::gateway::observation::Observations>) {
         let cursor = event.gateway_sequence;
         let persisted = event.transcript_message.is_some();
         let key = (identity_key(&identity), generation);
+        let image_result = event.activity.as_ref().is_some_and(|activity| matches!(activity.kind(), super::protocol::SessionActivityKind::Tool { .. }))
+            || event.transcript_message.as_ref().is_some_and(|message| matches!(message.role(), super::window::MessageRole::ToolResult));
+        let known_image_tasks = image_result.then(|| self.image_task_tools(&identity, generation).iter().filter_map(|tool| super::image_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>());
         let live_run = self.actor(&identity, generation).live_run_id().map(str::to_owned);
         let has_live_run = live_run.is_some();
         let missing_final = event.chat.as_ref().filter(|chat|
@@ -94,7 +124,9 @@ impl EventRouter {
             accepted && self.claim_terminal_history(&identity, generation, epoch, run, observations));
         let replay_pending = accepted && self.actor(&identity, generation).live_run_id().is_none()
             && self.pending_messages.remove(&key);
-        let history_refresh = accepted && (truncated || message_refresh || changed_refresh || replay_pending || recovery_refresh);
+        let image_task_started = known_image_tasks.is_some_and(|known| self.image_task_tools(&identity, generation).iter().filter_map(super::image_tasks::task_id)
+            .any(|id| !known.contains(id)));
+        let history_refresh = accepted && (truncated || message_refresh || changed_refresh || replay_pending || recovery_refresh || image_task_started);
         if (message_refresh && !has_live_run) || recovery_refresh { self.pending_messages.remove(&key); }
         self.prune_recoveries();
         if super::trace::enabled() && (persisted || terminal || truncated) {

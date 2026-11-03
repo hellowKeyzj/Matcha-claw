@@ -85,6 +85,115 @@ h1 {
   margin-bottom: 44px;
 }
 
+/* ── Permissions & privacy note (collapsible, default collapsed) ── */
+
+.permissions-note {
+  margin: -28px 0 36px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  animation: step-enter 0.4s ease-out 0.05s both;
+}
+
+.permissions-note-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 18px;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s, background 0.15s;
+  -webkit-app-region: no-drag;
+}
+
+.permissions-note-toggle:hover {
+  color: var(--muted);
+  background: color-mix(in oklab, canvasText 3%, transparent);
+}
+
+.permissions-note-toggle .perm-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.permissions-note-toggle .perm-label {
+  flex: 1;
+}
+
+.permissions-note-toggle .perm-chevron {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: transform 0.2s;
+}
+
+.permissions-note-toggle[aria-expanded="true"] .perm-chevron {
+  transform: rotate(90deg);
+}
+
+.permissions-note-content {
+  display: none;
+  padding: 0 18px 14px;
+}
+
+.permissions-note-content.open {
+  display: block;
+}
+
+.permissions-note-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.permissions-note-list li {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--muted);
+  padding-left: 14px;
+  position: relative;
+}
+
+.permissions-note-list li::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 9px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+
+.permissions-note-list li strong {
+  color: canvasText;
+  font-weight: 600;
+}
+
+.permissions-note-list code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: color-mix(in oklab, canvas 80%, canvasText 5%);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+
 /* ── Chrome Web Store section ── */
 
 .webstore-section {

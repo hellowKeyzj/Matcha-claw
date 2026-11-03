@@ -14,6 +14,7 @@ const UNAVAILABLE = { success: false, error: 'Workspace media is unavailable' } 
 export type WorkspaceMediaOperationId =
   | 'media.prepare'
   | 'media.resolve'
+  | 'media.playback'
   | 'media.thumbnail'
   | 'media.thumbnails'
   | 'media.stagePaths'
@@ -44,8 +45,10 @@ export function createWorkspaceMediaTransport(
         method: 'POST',
         fetcher,
         body: request,
+        ...((request.operationId === 'media.resolve' || request.operationId === 'media.playback')
+          && isHistoricalMediaReference(request.input.reference) ? { timeoutMs: 145_000 } : {}),
       });
-      if (response?.status === 200 && isResponse(response.body, request.operationId)) {
+      if (response?.status === 200 && isResponse(response.body, request)) {
         return { status: 200, body: response.body };
       }
       if (response?.status === 422 && isFailure(response.body)) return { status: 422, body: response.body };
@@ -134,7 +137,11 @@ function isRequest(value: unknown): value is Request {
           && !/[^A-Za-z0-9._:-]/.test(input.reference)
           && !/^[A-Za-z]:/.test(input.reference));
     case 'media.resolve':
-      return exact(input, ['endpoint', 'sessionKey', 'reference']) && isReference(input.reference);
+      return exact(input, ['endpoint', 'sessionKey', 'reference'])
+        && (isReference(input.reference) || isHistoricalMediaReference(input.reference));
+    case 'media.playback':
+      return exact(input, ['endpoint', 'sessionKey', 'reference'])
+        && isHistoricalMediaReference(input.reference);
     case 'media.thumbnails':
       return exact(input, ['endpoint', 'sessionKey', 'paths'])
         && Array.isArray(input.paths)
@@ -156,9 +163,19 @@ function isRequest(value: unknown): value is Request {
   }
 }
 
-function isResponse(value: unknown, operation: WorkspaceMediaOperationId): boolean {
+function isResponse(value: unknown, request: Request): boolean {
+  const operation = request.operationId;
   if (operation === 'media.resolve') {
     return isRecord(value) && exact(value, ['data']) && isCanonicalBase64(value.data);
+  }
+  if (operation === 'media.playback') {
+    const maxBytes = request.input.reference?.startsWith('oc-media:1:') ? 100 * 1024 * 1024 : MAX_MEDIA_BYTES;
+    return isRecord(value) && exact(value, ['data', 'mimeType'])
+      && typeof value.data === 'string'
+      && value.data.length <= Math.ceil(maxBytes / 3) * 4
+      && estimateBase64Bytes(value.data) <= maxBytes
+      && isCanonicalBase64(value.data)
+      && isMimeType(value.mimeType);
   }
   if (operation === 'media.thumbnail') {
     return isThumbnail(value);
@@ -223,6 +240,7 @@ function isFailure(value: unknown): boolean {
 function isOperationId(value: unknown): value is WorkspaceMediaOperationId {
   return value === 'media.prepare'
     || value === 'media.resolve'
+    || value === 'media.playback'
     || value === 'media.thumbnail'
     || value === 'media.thumbnails'
     || value === 'media.stagePaths'
@@ -269,13 +287,20 @@ function isMimeType(value: unknown): value is string {
   return isNonEmptyString(value) && value.length <= 255;
 }
 
+function isHistoricalMediaReference(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 512 && /^(?:oc|ma)-media:1:[A-Za-z0-9_-]+$/.test(value);
+}
+
 function isReference(value: unknown): value is string {
   return typeof value === 'string' && /^media_[a-f0-9]{32}$/.test(value);
 }
 
 function isCanonicalBase64(value: unknown): value is string {
   if (typeof value !== 'string' || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return false;
-  return Buffer.from(value, 'base64').toString('base64') === value;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  const terminal = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    .indexOf(value.charAt(value.length - padding - 1));
+  return padding === 0 || terminal % (padding === 1 ? 4 : 16) === 0;
 }
 
 function estimateBase64Bytes(value: string): number {

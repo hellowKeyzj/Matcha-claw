@@ -133,6 +133,13 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
         session_key: &'a str,
         reference: &'a str,
     ) -> WorkspaceFuture<'a, ResolvedWorkspaceMedia, DriverWorkspaceMediaFailure> {
+        if reference.starts_with("oc-media:1:") {
+            return Box::pin(async move {
+                crate::session::operation::SessionOperation::new(self.gateway.client())
+                    .resolve_media_reference(session_key, reference)
+                    .await
+            });
+        }
         let workspace = self.workspace.clone();
         let session_key = session_key.to_owned();
         let reference = reference.to_owned();
@@ -141,6 +148,17 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
                 .resolve_media(&session_key, &reference)
                 .map(resolved_workspace_media)
                 .map_err(workspace_media_failure)
+        })
+    }
+
+    fn playback_media<'a>(
+        &'a self,
+        session_key: &'a str,
+        reference: &'a str,
+    ) -> WorkspaceFuture<'a, ResolvedWorkspaceMedia, DriverWorkspaceMediaFailure> {
+        Box::pin(async move {
+            crate::session::operation::SessionOperation::new(self.gateway.client())
+                .playback_media_reference(session_key, reference).await
         })
     }
 

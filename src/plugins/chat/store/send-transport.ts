@@ -9,7 +9,8 @@ import type {
   SessionIdentity,
 } from '@/types/desktop/runtime-address';
 import { decodeSessionProjectionEvent, type SessionProjectionEvent } from '@/types/session/update-event';
-import { CHAT_INLINE_ATTACHMENT_MAX_BYTES, type ChatSendAttachment } from '@/plugins/chat/store/types';
+import { sessionAttachmentMaxBytes } from '@/types/session/attachments';
+import type { ChatSendAttachment } from '@/plugins/chat/store/types';
 
 export const CHAT_SEND_RPC_TIMEOUT_MS = 120_000;
 const CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT = 'Process the attached file(s).';
@@ -19,29 +20,36 @@ export function isDirectoryAttachment(attachment: Pick<ChatSendAttachment, 'entr
   return attachment.entryKind === 'directory' || attachment.mimeType === 'application/x-directory';
 }
 
-export function isReadableChatAttachment(attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType' | 'fileSize' | 'sourcePath'>): boolean {
+export function isInlineChatAttachment(
+  attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType' | 'fileSize' | 'stagedAttachmentId' | 'transport'>,
+  runtimeAdapterId?: string,
+): boolean {
   return !isDirectoryAttachment(attachment)
-    && (attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(attachment.sourcePath));
+    && attachment.transport !== 'path'
+    && attachment.fileSize <= sessionAttachmentMaxBytes(runtimeAdapterId)
+    && Boolean(attachment.stagedAttachmentId);
 }
 
-export function isUnsupportedGoalStartAttachment(attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType' | 'fileSize'>): boolean {
-  return isDirectoryAttachment(attachment) || attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES;
+function isLocalPathAttachment(attachment: ChatSendAttachment, runtimeAdapterId?: string): boolean {
+  return !isDirectoryAttachment(attachment)
+    && Boolean(attachment.sourcePath)
+    && (attachment.transport === 'path'
+      || runtimeAdapterId !== 'openclaw' && attachment.fileSize > sessionAttachmentMaxBytes(runtimeAdapterId));
 }
 
-function localPathAttachments(attachments: readonly ChatSendAttachment[]): ChatSendAttachment[] {
-  return attachments.filter((attachment) => !isDirectoryAttachment(attachment)
-    && attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES
-    && Boolean(attachment.sourcePath));
+export function isReadableChatAttachment(attachment: ChatSendAttachment, runtimeAdapterId?: string): boolean {
+  return isInlineChatAttachment(attachment, runtimeAdapterId) || isLocalPathAttachment(attachment, runtimeAdapterId);
 }
 
-function inlineAttachments(attachments: readonly ChatSendAttachment[]): ChatSendAttachment[] {
-  return attachments.filter((attachment) => !isDirectoryAttachment(attachment)
-    && attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES
-    && Boolean(attachment.stagedAttachmentId));
+export function isUnsupportedGoalStartAttachment(
+  attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType' | 'fileSize' | 'stagedAttachmentId' | 'transport'>,
+  runtimeAdapterId?: string,
+): boolean {
+  return !isInlineChatAttachment(attachment, runtimeAdapterId);
 }
 
-function appendLocalPathAttachmentPrompt(message: string, attachments: readonly ChatSendAttachment[]): string {
-  const pathAttachments = localPathAttachments(attachments);
+function appendLocalPathAttachmentPrompt(message: string, attachments: readonly ChatSendAttachment[], runtimeAdapterId?: string): string {
+  const pathAttachments = attachments.filter((attachment) => isLocalPathAttachment(attachment, runtimeAdapterId));
   if (pathAttachments.length === 0) {
     return message;
   }
@@ -52,15 +60,18 @@ function appendLocalPathAttachmentPrompt(message: string, attachments: readonly 
 export function resolveChatSendTransportPayload(
   message: string,
   attachments: readonly ChatSendAttachment[],
+  runtimeAdapterId?: string,
 ): { message: string; attachments: ChatSendAttachment[] } {
-  const attachmentsToInline = inlineAttachments(attachments);
-  return {
-    message: appendLocalPathAttachmentPrompt(
-      message || (attachmentsToInline.length > 0 ? CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT : ''),
-      attachments,
-    ),
-    attachments: attachmentsToInline,
-  };
+  const attachmentsToInline = attachments.filter((attachment) => isInlineChatAttachment(attachment, runtimeAdapterId));
+  const preparedMessage = appendLocalPathAttachmentPrompt(
+    message || (attachmentsToInline.length > 0 ? CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT : ''),
+    attachments,
+    runtimeAdapterId,
+  );
+  if (new TextEncoder().encode(preparedMessage).byteLength > 64 * 1024) {
+    throw new Error('Message exceeds 64 KiB');
+  }
+  return { message: preparedMessage, attachments: attachmentsToInline };
 }
 
 export interface SendChatTransportParams {

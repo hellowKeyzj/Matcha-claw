@@ -176,12 +176,16 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
   text: string; attachments?: ChatSendAttachment[]; intent?: SessionSendIntent; operationId?: string;
 }): Promise<ChatSendResult> {
   const { text, attachments, intent } = payload;
+  const sendGate = selectCurrentChatSendGate(input.get());
+  const endpoint = sendGate.canSend ? sendGate.kind === 'session' ? sendGate.sessionIdentity.endpoint : sendGate.endpoint
+    : input.get().currentConversation?.endpoint;
+  const runtimeAdapterId = endpoint?.kind === 'native-runtime' ? endpoint.runtimeAdapterId : undefined;
   if (intent && !text.trim()) return { accepted: false, reason: 'empty' };
-  if (intent && attachments?.some(isUnsupportedGoalStartAttachment)) {
+  if (intent && attachments?.some((attachment) => isUnsupportedGoalStartAttachment(attachment, runtimeAdapterId))) {
     return { accepted: false, reason: 'goal-attachments' };
   }
-  const attachmentCount = attachments?.filter(isReadableChatAttachment).length ?? 0;
-  const gate = resolveChatSendGateForPayload(selectCurrentChatSendGate(input.get()), { text, attachmentCount });
+  const attachmentCount = attachments?.filter((attachment) => isReadableChatAttachment(attachment, runtimeAdapterId)).length ?? 0;
+  const gate = resolveChatSendGateForPayload(sendGate, { text, attachmentCount });
   if (!gate.canSend) return { accepted: false, reason: gate.reason, error: gate.error };
   let conversation = input.get().currentConversation;
   let key = gate.kind === 'draft' ? `${gate.runtimeScopeKey}:agent:${gate.agentId}:draft` : gate.sessionKey;

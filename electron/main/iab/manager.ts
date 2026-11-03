@@ -1,7 +1,7 @@
 import { app, nativeTheme, WebContentsView, type BrowserWindow, type WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import type { IabBounds, IabEvent, IabInternalPage, IabSnapshot, IabTab, IabUiCommand, IabUiResponse } from '../../../src/types/desktop/iab';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../../src/types/desktop/runtime-address';
+import { canAccessPage, canClosePage, claimPage, releasePage, type PageOwnership } from '../../../packages/openclaw-browser-relay-plugin/src/state/page-ownership';
 import type { IabManager as ManagerContract, IabManagerOptions, IabTrustedContext } from './contracts';
 import { iabError } from './error';
 import { IabTabHost } from './tab-host';
@@ -14,8 +14,8 @@ import { IAB_WEB_PREFERENCES, isIabUrl, normalizeIabUrl, watchDownloadPopup } fr
 const EMPTY_BOUNDS = { x: 0, y: 0, width: 0, height: 0 };
 const OFFSCREEN = { x: -32000, y: 0, width: 1920, height: 1080 };
 
-type AgentGrant = { controller: AbortController; revocation?: Promise<void> };
-type TabAccess = { createdBy: string | null; grants: Map<string, AgentGrant> };
+type PageClaim = { controller: AbortController; releasing?: Promise<void> };
+type TabAccess = PageOwnership & { claim?: PageClaim };
 
 export class IabManager implements ManagerContract {
   readonly ownerId = randomUUID();
@@ -69,12 +69,66 @@ export class IabManager implements ManagerContract {
   getActiveTabId(ownerId: string) { return ownerId === this.ownerId ? this.activeTabId : null; }
   getWebContents(tabId: string) { return this.host.getWebContents(tabId); }
   getView(tabId: string) { return this.host.get(tabId)?.view ?? null; }
-  agentAccess(tabId: string, principalId: string): AbortSignal {
-    const grant = this.tabs.get(tabId)?.grants.get(principalId);
-    if (this.disposed || !grant || grant.controller.signal.aborted) {
-      throw iabError('IAB_AGENT_ACCESS_DENIED', 'The agent session is not allowed to access this browser tab');
+  agentAccess(tabId: string, context: IabTrustedContext, claim = true): AbortSignal {
+    context.assertCurrent();
+    const tab = this.tabs.get(tabId);
+    if (this.disposed || !tab || !canAccessPage(tab, context.executorId, context.principalId)
+      || tab.claim?.controller.signal.aborted || (!claim && (!tab.claim || tab.claimedBy !== context.executorId))) {
+      throw iabError('IAB_AGENT_ACCESS_DENIED', 'The browser tab belongs to another session group or its claim is unavailable');
     }
-    return grant.controller.signal;
+    if (!tab.claim) {
+      Object.assign(tab, claimPage(tab, context.executorId, context.principalId));
+      tab.claim = { controller: new AbortController() };
+      this.changed();
+    }
+    return tab.claim.controller.signal;
+  }
+  getPageOwnership(tabId: string): Readonly<PageOwnership> | null {
+    const tab = this.tabs.get(tabId);
+    return tab ? { createdBy: tab.createdBy, retained: tab.retained, claimedBy: tab.claimedBy, sessionGroupId: tab.sessionGroupId } : null;
+  }
+  async releaseSessionClaims(executorId: string, claims?: ReadonlyMap<string, PageClaim>): Promise<void> {
+    const releases: Promise<void>[] = [];
+    for (const [tabId, tab] of this.tabs) {
+      if (tab.claimedBy !== executorId || (claims && claims.get(tabId) !== tab.claim)) continue;
+      const claim = tab.claim!;
+      claim.controller.abort(iabError('IAB_ACCESS_REVOKED', 'The browser page claim was released'));
+      claim.releasing ??= Promise.resolve().then(() => this.options.releaseClaim(tabId, executorId)).then(() => {
+        if (this.tabs.get(tabId) !== tab || tab.claim !== claim) return;
+        Object.assign(tab, releasePage(tab, executorId));
+        tab.claim = undefined;
+        this.changed();
+      }).finally(() => { claim.releasing = undefined; });
+      releases.push(claim.releasing);
+    }
+    const failures = (await Promise.allSettled(releases)).filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason);
+    if (failures.length) throw new AggregateError(failures, 'Browser page claims did not physically drain');
+  }
+  async cleanupSession(executorId: string, sessionGroupId: string, scope: 'executor' | 'group'): Promise<void> {
+    if (scope === 'executor') return this.releaseSessionClaims(executorId);
+    const pages = new Map<string, TabAccess>();
+    const claims = new Map<string, PageClaim>();
+    const failures: unknown[] = [];
+    for (;;) {
+      const executors = new Set<string>();
+      for (const [tabId, tab] of this.tabs) {
+        if (tab.sessionGroupId !== sessionGroupId || pages.has(tabId)) continue;
+        pages.set(tabId, tab);
+        if (!tab.claim || !tab.claimedBy) continue;
+        claims.set(tabId, tab.claim);
+        executors.add(tab.claimedBy);
+        tab.claim.controller.abort(iabError('IAB_ACCESS_REVOKED', 'The browser session group ended'));
+      }
+      if (!executors.size) break;
+      const releases = await Promise.allSettled([...executors].map((executor) => this.releaseSessionClaims(executor, claims)));
+      for (const result of releases) if (result.status === 'rejected') failures.push(result.reason);
+      // Popup registration can finish during physical drain; collect those pages before closing.
+    }
+    for (const [tabId, tab] of pages) {
+      if (this.tabs.get(tabId) !== tab || tab.sessionGroupId !== sessionGroupId || tab.claim || !tab.createdBy || tab.retained) continue;
+      try { this.close(tabId, this.ownerId); } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, 'Browser session group cleanup did not complete');
   }
   resolveBrokerTarget(tabId: string, expectedOwnerId: string): WebContents {
     if (expectedOwnerId !== this.ownerId) {
@@ -83,24 +137,6 @@ export class IabManager implements ManagerContract {
     const contents = this.tabs.has(tabId) ? this.host.getWebContents(tabId) : null;
     if (!contents) throw Object.assign(new Error(`IAB tab is unavailable: ${tabId}`), { code: 'IAB_TARGET_CLOSED' });
     return contents;
-  }
-  private async setAgentAccess(tabId: string, identity: SessionIdentity, allowed: boolean): Promise<void> {
-    const principalId = buildSessionIdentityKey(identity);
-    const tab = this.tabs.get(tabId)!;
-    let grant = tab.grants.get(principalId);
-    if (allowed) {
-      if (grant?.controller.signal.aborted) throw iabError('IAB_AGENT_ACCESS_DENIED', 'Browser access revocation has not completed');
-      if (!grant) { tab.grants.set(principalId, { controller: new AbortController() }); this.changed(); }
-      return;
-    }
-    if (!grant) { grant = { controller: new AbortController() }; tab.grants.set(principalId, grant); }
-    grant.controller.abort(iabError('IAB_AGENT_ACCESS_DENIED', 'Browser access was revoked for this agent session'));
-    const revokedGrant = grant;
-    revokedGrant.revocation ??= Promise.resolve().then(() => this.options.revokeAgentAccess(tabId, principalId)).then(() => {
-      if (tab.grants.get(principalId) === revokedGrant) { tab.grants.delete(principalId); this.changed(); }
-    }).finally(() => { revokedGrant.revocation = undefined; });
-    this.changed();
-    await revokedGrant.revocation;
   }
   private assertLive(): void { if (this.disposed) throw new Error('IAB manager is disposed'); }
   private window(): BrowserWindow | null {
@@ -139,7 +175,7 @@ export class IabManager implements ManagerContract {
     const contents = window.webContents;
     window.on('hide', invalidate);
     window.on('close', invalidate);
-    window.on('resize', invalidate);
+    window.on('resize', closeTools);
     window.on('blur', closeTools);
     contents.on('before-input-event', zoomInput);
     contents.on('zoom-changed', zoomChanged);
@@ -148,7 +184,7 @@ export class IabManager implements ManagerContract {
     this.removeWindowListeners = () => {
       window.removeListener('hide', invalidate);
       window.removeListener('close', invalidate);
-      window.removeListener('resize', invalidate);
+      window.removeListener('resize', closeTools);
       window.removeListener('blur', closeTools);
       contents.removeListener('before-input-event', zoomInput);
       contents.removeListener('zoom-changed', zoomChanged);
@@ -168,19 +204,26 @@ export class IabManager implements ManagerContract {
     const window = this.boundWindow;
     return this.visible && this.bounds.width > 0 && this.bounds.height > 0 && !!window && !window.isDestroyed() && window.isVisible();
   }
-  open(url: string, options: { background?: boolean; creator?: IabTrustedContext } = {}): string {
+  open(url: string, options: { background?: boolean; creator?: IabTrustedContext; retain?: boolean } = {}): string {
     this.assertLive();
     options.creator?.assertCurrent();
     const tabId = `iab-${++this.nextTab}`;
-    const access: TabAccess = { createdBy: options.creator?.principalId ?? null, grants: new Map() };
-    if (options.creator) access.grants.set(options.creator.principalId, { controller: new AbortController() });
-    const ready = this.create(tabId, normalizeIabUrl(url), !options.background, access);
+    const access: TabAccess = {
+      createdBy: options.creator?.executorId ?? null, retained: !!options.creator && options.retain === true, claimedBy: null,
+      sessionGroupId: options.creator?.principalId ?? null,
+    };
+    if (options.creator) {
+      Object.assign(access, claimPage(access, options.creator.executorId, options.creator.principalId));
+      access.claim = { controller: new AbortController() };
+    }
+    const ready = this.create(tabId, normalizeIabUrl(url), !options.creator && !options.background, access);
     void ready.catch(() => this.close(tabId));
+    if (options.creator && !options.background) this.requestShow(this.ownerId, tabId);
     return tabId;
   }
   private create(tabId: string, url: string, activate: boolean, access: TabAccess, contents?: WebContents): Promise<void> {
     if (activate) this.pageTools.closeMenu();
-    // Register the resource and grants before any ready/CDP callback can observe this tab.
+    // Register the resource and claim before any ready/CDP callback can observe this tab.
     this.tabs.set(tabId, access);
     let ready: Promise<void>;
     try {
@@ -198,7 +241,7 @@ export class IabManager implements ManagerContract {
       cleanups.push(this.pageTools.attach(tabId, native));
       cleanups.push(this.bindTab(tabId, native));
     } catch (error) { void ready.catch(() => {}); this.close(tabId); throw error; }
-    if (activate || !this.activeTabId) this.activeTabId = tabId;
+    if (activate) this.activeTabId = tabId;
     this.applyTheme(tabId);
     this.activateTab();
     this.changed();
@@ -211,16 +254,26 @@ export class IabManager implements ManagerContract {
     this.activateTab();
     this.changed();
   }
-  close(tabId: string, expectedOwnerId?: string): void {
+  close(tabId: string, expectedOwnerId?: string, agent?: IabTrustedContext): void {
+    if (agent) {
+      agent.assertCurrent();
+      this.agentAccess(tabId, agent);
+      if (!canClosePage(this.tabs.get(tabId)!, agent.executorId)) {
+        throw iabError('IAB_AGENT_CLOSE_DENIED', 'Only this agent session\'s non-retained browser tabs can be closed');
+      }
+    }
     if (!this.tabs.has(tabId) && !this.host.has(tabId)) return;
-    if (expectedOwnerId !== undefined) this.resolveBrokerTarget(tabId, expectedOwnerId);
+    if (expectedOwnerId !== undefined || agent) this.resolveBrokerTarget(tabId, expectedOwnerId ?? this.ownerId);
     this.pageTools.closeMenu(tabId);
+    const tab = this.tabs.get(tabId);
     this.tabs.delete(tabId);
+    tab?.claim?.controller.abort(iabError('IAB_TARGET_CLOSED', 'The browser tab is closed'));
     this.cleanup.get(tabId)?.(); this.cleanup.delete(tabId);
     this.favicons.delete(tabId); this.crashes.delete(tabId);
-    if (this.activeTabId === tabId) this.activeTabId = [...this.tabs.keys()].pop() ?? null;
-    this.host.closeTab(tabId);
+    if (this.activeTabId === tabId) this.activeTabId = [...this.tabs].reverse().find(([, candidate]) => candidate.createdBy === null || candidate.sessionGroupId === null
+      || tab?.createdBy != null && candidate.sessionGroupId === tab.sessionGroupId)?.[0] ?? null;
     this.activateTab();
+    this.host.closeTab(tabId);
     if (!this.disposed) this.changed();
   }
   private activateTab(): void {
@@ -262,8 +315,8 @@ export class IabManager implements ManagerContract {
     const url = contents?.getURL() || tab?.initialUrl || 'about:blank';
     return {
       id: tabId, ownerId: this.ownerId, url,
-      agentSessionIds: [...this.tabs.get(tabId)!.grants].filter(([, grant]) => !grant.controller.signal.aborted).map(([principalId]) => principalId),
-      createdBy: this.tabs.get(tabId)!.createdBy,
+      createdBy: this.tabs.get(tabId)!.createdBy, retained: this.tabs.get(tabId)!.retained,
+      claimedBy: this.tabs.get(tabId)!.claimedBy, sessionGroupId: this.tabs.get(tabId)!.sessionGroupId,
       title: url === 'about:blank' ? '' : contents?.getTitle() || url,
       ...(this.favicons.has(tabId) && url !== 'about:blank' ? { faviconUrl: this.favicons.get(tabId) } : {}),
       loading: contents?.isLoadingMainFrame() ?? false,
@@ -290,7 +343,6 @@ export class IabManager implements ManagerContract {
       switch (command.action) {
         case 'snapshot': result = { resultType: 'snapshot', snapshot: this.snapshot() }; break;
         case 'list-all': result = { resultType: 'tabs', tabs: this.listAllTabs() }; break;
-        case 'set-agent-access': await this.setAgentAccess(command.tabId, command.identity, command.allowed); break;
         case 'open': result = { resultType: 'opened', tabId: this.open(command.url, command) }; break;
         case 'switch': this.switch(command.tabId); break;
         case 'close': this.close(command.tabId, ownerId); break;
@@ -383,18 +435,22 @@ export class IabManager implements ManagerContract {
           if (!popupOptions.webContents || popupOptions.webContents.session !== contents.session) throw new Error('IAB native popup target is unavailable');
           const opener = this.tabs.get(tabId);
           if (!opener) throw iabError('IAB_TARGET_CLOSED', 'The browser popup opener is closed');
-          const access: TabAccess = { createdBy: opener.createdBy, grants: new Map() };
-          for (const [principalId, grant] of opener.grants) {
-            if (!grant.controller.signal.aborted) access.grants.set(principalId, { controller: new AbortController() });
+          const nativeOpener = this.host.getWebContents(tabId) === contents && popupOptions.webContents.opener?.top === contents.mainFrame;
+          const createdBy = nativeOpener && opener.claim && !opener.claim.controller.signal.aborted ? opener.claimedBy : null;
+          const access: TabAccess = { createdBy, retained: false, claimedBy: null, sessionGroupId: nativeOpener ? opener.sessionGroupId : null };
+          if (createdBy) {
+            Object.assign(access, claimPage(access, createdBy, opener.sessionGroupId!));
+            access.claim = { controller: new AbortController() };
           }
-          const ready = this.create(tabIdPopup, details.url, details.disposition !== 'background-tab', access, popupOptions.webContents);
+          const foreground = this.host.getWebContents(tabId) === contents && this.activeTabId === tabId && details.disposition !== 'background-tab';
+          const ready = this.create(tabIdPopup, details.url, foreground && !createdBy, access, popupOptions.webContents);
+          if (foreground && createdBy) this.requestShow(this.ownerId, tabIdPopup);
           const popup = this.resolveBrokerTarget(tabIdPopup, this.ownerId);
           void ready.catch(() => this.close(tabIdPopup));
           if (popup.session !== contents.session) { this.close(tabIdPopup); throw new Error('IAB popup session mismatch'); }
           this.data.downloads.followDownloadPopup(contents, popup);
           const disposeDownload = watchDownloadPopup(popup, details.url, () => {
             if (this.host.getWebContents(tabIdPopup) !== popup) return;
-            if (this.activeTabId === tabIdPopup && this.tabs.has(tabId) && this.host.getWebContents(tabId) === contents) this.activeTabId = tabId;
             this.close(tabIdPopup, this.ownerId);
           });
           const remove = this.cleanup.get(tabIdPopup)!;

@@ -69,7 +69,7 @@ enum Input {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProviderAccountWireDraft {
+pub(super) struct ProviderAccountWireDraft {
     id: String,
     provider: String,
     label: String,
@@ -84,7 +84,7 @@ struct ProviderAccountWireDraft {
 }
 
 impl ProviderAccountWireDraft {
-    fn into_draft(self) -> ProviderAccountDraft {
+    pub(super) fn into_draft(self) -> ProviderAccountDraft {
         ProviderAccountDraft::new(
             self.id,
             self.provider,

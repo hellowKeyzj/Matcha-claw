@@ -455,7 +455,9 @@ async function safelyReadMemoryFileAsync(
 ): Promise<{ info: MemoryFileInfo | null; includePaths: string[] }> {
   try {
     const rawContent = currentInvestigationScope()
-      ? (await readSourceBytes(filePath, { signal: investigationSignal() })).toString('utf-8')
+      ? (
+          await readSourceBytes(filePath, { signal: investigationSignal() })
+        ).toString('utf-8')
       : await getFsImplementation().readFile(filePath, { encoding: 'utf-8' })
     return parseMemoryFileContent(rawContent, filePath, type, includeBasePath)
   } catch (error) {
@@ -565,12 +567,17 @@ function extractIncludePathsFromTokens(
 const MAX_INCLUDE_DEPTH = 5
 
 /** Matches paths against exclude patterns whose symlink prefixes are already resolved. */
-function isClaudeMdExcluded(filePath: string, expandedPatterns: string[]): boolean {
+function isClaudeMdExcluded(
+  filePath: string,
+  expandedPatterns: string[],
+): boolean {
   if (expandedPatterns.length === 0) {
     return false
   }
 
-  return picomatch.isMatch(filePath.replaceAll('\\', '/'), expandedPatterns, { dot: true })
+  return picomatch.isMatch(filePath.replaceAll('\\', '/'), expandedPatterns, {
+    dot: true,
+  })
 }
 
 /**
@@ -597,9 +604,13 @@ async function resolveExcludePatterns(patterns: string[]): Promise<string[]> {
     const dirToResolve = dirname(staticPrefix)
 
     try {
-      const resolvedDir = (currentInvestigationScope()
-        ? (await realSourcePath(dirToResolve, investigationSignal())).normalize('NFC')
-        : fs.realpathSync(dirToResolve)).replaceAll('\\', '/')
+      const resolvedDir = (
+        currentInvestigationScope()
+          ? (
+              await realSourcePath(dirToResolve, investigationSignal())
+            ).normalize('NFC')
+          : fs.realpathSync(dirToResolve)
+      ).replaceAll('\\', '/')
       if (resolvedDir !== dirToResolve) {
         const resolvedPattern =
           resolvedDir + normalized.slice(dirToResolve.length)
@@ -637,7 +648,10 @@ export async function processMemoryFile(
   // Managed, AutoMem, and TeamMem are never excluded.
   if (type === 'User' || type === 'Project' || type === 'Local') {
     const patterns = getInitialSettings().claudeMdExcludes
-    if (patterns?.length && isClaudeMdExcluded(filePath, await resolveExcludePatterns(patterns))) {
+    if (
+      patterns?.length &&
+      isClaudeMdExcluded(filePath, await resolveExcludePatterns(patterns))
+    ) {
       return []
     }
   }
@@ -722,10 +736,8 @@ export async function processMdRules({
   try {
     const fs = getFsImplementation()
 
-    const { resolvedPath: resolvedRulesDir, isSymlink } = await safeResolveSourcePath(
-      rulesDir,
-      investigationSignal(),
-    )
+    const { resolvedPath: resolvedRulesDir, isSymlink } =
+      await safeResolveSourcePath(rulesDir, investigationSignal())
 
     visitedDirs.add(rulesDir)
     if (isSymlink) {
@@ -749,16 +761,16 @@ export async function processMdRules({
 
     for (const entry of entries) {
       const entryPath = join(rulesDir, entry.name)
-      const { resolvedPath: resolvedEntryPath, isSymlink } = await safeResolveSourcePath(
-        entryPath,
-        investigationSignal(),
-      )
+      const { resolvedPath: resolvedEntryPath, isSymlink } =
+        await safeResolveSourcePath(entryPath, investigationSignal())
 
       // Use Dirent methods for non-symlinks to avoid extra stat calls.
       // For symlinks, we need stat to determine what the target is.
       const stats = isSymlink
         ? currentInvestigationScope()
-          ? await statSourcePath(resolvedEntryPath, { signal: investigationSignal() })
+          ? await statSourcePath(resolvedEntryPath, {
+              signal: investigationSignal(),
+            })
           : await fs.stat(resolvedEntryPath)
         : null
       const isDirectory = stats ? stats.isDirectory() : entry.isDirectory()
@@ -1110,7 +1122,8 @@ export const getMemoryFiles: typeof memoizedGetMemoryFiles = Object.assign(
     const scope = currentInvestigationScope()
     const cache = getMemoryFiles.cache
     memoizedGetMemoryFiles.cache = cache
-    const cached: Promise<MemoryFileInfo[]> | undefined = cache.get(forceIncludeExternal)
+    const cached: Promise<MemoryFileInfo[]> | undefined =
+      cache.get(forceIncludeExternal)
     if (cached !== undefined) {
       const pending = pendingMemoryFileLoads.has(cached)
       if (
@@ -1124,7 +1137,9 @@ export const getMemoryFiles: typeof memoizedGetMemoryFiles = Object.assign(
       cache.delete(forceIncludeExternal)
     }
 
-    const load = trackInvestigationOperation(memoizedGetMemoryFiles(forceIncludeExternal))
+    const load = trackInvestigationOperation(
+      memoizedGetMemoryFiles(forceIncludeExternal),
+    )
     pendingMemoryFileLoads.set(load, scope)
     void load.then(
       () => {

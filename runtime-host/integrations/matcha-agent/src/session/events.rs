@@ -3,6 +3,7 @@ use std::fmt;
 use super::{
     interaction,
     model::{ClassifiedErrorKind, RunRecord, RunStatus, valid_uuid},
+    normalization,
     projection::{self, Streaming},
     rpc::{self, Failure},
 };
@@ -12,7 +13,7 @@ use sessions_module::{
     question::{QuestionAvailability, QuestionDelivery, QuestionTarget},
     state::{
         ApprovalPhase, ApprovalView, ItemAnchor, RuntimeIssue, RuntimeView, SessionChange,
-        SessionFact, SessionItem, SessionState, ToolView,
+        SessionContent, SessionFact, SessionItem, SessionState, ToolView,
     },
 };
 
@@ -30,6 +31,48 @@ impl fmt::Debug for ProjectedRunError {
     }
 }
 
+// The native executor dispatches one active input per session; queued runs do not own ACKs.
+#[derive(Clone, Default)]
+pub(crate) struct InputBinding(Option<(String, String)>);
+impl InputBinding {
+    fn observe(&mut self, run: &RunRecord) -> Result<(), Failure> {
+        if let Some((message_id, request_id)) = &self.0
+            && message_id == &run.message_id
+            && run.request_id.as_ref() != Some(request_id)
+        {
+            return Err(Failure::InvalidReadback);
+        }
+        if run.status.terminal() {
+            if self
+                .0
+                .as_ref()
+                .is_some_and(|(message_id, _)| message_id == &run.message_id)
+            {
+                self.0 = None;
+            }
+        } else if run.status != RunStatus::Queued {
+            self.0 = run
+                .request_id
+                .as_ref()
+                .filter(|request_id| {
+                    sessions_module::state::valid_input_ids(std::slice::from_ref(request_id))
+                })
+                .map(|request_id| (run.message_id.clone(), request_id.clone()));
+        }
+        Ok(())
+    }
+    fn request_id(&self, row: &Value) -> Option<&str> {
+        let (message_id, request_id) = self.0.as_ref()?;
+        (row["type"] == "user"
+            && row["uuid"].as_str() == Some(message_id.as_str())
+            && row.get("parent_tool_use_id").is_none_or(Value::is_null)
+            && row["isSidechain"] != true
+            && row["isSynthetic"] != true
+            && normalization::initial_replay(row))
+        .then_some(request_id.as_str())
+    }
+}
+
 pub(crate) struct Projected {
     pub changes: Vec<SessionChange>,
     pub history_refresh: bool,
@@ -37,6 +80,7 @@ pub(crate) struct Projected {
 }
 pub(crate) fn project(
     streaming: &mut Streaming,
+    input: &mut InputBinding,
     event: &Event,
     state: &SessionState,
 ) -> Result<Projected, Failure> {
@@ -64,11 +108,23 @@ pub(crate) fn project(
                     });
                 let mut incoming_items = Vec::new();
                 let mut incoming_tools = Vec::new();
-                for message in projected.messages {
-                    // Live user messages acknowledge input or carry tool results; history owns user rows.
-                    if !matches!(message.item, SessionItem::UserMessage { .. }) {
-                        incoming_items.push(message.item);
+                for mut message in projected.messages {
+                    if let SessionItem::UserMessage {
+                        input_ids, content, ..
+                    } = &mut message.item
+                    {
+                        if let Some(request_id) = input.request_id(&event.payload)
+                            && !content
+                                .iter()
+                                .any(|block| matches!(block, SessionContent::ToolResult { .. }))
+                        {
+                            input_ids.push(request_id.to_owned());
+                        } else {
+                            incoming_tools.extend(message.tools);
+                            continue;
+                        }
                     }
+                    incoming_items.push(message.item);
                     incoming_tools.extend(message.tools);
                 }
                 if !incoming_items.is_empty() || !projected.retired.is_empty() {
@@ -126,6 +182,7 @@ pub(crate) fn project(
                 trace_failure(event, reason, &Failure::InvalidReadback);
                 return Err(Failure::InvalidReadback);
             }
+            input.observe(&run)?;
             let runtime = run_runtime(&run, state.runtime());
             if (run.status.terminal() || runtime.is_some()) && !state.has_terminal_run(&run.run_id)
             {

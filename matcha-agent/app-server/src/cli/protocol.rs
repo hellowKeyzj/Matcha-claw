@@ -186,6 +186,14 @@ pub fn decode(bytes: &[u8]) -> rpc::Result<NativeMessage> {
                     text(&message, name, &format!("user_{name}"))?;
                 }
             }
+            if message.get("source_tool_use_id").is_some() {
+                check(
+                    &message,
+                    "source_tool_use_id",
+                    "user_source_tool_use_id",
+                    |value| value.as_str().is_some_and(|id| !id.is_empty()),
+                )?;
+            }
             Ok(NativeMessage::Message(message))
         }
         _ => Ok(NativeMessage::Message(message)),

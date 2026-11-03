@@ -3,12 +3,13 @@ import { Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { WorkspacePageProps } from '@/plugins/workspace/extensions';
 import type { IabEvent } from '@/types/desktop/iab';
+import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
 import { BrowserChrome } from './BrowserChrome';
 import { HistoryPage } from './HistoryPage';
 import { DownloadsPage } from './DownloadsPage';
 import { IabConfirmation } from './IabConfirmation';
 import { useNativeView } from './useNativeView';
-import { iabCommand, onIabEvent, reportIabError, useIabStore } from './store';
+import { iabCommand, isIabTabVisible, onIabEvent, reportIabError, useIabStore } from './store';
 import './iab.css';
 
 type ClearRequest = Extract<IabEvent, { type: 'clear-data-requested' }>;
@@ -17,9 +18,10 @@ export function IabToolLayer({ sessionIdentity, visible: pageVisible, ownerId, t
   const { t, i18n } = useTranslation('iab');
   const currentOwnerId = useIabStore((state) => state.ownerId);
   const activeTabId = useIabStore((state) => state.activeTabId);
-  const tab = useIabStore((state) => state.tabs.find((entry) => entry.ownerId === ownerId && entry.id === tabId) ?? null);
+  const sessionGroupId = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
+  const tab = useIabStore((state) => state.tabs.find((entry) => entry.ownerId === ownerId && entry.id === tabId && isIabTabVisible(entry, sessionGroupId)) ?? null);
   const matchingOwner = currentOwnerId === ownerId;
-  const visible = pageVisible && matchingOwner && activeTabId === tabId;
+  const visible = pageVisible && matchingOwner && !!tab && activeTabId === tabId;
   const surface = useRef<HTMLDivElement>(null);
   const placeholder = useRef<HTMLDivElement>(null);
   const [clearRequest, setClearRequest] = useState<ClearRequest | null>(null);
@@ -56,7 +58,7 @@ export function IabToolLayer({ sessionIdentity, visible: pageVisible, ownerId, t
     finally { clearRunning.current = false; }
   };
   return <div ref={surface} data-browser-surface className="iab-root flex h-full min-h-0 min-w-0 flex-col bg-card text-foreground">
-    <BrowserChrome key={`${ownerId}:${tabId}:${browserVisible}`} tab={tab} sessionIdentity={sessionIdentity} surface={surface} visible={browserVisible} />
+    <BrowserChrome key={`${ownerId}:${tabId}:${browserVisible}`} tab={tab} surface={surface} visible={browserVisible} />
     <div ref={placeholder} className="min-h-0 flex-1">
       {tab?.internalPage === 'history' ? <HistoryPage key={tab.id} tabId={tab.id} visible={browserVisible} />
         : tab?.internalPage === 'downloads' ? <DownloadsPage key={tab.id} visible={browserVisible} />

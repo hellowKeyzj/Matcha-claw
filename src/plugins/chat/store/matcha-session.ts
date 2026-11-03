@@ -24,7 +24,7 @@ export const reconcileItems: SessionMessageModel['reconcileItems'] = (current, n
     if (item.kind !== 'user-message' || !item.messageId) return item;
     const receipt = attachmentReceipts.get(item.messageId);
     if (!receipt) return item;
-    // Native history omits media; only this exact message may inherit its local attachment receipt.
+    // Only an exact message receipt may supply attachments absent from native history.
     const attachments = receipt.attachedFiles.filter((file) => !file.attachmentStatus);
     const retainAttachments = attachments.length > 0 && item.images.length === 0
       && !item.attachedFiles.some((file) => !file.attachmentStatus);
@@ -33,7 +33,8 @@ export const reconcileItems: SessionMessageModel['reconcileItems'] = (current, n
       clientId: receipt.clientId,
       rendererReceiptRunId: receipt.rendererReceiptRunId,
       ...(retainAttachments ? {
-        attachedFiles: [...attachments, ...item.attachedFiles.filter((file) => file.attachmentStatus !== 'unsafe-media-omitted')],
+        attachedFiles: attachments,
+        contentNotices: item.contentNotices?.filter((notice) => notice !== 'media-unavailable'),
       } : {}),
     };
   });

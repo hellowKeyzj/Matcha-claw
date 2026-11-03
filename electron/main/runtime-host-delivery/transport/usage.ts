@@ -1,3 +1,4 @@
+import type { UsageCoverage, UsageHistory, UsageHistoryEntry, UsageUnknownEntry, UsageUnknownReason } from '../../../../src/types/desktop/usage';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from './client';
 import { isProductRuntimeScope, type ProductRuntimeScope } from './runtime-scope';
@@ -5,23 +6,19 @@ import { isProductRuntimeScope, type ProductRuntimeScope } from './runtime-scope
 const UNAVAILABLE = { success: false, error: 'OpenClaw usage history is unavailable' } as const;
 const MATCHA_UNAVAILABLE = { success: false, error: 'Matcha usage history is unavailable' } as const;
 
-export type UsageHistoryEntry = Readonly<{
-  sessionId: string;
-  agentId: string;
-  timestamp: string;
-  model?: string;
-  provider?: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  totalTokens: number;
-  costUsd?: number;
-}>;
+export type { UsageHistoryEntry } from '../../../../src/types/desktop/usage';
+
+const UNKNOWN_REASONS: Readonly<Record<UsageUnknownReason, true>> = {
+  native_result_session_mismatch: true,
+  native_result_identity_missing: true,
+  native_execution_error_placeholder: true,
+  native_usage_scope_unknown: true,
+  native_usage_missing_or_invalid: true,
+};
 
 export type UsageTransportResponse = Readonly<{
   status: 200 | 400 | 503;
-  body: Readonly<{ entries: readonly UsageHistoryEntry[] }> | typeof UNAVAILABLE | typeof MATCHA_UNAVAILABLE;
+  body: UsageHistory | typeof UNAVAILABLE | typeof MATCHA_UNAVAILABLE;
 }>;
 
 export interface UsageTransport {
@@ -87,11 +84,35 @@ async function readUsageTransport(
   return { status: 503, body: runtimeAdapterId === 'matcha-agent' ? MATCHA_UNAVAILABLE : UNAVAILABLE };
 }
 
-function isResponse(value: unknown, runtimeAdapterId: string): value is Readonly<{ entries: readonly UsageHistoryEntry[] }> {
+function isResponse(value: unknown, runtimeAdapterId: string): value is UsageHistory {
   return isRecord(value)
-    && hasExactKeys(value, ['entries'])
+    && hasExactKeys(value, ['entries', 'coverage'])
     && Array.isArray(value.entries)
-    && value.entries.every((entry) => isEntry(entry, runtimeAdapterId));
+    && value.entries.every((entry) => isEntry(entry, runtimeAdapterId))
+    && isCoverage(value.coverage, runtimeAdapterId);
+}
+
+function isCoverage(value: unknown, runtimeAdapterId: string): value is UsageCoverage {
+  if (!isRecord(value)) return false;
+  return runtimeAdapterId === 'matcha-agent'
+    ? hasExactKeys(value, ['kind', 'hasMore', 'nativeOutcomeUnknown', 'unknownEntries'])
+      && value.kind === 'observed'
+      && typeof value.hasMore === 'boolean'
+      && typeof value.nativeOutcomeUnknown === 'boolean'
+      && Array.isArray(value.unknownEntries)
+      && value.unknownEntries.every((entry) => isUnknownEntry(entry, runtimeAdapterId))
+    : hasExactKeys(value, ['kind']) && value.kind === 'reported';
+}
+
+function isUnknownEntry(value: unknown, runtimeAdapterId: string): value is UsageUnknownEntry {
+  return isRecord(value)
+    && hasExactKeys(value, ['sessionId', 'agentId', 'timestamp', 'reason'])
+    && isSafeSessionId(value.sessionId)
+    && isSafeAgentId(value.agentId, runtimeAdapterId)
+    && typeof value.timestamp === 'string'
+    && Number.isFinite(Date.parse(value.timestamp))
+    && typeof value.reason === 'string'
+    && Object.hasOwn(UNKNOWN_REASONS, value.reason);
 }
 
 function isEntry(value: unknown, runtimeAdapterId: string): value is UsageHistoryEntry {

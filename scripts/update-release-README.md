@@ -10,6 +10,8 @@
 https://www.senluopan.com/dav/
 ├─ MatchaClaw-<version>-win-x64.exe
 ├─ MatchaClaw-<version>-win-arm64.exe
+├─ MatchaClaw-<version>-mac-x64.dmg
+├─ MatchaClaw-<version>-mac-x64.zip
 ├─ MatchaClaw-<version>-mac-arm64.dmg
 ├─ MatchaClaw-<version>-mac-arm64.zip
 └─ <channel>.yml / <channel>-mac.yml
@@ -17,12 +19,12 @@ https://www.senluopan.com/dav/
 
 该 WebDAV 账号根已是 `claw-update`，URL 后不得再加 `claw-update/`。稳定通道为 `latest`，预发布按版本中的 `alpha`／`beta` 识别；以 builder 生成的 channel 文件为准，不手改文件名、包地址或哈希。
 
-- Windows 发布 x64/arm64 NSIS；macOS 发布 arm64 DMG/ZIP，ZIP 用于自动更新，不可只传 DMG。
-- Linux 与 macOS x64 安装包暂停发布，不代表删除这些平台的 runtime 支持；保留历史安装包。
+- Windows 发布 x64/arm64 NSIS；macOS 发布 x64/arm64 DMG/ZIP，ZIP 用于自动更新，不可只传 DMG。
+- 仅 Linux 安装包暂停发布，不代表删除 runtime 支持；保留历史安装包。
 - Main `disableDifferentialDownload = true`、builder `nsis.differentialPackage: false` 与 `useMultipleRangeRequest: false`，下载完整包；UI、IPC、状态及用户点击下载／安装不变。
 - GitHub Release 仅作手动下载镜像，不是新客户端 fallback；不涉及 runtime-host／组件升级、自定义 Provider 或客户端 JWT。
 
-本地 `pnpm run package:win`／`package:win:x64`／`package:mac` 只打包（`--publish never`），不走发布；Linux 与 Intel Mac 不作为当前发布命令。不要用本地 package 代替 CI 的发布器。[VERIFY: electron-builder.yml:56-79] [VERIFY: electron-builder.yml:125-137] [VERIFY: package.json:92-98]
+本地 `pnpm run package:win`／`package:win:x64`／`package:mac` 只打包（`--publish never`），不走发布；本地 `package:mac`／`package:mac:local` 仍只构建 arm64，CI Release 构建 Mac 双架构，Linux 不作为当前发布命令。不要用本地 package 代替 CI 的发布器。[VERIFY: electron-builder.yml:90-98] [VERIFY: electron-builder.yml:169-181] [VERIFY: package.json:98-101] [VERIFY: .github/workflows/release.yml:438-449]
 
 ## 2. 凭据与 Secrets
 
@@ -32,13 +34,13 @@ https://www.senluopan.com/dav/
 | CI 发布 | `UPDATE_WEBDAV_USERNAME`、`UPDATE_WEBDAV_PASSWORD` | GitHub Actions Secrets 中配置独立发布账号，仅授权更新根读取／PUT；不要使用只读账号或无关目录的管理权限，不授予删除历史包权限 |
 | macOS 签名／公证 | `MAC_CERTS`、`MAC_CERTS_PASSWORD`、`APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID` | 沿用现有 macOS 构建所需 Secrets，与 WebDAV 发布账号分离 |
 
-在仓库 GitHub Actions Secrets 配置两项 `UPDATE_WEBDAV_*`，二者缺一即发布失败，不降级为只发 GitHub。它们只注入 CI 发布步骤，不放入客户端、builder publish 配置、产物或日志。不把密码、认证头、编码认证串放入文档或命令示例；排障日志也须脱敏。Main 单例构造不访问 Electron session，hook 由 app ready 后的原注册入口安装。[VERIFY: electron/main/updater.ts:52-79] [VERIFY: electron/main/updater.ts:290-306] [VERIFY: electron/main/index.ts:203-217] [VERIFY: electron/main/app-bootstrap.ts:183-196] [VERIFY: .github/workflows/release.yml:763-767] [VERIFY: scripts/publish-update-webdav.mjs:130-135]
+在仓库 GitHub Actions Secrets 配置两项 `UPDATE_WEBDAV_*`，二者缺一即发布失败，不降级为只发 GitHub。它们只注入 CI 发布步骤，不放入客户端、builder publish 配置、产物或日志。不把密码、认证头、编码认证串放入文档或命令示例；排障日志也须脱敏。Main 单例构造不访问 Electron session，hook 由 app ready 后的原注册入口安装。[VERIFY: electron/main/updater.ts:52-79] [VERIFY: electron/main/updater.ts:290-306] [VERIFY: electron/main/index.ts:203-217] [VERIFY: electron/main/app-bootstrap.ts:183-196] [VERIFY: .github/workflows/release.yml:983-987] [VERIFY: scripts/publish-update-webdav.mjs:130-135]
 
 ## 3. 发布顺序
 
 ```text
 v* tag
-  → 构建 Windows x64/arm64 + macOS arm64 → 聚合 deploy-bundle
+  → 构建 Windows／macOS x64/arm64 → 原生 package proof／attestation → 聚合 deploy-bundle
   → 校验本地包 SHA-512 / size
   → PUT 全部安装包 → 逐包 GET 读回核对
   → PUT channel 清单（最后）
@@ -48,8 +50,8 @@ workflow_dispatch → 仅构建 artifacts，不发布
 ```
 
 1. 配齐发布 Secrets，确认版本号与 `vX.Y.Z`、`vX.Y.Z-alpha.N` 或 `vX.Y.Z-beta.N` tag 一致；确认本次包及清单来自同一次构建，不混入旧 artifacts。
-2. 日常验证用 GitHub Actions `Release` 的 `workflow_dispatch`，选择 `win`／`mac`／`all`，仅留存构建产物。需要对外发布时由维护者推送 `v*` tag；只有 tag push 且构建及 Windows ARM64 package-proof job 成功才发布。不要把手动构建或配置了 proof 步骤当成已发布／已验收；同一更新根发布串行，勿手工取消正在上传的任务。[VERIFY: .github/workflows/release.yml:7-24] [VERIFY: .github/workflows/release.yml:701-713]
-3. tag 的发布 job 只取 artifacts 根层的包／清单／证据聚合 `deploy-bundle`，排除 unpacked 内部文件与 builder 调试配置；同名不同内容则失败。WebDAV 发布器只处理安装包与 channel 清单，证据保留给 GitHub 手动镜像。由 CI Secrets 提供认证并执行唯一发布入口。[VERIFY: .github/workflows/release.yml:744-767] [VERIFY: scripts/publish-update-webdav.mjs:27-33]
+2. 日常验证用 GitHub Actions `Release` 的 `workflow_dispatch`，选择 `win`／`mac`／`all`，仅留存构建产物。需要对外发布时由维护者推送 `v*` tag；只有 tag push 且构建、macOS x64 与 Windows ARM64 package-proof jobs 全部成功才发布。不要把手动构建或配置了 proof 步骤当成已发布／已验收；同一更新根发布串行，勿手工取消正在上传的任务。[VERIFY: .github/workflows/release.yml:7-24] [VERIFY: .github/workflows/release.yml:920-933]
+3. tag 的发布 job 只取 artifacts 根层的包／清单／证据聚合 `deploy-bundle`，排除 unpacked 内部文件与 builder 调试配置；同名不同内容则失败。WebDAV 发布器只处理安装包与 channel 清单，证据保留给 GitHub 手动镜像。由 CI Secrets 提供认证并执行唯一发布入口。[VERIFY: .github/workflows/release.yml:964-987] [VERIFY: .github/workflows/release.yml:1016-1024] [VERIFY: scripts/publish-update-webdav.mjs:27-33]
 
    ```bash
    node scripts/publish-update-webdav.mjs <deploy-bundle>
@@ -72,7 +74,7 @@ workflow_dispatch → 仅构建 artifacts，不发布
 
 - `UPDATE_SERVER_HOST`、`UPDATE_SERVER_USER`、`UPDATE_SERVER_PATH`、`UPDATE_SERVER_SSH_KEY` 为必需；`UPDATE_SERVER_PORT` 可选，默认 `22`。
 - 缺少旧源 Secrets 可以跳过旧源同步，但这也意味着未替旧客户端完成迁移发布；不能拿新源或 GitHub Release 代替旧版可见的清单。
-- 旧源同步先包后清单，不删历史安装包、不使用 `rsync --delete`；不得把旧源加回新客户端 fallback。旧源步骤排在 WebDAV 发布之后、GitHub 镜像之前，其失败需排查，不能据此断言新源尚未发布。[VERIFY: .github/workflows/release.yml:763-817]
+- 旧源同步先包后清单，不删历史安装包、不使用 `rsync --delete`；不得把旧源加回新客户端 fallback。旧源步骤排在 WebDAV 发布之后、GitHub 镜像之前，其失败需排查，不能据此断言新源尚未发布。[VERIFY: .github/workflows/release.yml:983-1017]
 
 ## 5. 失败定位与验证边界
 

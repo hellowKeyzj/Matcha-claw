@@ -426,6 +426,8 @@ enum ProviderMediaApiProtocolDocument {
     Google,
     OpenAi,
     OpenRouter,
+    DashScope,
+    Ark,
 }
 
 impl From<ProviderMediaApiProtocol> for ProviderMediaApiProtocolDocument {
@@ -434,6 +436,8 @@ impl From<ProviderMediaApiProtocol> for ProviderMediaApiProtocolDocument {
             ProviderMediaApiProtocol::Google => Self::Google,
             ProviderMediaApiProtocol::OpenAi => Self::OpenAi,
             ProviderMediaApiProtocol::OpenRouter => Self::OpenRouter,
+            ProviderMediaApiProtocol::DashScope => Self::DashScope,
+            ProviderMediaApiProtocol::Ark => Self::Ark,
         }
     }
 }
@@ -444,6 +448,8 @@ impl From<ProviderMediaApiProtocolDocument> for ProviderMediaApiProtocol {
             ProviderMediaApiProtocolDocument::Google => Self::Google,
             ProviderMediaApiProtocolDocument::OpenAi => Self::OpenAi,
             ProviderMediaApiProtocolDocument::OpenRouter => Self::OpenRouter,
+            ProviderMediaApiProtocolDocument::DashScope => Self::DashScope,
+            ProviderMediaApiProtocolDocument::Ark => Self::Ark,
         }
     }
 }

@@ -16,7 +16,7 @@ async function requireDirectory(path: string): Promise<void> {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('App plugin storage directory is invalid.');
 }
 
-async function readBoundedFile(path: string, maximum: number): Promise<Buffer> {
+export async function readBoundedFile(path: string, maximum: number): Promise<Buffer> {
   const stat = await lstat(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximum) throw new Error('App plugin storage file is invalid.');
   const file = await open(path, 'r');
@@ -51,8 +51,12 @@ async function syncDirectory(path: string): Promise<void> {
   try { await directory.sync(); } finally { await directory.close(); }
 }
 
-function readCatalog(value: unknown): AppPluginCatalog {
-  const catalog = requireObject(value, ['revision', 'plugins']);
+export interface StoredAppPluginCatalog extends AppPluginCatalog {
+  readonly bundled: Readonly<Record<string, string>>;
+}
+
+function readCatalog(value: unknown): StoredAppPluginCatalog {
+  const catalog = requireObject(value, ['revision', 'plugins', 'bundled']);
   if (!Number.isSafeInteger(catalog.revision) || (catalog.revision as number) < 0
     || !Array.isArray(catalog.plugins) || catalog.plugins.length > MAX_INSTALLED_APP_PLUGINS) {
     throw new Error('App plugin catalog is invalid.');
@@ -62,7 +66,7 @@ function readCatalog(value: unknown): AppPluginCatalog {
     const record = requireObject(value, ['manifest', 'digest', 'enabled', 'origin', 'installedAt', 'previous']);
     const manifest = validateAppPluginManifest(record.manifest);
     requireDigest(record.digest);
-    if (typeof record.enabled !== 'boolean' || (record.origin !== 'manual' && record.origin !== 'agent')
+    if (typeof record.enabled !== 'boolean' || (record.origin !== 'manual' && record.origin !== 'agent' && record.origin !== 'bundled')
       || typeof record.installedAt !== 'string' || !Number.isFinite(Date.parse(record.installedAt)) || ids.has(manifest.id)) {
       throw new Error('App plugin catalog record is invalid.');
     }
@@ -73,27 +77,37 @@ function readCatalog(value: unknown): AppPluginCatalog {
       const oldManifest = validateAppPluginManifest(old.manifest);
       requireDigest(old.digest);
       if (oldManifest.id !== manifest.id || old.digest === record.digest || oldManifest.version === manifest.version
-        || (old.origin !== 'manual' && old.origin !== 'agent') || typeof old.installedAt !== 'string'
+        || (old.origin !== 'manual' && old.origin !== 'agent' && old.origin !== 'bundled') || typeof old.installedAt !== 'string'
         || !Number.isFinite(Date.parse(old.installedAt))) throw new Error('App plugin previous version is invalid.');
       previous = { manifest: oldManifest, digest: old.digest, origin: old.origin, installedAt: old.installedAt };
     }
     return { manifest, digest: record.digest, enabled: record.enabled, origin: record.origin, installedAt: record.installedAt,
       ...(previous ? { previous } : {}) };
   });
-  return { revision: catalog.revision as number, plugins };
+  const bundled: Record<string, string> = {};
+  if (catalog.bundled !== undefined) {
+    if (!catalog.bundled || typeof catalog.bundled !== 'object' || Array.isArray(catalog.bundled)
+      || Object.keys(catalog.bundled).length > MAX_INSTALLED_APP_PLUGINS) throw new Error('Bundled app plugin receipts are invalid.');
+    for (const [id, digest] of Object.entries(catalog.bundled)) {
+      requirePluginId(id);
+      requireDigest(digest);
+      bundled[id] = digest;
+    }
+  }
+  return { revision: catalog.revision as number, plugins, bundled };
 }
 
 export class AppPluginStorage {
   constructor(private readonly rootDir: string, private readonly packageWorker: AppPluginPackageWorker) {}
 
-  async load(): Promise<AppPluginCatalog> {
+  async load(): Promise<StoredAppPluginCatalog> {
     await requireDirectory(this.rootDir);
     await requireDirectory(join(this.rootDir, 'versions'));
     let bytes: Buffer;
     try {
       bytes = await readBoundedFile(join(this.rootDir, 'catalog.json'), MAX_CATALOG_BYTES);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { revision: 0, plugins: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { revision: 0, plugins: [], bundled: {} };
       throw error;
     }
     // Corruption is visible; never replace an unreadable catalog with an empty one.
@@ -150,7 +164,7 @@ export class AppPluginStorage {
     }
   }
 
-  async publish(catalog: AppPluginCatalog): Promise<void> {
+  async publish(catalog: StoredAppPluginCatalog): Promise<void> {
     const contents = JSON.stringify(catalog, null, 2);
     if (Buffer.byteLength(contents) > MAX_CATALOG_BYTES) throw new Error('App plugin catalog is too large.');
     const target = join(this.rootDir, 'catalog.json');

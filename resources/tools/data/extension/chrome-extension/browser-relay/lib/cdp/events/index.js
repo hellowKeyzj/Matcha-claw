@@ -49,8 +49,9 @@ import { handleLogEvent } from './log.js'
 
 /**
  * @typedef {Object} EventContext
- * @property {Map<string, number>} childSession  — child sessionId → parent tabId
- * @property {Map<number, Set<string>>} childSets — parent tabId → child sessionIds
+ * @property {{tabId: number, sessionId?: string}} debuggee
+ * @property {(sessionId: string) => void} addChildSession
+ * @property {(sessionId: string) => void} removeChildSession
  * @property {{ info: Function, warn: Function, debug: Function, error: Function }} log
  */
 

@@ -8,7 +8,7 @@ import type { SessionGoalView, SessionGoalUpdate, SessionGoalOutcome } from '@/t
 type GoalAction = SessionGoalUpdate | { action: 'clear' };
 type GoalTarget = { identity: SessionIdentity; recordKey: string; endpointSessionId: string };
 type PendingOperation = { operationId: string; issuedAtMs: number; action: GoalAction['action'] | 'start'; draftId?: string; draftRevision?: number; target?: GoalTarget; goalId?: string };
-type GoalError = Exclude<SessionGoalOutcome['outcome'], 'succeeded'> | 'empty' | 'active' | 'missing-session' | 'goal-attachments' | 'error';
+type GoalError = Exclude<SessionGoalOutcome['outcome'], 'succeeded'> | 'empty' | 'active' | 'missing-session' | 'goal-attachments' | 'goal-model-context' | 'error';
 type ActionState = { busy: boolean; error: GoalError | null; unknown: boolean; canDiscard?: boolean; pending?: PendingOperation };
 const IDLE: ActionState = { busy: false, error: null, unknown: false };
 
@@ -17,6 +17,7 @@ function goalSendError(result: Extract<ChatSendResult, { accepted: false }>): Go
   switch (result.reason) {
     case 'empty':
     case 'goal-attachments':
+    case 'goal-model-context':
     case 'active':
     case 'missing-session':
     case 'error':
@@ -105,6 +106,7 @@ export function useChatGoals(identity: SessionIdentity | null, recordKey: string
     const drafts = useComposerDraftStore.getState();
     const mode = drafts.modes[draftKey];
     if (!enabled || !mode || currentState().busy || currentState().unknown) return { accepted: false, reason: 'error', dispatch: 'not-dispatched' };
+    if (drafts.contexts[draftKey]?.length) return { accepted: false, reason: 'goal-model-context', dispatch: 'not-dispatched' };
     const prepared = !mode.goalId ? drafts.submissions[draftKey] : undefined;
     const submission = prepared?.status === 'prepared' && prepared.snapshot.mode?.id === mode.id ? prepared : undefined;
     if (prepared && !submission || submission && !drafts.takeSubmission(draftKey, submission.operationId)) {

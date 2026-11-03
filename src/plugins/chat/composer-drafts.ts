@@ -12,8 +12,10 @@ export type ComposerContext = {
   id: string;
   name: string;
   text: string;
+  prompt?: string;
+  tag?: string;
   stagedAttachmentIds?: readonly string[];
-  group?: { key: string; source: AppComposeSource; prompt: string; attachments: ChatSendAttachment[]; attachmentRemoval?: { tool: string } };
+  group?: { key: string; source: AppComposeSource; attachments: ChatSendAttachment[]; attachmentRemoval?: { tool: string } };
 };
 export type ComposerSubmission = {
   operationId: string;
@@ -21,7 +23,10 @@ export type ComposerSubmission = {
   skills: ComposerSkill[];
   attachments: ChatSendAttachment[];
   ownedAttachmentIds: string[];
-  status: 'prepared' | 'sending' | 'failed' | 'unknown';
+  message: string;
+  createdAt: number;
+  draftId?: string;
+  status: 'prepared' | 'submitting' | 'sending' | 'failed' | 'unknown';
   revision?: number;
   error?: string;
   attachmentReselectionRequired?: boolean;
@@ -85,6 +90,7 @@ type ComposerDraftState = {
   submissions: Record<string, ComposerSubmission>;
   prepareSubmission: (key: string, submission: ComposerSubmission) => boolean;
   takeSubmission: (key: string, operationId: string) => boolean;
+  markSubmissionSending: (key: string, operationId: string) => void;
   settleSubmission: (key: string, operationId: string, result: ChatSendResult) => void;
   removeSubmission: (key: string, operationId: string) => void;
   discardSubmission: (key: string, operationId: string) => void;
@@ -94,7 +100,7 @@ type ComposerDraftState = {
   setThinkingSelection: (key: string, selection: ComposerThinkingSelection | null) => void;
   confirmConfiguration: (key: string, revision: number, field: 'modelSelectionId' | 'permissionSelection' | 'thinkingSelection') => void;
   setInitialization: (key: string, initialization: ComposerInitialization | null) => void;
-  promoteDraft: (from: string, to: string, snapshot: ComposerDraftSnapshot, initialization: Extract<ComposerInitialization, { kind: 'pending' }>) => void;
+  promoteDraft: (from: string, to: string, snapshot: ComposerDraftSnapshot, initialization: Extract<ComposerInitialization, { kind: 'pending' }>, promoteEdits: boolean) => void;
   setDraft: (key: string, update: SetStateAction<string>) => void;
   setContexts: (key: string, update: SetStateAction<ComposerContext[]>) => void;
   invalidateAttachmentContexts: (ids: readonly string[]) => void;
@@ -164,11 +170,12 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
     return true;
   },
   takeSubmission: (key, operationId) => {
-    const state = get();
-    const submission = state.submissions[key];
-    if (!submission || submission.operationId !== operationId || submission.status !== 'prepared'
-      || state.revisions[key] !== submission.snapshot.revision) return false;
+    let taken = false;
     set((current) => {
+      const submission = current.submissions[key];
+      if (!submission || submission.operationId !== operationId || submission.status !== 'prepared'
+        || current.revisions[key] !== submission.snapshot.revision) return current;
+      taken = true;
       const drafts = { ...current.drafts };
       const contexts = { ...current.contexts };
       const selections = { ...current.selections };
@@ -178,10 +185,17 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       const revision = ++draftRevision;
       return {
         drafts, contexts, selections, revisions: { ...current.revisions, [key]: revision },
-        submissions: { ...current.submissions, [key]: { ...submission, status: 'sending', revision } },
+        submissions: { ...current.submissions, [key]: { ...submission, status: 'submitting', revision } },
       };
     });
-    return true;
+    return taken;
+  },
+  markSubmissionSending: (key, operationId) => {
+    set((state) => {
+      const submission = state.submissions[key];
+      if (submission?.operationId !== operationId || submission.status !== 'submitting') return state;
+      return { submissions: { ...state.submissions, [key]: { ...submission, status: 'sending' } } };
+    });
   },
   settleSubmission: (key, operationId, result) => {
     const state = get();
@@ -215,7 +229,7 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
   discardSubmission: (key, operationId) => {
     const state = get();
     const submission = state.submissions[key];
-    if (!submission || submission.operationId !== operationId || submission.status === 'sending') return;
+    if (!submission || submission.operationId !== operationId || submission.status === 'submitting' || submission.status === 'sending') return;
     const draftIds = new Set(groupAttachmentIds(state.contexts[key]));
     releaseSubmissionAttachments(submission.ownedAttachmentIds.filter((id) => !draftIds.has(id)));
     state.removeSubmission(key, operationId);
@@ -288,7 +302,7 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       return { initializations };
     });
   },
-  promoteDraft: (from, to, snapshot, initialization) => {
+  promoteDraft: (from, to, snapshot, initialization, promoteEdits) => {
     set((state) => {
       if (state.initializations[from]?.operationId !== initialization.operationId) return state;
       const drafts = { ...state.drafts };
@@ -300,22 +314,24 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       const initializations = { ...state.initializations, [to]: initialization };
       const submissions = { ...state.submissions };
       const submission = submissions[from];
-      const submitted = submission?.operationId === initialization.operationId && submission.status === 'sending';
-      const promoted = submitted ? {
+      const submitted = submission?.operationId === initialization.operationId && (submission.status === 'submitting' || submission.status === 'sending');
+      const promoted = submitted && promoteEdits ? {
         draft: state.drafts[from], contexts: state.contexts[from], revision: state.revisions[from], selection: state.selections[from],
         mode: state.modes[from], configuration: state.configurations[from],
       } : snapshot;
-      if (promoted.draft) drafts[to] = promoted.draft;
-      if (promoted.contexts?.length) contexts[to] = promoted.contexts;
-      if (promoted.revision !== undefined) revisions[to] = promoted.revision;
-      if (promoted.selection) selections[to] = promoted.selection;
+      if (promoteEdits || !submitted) {
+        if (promoted.draft) drafts[to] = promoted.draft;
+        if (promoted.contexts?.length) contexts[to] = promoted.contexts;
+        if (promoted.revision !== undefined) revisions[to] = promoted.revision;
+        if (promoted.selection) selections[to] = promoted.selection;
+      }
       if (promoted.mode) modes[to] = promoted.mode;
       if (promoted.configuration) configurations[to] = promoted.configuration;
       if (submitted) {
         submissions[to] = submission;
         delete submissions[from];
       }
-      if (submitted || state.revisions[from] === snapshot.revision) {
+      if (promoteEdits && (submitted || state.revisions[from] === snapshot.revision)) {
         delete drafts[from];
         delete contexts[from];
         delete revisions[from];
@@ -418,7 +434,7 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       const configurations = { ...state.configurations };
       const initializations = { ...state.initializations };
       const submissions = { ...state.submissions };
-      if (submissions[key]?.status !== 'sending') {
+      if (submissions[key]?.status !== 'submitting' && submissions[key]?.status !== 'sending') {
         const ids = new Set([...(submissions[key]?.ownedAttachmentIds ?? []), ...groupAttachmentIds(state.contexts[key])]);
         releaseSubmissionAttachments([...ids]);
         delete submissions[key];
@@ -457,7 +473,7 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       const initializations = { ...state.initializations };
       const submissions = { ...state.submissions };
       for (const key of keys) {
-        if (submissions[key]?.status !== 'sending') {
+        if (submissions[key]?.status !== 'submitting' && submissions[key]?.status !== 'sending') {
           const ids = new Set([...(submissions[key]?.ownedAttachmentIds ?? []), ...groupAttachmentIds(state.contexts[key])]);
           releaseSubmissionAttachments([...ids]);
           delete submissions[key];

@@ -8,13 +8,13 @@ use platform::{
         RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::{
     api::UsageHandle,
-    domain::model::{UsageEntry as ModelUsageEntry, UsageReadError},
+    domain::model::{UsageEntry, UsageHistory, UsageReadError},
 };
 
 pub const RECENT_PATH: &str = "/api/usage/recent";
@@ -305,56 +305,14 @@ fn hex(byte: u8) -> Option<u8> {
 }
 
 enum UsageDelivery {
-    Ok(UsageResponse),
+    Ok(UsageHistory),
     Unavailable,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageResponse {
-    entries: Vec<UsageEntry>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageEntry {
-    session_id: String,
-    agent_id: String,
-    timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_write_tokens: u64,
-    total_tokens: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cost_usd: Option<f64>,
-}
-
 impl UsageDelivery {
-    fn from_result(result: Result<Vec<ModelUsageEntry>, UsageReadError>) -> Self {
+    fn from_result(result: Result<UsageHistory, UsageReadError>) -> Self {
         match result {
-            Ok(entries) => Self::Ok(UsageResponse {
-                entries: entries
-                    .into_iter()
-                    .map(|entry| UsageEntry {
-                        session_id: entry.session_id,
-                        agent_id: entry.agent_id,
-                        timestamp: entry.timestamp,
-                        model: entry.model,
-                        provider: entry.provider,
-                        input_tokens: entry.input_tokens,
-                        output_tokens: entry.output_tokens,
-                        cache_read_tokens: entry.cache_read_tokens,
-                        cache_write_tokens: entry.cache_write_tokens,
-                        total_tokens: entry.total_tokens,
-                        cost_usd: entry.cost_usd,
-                    })
-                    .collect(),
-            }),
+            Ok(history) => Self::Ok(history),
             Err(_) => Self::Unavailable,
         }
     }
@@ -409,14 +367,14 @@ fn timeout_response() -> Response {
     )
 }
 
-fn usage_response_json(response: &UsageResponse) -> Value {
-    serde_json::json!({
-        "entries": response
-            .entries
-            .iter()
-            .map(usage_entry_json)
-            .collect::<Vec<_>>(),
-    })
+fn usage_response_json(history: &UsageHistory) -> Value {
+    Value::Object(serde_json::Map::from_iter([
+        (
+            "entries".into(),
+            Value::Array(history.entries.iter().map(usage_entry_json).collect()),
+        ),
+        ("coverage".into(), serde_json::json!(&history.coverage)),
+    ]))
 }
 
 fn usage_entry_json(entry: &UsageEntry) -> Value {
@@ -567,7 +525,7 @@ mod tests {
 
     #[test]
     fn public_projection_exposes_validated_identity_and_omits_private_transcript_data() {
-        let entries = vec![ModelUsageEntry {
+        let entries = vec![UsageEntry {
             session_id: "session-1".to_owned(),
             agent_id: "main".to_owned(),
             timestamp: "2026-04-03T00:00:00.000Z".to_owned(),
@@ -580,9 +538,12 @@ mod tests {
             total_tokens: 14,
             cost_usd: None,
         }];
-        let body = UsageDelivery::from_result(Ok(entries))
-            .into_response_body()
-            .body;
+        let body = UsageDelivery::from_result(Ok(UsageHistory {
+            entries,
+            coverage: crate::UsageCoverage::Reported,
+        }))
+        .into_response_body()
+        .body;
         let entry = body
             .get("entries")
             .and_then(Value::as_array)

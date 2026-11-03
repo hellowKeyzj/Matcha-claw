@@ -47,7 +47,10 @@ export async function scanMemoryFiles(
     for (const relativeDir of directories) {
       if (currentInvestigationScope()) signal.throwIfAborted()
       requireInvestigationEffects([])
-      const entries = await readSourceDirectory(join(memoryDir, relativeDir), signal)
+      const entries = await readSourceDirectory(
+        join(memoryDir, relativeDir),
+        signal,
+      )
       for (const entry of entries) {
         const relativePath = join(relativeDir, entry.name)
         if (entry.isDirectory()) {
@@ -85,7 +88,11 @@ export async function scanMemoryFiles(
     for (const result of headerResults) {
       if (result.status === 'rejected') {
         rethrowInvestigationAdmission(result.reason)
-        if (currentInvestigationScope() && result.reason instanceof Error && result.reason.cause !== undefined) {
+        if (
+          currentInvestigationScope() &&
+          result.reason instanceof Error &&
+          result.reason.cause !== undefined
+        ) {
           throw result.reason
         }
       }

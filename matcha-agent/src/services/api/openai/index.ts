@@ -14,7 +14,11 @@ import type {
 import type { AgentId } from '../../../types/ids.js'
 import type { Tools } from '../../../Tool.js'
 import { getSessionId } from '../../../bootstrap/state.js'
-import { getOpenAIClient } from './client.js'
+import {
+  createOpenAIRequestTiming,
+  getOpenAIClient,
+  observeOpenAIStream,
+} from './client.js'
 import { rethrowInvestigationAdmission } from '../investigation.js'
 import {
   formatOpenAIPromptCacheKey,
@@ -29,7 +33,11 @@ import {
 import { isChatGPTAuthEnabled } from './chatgptAuth.js'
 import { getAPIProvider } from '../../../utils/model/providers.js'
 import { normalizeModelStringForAPI } from '../../../utils/model/configs.js'
-import { isEffortLevel, resolveAdapterEffort, traceEffort } from '../../../utils/effort.js'
+import {
+  isEffortLevel,
+  resolveAdapterEffort,
+  traceEffort,
+} from '../../../utils/effort.js'
 import {
   adaptResponsesStreamToAnthropic,
   buildResponsesRequest,
@@ -42,7 +50,10 @@ import {
   getEmptyToolPermissionContext,
   toolMatchesName,
 } from '../../../Tool.js'
-import { logForDebugging } from '../../../utils/debug.js'
+import {
+  debugIdentifierHash,
+  logForDebugging,
+} from '../../../utils/debug.js'
 import { addToTotalSessionCost } from '../../../cost-tracker.js'
 import { calculateUSDCost } from '../../../utils/modelCost.js'
 import {
@@ -205,6 +216,20 @@ export async function* queryModelOpenAI(
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
 > {
+  const timing = createOpenAIRequestTiming(options.querySource)
+  let outcome = 'consumer_return'
+  let queryYieldAt: number | undefined
+  let yieldCount = 0
+  let yieldPauseTotalMs = 0
+  let yieldPauseMaxMs = 0
+  const recordResume = () => {
+    if (queryYieldAt === undefined) return
+    const pauseMs = performance.now() - queryYieldAt
+    yieldPauseTotalMs += pauseMs
+    yieldPauseMaxMs = Math.max(yieldPauseMaxMs, pauseMs)
+    queryYieldAt = undefined
+  }
+  timing?.mark('query_begin')
   try {
     // 1. Resolve model name
     const openaiModel = normalizeModelStringForAPI(options.model)
@@ -361,20 +386,27 @@ export async function* queryModelOpenAI(
             }),
           })
         : undefined
-    const completionsRequest = responsesRequest ? undefined : buildOpenAIRequestBody({
-      model: openaiModel,
-      messages: openaiMessages,
-      tools: openaiTools,
-      toolChoice: openaiToolChoice,
-      enableThinking,
-      maxTokens,
-      reasoningEffort: typeof effort === 'string' ? effort : undefined,
-      temperatureOverride: options.temperatureOverride,
-      promptCacheKey,
-    })
-    const senderEffort = responsesRequest?.reasoning?.effort ?? completionsRequest?.reasoning_effort
+    const completionsRequest = responsesRequest
+      ? undefined
+      : buildOpenAIRequestBody({
+          model: openaiModel,
+          messages: openaiMessages,
+          tools: openaiTools,
+          toolChoice: openaiToolChoice,
+          enableThinking,
+          maxTokens,
+          reasoningEffort: typeof effort === 'string' ? effort : undefined,
+          temperatureOverride: options.temperatureOverride,
+          promptCacheKey,
+        })
+    const senderEffort =
+      responsesRequest?.reasoning?.effort ??
+      completionsRequest?.reasoning_effort
     traceEffort('sender_request', options.model, options.effortValue, {
-      actual: typeof senderEffort === 'string' && isEffortLevel(senderEffort) ? senderEffort : null,
+      actual:
+        typeof senderEffort === 'string' && isEffortLevel(senderEffort)
+          ? senderEffort
+          : null,
       senderField: responsesRequest ? 'reasoning.effort' : 'reasoning_effort',
     })
     const adaptedStream = responsesRequest
@@ -385,17 +417,21 @@ export async function* queryModelOpenAI(
             request: responsesRequest,
             signal,
             fetchOverride: options.fetchOverride as unknown as typeof fetch,
+            source: options.querySource,
+            timing,
           }),
           openaiModel,
         )
       : adaptOpenAIStreamToAnthropic(
-          await getOpenAIClient({
-            maxRetries: 0,
-            fetchOverride: options.fetchOverride as unknown as typeof fetch,
-            source: options.querySource,
-          }).chat.completions.create(
-            completionsRequest!,
-            { signal },
+          observeOpenAIStream(
+            await getOpenAIClient({
+              maxRetries: 0,
+              fetchOverride: options.fetchOverride as unknown as typeof fetch,
+              source: options.querySource,
+              timing,
+            }).chat.completions.create(completionsRequest!, { signal }),
+            timing,
+            signal,
           ),
           openaiModel,
           { includeCacheWriteTokens: useOfficialOpenAICache },
@@ -420,10 +456,37 @@ export async function* queryModelOpenAI(
     let ttftMs = 0
     const start = Date.now()
 
+    let adaptedEvents = 0
+    let adaptedTextEvents = 0
+    let lastAdaptedTextAt: number | undefined
+    let adapterMessageStop = false
     for await (const event of adaptedStream) {
+      adaptedEvents++
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        lastAdaptedTextAt = performance.now()
+        adaptedTextEvents++
+      }
+      if (event.type === 'content_block_stop' || event.type === 'message_stop') {
+        timing?.mark('adapter_event', {
+          event: event.type,
+          index: event.type === 'content_block_stop' ? event.index : undefined,
+          blockType: event.type === 'content_block_stop'
+            ? contentBlocks[event.index]?.type === 'text' ? 'text'
+              : contentBlocks[event.index]?.type === 'thinking' ? 'thinking'
+                : contentBlocks[event.index]?.type === 'tool_use' ? 'tool_use' : 'other'
+            : undefined,
+          adaptedEvents,
+          adaptedTextEvents,
+          lastTextToNowMs: lastAdaptedTextAt === undefined ? undefined : performance.now() - lastAdaptedTextAt,
+        })
+      }
       switch (event.type) {
         case 'message_start': {
           partialMessage = event.message
+          if (timing) {
+            timing.providerMessageHash = debugIdentifierHash(event.message.id)
+            timing.mark('provider_message_link')
+          }
           ttftMs = Date.now() - start
           if (event.message.usage) {
             usage = {
@@ -499,6 +562,7 @@ export async function* queryModelOpenAI(
           break
         }
         case 'message_stop': {
+          adapterMessageStop = true
           // Assemble ONE AssistantMessage with ALL content blocks, matching the
           // Anthropic SDK path. Real usage (input + output tokens) is available
           // here and injected so tokenCountWithEstimation() can read it.
@@ -515,7 +579,17 @@ export async function* queryModelOpenAI(
               if (output.type === 'assistant') {
                 collectedMessages.push(output)
               }
+              timing?.mark('assistant_yield', {
+                assistantHash: debugIdentifierHash(output.uuid),
+                output: output.type === 'assistant' ? 'assistant' : 'api_error',
+                assembly: 'message_stop',
+                contentBlocks: Object.keys(contentBlocks).length,
+              })
+              yieldCount++
+              queryYieldAt = performance.now()
               yield output
+              recordResume()
+              timing?.mark('assistant_resume')
             }
             // Reset partialMessage so the post-loop safety fallback does not
             // yield a second identical AssistantMessage.
@@ -544,6 +618,8 @@ export async function* queryModelOpenAI(
       }
 
       // Also yield as StreamEvent for real-time display (matching Anthropic path)
+      yieldCount++
+      queryYieldAt = performance.now()
       yield {
         type: 'stream_event',
         event,
@@ -556,7 +632,14 @@ export async function* queryModelOpenAI(
             }
           : undefined),
       } as StreamEvent
+      recordResume()
+      if (event.type === 'message_stop') timing?.mark('query_message_stop_resume')
     }
+    timing?.mark('adapter_iterator_end', {
+      outcome: signal.aborted ? 'aborted' : adapterMessageStop ? 'eof_after_message_stop' : 'eof_without_message_stop',
+      adaptedEvents,
+      adaptedTextEvents,
+    })
 
     // Record LLM observation in Langfuse (no-op if not configured)
     recordLLMObservation(options.langfuseTrace ?? null, {
@@ -588,13 +671,28 @@ export async function* queryModelOpenAI(
         stopReason,
         maxTokens,
       })) {
+        timing?.mark('assistant_yield', {
+          assistantHash: debugIdentifierHash(output.uuid),
+          output: output.type === 'assistant' ? 'assistant' : 'api_error',
+          assembly: 'eof_fallback',
+          contentBlocks: Object.keys(contentBlocks).length,
+        })
+        yieldCount++
+        queryYieldAt = performance.now()
         yield output
+        recordResume()
+        timing?.mark('assistant_resume')
       }
     }
+    outcome = signal.aborted ? 'aborted' : adapterMessageStop ? 'complete' : 'eof_without_message_stop'
   } catch (error) {
+    outcome = signal.aborted ? 'aborted' : 'error'
+    timing?.mark('query_error', { outcome })
     rethrowInvestigationAdmission(error)
     const errorMessage = error instanceof Error ? error.message : String(error)
     logForDebugging(`[OpenAI] Error: ${errorMessage}`, { level: 'error' })
+    yieldCount++
+    queryYieldAt = performance.now()
     yield {
       ...getAssistantMessageFromError(
         error instanceof Error ? error : new Error(errorMessage),
@@ -602,5 +700,15 @@ export async function* queryModelOpenAI(
       ),
       apiError: 'api_error',
     }
+    recordResume()
+  } finally {
+    recordResume()
+    timing?.mark('query_iterator_end', {
+      outcome,
+      aborted: signal.aborted,
+      yieldCount,
+      yieldPauseTotalMs,
+      yieldPauseMaxMs,
+    })
   }
 }

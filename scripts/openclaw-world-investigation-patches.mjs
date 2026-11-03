@@ -828,6 +828,9 @@ export function finishMatchaWorldInvestigation(runId, terminal) {
 `;
 
 export function patchOpenClawWorldInvestigation(openclawDir) {
+  if (JSON.parse(fs.readFileSync(path.join(openclawDir, 'package.json'), 'utf8')).version !== '2026.9.3') {
+    throw new Error(`${PATCH_ID}: expected OpenClaw 2026.9.3`);
+  }
   const dist = path.join(openclawDir, 'dist');
   const updates = new Map();
   const target = (prefix, markers) => locateSingleJavaScriptFile(dist, prefix, markers);
@@ -844,9 +847,29 @@ export function patchOpenClawWorldInvestigation(openclawDir) {
   const runRegistry = target('agent-run-registry-', ['function getAgentRunContext(runId)', 'function getActiveAgentRunDelegatedAuthority(operationalRunInstance)']);
   const runtime = [nativeImport(database, ['runOpenClawAgentWriteTransaction', 'getOpenClawAgentDatabaseIfOpen']), nativeImport(readonly, ['withOpenClawAgentDatabaseReadOnly']), nativeImport(sqliteScope, ['resolveSqliteTranscriptScope', 'toDatabaseOptions']), nativeImport(events, ['getAgentEventLifecycleGeneration']), nativeImport(runRegistry, ['getAgentRunContext', 'getActiveAgentRunDelegatedAuthority']), RUNTIME].join('\n');
   updates.set(path.join(dist, RUNTIME_FILE), runtime);
-  patch(maintenance, source => replaceOnce(source,
-    '\t\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "consumed_event_id TEXT");',
-    '\t\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "consumed_event_id TEXT");\n\t\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "world_investigation_json TEXT");'));
+  patch(maintenance, source => {
+    source = replaceOnce(source, 'o as tableHasColumn, p as readSqliteUserVersion', 'o as tableHasColumn, s as tableHasColumns, p as readSqliteUserVersion');
+    source = replaceOnce(source,
+      String.raw`  consumed_event_id TEXT,\n  UNIQUE (session_id, idempotency_key),`,
+      String.raw`  consumed_event_id TEXT,\n  world_investigation_json TEXT,\n  UNIQUE (session_id, idempotency_key),`);
+    const ensure = '\t\tdb.exec(OPENCLAW_AGENT_SCHEMA_SQL.slice(start));\n\t\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "consumed_event_id TEXT");';
+    const previousEnsure = `${ensure}\n\t\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "world_investigation_json TEXT");\n\t});`;
+    source = replaceOnce(source, source.includes(previousEnsure) ? previousEnsure : `${ensure}\n\t});`,
+      '\t\tdb.exec(OPENCLAW_AGENT_SCHEMA_SQL.slice(start));\n\t\tensurePendingInputConsumptionColumn(db);\n\t});');
+    source = replaceOnce(source,
+      'return hasSessionPendingInputsSchema(db) && !tableHasColumn(db, "session_pending_inputs", "consumed_event_id");',
+      'return hasSessionPendingInputsSchema(db) && !tableHasColumns(db, SESSION_PENDING_INPUTS_TABLE, ["consumed_event_id", "world_investigation_json"]);');
+    source = replaceOnce(source,
+      'function ensurePendingInputConsumptionColumn(db) {\n\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "consumed_event_id TEXT");\n}',
+      'function ensurePendingInputConsumptionColumn(db) {\n\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "consumed_event_id TEXT");\n\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "world_investigation_json TEXT");\n}');
+    // Consumption-only readers keep their result, but cannot certify the whole writer schema.
+    source = replaceOnce(source,
+      '\tif (present && !db.isTransaction) completeDatabases.add(db);',
+      '\tif (present && !db.isTransaction && tableHasColumn(db, SESSION_PENDING_INPUTS_TABLE, "world_investigation_json")) completeDatabases.add(db);');
+    return replaceOnce(source,
+      '\t\t"session_pending_inputs.consumed_event_id",',
+      '\t\t"session_pending_inputs.consumed_event_id",\n\t\t"session_pending_inputs.world_investigation_json",');
+  });
   const accessor = target('session-accessor-', ['async function stageSessionPendingInput(scope, options)', 'function appendTranscriptMessageInTransaction(database, resolved, options)']);
   patch(accessor, source => {
     source = addImport(source, ['stageMatchaWorldInvestigation', 'promoteMatchaWorldInvestigation', 'bindMatchaWorldPendingOwner']);
@@ -1168,6 +1191,24 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
   // The independent worker is minified and cannot import the main-process scope.
   const worker = path.join(dist, 'worker', 'worker.mjs');
   patch(worker, source => {
+    source = replaceOnce(source,
+      '  consumed_event_id TEXT,\n  UNIQUE (session_id, idempotency_key),',
+      '  consumed_event_id TEXT,\n  world_investigation_json TEXT,\n  UNIQUE (session_id, idempotency_key),');
+    source = replaceOnce(source,
+      'Ot.exec(OPENCLAW_AGENT_SCHEMA_SQL.slice(Zt)),ensureColumn(Ot,SESSION_PENDING_INPUTS_TABLE,`consumed_event_id TEXT`)',
+      'Ot.exec(OPENCLAW_AGENT_SCHEMA_SQL.slice(Zt)),ensurePendingInputConsumptionColumn(Ot)');
+    source = replaceOnce(source,
+      'return hasSessionPendingInputsSchema(Ot)&&!tableHasColumn(Ot,`session_pending_inputs`,`consumed_event_id`)',
+      'return hasSessionPendingInputsSchema(Ot)&&!tableHasColumns(Ot,SESSION_PENDING_INPUTS_TABLE,[`consumed_event_id`,`world_investigation_json`])');
+    source = replaceOnce(source,
+      'function ensurePendingInputConsumptionColumn(Ot){ensureColumn(Ot,SESSION_PENDING_INPUTS_TABLE,`consumed_event_id TEXT`)}',
+      'function ensurePendingInputConsumptionColumn(Ot){ensureColumn(Ot,SESSION_PENDING_INPUTS_TABLE,`consumed_event_id TEXT`),ensureColumn(Ot,SESSION_PENDING_INPUTS_TABLE,`world_investigation_json TEXT`)}');
+    source = replaceOnce(source,
+      'return Zt&&!Ot.isTransaction&&completeDatabases.add(Ot),Zt',
+      'return Zt&&!Ot.isTransaction&&tableHasColumn(Ot,SESSION_PENDING_INPUTS_TABLE,`world_investigation_json`)&&completeDatabases.add(Ot),Zt');
+    source = replaceOnce(source,
+      'allowedMissingColumns:[`session_pending_inputs.consumed_event_id`,',
+      'allowedMissingColumns:[`session_pending_inputs.consumed_event_id`,`session_pending_inputs.world_investigation_json`,');
     const retained = `function assertMatchaWorldWorkerRetained(database, field, value) {
   if (!database.db.prepare("PRAGMA table_info(session_pending_inputs)").all().some(column => column.name === "world_investigation_json")) return;
   const query = field === "session_id" ? "SELECT world_investigation_json FROM session_pending_inputs WHERE session_id = ? AND world_investigation_json IS NOT NULL" : "SELECT world_investigation_json FROM session_pending_inputs WHERE session_key = ? AND world_investigation_json IS NOT NULL";

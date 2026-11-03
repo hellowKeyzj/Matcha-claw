@@ -1,5 +1,6 @@
 import { createElement, lazy } from 'react';
 import { BookOpen, FileText, FolderOpen, GitGraph, ListChecks, MessageSquare, Search, ShieldQuestion, Wrench } from 'lucide-react';
+import { WikiNavigationIcon } from '@/components/icons/navigation';
 import { applicationNavigation, applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
 import { chatComposerActions, type ChatComposerPanelProps } from '@/plugins/chat/extensions';
@@ -30,7 +31,7 @@ export const wikiPlugin = definePlugin({
   extensionPoints: [wikiWorkspaceTabs, wikiSourceActions, wikiContentPreviews],
   contributes: [
     contribute(applicationPages, { id: 'wiki', path: '/wiki', component: WikiPage, viewport: 'workspace', preload: WikiPage.preload }),
-    contribute(applicationNavigation, { id: 'wiki', to: '/wiki', label: 'Wiki', icon: BookOpen, order: 60, prefetch: WikiPage.preload }),
+    contribute(applicationNavigation, { id: 'wiki', to: '/wiki', label: 'Wiki', icon: WikiNavigationIcon, order: 60, prefetch: WikiPage.preload }),
     contribute(chatComposerActions, {
       id: 'wiki', order: 20, icon: BookOpen, control: 'wiki', panel: ProjectPicker,
       resolve: ({ t }) => ({ label: t('input.pickWiki') }),

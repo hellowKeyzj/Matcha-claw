@@ -9,7 +9,11 @@ import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { execFileNoThrow } from './execFileNoThrow.js'
 import { getErrnoCode } from './errors.js'
-import { getFsImplementation, realSourcePath, statSourcePath } from './fsOperations.js'
+import {
+  getFsImplementation,
+  realSourcePath,
+  statSourcePath,
+} from './fsOperations.js'
 import {
   InvestigationAdmissionError,
   currentInvestigationScope,
@@ -217,14 +221,19 @@ function createFindCanonicalGitRoot(): {
 }
 
 function rethrowGitSourceFailure(error: unknown): void {
-  if (error instanceof InvestigationAdmissionError
-    || (error instanceof Error && error.cause !== undefined)) throw error
+  if (
+    error instanceof InvestigationAdmissionError ||
+    (error instanceof Error && error.cause !== undefined)
+  )
+    throw error
   investigationSignal()?.throwIfAborted()
   const code = getErrnoCode(error)
   if (code === undefined || code === 'ABORT_ERR') throw error
 }
 
-export async function findGitRootAsync(startPath: string): Promise<string | null> {
+export async function findGitRootAsync(
+  startPath: string,
+): Promise<string | null> {
   if (!currentInvestigationScope()) return findGitRoot(startPath)
   let current = resolve(startPath)
   const root = current.substring(0, current.indexOf(sep) + 1) || sep
@@ -241,7 +250,9 @@ export async function findGitRootAsync(startPath: string): Promise<string | null
   }
 }
 
-export async function findCanonicalGitRootAsync(startPath: string): Promise<string | null> {
+export async function findCanonicalGitRootAsync(
+  startPath: string,
+): Promise<string | null> {
   if (!currentInvestigationScope()) return findCanonicalGitRoot(startPath)
   const gitRoot = await findGitRootAsync(startPath)
   if (!gitRoot) return null
@@ -250,14 +261,27 @@ export async function findCanonicalGitRootAsync(startPath: string): Promise<stri
     if (!(await statSourcePath(gitPath)).isFile()) return gitRoot
     const gitContent = (await readSourceBytes(gitPath)).toString('utf-8').trim()
     if (!gitContent.startsWith('gitdir:')) return gitRoot
-    const worktreeGitDir = resolve(gitRoot, gitContent.slice('gitdir:'.length).trim())
-    const commonDir = resolve(worktreeGitDir,
-      (await readSourceBytes(join(worktreeGitDir, 'commondir'))).toString('utf-8').trim())
-    if (resolve(dirname(worktreeGitDir)) !== join(commonDir, 'worktrees')) return gitRoot
+    const worktreeGitDir = resolve(
+      gitRoot,
+      gitContent.slice('gitdir:'.length).trim(),
+    )
+    const commonDir = resolve(
+      worktreeGitDir,
+      (await readSourceBytes(join(worktreeGitDir, 'commondir')))
+        .toString('utf-8')
+        .trim(),
+    )
+    if (resolve(dirname(worktreeGitDir)) !== join(commonDir, 'worktrees'))
+      return gitRoot
     const backlink = await realSourcePath(
-      (await readSourceBytes(join(worktreeGitDir, 'gitdir'))).toString('utf-8').trim())
+      (await readSourceBytes(join(worktreeGitDir, 'gitdir')))
+        .toString('utf-8')
+        .trim(),
+    )
     if (backlink !== join(await realSourcePath(gitRoot), '.git')) return gitRoot
-    return (basename(commonDir) !== '.git' ? commonDir : dirname(commonDir)).normalize('NFC')
+    return (
+      basename(commonDir) !== '.git' ? commonDir : dirname(commonDir)
+    ).normalize('NFC')
   } catch (error) {
     rethrowGitSourceFailure(error)
     return gitRoot

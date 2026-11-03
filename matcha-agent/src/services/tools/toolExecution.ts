@@ -584,11 +584,20 @@ function streamedCheckPermissionsAndCallTool(
           mcpServerBaseUrl,
         ),
       })
+      const data = progress.data
       stream.enqueue({
         message: createProgressMessage({
           toolUseID: progress.toolUseID as string,
           parentToolUseID: toolUseID,
-          data: progress.data,
+          data:
+            (data.type === 'agent_progress' ||
+              data.type === 'skill_progress') &&
+            data.message.type === 'user'
+              ? {
+                  ...data,
+                  message: { ...data.message, sourceToolUseID: toolUseID },
+                }
+              : data,
         }),
       })
     },
@@ -597,7 +606,14 @@ function streamedCheckPermissionsAndCallTool(
   void operation
     .then(results => {
       for (const result of results) {
-        stream.enqueue(result)
+        stream.enqueue(
+          result.message.type === 'user'
+            ? {
+                ...result,
+                message: { ...result.message, sourceToolUseID: toolUseID },
+              }
+            : result,
+        )
       }
     })
     .catch(error => {

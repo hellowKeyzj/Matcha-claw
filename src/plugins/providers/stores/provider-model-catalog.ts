@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import i18n from '@/i18n';
 import {
   fetchProviderModels,
   persistProviderModels,
@@ -17,7 +18,7 @@ interface ProviderModelCatalogState {
   loading: boolean;
   saving: boolean;
   error: string | null;
-  refresh: () => Promise<void>;
+  refresh: (options?: { force?: boolean }) => Promise<void>;
   replaceAccountModels: (
     accountId: string,
     models: readonly ProviderModelDraft[],
@@ -31,8 +32,8 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
   saving: false,
   error: null,
 
-  refresh: async () => {
-    if (inflightRefreshTask) {
+  refresh: async (options) => {
+    if (inflightRefreshTask && !options?.force) {
       await inflightRefreshTask;
       return;
     }
@@ -75,7 +76,7 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
       }
       await refreshProviderPostMutationProjections({
         refreshProviderModelCatalog: false,
-      });
+      }).catch(() => { set({ error: i18n.t('settings:aiProviders.dialog.projectionsUnavailable') }); });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ error: message });

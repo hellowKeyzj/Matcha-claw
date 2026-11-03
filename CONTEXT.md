@@ -48,6 +48,10 @@ _Avoid_: final outcome, durable job, execution record
 跨边界寻址并关联一次 approval 请求与决定的公共语言；approval 的可操作状态与业务推进仍由产生它的 Runtime 或 Domain 拥有。
 _Avoid_: global approval store, shared approval state machine, approval authority
 
+**App Plugin Human Confirmation**:
+正式插件后台通过 `AppPluginContext.requestConfirmation`（stdio 为 `matcha/requestConfirmation`）请求一次人工决定；Electron AppPluginHost 持有与精确工具调用生命周期绑定的临时 pending，唯一可用前台 AppFrame 在 iframe 外显示可信 ConfirmDialog，仅主窗口主 frame 的私有 IPC 可提交决定。无前台 owner 为 `approval_unavailable`，取消、隐藏、停止或更新使未决确认失效；开发预览不提供确认 owner。业务版本绑定与确认后的 revision 复核仍由插件拥有，不建立持久审批库；iframe 自报批准、工具参数或 app-only 元数据均不是批准依据。
+_Avoid_: iframe approval authority, model self-approval, reusable approval token, generic approval database
+
 **Reconciliation**:
 Domain 对自身 Desired、Applied 与 Observed 三个状态面进行比较并推动收敛的过程；Applied 是某一 revision 已物化的证据，不等同于当前观察，具体状态、策略与恢复仍由该 Domain 拥有。
 _Avoid_: Platform resource database, global reconciler, Applied-is-Observed assumption

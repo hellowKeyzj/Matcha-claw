@@ -7,7 +7,10 @@ import {
   investigationSignal,
   requireInvestigationEffects,
 } from '../../world/investigation.js'
-import { hookJSONOutputSchema, isAsyncHookJSONOutput } from '../../types/hooks.js'
+import {
+  hookJSONOutputSchema,
+  isAsyncHookJSONOutput,
+} from '../../types/hooks.js'
 import { jsonParse } from '../slowOperations.js'
 import { createCombinedAbortSignal } from '../combinedAbortSignal.js'
 import { logForDebugging } from '../debug.js'
@@ -245,18 +248,27 @@ export async function execHttpHook(
             try {
               value = text ? jsonParse(text) : {}
             } catch {
-              throw new InvestigationAdmissionError('investigation_http_hook_receipt_invalid')
+              throw new InvestigationAdmissionError(
+                'investigation_http_hook_receipt_invalid',
+              )
             }
             const parsed = hookJSONOutputSchema().safeParse(value)
             if (!parsed.success) {
-              throw new InvestigationAdmissionError('investigation_http_hook_receipt_invalid')
+              throw new InvestigationAdmissionError(
+                'investigation_http_hook_receipt_invalid',
+              )
             }
             if (isAsyncHookJSONOutput(parsed.data)) {
-              throw new InvestigationAdmissionError('investigation_http_hook_async_unjoined')
+              throw new InvestigationAdmissionError(
+                'investigation_http_hook_async_unjoined',
+              )
             }
             return text ? 1n : 0n
           },
-        }).then(response => ({ ...response, data: response.data.toString('utf8') }))
+        }).then(response => ({
+          ...response,
+          data: response.data.toString('utf8'),
+        }))
       : await axios.post<string>(hook.url, jsonInput, axiosConfig)
 
     cleanup()

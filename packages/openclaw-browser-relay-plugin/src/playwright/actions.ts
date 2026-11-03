@@ -1,24 +1,15 @@
-import type { PlaywrightSession } from './session.js'
-import { parseRoleSnapshot, type RoleRef } from './role-refs.js'
-import { filterSnapshot, type SnapshotFilterOptions } from './snapshot-filter.js'
-import { PageBlankError, ScopeEmptyError, ScopeFrameMultiMatchError } from './snapshot-errors.js'
-import { stabilizeRefs, computeRefDiff } from './snapshot-diff.js'
-
-const LANDMARK_SELECTORS: Record<string, string> = {
-  main: 'main, [role="main"]',
-  nav: 'nav, [role="navigation"]',
-  form: 'form, [role="form"]',
-  search: '[role="search"]',
-  aside: 'aside, [role="complementary"]',
-  header: 'header, [role="banner"]',
-  footer: 'footer, [role="contentinfo"]',
-}
-
-function landmarkToSelector(landmark: string): string {
-  return LANDMARK_SELECTORS[landmark] ?? landmark
-}
+import type { PlaywrightInvocation, PlaywrightSession } from './session.js'
+import { relayOperationError } from '../relay/downloads.js'
+import { readRelayError } from '../relay/errors.js'
+import type { BrowserSnapshotAction, BrowserActRequest, BrowserPdfOptions } from '../browser-action-contract.js'
+import type { SnapshotFilterOptions } from './snapshot-filter.js'
+import { NativePageUpdatedError, renderRawSnapshot, type NativeSnapshotResult } from './native-snapshot.js'
+import { selectSnapshotScope } from './native-snapshot-dom.js'
+import { captureRawRows } from './native-snapshot-raw.js'
+import { actNativeElement, evaluateNativeElement, screenshotNativeElementClip, setNativeInputFiles, highlightNativeElement, moveNativePointer } from './native-elements.js'
 
 type BrowserStorageHandle = 'localStorage' | 'sessionStorage'
+type NativeElementInput = { ref?: string; backendNodeId?: number; frameId?: string }
 
 function requiredString(value: unknown, field: string): string {
   const normalized = typeof value === 'string' ? value.trim() : ''
@@ -28,17 +19,14 @@ function requiredString(value: unknown, field: string): string {
   return normalized
 }
 
-function withTimeout(timeoutMs: unknown, fallback: number): number {
-  return Math.max(500, Math.min(120_000, typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) ? timeoutMs : fallback))
-}
-
 function isDetachedFrameError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return message.includes('Frame has been detached') || message.includes('frame was detached')
 }
 
 function mapLocatorError(error: unknown, ref: string): Error {
-  const message = error instanceof Error ? error.message : String(error)
+  const { message, errorDetail } = readRelayError(error)
+  if (errorDetail) return Object.assign(new Error(message), { errorDetail })
   if (message.includes('strict mode violation')) {
     const match = message.match(/resolved to (\d+) elements/)
     const count = match?.[1] ?? 'multiple'
@@ -83,43 +71,92 @@ async function evaluateFunctionOnPage(page: any, fnBody: string, timeoutMs: numb
 export class PlaywrightActions {
   constructor(private readonly session: PlaywrightSession) {}
 
-  async navigate(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; url: string; timeoutMs?: number; waitUntil?: string }): Promise<{ url: string }> {
+  private async actNative(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp' } & PlaywrightInvocation, request: BrowserActRequest | ({ kind: 'setChecked'; checked: boolean } & NativeElementInput), humanize: boolean) {
+    return await this.session.withNativeTransport(input, async (transport, owner, actorKey) => await actNativeElement(request, (target) => owner.resolve(actorKey, target, transport), transport, humanize))
+  }
+
+  async observeAction<T extends Record<string, unknown>>(
+    input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp' } & PlaywrightInvocation,
+    watchTabs: boolean,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const page = await this.session.getPageForTargetId(input)
+    const state = this.session.ensurePageState(page)
+    const cursor = state.nextEventSeq
+    const previousInvocation = state.eventInvocation
+    state.eventInvocation = input
+    const browser = (await this.session.connectBrowser(input.cdpUrl, input.mode, input)).browser
+    const pages = () => browser.contexts().flatMap((context: any) => context.pages()) as any[]
+    const previousPages = watchTabs ? new Set(pages()) : undefined
+    try {
+      const result = await operation()
+      if (result.ok === false || result.actionPerformed === false) return result
+      try {
+        const newTabs: Array<{ targetId: string; url: string; title: string }> = []
+        if (previousPages) {
+          const until = Date.now() + 400
+          await this.session.runInvocation(input, () => new Promise((resolve) => setTimeout(resolve, 80)))
+          while (true) {
+            for (const candidate of pages().filter((entry) => !previousPages.has(entry))) {
+              const targetId = await this.session.runInvocation(input, () => this.session.resolvePageTargetId(candidate, input))
+              if (targetId) newTabs.push({ targetId, url: candidate.url(), title: await this.session.runInvocation(input, () => candidate.title()) })
+            }
+            if (newTabs.length || Date.now() >= until) break
+            await this.session.runInvocation(input, () => new Promise((resolve) => setTimeout(resolve, Math.min(100, until - Date.now()))))
+          }
+        }
+        const pageEvents = state.events.filter((event) => event.seq > cursor)
+        let hint = result.domChanged === true ? 'The page DOM changed during this action. Take a fresh snapshot before acting on newly rendered elements.' : undefined
+        if (newTabs.length) hint = 'The action opened new tab(s). Continue in the new tab targetId — the operated page did not navigate.'
+        if (pageEvents.some((event) => event.kind === 'dialog')) hint = 'A JavaScript dialog opened during this action and was auto-answered (see pageEvents). Verify the resulting state before proceeding.'
+        else if (pageEvents.some((event) => event.kind === 'rendererCrash')) hint = 'The renderer crashed during this action. Re-check with a snapshot before retrying.'
+        return { ...result, ...(newTabs.length ? { newTabs } : {}), ...(pageEvents.length ? { pageEvents } : {}), ...(hint ? { hint } : {}) }
+      } catch (error) {
+        const { message, errorDetail } = readRelayError(error)
+        if (input.signal?.aborted || !/timeout|timed out|deadline/i.test(`${errorDetail?.code ?? ''} ${message}`)) throw error
+        return { ...result, actionPerformed: true, observationComplete: false, warning: { code: 'ACTION_OBSERVATION_TIMEOUT', message: 'The action was performed, but post-action observation timed out. Inspect the page before deciding what to do next; do not repeat the input automatically.' } }
+      }
+    } finally {
+      if (state.eventInvocation === input) state.eventInvocation = previousInvocation
+    }
+  }
+
+  async navigate(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; url: string; timeoutMs?: number; waitUntil?: string } & PlaywrightInvocation): Promise<{ url: string }> {
     const url = requiredString(input.url, 'url')
-    let page = await this.session.getPageForTargetId(input)
+    const observationTimeout = input.timeoutMs ?? 10_000
+    input = { ...this.session.withInvocationDeadline({ ...input, timeoutMs: undefined }, 120_000), timeoutMs: undefined }
+    const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
     await this.session.logPageSnapshot('navigate before goto', page, input.targetId)
+    this.session.assertInvocationCurrent(input)
     try {
-      await page.goto(url, {
-        timeout: withTimeout(input.timeoutMs, 20_000),
-        waitUntil: input.waitUntil ?? 'domcontentloaded',
+      const result = await this.session.sendPageCdpCommand(input, 'Page.navigate', { url })
+      if (result?.errorText) throw new Error(`Navigation failed: ${result.errorText}`)
+      const timeout = Math.max(1, Math.min(observationTimeout, this.session.remainingTimeout(input)))
+      await this.session.runInvocation(input, async () => {
+        try {
+          if (input.waitUntil === 'networkidle') await this.session.waitForNetworkIdle({ ...input, timeoutMs: timeout })
+          else await page.waitForFunction(input.waitUntil === 'domcontentloaded'
+            ? '["interactive", "complete"].includes(document.readyState)'
+            : 'document.readyState === "complete"', undefined, { timeout, polling: 100 })
+        } catch (error) {
+          if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error
+        }
       })
       await this.session.logPageSnapshot('navigate after goto', page, input.targetId)
+      this.session.assertInvocationCurrent(input)
     } catch (error) {
       await this.session.logPageSnapshot('navigate failed', page, input.targetId, error)
-      if (!isDetachedFrameError(error)) {
-        throw error
-      }
+      if (!isDetachedFrameError(error)) throw error
 
-      await this.session.closeConnections(input.mode)
-      page = await this.session.getPageForTargetId(input)
-      this.session.ensurePageState(page)
-      await this.session.logPageSnapshot('navigate retry before goto', page, input.targetId)
-      try {
-        await page.goto(url, {
-          timeout: withTimeout(input.timeoutMs, 20_000),
-          waitUntil: input.waitUntil ?? 'domcontentloaded',
-        })
-        await this.session.logPageSnapshot('navigate retry after goto', page, input.targetId)
-      } catch (retryError) {
-        await this.session.logPageSnapshot('navigate retry failed', page, input.targetId, retryError)
-        throw retryError
-      }
+      // Only rebuild the projection on the next independent invocation; goto may have committed.
+      await this.session.closeConnections(input.mode).catch(() => {})
+      const { message, errorDetail } = readRelayError(error)
+      throw relayOperationError(message, 'NAVIGATION_OUTCOME_UNKNOWN', { ...errorDetail, outcome: 'unknown', retryable: false })
     }
 
-    // Navigation invalidates previous snapshot diff baseline
-    this.session.clearPrevSnapshotState(input.cdpUrl, input.targetId)
-
-    return { url: page.url() }
+    return { url }
   }
 
   async snapshot(input: {
@@ -128,155 +165,36 @@ export class PlaywrightActions {
     mode?: 'relay' | 'direct-cdp'
     selector?: string
     frameSelector?: string
+    limit?: number
+    maxChars?: number
     timeoutMs?: number
     options?: { interactive?: boolean; compact?: boolean; maxDepth?: number }
     scope?: { frame?: string; landmark?: string; selector?: string }
     filter?: SnapshotFilterOptions
-  }): Promise<{
-    snapshot: string
-    refs: Record<string, RoleRef>
-    stats: { lines: number; chars: number; refs: number; interactive: number }
-    pageUrl: string
-    totalCount?: number
-    matchedCount?: number
-    returnedCount?: number
-    truncated?: boolean
-    sparse?: boolean
-    refRange?: { min: string; max: string }
-    diff?: string
-  }> {
+  } & PlaywrightInvocation): Promise<NativeSnapshotResult & { pageUrl: string }> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
-    this.session.ensurePageState(page)
-
-    // Resolve scope (frame → landmark/selector → locator root)
-    const scope = input.scope
-    const frameSelector = scope?.frame?.trim() || input.frameSelector?.trim() || ''
-    const landmark = scope?.landmark?.trim() || ''
-    const scopeSelector = scope?.selector?.trim() || input.selector?.trim() || ''
-
-    let pageRoot: any = page
-    if (frameSelector) {
-      const frameLocator = page.locator(frameSelector)
-      const frameCount = await frameLocator.count()
-      if (frameCount === 0) {
-        throw new ScopeEmptyError('frame_not_found', `scope.frame ${JSON.stringify(frameSelector)} matched 0 iframes.`)
-      }
-      if (frameCount > 1) {
-        throw new ScopeFrameMultiMatchError(frameSelector, frameCount)
-      }
-      pageRoot = page.frameLocator(frameSelector)
+    const options = {
+      selector: input.selector,
+      frame: input.frameSelector,
+      limit: input.limit,
+      maxChars: input.maxChars,
+      interactive: input.options?.interactive,
+      compact: input.options?.compact,
+      depth: input.options?.maxDepth,
+      scope: input.scope,
+      filter: input.filter as BrowserSnapshotAction["filter"],
     }
-
-    const resolvedSelector = landmark ? landmarkToSelector(landmark) : scopeSelector
-    let locator: any
-    if (resolvedSelector) {
-      locator = frameSelector
-        ? pageRoot.locator(resolvedSelector)
-        : page.locator(resolvedSelector)
-      const count = await locator.count()
-      if (count === 0) {
-        throw new ScopeEmptyError(
-          landmark ? 'landmark_not_found' : 'selector_no_match',
-          `scope ${landmark ? `landmark=${landmark}` : `selector=${JSON.stringify(scopeSelector)}`} matched 0 elements.`,
-        )
-      }
-    } else {
-      locator = frameSelector ? pageRoot.locator(':root') : page.locator(':root')
-    }
-
-    const ariaSnapshot = await locator.ariaSnapshot({ timeout: withTimeout(input.timeoutMs, 20_000) })
-    const ariaText = String(ariaSnapshot ?? '')
-
-    // Detect blank page
-    if (!ariaText.trim()) {
-      throw new PageBlankError()
-    }
-
-    const parsed = parseRoleSnapshot(ariaText, input.options)
-
-    // Apply ref stability: reuse previous ref IDs for unchanged elements
-    const prevState = this.session.getPrevSnapshotState(input.cdpUrl, input.targetId)
-    const stabilized = stabilizeRefs({
-      currentRefs: parsed.refs,
-      currentSnapshot: parsed.snapshot,
-      currentLineMeta: parsed.lineMeta,
-      prevRefs: prevState?.refs,
-      prevMaxCounter: prevState?.maxRefCounter,
+    const result = await this.session.withNativeTransport(input, async (transport, owner, actorKey) => {
+      const snapshot = await owner.capture(actorKey, options, transport)
+      if (!snapshot.degraded || snapshot.source !== 'fused' || snapshot.degradedReason !== 'document_changed' || snapshot.snapshot) return snapshot
+      const frames = await transport.frames()
+      const scope = await selectSnapshotScope(transport, frames, options)
+      const raw = await captureRawRows(transport, frames, scope, options)
+      transport.assertCurrent()
+      return renderRawSnapshot(raw.rows, options, frames, raw.source, snapshot.degradedReason)
     })
-
-    // Store current state for next diff
-    this.session.updatePrevSnapshotState(input.cdpUrl, input.targetId, stabilized.refs, stabilized.nextMaxCounter)
-
-    this.session.rememberRoleRefs({
-      page,
-      cdpUrl: input.cdpUrl,
-      targetId: input.targetId,
-      refs: stabilized.refs,
-      frameSelector: frameSelector || undefined,
-      mode: 'role',
-    })
-
-    // Compute diff if we have previous state
-    let diffText: string | undefined
-    if (prevState && stabilized.keptRefs.length > 0) {
-      const diffResult = computeRefDiff({
-        prevRefs: prevState.refs,
-        currentRefs: stabilized.refs,
-        currentLineMeta: stabilized.lineMeta,
-        currentSnapshot: stabilized.snapshot,
-      })
-      if (diffResult.kind === 'DIFF') {
-        diffText = diffResult.diffText
-      }
-    }
-
-    // Apply filter if provided
-    const filter = input.filter
-    if (filter && (filter.keywords?.length || filter.roles?.length)) {
-      const filterResult = filterSnapshot(stabilized.lineMeta, filter)
-      if (filterResult === null) {
-        return {
-          snapshot: stabilized.snapshot,
-          refs: stabilized.refs,
-          stats: parsed.stats,
-          pageUrl: page.url(),
-          totalCount: Object.keys(stabilized.refs).length,
-          matchedCount: 0,
-          returnedCount: Object.keys(stabilized.refs).length,
-          truncated: false,
-          sparse: false,
-          ...(diffText ? { diff: diffText } : {}),
-        }
-      }
-      return {
-        snapshot: filterResult.prunedSnapshot,
-        refs: stabilized.refs,
-        stats: parsed.stats,
-        pageUrl: page.url(),
-        totalCount: Object.keys(stabilized.refs).length,
-        matchedCount: filterResult.matchedCount,
-        returnedCount: filterResult.returnedCount,
-        truncated: filterResult.truncated,
-        sparse: filterResult.sparse,
-        refRange: filterResult.refRange,
-        ...(diffText ? { diff: diffText } : {}),
-      }
-    }
-
-    // Use diff output if available and shorter than full snapshot
-    const finalSnapshot = diffText ?? stabilized.snapshot
-
-    return {
-      snapshot: finalSnapshot,
-      refs: stabilized.refs,
-      stats: parsed.stats,
-      pageUrl: page.url(),
-      totalCount: Object.keys(stabilized.refs).length,
-      matchedCount: Object.keys(stabilized.refs).length,
-      returnedCount: Object.keys(stabilized.refs).length,
-      truncated: false,
-      sparse: false,
-    }
+    return { ...result, pageUrl: page.url() }
   }
 
   async screenshot(input: {
@@ -293,14 +211,16 @@ export class PlaywrightActions {
     caret?: 'hide' | 'initial'
     scale?: 'css' | 'device'
     omitBackground?: boolean
-  }): Promise<{ buffer: Buffer; pageUrl: string }> {
+  } & PlaywrightInvocation): Promise<{ buffer: Buffer; pageUrl: string }> {
+    if (input.ref && input.element) throw new Error('ref and element are mutually exclusive')
+    input = this.session.withInvocationDeadline(input, 15_000)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
 
     const options: Record<string, unknown> = {
       type: input.type ?? 'png',
-      timeout: withTimeout(input.timeoutMs, 15_000),
+      timeout: this.session.remainingTimeout(input),
       animations: input.animations ?? 'disabled',
       caret: input.caret ?? 'hide',
       ...(input.scale ? { scale: input.scale } : {}),
@@ -312,32 +232,39 @@ export class PlaywrightActions {
       if (input.fullPage) {
         throw new Error('fullPage is not supported for element screenshots')
       }
-      const locator = this.session.refLocator(page, input.ref)
-      return { buffer: await locator.screenshot(options), pageUrl: page.url() }
+      return await this.session.withNativeTransport(input, async (transport, owner, actorKey) => {
+        const target = await owner.resolve(actorKey, { ref: input.ref }, transport)
+        const clip = await screenshotNativeElementClip(target, transport)
+        return { buffer: await this.session.runInvocation(input, () => page.screenshot({ ...options, clip })), pageUrl: page.url() }
+      })
     }
 
     if (input.element) {
       if (input.fullPage) {
         throw new Error('fullPage is not supported for element screenshots')
       }
-      return { buffer: await page.locator(input.element).first().screenshot(options), pageUrl: page.url() }
+      return { buffer: await this.session.runInvocation(input, () => page.locator(input.element).first().screenshot(options)), pageUrl: page.url() }
     }
 
     return {
-      buffer: await page.screenshot({ ...options, fullPage: Boolean(input.fullPage) }),
+      buffer: await this.session.runInvocation(input, () => page.screenshot({ ...options, fullPage: Boolean(input.fullPage) })),
       pageUrl: page.url(),
     }
   }
 
-  async scroll(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; direction?: string; amount?: number }): Promise<unknown> {
+  async scroll(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; direction?: string; amount?: number; pace?: boolean } & PlaywrightInvocation): Promise<unknown> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
 
     const direction = input.direction ?? 'down'
+    if (!['up', 'down', 'left', 'right', 'top', 'bottom'].includes(direction)) throw new Error('Invalid scroll direction')
     const amount = typeof input.amount === 'number' && Number.isFinite(input.amount) ? input.amount : 0
+    if (input.pace) await this.session.beforeInput(input)
 
-    return await page.evaluate(({ direction, amount }: { direction: string; amount: number }) => {
-      const delta = amount > 0 ? amount : window.innerHeight * 0.75
+    return await this.session.runInvocation(input, () => page.evaluate(({ direction, amount }: { direction: string; amount: number }) => {
+      const delta = amount > 0 ? amount : Math.round(window.innerHeight * 0.9)
       if (direction === 'up') window.scrollBy(0, -delta)
       else if (direction === 'down') window.scrollBy(0, delta)
       else if (direction === 'left') window.scrollBy(-delta, 0)
@@ -355,239 +282,184 @@ export class PlaywrightActions {
           (window.scrollY / Math.max(1, document.documentElement.scrollHeight - window.innerHeight)) * 100,
         ),
       }
-    }, { direction, amount })
+    }, { direction, amount }))
   }
 
-  async evaluate(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; fnBody: string; ref?: string; timeoutMs?: number }): Promise<unknown> {
+  async evaluate(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; fnBody: string; ref?: string; timeoutMs?: number } & PlaywrightInvocation): Promise<unknown> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
 
-    const timeoutMs = withTimeout(input.timeoutMs, 20_000)
+    const timeoutMs = this.session.remainingTimeout(input)
     const fnBody = requiredString(input.fnBody, 'fn')
 
     if (input.ref) {
-      const locator = this.session.refLocator(page, input.ref)
-      const evaluator = new Function(
-        'element',
-        'args',
-        `
-          "use strict";
-          const { fnBody, timeoutMs } = args;
-          let candidate;
-          try {
-            candidate = eval("(" + fnBody + ")");
-          } catch (error) {
-            throw new Error("Invalid evaluate function: " + (error && error.message ? error.message : String(error)));
-          }
-          const result = typeof candidate === "function" ? candidate(element) : candidate;
-          if (result && typeof result.then === "function") {
-            return Promise.race([
-              result,
-              new Promise((_, reject) => {
-                setTimeout(() => reject(new Error("evaluate timed out after " + timeoutMs + "ms")), timeoutMs);
-              }),
-            ]);
-          }
-          return result;
-        `,
-      )
-      return await locator.evaluate(evaluator, { fnBody, timeoutMs })
+      return await this.session.withNativeTransport(input, async (transport, owner, actorKey) => await evaluateNativeElement(await owner.resolve(actorKey, { ref: input.ref }, transport), fnBody, transport))
     }
 
-    return await evaluateFunctionOnPage(page, fnBody, timeoutMs)
+    return await this.session.runInvocation(input, () => evaluateFunctionOnPage(page, fnBody, timeoutMs))
   }
 
-  async click(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; selector?: string; x?: number; y?: number; timeoutMs?: number; doubleClick?: boolean; button?: 'left' | 'middle' | 'right'; modifiers?: string[]; delayMs?: number }): Promise<void> {
+  async click(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; backendNodeId?: number; frameId?: string; selector?: string; x?: number; y?: number; timeoutMs?: number; doubleClick?: boolean; button?: 'left' | 'middle' | 'right'; modifiers?: string[]; delayMs?: number; humanize?: boolean } & PlaywrightInvocation): Promise<{ observedValue?: string; valueKind?: 'value' | 'text'; domChanged?: boolean } | void> {
+    input = this.session.withInvocationDeadline(input, 8_000)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
+    const humanize = await this.session.beforeInput(input, input.humanize)
 
     const x = typeof input.x === 'number' && Number.isFinite(input.x) ? input.x : undefined
     const y = typeof input.y === 'number' && Number.isFinite(input.y) ? input.y : undefined
     if (x !== undefined && y !== undefined) {
-      if (input.doubleClick) {
-        await page.mouse.dblclick(x, y, { button: input.button, delay: input.delayMs })
-      } else {
-        await page.mouse.click(x, y, { button: input.button, delay: input.delayMs })
-      }
+      await this.session.runInvocation(input, async () => {
+        const modifiers = (input.modifiers ?? []).map((modifier) => modifier === 'ControlOrMeta' ? process.platform === 'darwin' ? 'Meta' : 'Control' : modifier)
+        const pressed: string[] = []
+        try {
+          for (const modifier of modifiers) {
+            this.session.assertInvocationCurrent(input)
+            await page.keyboard.down(modifier)
+            pressed.push(modifier)
+          }
+          if (humanize) await this.session.withNativeTransport(input, async (transport) => await moveNativePointer({ x, y }, transport, input.modifiers))
+          this.session.assertInvocationCurrent(input)
+          const delay = input.delayMs ?? (humanize ? 30 + Math.random() * 60 : undefined)
+          if (input.doubleClick) await page.mouse.dblclick(x, y, { button: input.button, delay })
+          else await page.mouse.click(x, y, { button: input.button, delay })
+        } finally {
+          for (const modifier of pressed.reverse()) await page.keyboard.up(modifier)
+        }
+      })
       return
     }
 
     const selector = input.selector?.trim()
     const ref = input.ref?.trim()
 
-    if (!selector && !ref) {
+    if (!selector && !ref && input.backendNodeId === undefined) {
       throw new Error('Either ref or selector is required for click')
     }
 
-    let locator: any
-    let identifier: string
+    if (!selector || input.backendNodeId !== undefined) return await this.actNative(input, { kind: 'click', ref, backendNodeId: input.backendNodeId, frameId: input.frameId, doubleClick: input.doubleClick, button: input.button, modifiers: input.modifiers }, humanize)
+    const handle = await this.session.runInvocation(input, () => page.$(selector))
+    if (!handle) throw new Error(`Selector "${selector}" did not match any elements on the page.`)
+    await this.session.runInvocation(input, () => handle.dispose())
+    const locator = page.locator(selector).first()
+    const identifier = selector
 
-    if (selector) {
-      // Selector path: verify element exists, then build locator
-      const handle = await page.$(selector)
-      if (!handle) {
-        throw new Error(`Selector "${selector}" did not match any elements on the page.`)
-      }
-      await handle.dispose()
-      locator = page.locator(selector).first()
-      identifier = selector
-    } else {
-      // Ref path: restore role refs and resolve locator
-      this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
-      locator = this.session.refLocator(page, ref!)
-      identifier = ref!
-    }
-
-    const timeout = withTimeout(input.timeoutMs, 8_000)
+    this.session.assertInvocationCurrent(input)
     try {
+      if (humanize) {
+        await this.session.runInvocation(input, () => locator.scrollIntoViewIfNeeded({ timeout: this.session.remainingTimeout(input) }))
+        const box = await this.session.runInvocation(input, () => locator.boundingBox({ timeout: this.session.remainingTimeout(input) }))
+        if (!box) throw new Error(`Element "${selector}" is not visible.`)
+        await this.session.withNativeTransport(input, async (transport) => await moveNativePointer({ x: box.x + box.width / 2, y: box.y + box.height / 2 }, transport, input.modifiers))
+      }
+      const delay = humanize ? 30 + Math.random() * 60 : undefined
       if (input.doubleClick) {
-        await locator.dblclick({ timeout, button: input.button, modifiers: input.modifiers })
+        await this.session.runInvocation(input, () => locator.dblclick({ timeout: this.session.remainingTimeout(input), button: input.button, modifiers: input.modifiers, delay }))
       } else {
-        await locator.click({ timeout, button: input.button, modifiers: input.modifiers })
+        await this.session.runInvocation(input, () => locator.click({ timeout: this.session.remainingTimeout(input), button: input.button, modifiers: input.modifiers, delay }))
       }
     } catch (error) {
       throw mapLocatorError(error, identifier)
     }
   }
 
-  async type(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref: string; text: string; submit?: boolean; slowly?: boolean; clearFirst?: boolean; timeoutMs?: number }): Promise<void> {
-    const page = await this.session.getPageForTargetId(input)
-    this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
-
-    const ref = requiredString(input.ref, 'ref')
-    const text = typeof input.text === 'string' ? input.text : ''
-    const locator = this.session.refLocator(page, ref)
-    const timeout = withTimeout(input.timeoutMs, 8_000)
-
-    try {
-      if (input.slowly) {
-        await locator.click({ timeout })
-        if (input.clearFirst !== false) {
-          await locator.fill('', { timeout })
-        }
-        await locator.pressSequentially(text, { timeout, delay: 75 })
-      } else if (input.clearFirst === false) {
-        await locator.click({ timeout })
-        await locator.pressSequentially(text, { timeout })
-      } else {
-        await locator.fill(text, { timeout })
-      }
-
-      if (input.submit) {
-        await locator.press('Enter', { timeout })
-      }
-    } catch (error) {
-      throw mapLocatorError(error, ref)
-    }
+  async type(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; backendNodeId?: number; frameId?: string; text: string; submit?: boolean; slowly?: boolean; clearFirst?: boolean; timeoutMs?: number } & PlaywrightInvocation): Promise<{ observedValue?: string; valueKind?: 'value' | 'text'; domChanged?: boolean }> {
+    input = this.session.withInvocationDeadline(input, 8_000)
+    const humanize = await this.session.beforeInput(input)
+    return await this.actNative(input, { kind: 'type', ref: input.ref, backendNodeId: input.backendNodeId, frameId: input.frameId, text: input.text, submit: input.submit, slowly: input.slowly, clearFirst: input.clearFirst }, humanize)
   }
 
-  async press(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; key: string; delayMs?: number }): Promise<void> {
+  async press(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; key: string; delayMs?: number } & PlaywrightInvocation): Promise<void> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    await page.keyboard.press(requiredString(input.key, 'key'), {
+    const key = requiredString(input.key, 'key')
+    await this.session.beforeInput(input)
+    await this.session.runInvocation(input, () => page.keyboard.press(key, {
       delay: Math.max(0, Math.floor(typeof input.delayMs === 'number' ? input.delayMs : 0)),
-    })
+    }))
   }
 
-  async hover(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref: string; timeoutMs?: number }): Promise<void> {
-    const page = await this.session.getPageForTargetId(input)
-    this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
-    const ref = requiredString(input.ref, 'ref')
-    try {
-      await this.session.refLocator(page, ref).hover({ timeout: withTimeout(input.timeoutMs, 8_000) })
-    } catch (error) {
-      throw mapLocatorError(error, ref)
-    }
+  async hover(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; backendNodeId?: number; frameId?: string; timeoutMs?: number } & PlaywrightInvocation): Promise<{ observedValue?: string; valueKind?: 'value' | 'text'; domChanged?: boolean }> {
+    input = this.session.withInvocationDeadline(input, 8_000)
+    const humanize = await this.session.beforeInput(input)
+    return await this.actNative(input, { kind: "hover", ref: input.ref, backendNodeId: input.backendNodeId, frameId: input.frameId }, humanize)
   }
 
-  async scrollIntoView(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref: string; timeoutMs?: number }): Promise<void> {
-    const page = await this.session.getPageForTargetId(input)
-    this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
-    const ref = requiredString(input.ref, 'ref')
-    try {
-      await this.session.refLocator(page, ref).scrollIntoViewIfNeeded({ timeout: withTimeout(input.timeoutMs, 20_000) })
-    } catch (error) {
-      throw mapLocatorError(error, ref)
-    }
+  async scrollIntoView(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; backendNodeId?: number; frameId?: string; timeoutMs?: number } & PlaywrightInvocation): Promise<{ observedValue?: string; valueKind?: 'value' | 'text'; domChanged?: boolean }> {
+    input = this.session.withInvocationDeadline(input)
+    const humanize = await this.session.beforeInput(input)
+    return await this.actNative(input, { kind: "scrollIntoView", ref: input.ref, backendNodeId: input.backendNodeId, frameId: input.frameId }, humanize)
   }
 
-  async drag(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; startRef: string; endRef: string; timeoutMs?: number }): Promise<void> {
-    const page = await this.session.getPageForTargetId(input)
-    this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
-    const startRef = requiredString(input.startRef, 'startRef')
-    const endRef = requiredString(input.endRef, 'endRef')
-    try {
-      await this.session.refLocator(page, startRef).dragTo(this.session.refLocator(page, endRef), {
-        timeout: withTimeout(input.timeoutMs, 8_000),
-      })
-    } catch (error) {
-      throw mapLocatorError(error, `${startRef} -> ${endRef}`)
-    }
+  async drag(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; startRef: string; endRef: string; timeoutMs?: number } & PlaywrightInvocation): Promise<{ observedValue?: string; valueKind?: 'value' | 'text'; domChanged?: boolean }> {
+    input = this.session.withInvocationDeadline(input, 8_000)
+    const humanize = await this.session.beforeInput(input)
+    return await this.actNative(input, { kind: "drag", startRef: requiredString(input.startRef, "startRef"), endRef: requiredString(input.endRef, "endRef") }, humanize)
   }
 
-  async select(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref: string; values: string[]; timeoutMs?: number }): Promise<void> {
-    const page = await this.session.getPageForTargetId(input)
-    this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
-    const ref = requiredString(input.ref, 'ref')
-    if (!input.values.length) {
-      throw new Error('values are required')
-    }
-    try {
-      await this.session.refLocator(page, ref).selectOption(input.values, { timeout: withTimeout(input.timeoutMs, 8_000) })
-    } catch (error) {
-      throw mapLocatorError(error, ref)
-    }
+  async select(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; backendNodeId?: number; frameId?: string; values: string[]; timeoutMs?: number } & PlaywrightInvocation): Promise<{ observedValue?: string; valueKind?: 'value' | 'text'; domChanged?: boolean }> {
+    input = this.session.withInvocationDeadline(input, 8_000)
+    if (!input.values.length) throw new Error("values are required")
+    const humanize = await this.session.beforeInput(input)
+    return await this.actNative(input, { kind: "select", ref: input.ref, backendNodeId: input.backendNodeId, frameId: input.frameId, values: input.values }, humanize)
   }
 
-  async fill(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; fields: Array<{ ref: string; type: string; value?: string | number | boolean }>; timeoutMs?: number }): Promise<void> {
+  async fill(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; fields: Array<NativeElementInput & { type: string; value?: string | number | boolean }>; timeoutMs?: number } & PlaywrightInvocation): Promise<{ applied: Array<{ index: number; ref: string; type: string }>; failed: Array<{ index: number; ref: string; type: string; reason: string }> }> {
+    input = this.session.withInvocationDeadline(input, 8_000)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
 
-    const timeout = withTimeout(input.timeoutMs, 8_000)
-    for (const field of input.fields) {
-      const ref = field.ref.trim()
-      const type = field.type.trim()
-      if (!ref || !type) continue
-
-      const locator = this.session.refLocator(page, ref)
-      if (type === 'checkbox' || type === 'radio') {
-        const checked = field.value === true || field.value === 1 || field.value === '1' || field.value === 'true'
-        try {
-          await locator.setChecked(checked, { timeout })
-        } catch (error) {
-          throw mapLocatorError(error, ref)
-        }
-        continue
-      }
-
-      const value =
-        typeof field.value === 'string'
-          ? field.value
-          : typeof field.value === 'number' || typeof field.value === 'boolean'
-            ? String(field.value)
-            : ''
+    const humanize = await this.session.beforeInput(input)
+    const applied: Array<{ index: number; ref: string; type: string }> = []
+    const failed: Array<{ index: number; ref: string; type: string; reason: string }> = []
+    for (const [index, field] of input.fields.entries()) {
+      const { ref, type, backendNodeId, frameId } = field
+      const receiptRef = backendNodeId !== undefined ? `dom=${backendNodeId}` : ref!
       try {
-        await locator.fill(value, { timeout })
-      } catch (error) {
-        throw mapLocatorError(error, ref)
+        this.session.assertInvocationCurrent(input)
+        if (type === 'checkbox' || type === 'radio') {
+          const checked = field.value === true || field.value === 1 || field.value === '1' || field.value === 'true'
+          await this.actNative(input, { kind: 'setChecked', ref, backendNodeId, frameId, checked }, humanize)
+        } else {
+          const value = field.value === undefined ? '' : String(field.value)
+          if (type === 'select') await this.session.beforeInput(input)
+          await this.actNative(input, type === 'select' ? { kind: 'select', ref, backendNodeId, frameId, values: [value] } : { kind: 'type', ref, backendNodeId, frameId, text: value }, humanize)
+        }
+        applied.push({ index, ref: receiptRef, type })
+      } catch (caughtError) {
+        let error = caughtError
+        const receipt = error && typeof error === 'object' ? error as { actionPerformed?: boolean; observationComplete?: boolean } : undefined
+        try { this.session.assertInvocationCurrent(input) } catch (currentError) {
+          error = Object.assign(currentError instanceof Error ? currentError : new Error(String(currentError)), {
+            ...(receipt?.actionPerformed === true ? { actionPerformed: true } : {}),
+            ...(receipt?.observationComplete === false ? { observationComplete: false } : {}),
+          })
+        }
+        if (error instanceof NativePageUpdatedError) throw Object.assign(error, { partial: { applied, failed, notPerformed: { index, ref: receiptRef, type } } })
+        const { errorDetail } = readRelayError(error)
+        if (errorDetail?.outcome === 'unknown' || receipt?.actionPerformed === true) throw Object.assign(error instanceof Error ? error : new Error(String(error)), { ...(applied.length ? { actionPerformed: true } : {}), partial: { applied, failed, unknown: { index, ref: receiptRef, type, ...(receipt?.actionPerformed === true ? { actionPerformed: true, observationComplete: false } : {}) } } })
+        failed.push({ index, ref: receiptRef, type, reason: mapLocatorError(error, receiptRef).message })
       }
     }
+    return { applied, failed }
   }
 
-  async resize(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; width: number; height: number }): Promise<void> {
+  async resize(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; width: number; height: number } & PlaywrightInvocation): Promise<void> {
+    if (!Number.isFinite(input.width) || !Number.isFinite(input.height) || input.width <= 0 || input.height <= 0) throw new Error('width and height must be positive numbers')
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    await page.setViewportSize({
+    await this.session.beforeInput(input)
+    await this.session.runInvocation(input, () => page.setViewportSize({
       width: Math.max(1, Math.floor(input.width)),
       height: Math.max(1, Math.floor(input.height)),
-    })
+    }))
   }
 
   async waitFor(input: {
@@ -602,49 +474,52 @@ export class PlaywrightActions {
     url?: string
     loadState?: 'load' | 'domcontentloaded' | 'networkidle'
     fnBody?: string
-  }): Promise<void> {
+  } & PlaywrightInvocation): Promise<void> {
+    input = this.session.withInvocationDeadline(input, 30_000)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    const timeout = withTimeout(input.timeoutMs, 20_000)
-
-    if (typeof input.timeMs === 'number' && Number.isFinite(input.timeMs)) {
-      await page.waitForTimeout(Math.max(0, input.timeMs))
+    if (typeof input.timeMs === 'number' && Number.isFinite(input.timeMs) && input.timeMs > 0) {
+      await this.session.runInvocation(input, () => page.waitForTimeout(input.timeMs))
+      return
     }
-    if (input.text) {
-      await page.getByText(input.text).first().waitFor({ state: 'visible', timeout })
+    if (input.loadState === 'networkidle') {
+      await this.session.waitForNetworkIdle(input)
+      return
     }
-    if (input.textGone) {
-      await page.getByText(input.textGone).first().waitFor({ state: 'hidden', timeout })
-    }
-    if (input.selector?.trim()) {
-      await page.locator(input.selector.trim()).first().waitFor({ state: 'visible', timeout })
-    }
-    if (input.url?.trim()) {
-      await page.waitForURL(input.url.trim(), { timeout })
-    }
-    if (input.loadState) {
-      await page.waitForLoadState(input.loadState, { timeout })
-    }
-    if (input.fnBody?.trim()) {
-      await page.waitForFunction(input.fnBody.trim(), { timeout })
-    }
+    const predicate = input.loadState
+      ? `${input.loadState === 'domcontentloaded' ? '["interactive","complete"]' : '["complete"]'}.includes(document.readyState)`
+      : input.text ? `(document.body?.innerText ?? '').includes(${JSON.stringify(input.text)})`
+      : input.textGone ? `!(document.body?.innerText ?? '').includes(${JSON.stringify(input.textGone)})`
+      : input.selector ? `document.querySelector(${JSON.stringify(input.selector)}) !== null`
+      : input.url ? `location.href.includes(${JSON.stringify(input.url)})`
+      : input.fnBody ? `!!(${input.fnBody})`
+      : undefined
+    if (!predicate) throw new Error('wait requires at least one of: timeMs, text, textGone, selector, url, loadState, fn')
+    await this.session.runInvocation(input, () => page.waitForFunction(predicate, undefined, { timeout: this.session.remainingTimeout(input), polling: 200 }))
   }
 
-  async closePage(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp' }): Promise<void> {
+  async closePage(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp' } & PlaywrightInvocation): Promise<void> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
-    await page.close()
+    this.session.assertInvocationCurrent(input)
+    await this.session.runInvocation(input, () => page.close())
   }
 
-  async consoleMessages(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; level?: string }): Promise<{ targetId?: string; messages: unknown[] }> {
+  async consoleMessages(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; level?: string } & PlaywrightInvocation): Promise<{ targetId?: string; messages: unknown[] }> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     const state = this.session.ensurePageState(page)
     const level = input.level?.toLowerCase()
     const messages = level ? state.console.filter((entry) => entry.type === level) : [...state.console]
     return { targetId: input.targetId, messages }
   }
 
-  async pageErrors(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; clear?: boolean }): Promise<{ targetId?: string; errors: unknown[] }> {
+  async pageErrors(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; clear?: boolean } & PlaywrightInvocation): Promise<{ targetId?: string; errors: unknown[] }> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     const state = this.session.ensurePageState(page)
     const errors = [...state.errors]
     if (input.clear) {
@@ -653,30 +528,24 @@ export class PlaywrightActions {
     return { targetId: input.targetId, errors }
   }
 
-  async networkRequests(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; filter?: string; clear?: boolean }): Promise<{ targetId?: string; requests: unknown[] }> {
-    const page = await this.session.getPageForTargetId(input)
-    const state = this.session.ensurePageState(page)
-    const filter = input.filter?.toLowerCase()
-    const requests = filter
-      ? state.requests.filter((entry) => entry.url.toLowerCase().includes(filter))
-      : [...state.requests]
-    if (input.clear) {
-      state.requests.length = 0
-    }
-    return { targetId: input.targetId, requests }
+  async networkRequests(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; filter?: string; clear?: boolean; last?: number } & PlaywrightInvocation): Promise<{ targetId?: string; requests: unknown[] }> {
+    input = this.session.withInvocationDeadline(input)
+    return await this.session.executeUtility(input, { kind: 'requests', filter: input.filter, last: input.last, clear: input.clear }) as { targetId?: string; requests: unknown[] }
   }
 
-  async storage(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; storageType: 'local' | 'session'; operation: 'get' | 'set' | 'clear'; key?: string; value?: string }): Promise<unknown> {
+  async storage(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; storageType: 'local' | 'session'; operation: 'get' | 'set' | 'clear'; key?: string; value?: string } & PlaywrightInvocation): Promise<unknown> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     const storageName: BrowserStorageHandle = input.storageType === 'session' ? 'sessionStorage' : 'localStorage'
     if (input.operation === 'get') {
-      if (input.key) {
-        return await page.evaluate(
+      if (input.key !== undefined) {
+        return await this.session.runInvocation(input, () => page.evaluate(
           ([targetStorage, key]: [BrowserStorageHandle, string]) => window[targetStorage].getItem(key),
           [storageName, input.key],
-        )
+        ))
       }
-      return await page.evaluate((targetStorage: BrowserStorageHandle) => {
+      return await this.session.runInvocation(input, () => page.evaluate((targetStorage: BrowserStorageHandle) => {
         const storage = window[targetStorage]
         const result: Record<string, string> = {}
         for (let index = 0; index < storage.length; index += 1) {
@@ -686,81 +555,86 @@ export class PlaywrightActions {
           }
         }
         return result
-      }, storageName)
+      }, storageName))
     }
     if (input.operation === 'set') {
-      if (!input.key) {
+      if (input.key === undefined) {
         throw new Error('key is required for storage set')
       }
-      await page.evaluate(
+      if (input.value === undefined) throw new Error('value is required for storage set')
+      await this.session.runInvocation(input, () => page.evaluate(
         ([targetStorage, key, value]: [BrowserStorageHandle, string, string]) => window[targetStorage].setItem(key, value),
         [storageName, input.key, input.value ?? ''],
-      )
+      ))
       return { ok: true }
     }
-    await page.evaluate((targetStorage: BrowserStorageHandle) => window[targetStorage].clear(), storageName)
+    await this.session.runInvocation(input, () => page.evaluate((targetStorage: BrowserStorageHandle) => window[targetStorage].clear(), storageName))
     return { ok: true }
   }
 
-  async highlight(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref: string; durationMs?: number }): Promise<void> {
-    const page = await this.session.getPageForTargetId(input)
-    this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
-    const ref = requiredString(input.ref, 'ref')
-    const locator = this.session.refLocator(page, ref)
+  async highlight(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; backendNodeId?: number; frameId?: string; durationMs?: number } & PlaywrightInvocation): Promise<void> {
+    input = this.session.withInvocationDeadline(input)
     const durationMs = Math.max(500, Math.min(10_000, typeof input.durationMs === 'number' ? input.durationMs : 2_000))
-    await locator.evaluate((element: HTMLElement, delay: number) => {
-      const previous = element.style.cssText
-      element.style.outline = '3px solid #FF4500'
-      element.style.outlineOffset = '2px'
-      setTimeout(() => {
-        element.style.cssText = previous
-      }, delay)
-    }, durationMs)
+    await this.session.withNativeTransport(input, async (transport, owner, actorKey) => await highlightNativeElement(await owner.resolve(actorKey, { ref: input.ref, backendNodeId: input.backendNodeId, frameId: input.frameId }, transport), durationMs, transport))
   }
 
-  async setInputFiles(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; paths: string[]; inputRef?: string; element?: string }): Promise<void> {
+  async setInputFiles(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; paths: string[]; inputRef?: string; element?: string; backendNodeId?: number; frameId?: string } & PlaywrightInvocation): Promise<void> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
-    if (input.inputRef) {
-      await this.session.refLocator(page, input.inputRef).setInputFiles(input.paths)
+    if (input.inputRef || input.backendNodeId !== undefined) {
+      await this.session.withNativeTransport(input, async (transport, owner, actorKey) => await setNativeInputFiles(await owner.resolve(actorKey, { ref: input.inputRef, backendNodeId: input.backendNodeId, frameId: input.frameId }, transport), input.paths, transport))
       return
     }
     if (input.element) {
-      await page.locator(input.element).first().setInputFiles(input.paths)
+      await this.session.runInvocation(input, () => page.locator(input.element).first().setInputFiles(input.paths, { timeout: this.session.remainingTimeout(input) }))
       return
     }
-    await page.locator('input[type=file]').first().setInputFiles(input.paths)
+    await this.session.runInvocation(input, () => page.locator('input[type=file]').first().setInputFiles(input.paths, { timeout: this.session.remainingTimeout(input) }))
   }
 
-  async armFileChooser(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; timeoutMs?: number; paths: string[] }): Promise<{ waitAndSetFiles: () => Promise<void> }> {
+  async armFileChooser(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; timeoutMs?: number; paths: string[] } & PlaywrightInvocation): Promise<{ waitAndSetFiles: () => Promise<void> }> {
+    input = this.session.withInvocationDeadline(input, 10_000)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    const fileChooser = page.waitForEvent('filechooser', { timeout: withTimeout(input.timeoutMs, 10_000) })
+    const fileChooser = this.session.runInvocation(input, () => page.waitForEvent('filechooser', { timeout: this.session.remainingTimeout(input) }))
+    void fileChooser.catch(() => {})
     return {
-      async waitAndSetFiles() {
+      waitAndSetFiles: async () => {
         const chooser = await fileChooser
-        await chooser.setFiles(input.paths)
+        const state = this.session.ensurePageState(page)
+        state.events.push({ seq: ++state.nextEventSeq, timestamp: new Date().toISOString(), kind: 'fileChooser', multiple: chooser.isMultiple() })
+        if (state.events.length > 100) state.events.splice(0, state.events.length - 100)
+        this.session.assertInvocationCurrent(input)
+        await this.session.runInvocation(input, () => chooser.setFiles(input.paths, { timeout: this.session.remainingTimeout(input) }))
       },
     }
   }
 
-  async armDialog(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; accept?: boolean; promptText?: string }): Promise<void> {
+  async armDialog(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; accept?: boolean; promptText?: string } & PlaywrightInvocation): Promise<void> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    page.once('dialog', async (dialog: any) => {
-      if (input.accept) {
-        await dialog.accept(input.promptText)
-      } else {
-        await dialog.dismiss()
-      }
-    })
+    this.session.ensurePageState(page).dialog = { accept: input.accept === true, ...(input.promptText !== undefined ? { promptText: input.promptText } : {}) }
   }
 
-  async pdf(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp' }): Promise<{ buffer: Buffer }> {
+  async pdf(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp' } & BrowserPdfOptions & PlaywrightInvocation): Promise<{ buffer: Buffer }> {
+    input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
+    this.session.assertInvocationCurrent(input)
     this.session.ensurePageState(page)
-    return { buffer: await page.pdf({ printBackground: true }) }
+    const papers = { a3: [11.69, 16.54], a4: [8.27, 11.69], a5: [5.83, 8.27], letter: [8.5, 11], legal: [8.5, 14], tabloid: [11, 17], ledger: [17, 11] }
+    const paper = input.paper === undefined ? undefined : papers[input.paper.trim().toLowerCase() as keyof typeof papers]
+    if (input.paper !== undefined && !Array.isArray(paper)) throw new Error('Unknown PDF paper size')
+    if (input.scale !== undefined && !Number.isFinite(input.scale)) throw new Error('PDF scale must be finite')
+    return { buffer: await this.session.runInvocation(input, () => page.pdf({
+      printBackground: input.printBackground ?? true,
+      ...(input.landscape === true ? { landscape: true } : {}),
+      ...(paper ? { width: `${paper[input.landscape ? 1 : 0]}in`, height: `${paper[input.landscape ? 0 : 1]}in` } : {}),
+      ...(input.scale === undefined ? {} : { scale: Math.min(2, Math.max(0.1, input.scale)) }),
+    })) }
   }
 }

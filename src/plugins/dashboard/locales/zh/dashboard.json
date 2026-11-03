@@ -29,6 +29,23 @@
         "hideDetails": "收起 session 明细",
         "detailsLoading": "正在加载 session 明细...",
         "detailsEmpty": "这个 session 没有 token 明细",
-        "detailsError": "加载 session 明细失败"
+        "detailsError": "加载 session 明细失败",
+        "recordedTitle": "已记录用量",
+        "recordedDescription": "按模型和时间查看 Matcha 已记录用量，不代表完整消耗。",
+        "recordedTokens": "已记录 token",
+        "returnedRecords": "已返回记录",
+        "partialUsage": "当前返回范围内有用量未知的记录，汇总仅包含已记录用量。",
+        "nativeOutcomeUnknown": "当前返回范围内存在原生结果未知的执行，可能有未计量消耗；无法据此判断所选时间窗是否有缺口。",
+        "hasMore": "仅显示最近有界数量的记录；时间筛选只作用于已返回记录，不代表全部历史。",
+        "noKnownUsage": "当前筛选下没有已知用量记录",
+        "noKnownUsageDescription": "尚无可汇总的用量观察，不代表消耗为零。",
+        "unknownUsage": "用量未知的记录",
+        "unknownReasons": {
+            "native_result_session_mismatch": "原生结果与请求的会话不匹配",
+            "native_result_identity_missing": "原生结果缺少身份信息",
+            "native_execution_error_placeholder": "原生执行仅返回错误占位结果",
+            "native_usage_scope_unknown": "无法确定原生用量的计量范围",
+            "native_usage_missing_or_invalid": "原生用量缺失或无效"
+        }
     }
 }

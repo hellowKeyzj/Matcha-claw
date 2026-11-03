@@ -1,5 +1,8 @@
 import type { QuerySource } from '../../constants/querySource.js'
-import { currentInvestigationScope, InvestigationAdmissionError } from '../../world/investigation.js'
+import {
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+} from '../../world/investigation.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
 import { toError } from '../errors.js'
@@ -70,7 +73,9 @@ export async function executePostSamplingHooks(
     for (const hook of postSamplingHooks) {
       try {
         if (currentInvestigationScope()) {
-          throw new InvestigationAdmissionError('investigation_post_sampling_hook_effects_unbounded')
+          throw new InvestigationAdmissionError(
+            'investigation_post_sampling_hook_effects_unbounded',
+          )
         }
         await hook(context)
       } catch (error) {

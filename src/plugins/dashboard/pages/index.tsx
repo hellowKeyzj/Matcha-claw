@@ -19,7 +19,7 @@ import {
   useRuntimeEndpointsStore,
 } from '@/plugins/runtime/directory';
 import { runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
-import { useDashboardUsageStore } from '../stores/dashboard-usage';
+import { useDashboardUsageStore, type UsageSessionDetailState } from '../stores/dashboard-usage';
 import { useDashboardUiStore } from '../stores/dashboard-ui';
 import { FeedbackState } from '@/components/common/FeedbackState';
 import { LoadingState } from '@/components/common/LoadingSpinner';
@@ -31,15 +31,9 @@ import {
   filterUsageHistoryByWindow,
   groupUsageHistory,
 } from './usage-history';
-import type { UsageSessionDetailEntry } from './usage-history';
+import type { UsageCoverage, UsageUnknownEntry } from '@/types/desktop/usage';
 const DEFAULT_USAGE_FETCH_MAX_ATTEMPTS = 2;
 const WINDOWS_USAGE_FETCH_MAX_ATTEMPTS = 3;
-
-type UsageSessionDetailViewState =
-  | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'loaded'; entries: UsageSessionDetailEntry[] }
-  | { status: 'error'; message: string };
 
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
@@ -55,7 +49,7 @@ export function Dashboard() {
     ? WINDOWS_USAGE_FETCH_MAX_ATTEMPTS
     : DEFAULT_USAGE_FETCH_MAX_ATTEMPTS;
   const usageHistory = useDashboardUsageStore((state) => state.usageHistory);
-  const usageHistoryReady = useDashboardUsageStore((state) => state.usageHistoryReady);
+  const usageHistoryReady = usageHistory !== null;
   const usageContentReady = useIdleReady(scopeReady && usageHistoryReady);
   const usageRefreshingState = useDashboardUsageStore((state) => state.refreshing);
   const usageSessionDetails = useDashboardUsageStore((state) => state.sessionDetails);
@@ -97,9 +91,16 @@ export function Dashboard() {
   }, [endpoint, isUsageRuntimeReady, refreshUsageHistory, runtimeTransportEpoch, scopeReady, usageFetchMaxAttempts]);
 
   // Calculate statistics safely
+  const visibleCoverage = scopeReady ? usageHistory?.coverage : undefined;
+  const observedUsage = visibleCoverage?.kind === 'observed';
+  const totalTokensLabel = t(observedUsage ? 'recentTokenHistory.recordedTokens' : 'recentTokenHistory.totalTokens');
   const visibleUsageHistory = useMemo(
-    () => scopeReady ? usageHistory : [],
+    () => scopeReady ? usageHistory?.entries ?? [] : [],
     [scopeReady, usageHistory],
+  );
+  const filteredUnknownEntries = useMemo(
+    () => filterUsageHistoryByWindow(visibleCoverage?.kind === 'observed' ? visibleCoverage.unknownEntries : [], usageWindow),
+    [usageWindow, visibleCoverage],
   );
   const filteredUsageHistory = useMemo(
     () => filterUsageHistoryByWindow(visibleUsageHistory, usageWindow),
@@ -150,11 +151,11 @@ export function Dashboard() {
     <div className="space-y-6">
       <header>
         <div className="flex min-h-11 items-center justify-between gap-4">
-          <h1 className="text-lg font-semibold">{t('recentTokenHistory.title')}</h1>
+          <h1 className="text-lg font-semibold">{t(observedUsage ? 'recentTokenHistory.recordedTitle' : 'recentTokenHistory.title')}</h1>
           <RuntimeScopeSelector />
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-sm text-muted-foreground">{t('recentTokenHistory.description')}</p>
+          <p className="text-sm text-muted-foreground">{t(observedUsage ? 'recentTokenHistory.recordedDescription' : 'recentTokenHistory.description')}</p>
           {showUsageRefreshingHint && (
             <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -174,7 +175,7 @@ export function Dashboard() {
         <FeedbackState state="error" title={t('common:calls.values.notReady')} />
       ) : showUsageInitialLoading ? (
         <LoadingState label={t('recentTokenHistory.loading')} />
-      ) : visibleUsageHistory.length === 0 ? (
+      ) : !observedUsage && visibleUsageHistory.length === 0 ? (
         usageFetchError ? (
           <FeedbackState
             state="error"
@@ -184,7 +185,7 @@ export function Dashboard() {
         ) : (
           <FeedbackState state="empty" title={t('recentTokenHistory.empty')} />
         )
-      ) : filteredUsageHistory.length === 0 ? (
+      ) : !observedUsage && filteredUsageHistory.length === 0 ? (
         <FeedbackState state="empty" title={t('recentTokenHistory.emptyForWindow')} />
       ) : (
         <div className="space-y-6">
@@ -241,7 +242,7 @@ export function Dashboard() {
                     setUsageWindow('all');
                   }}
                 >
-                  {t('recentTokenHistory.allTime')}
+                  {t(observedUsage ? 'recentTokenHistory.returnedRecords' : 'recentTokenHistory.allTime')}
                 </Button>
               </div>
             </div>
@@ -250,134 +251,146 @@ export function Dashboard() {
             </p>
           </section>
 
-          <section className="grid grid-cols-2 gap-2 md:grid-cols-4">
-            <div className="rounded-lg border bg-[hsl(var(--shell-surface))] p-3 [border-color:hsl(var(--shell-border))]">
-              <p className="text-xs text-[hsl(var(--shell-text-muted))]">{t('recentTokenHistory.totalTokens')}</p>
-              <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.totalTokens)}</p>
-            </div>
-            <div className="rounded-lg border bg-[hsl(var(--shell-surface))] p-3 [border-color:hsl(var(--shell-border))]">
-              <p className="text-xs text-[hsl(var(--shell-text-muted))]">{t('recentTokenHistory.inputShort')}</p>
-              <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.inputTokens)}</p>
-            </div>
-            <div className="rounded-lg border bg-[hsl(var(--shell-surface))] p-3 [border-color:hsl(var(--shell-border))]">
-              <p className="text-xs text-[hsl(var(--shell-text-muted))]">{t('recentTokenHistory.outputShort')}</p>
-              <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.outputTokens)}</p>
-            </div>
-            <div className="rounded-lg border bg-[hsl(var(--shell-surface))] p-3 [border-color:hsl(var(--shell-border))]">
-              <p className="text-xs text-[hsl(var(--shell-text-muted))]">{t('recentTokenHistory.cacheShort')}</p>
-              <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.cacheTokens)}</p>
-            </div>
-          </section>
-
-          <section>
-            <UsageBarChart
-              groups={usageGroups}
-              emptyLabel={t('recentTokenHistory.empty')}
-              totalLabel={t('recentTokenHistory.totalTokens')}
-              inputLabel={t('recentTokenHistory.inputShort')}
-              outputLabel={t('recentTokenHistory.outputShort')}
-              cacheLabel={t('recentTokenHistory.cacheShort')}
+          {visibleCoverage && <UsageCoverageNotice coverage={visibleCoverage} />}
+          {filteredUsageHistory.length === 0 ? (
+            <FeedbackState
+              state="empty"
+              title={t('recentTokenHistory.noKnownUsage')}
+              description={t('recentTokenHistory.noKnownUsageDescription')}
             />
-          </section>
+          ) : (
+            <>
+              <section className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                <div className="rounded-lg border bg-[hsl(var(--shell-surface))] p-3 [border-color:hsl(var(--shell-border))]">
+                  <p className="text-xs text-[hsl(var(--shell-text-muted))]">{totalTokensLabel}</p>
+                  <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.totalTokens)}</p>
+                </div>
+                <div className="rounded-lg border bg-[hsl(var(--shell-surface))] p-3 [border-color:hsl(var(--shell-border))]">
+                  <p className="text-xs text-[hsl(var(--shell-text-muted))]">{t('recentTokenHistory.inputShort')}</p>
+                  <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.inputTokens)}</p>
+                </div>
+                <div className="rounded-lg border bg-[hsl(var(--shell-surface))] p-3 [border-color:hsl(var(--shell-border))]">
+                  <p className="text-xs text-[hsl(var(--shell-text-muted))]">{t('recentTokenHistory.outputShort')}</p>
+                  <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.outputTokens)}</p>
+                </div>
+                <div className="rounded-lg border bg-[hsl(var(--shell-surface))] p-3 [border-color:hsl(var(--shell-border))]">
+                  <p className="text-xs text-[hsl(var(--shell-text-muted))]">{t('recentTokenHistory.cacheShort')}</p>
+                  <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.cacheTokens)}</p>
+                </div>
+              </section>
 
-          <section className="space-y-3">
-                <div className="space-y-3">
-                  {pagedUsageHistory.map((entry, index) => {
-                    const detail = usageSessionDetails[entry.sessionId] ?? { status: 'idle' as const };
-                    const expanded = expandedUsageSessionId === entry.sessionId;
-                    return (
-                      <div
-                        key={`${entry.sessionId}-${entry.timestamp}-${index}`}
-                        className="rounded-lg border p-3"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="font-medium truncate">
-                              {entry.model || t('recentTokenHistory.unknownModel')}
-                            </p>
-                            <p className="text-xs text-muted-foreground truncate">
-                              {[entry.provider, entry.agentId, entry.sessionId].filter(Boolean).join(' • ')}
-                            </p>
-                          </div>
-                          <div className="flex shrink-0 items-start gap-2 text-right">
-                            <div>
-                              <p className="font-semibold">{formatTokenCount(entry.totalTokens)}</p>
-                              <p className="text-xs text-[hsl(var(--shell-text-muted))]">
-                                {formatUsageTimestamp(entry.timestamp)}
-                              </p>
+              <section>
+                <UsageBarChart
+                  groups={usageGroups}
+                  emptyLabel={t('recentTokenHistory.empty')}
+                  totalLabel={totalTokensLabel}
+                  inputLabel={t('recentTokenHistory.inputShort')}
+                  outputLabel={t('recentTokenHistory.outputShort')}
+                  cacheLabel={t('recentTokenHistory.cacheShort')}
+                />
+              </section>
+
+              <section className="space-y-3">
+                    <div className="space-y-3">
+                      {pagedUsageHistory.map((entry, index) => {
+                        const detail = usageSessionDetails[entry.sessionId] ?? { status: 'idle' as const };
+                        const expanded = expandedUsageSessionId === entry.sessionId;
+                        return (
+                          <div
+                            key={`${entry.sessionId}-${entry.timestamp}-${index}`}
+                            className="rounded-lg border p-3"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="font-medium truncate">
+                                  {entry.model || t('recentTokenHistory.unknownModel')}
+                                </p>
+                                <p className="text-xs text-muted-foreground truncate">
+                                  {[entry.provider, entry.agentId, entry.sessionId].filter(Boolean).join(' • ')}
+                                </p>
+                              </div>
+                              <div className="flex shrink-0 items-start gap-2 text-right">
+                                <div>
+                                  <p className="font-semibold">{formatTokenCount(entry.totalTokens)}</p>
+                                  <p className="text-xs text-[hsl(var(--shell-text-muted))]">
+                                    {formatUsageTimestamp(entry.timestamp)}
+                                  </p>
+                                </div>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2"
+                                  onClick={() => toggleUsageSessionDetails(entry.sessionId, entry.agentId)}
+                                >
+                                  {expanded ? (
+                                    <ChevronUp className="h-4 w-4" />
+                                  ) : (
+                                    <ChevronDown className="h-4 w-4" />
+                                  )}
+                                  <span className="sr-only">
+                                    {expanded ? t('recentTokenHistory.hideDetails') : t('recentTokenHistory.showDetails')}
+                                  </span>
+                                </Button>
+                              </div>
                             </div>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 px-2"
-                              onClick={() => toggleUsageSessionDetails(entry.sessionId, entry.agentId)}
-                            >
-                              {expanded ? (
-                                <ChevronUp className="h-4 w-4" />
-                              ) : (
-                                <ChevronDown className="h-4 w-4" />
+                            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                              <span>{t('recentTokenHistory.input', { value: formatTokenCount(entry.inputTokens) })}</span>
+                              <span>{t('recentTokenHistory.output', { value: formatTokenCount(entry.outputTokens) })}</span>
+                              {entry.cacheReadTokens > 0 && (
+                                <span>{t('recentTokenHistory.cacheRead', { value: formatTokenCount(entry.cacheReadTokens) })}</span>
                               )}
-                              <span className="sr-only">
-                                {expanded ? t('recentTokenHistory.hideDetails') : t('recentTokenHistory.showDetails')}
-                              </span>
-                            </Button>
+                              {entry.cacheWriteTokens > 0 && (
+                                <span>{t('recentTokenHistory.cacheWrite', { value: formatTokenCount(entry.cacheWriteTokens) })}</span>
+                              )}
+                              {typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd) && (
+                                <span>{t('recentTokenHistory.cost', { amount: entry.costUsd.toFixed(4) })}</span>
+                              )}
+                            </div>
+                            {expanded && (
+                              <UsageSessionDetails
+                                detail={detail}
+                                loadingLabel={t('recentTokenHistory.detailsLoading')}
+                                emptyLabel={t('recentTokenHistory.detailsEmpty')}
+                                errorLabel={t('recentTokenHistory.detailsError')}
+                                inputLabel={t('recentTokenHistory.inputShort')}
+                                outputLabel={t('recentTokenHistory.outputShort')}
+                                cacheLabel={t('recentTokenHistory.cacheShort')}
+                              />
+                            )}
                           </div>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                          <span>{t('recentTokenHistory.input', { value: formatTokenCount(entry.inputTokens) })}</span>
-                          <span>{t('recentTokenHistory.output', { value: formatTokenCount(entry.outputTokens) })}</span>
-                          {entry.cacheReadTokens > 0 && (
-                            <span>{t('recentTokenHistory.cacheRead', { value: formatTokenCount(entry.cacheReadTokens) })}</span>
-                          )}
-                          {entry.cacheWriteTokens > 0 && (
-                            <span>{t('recentTokenHistory.cacheWrite', { value: formatTokenCount(entry.cacheWriteTokens) })}</span>
-                          )}
-                          {typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd) && (
-                            <span>{t('recentTokenHistory.cost', { amount: entry.costUsd.toFixed(4) })}</span>
-                          )}
-                        </div>
-                        {expanded && (
-                          <UsageSessionDetails
-                            detail={detail}
-                            loadingLabel={t('recentTokenHistory.detailsLoading')}
-                            emptyLabel={t('recentTokenHistory.detailsEmpty')}
-                            errorLabel={t('recentTokenHistory.detailsError')}
-                            inputLabel={t('recentTokenHistory.inputShort')}
-                            outputLabel={t('recentTokenHistory.outputShort')}
-                            cacheLabel={t('recentTokenHistory.cacheShort')}
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                        );
+                      })}
+                    </div>
 
-                <div className="flex items-center justify-between gap-3 border-t pt-3">
-                  <p className="text-xs text-[hsl(var(--shell-text-muted))]">
-                    {t('recentTokenHistory.page', { current: safeUsagePage, total: usageTotalPages })}
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setUsagePage((page) => Math.max(1, page - 1))}
-                      disabled={safeUsagePage <= 1}
-                    >
-                      <ChevronLeft className="h-4 w-4 mr-1" />
-                      {t('recentTokenHistory.prev')}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setUsagePage((page) => Math.min(usageTotalPages, page + 1))}
-                      disabled={safeUsagePage >= usageTotalPages}
-                    >
-                      {t('recentTokenHistory.next')}
-                      <ChevronRight className="h-4 w-4 ml-1" />
-                    </Button>
-                  </div>
-                </div>
-          </section>
+                    <div className="flex items-center justify-between gap-3 border-t pt-3">
+                      <p className="text-xs text-[hsl(var(--shell-text-muted))]">
+                        {t('recentTokenHistory.page', { current: safeUsagePage, total: usageTotalPages })}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setUsagePage((page) => Math.max(1, page - 1))}
+                          disabled={safeUsagePage <= 1}
+                        >
+                          <ChevronLeft className="h-4 w-4 mr-1" />
+                          {t('recentTokenHistory.prev')}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setUsagePage((page) => Math.min(usageTotalPages, page + 1))}
+                          disabled={safeUsagePage >= usageTotalPages}
+                        >
+                          {t('recentTokenHistory.next')}
+                          <ChevronRight className="h-4 w-4 ml-1" />
+                        </Button>
+                      </div>
+                    </div>
+              </section>
+            </>
+          )}
+          <UsageUnknownEntries entries={filteredUnknownEntries} />
         </div>
       )}
     </div>
@@ -399,6 +412,37 @@ function formatUsageTimestamp(timestamp: string): string {
   }).format(date);
 }
 
+function UsageCoverageNotice({ coverage }: { coverage: UsageCoverage }) {
+  const { t } = useTranslation('dashboard');
+  if (coverage.kind !== 'observed' || (!coverage.hasMore && !coverage.nativeOutcomeUnknown && coverage.unknownEntries.length === 0)) return null;
+
+  return (
+    <div className="space-y-1 text-xs text-muted-foreground" role="note">
+      {coverage.unknownEntries.length > 0 && <p>{t('recentTokenHistory.partialUsage')}</p>}
+      {coverage.nativeOutcomeUnknown && <p>{t('recentTokenHistory.nativeOutcomeUnknown')}</p>}
+      {coverage.hasMore && <p>{t('recentTokenHistory.hasMore')}</p>}
+    </div>
+  );
+}
+
+function UsageUnknownEntries({ entries }: { entries: readonly UsageUnknownEntry[] }) {
+  const { t } = useTranslation('dashboard');
+  if (entries.length === 0) return null;
+
+  return (
+    <section className="space-y-2" aria-label={t('recentTokenHistory.unknownUsage')}>
+      <p className="text-sm font-medium">{t('recentTokenHistory.unknownUsage')}</p>
+      {entries.map((entry, index) => (
+        <div key={`${entry.sessionId}-${entry.timestamp}-${index}`} className="rounded-lg border p-3 text-xs text-muted-foreground">
+          <p className="font-medium text-foreground">{t(`recentTokenHistory.unknownReasons.${entry.reason}`)}</p>
+          <p className="mt-1 break-all">{[entry.agentId, entry.sessionId].filter(Boolean).join(' • ')}</p>
+          <p className="mt-1">{formatUsageTimestamp(entry.timestamp)}</p>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function UsageSessionDetails({
   detail,
   loadingLabel,
@@ -408,7 +452,7 @@ function UsageSessionDetails({
   outputLabel,
   cacheLabel,
 }: {
-  detail: UsageSessionDetailViewState;
+  detail: UsageSessionDetailState;
   loadingLabel: string;
   emptyLabel: string;
   errorLabel: string;
@@ -416,6 +460,7 @@ function UsageSessionDetails({
   outputLabel: string;
   cacheLabel: string;
 }) {
+  const { t } = useTranslation('dashboard');
   if (detail.status === 'idle' || detail.status === 'loading') {
     return (
       <div className="mt-3 flex items-center gap-2 rounded-md border bg-[hsl(var(--shell-surface))] px-3 py-2 text-xs text-[hsl(var(--shell-text-muted))] [border-color:hsl(var(--shell-border))]">
@@ -433,7 +478,7 @@ function UsageSessionDetails({
     );
   }
 
-  if (detail.entries.length === 0) {
+  if (detail.entries.length === 0 && detail.coverage.kind === 'reported') {
     return (
       <div className="mt-3 rounded-md border bg-[hsl(var(--shell-surface))] px-3 py-2 text-xs text-[hsl(var(--shell-text-muted))] [border-color:hsl(var(--shell-border))]">
         {emptyLabel}
@@ -443,9 +488,13 @@ function UsageSessionDetails({
 
   return (
     <div className="mt-3 space-y-2 border-t pt-3">
+      <UsageCoverageNotice coverage={detail.coverage} />
+      {detail.coverage.kind === 'observed' && detail.entries.length === 0 && (
+        <p className="text-xs text-muted-foreground">{t('recentTokenHistory.noKnownUsageDescription')}</p>
+      )}
       {detail.entries.map((entry, index) => (
         <div
-          key={entry.messageId || entry.eventId || `${entry.sessionId}-${entry.timestamp}-${index}`}
+          key={`${entry.sessionId}-${entry.timestamp}-${index}`}
           className="rounded-md border border-border/80 bg-card px-3 py-2"
         >
           <div className="flex items-center justify-between gap-3 text-xs">
@@ -461,6 +510,7 @@ function UsageSessionDetails({
           </div>
         </div>
       ))}
+      {detail.coverage.kind === 'observed' && <UsageUnknownEntries entries={detail.coverage.unknownEntries} />}
     </div>
   );
 }

@@ -13,7 +13,7 @@ import { resolveArtifactWorkspaceRoot } from '@/plugins/chat/artifact-workspace'
 import type { GeneratedFile } from '@/plugins/files/generated-files';
 import { useFilePreviewSupport } from '@/plugins/files/extensions';
 import { buildArtifactPreviewTargetFromAttachedFile, buildArtifactPreviewTargetFromGeneratedFile } from '@/plugins/files/types';
-import { openFileWorkspacePage } from '@/plugins/files/workspace';
+import { useOpenFileWorkspacePage } from '@/plugins/files/workspace';
 import { useWorkspace } from '@/plugins/workspace/context';
 import { Button } from '@/components/ui/button';
 import { pickLocalDirectory } from '@/lib/local-path-picker';
@@ -44,7 +44,9 @@ export const ChatArtifacts = memo(function ChatArtifacts({ renderItems, renderVi
 }) {
   const { t } = useTranslation('chat');
   const workspace = useWorkspace();
+  const openFile = useOpenFileWorkspacePage(workspace);
   const supportsInlineDiff = useFilePreviewSupport('diff');
+  const supportsPreview = useFilePreviewSupport('preview');
   const { currentConversation, currentAgentId } = useChatStore(useShallow(selectChatSelection));
   const currentConversationEndpoint = currentConversation?.endpoint ?? null;
   const { currentAgent } = useChatAgent();
@@ -70,13 +72,13 @@ export const ChatArtifacts = memo(function ChatArtifacts({ renderItems, renderVi
   const openGeneratedArtifact = useCallback((file: GeneratedFile) => {
     const group = artifactGroups.find((entry) => entry.files.includes(file))
       ?? artifactGroups.find((entry) => entry.files.some((candidate) => candidate.filePath === file.filePath && candidate.toolId === file.toolId));
-    openFileWorkspacePage(workspace, {
+    openFile({
       file: buildArtifactPreviewTargetFromGeneratedFile(file),
       workspaceContext: artifactWorkspaceContext,
       group,
       mode: file.sourceTool === 'edit' && supportsInlineDiff(file) ? 'diff' : 'preview',
     });
-  }, [artifactGroups, artifactWorkspaceContext, supportsInlineDiff, workspace]);
+  }, [artifactGroups, artifactWorkspaceContext, openFile, supportsInlineDiff]);
   const [workspaceRecoveryPending, setWorkspaceRecoveryPending] = useState(false);
   const handleChooseWorkspaceForCurrentAgent = useCallback(async () => {
     if (!canChooseWorkspaceForCurrentAgent || !currentAgent || workspaceRecoveryPending) {
@@ -128,13 +130,13 @@ export const ChatArtifacts = memo(function ChatArtifacts({ renderItems, renderVi
         : t('workspaceUnavailable.chooseWorkspaceAndNewSession')}
     </Button>
   ) : null;
+  const sessionIdentity = currentConversation?.kind === 'session' ? currentConversation.sessionIdentity : undefined;
   const handleOpenAttachedArtifact = useCallback((file: AttachedFileMeta) => {
-    if (file.source === 'user-upload') return false;
-    const target = buildArtifactPreviewTargetFromAttachedFile(file);
-    if (!target) return false;
-    openFileWorkspacePage(workspace, { file: target, workspaceContext: artifactWorkspaceContext });
+    const target = buildArtifactPreviewTargetFromAttachedFile(file, sessionIdentity);
+    if (!target || target.mediaSource && !supportsPreview(target)) return false;
+    openFile({ file: target, workspaceContext: artifactWorkspaceContext });
     return true;
-  }, [artifactWorkspaceContext, workspace]);
+  }, [artifactWorkspaceContext, openFile, sessionIdentity, supportsPreview]);
   const renderArtifactViewport = useCallback(() => renderViewport({
     workspaceContext: artifactWorkspaceContext,
     artifactGroups,

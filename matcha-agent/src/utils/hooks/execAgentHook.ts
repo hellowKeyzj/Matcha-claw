@@ -115,7 +115,8 @@ export async function execAgentHook(
         signalB: investigationSignal(),
         timeoutMs: hookTimeoutMs,
       })
-    const onParentTimeout = () => hookAbortController.abort(parentTimeoutSignal.reason)
+    const onParentTimeout = () =>
+      hookAbortController.abort(parentTimeoutSignal.reason)
     parentTimeoutSignal.addEventListener('abort', onParentTimeout)
     if (scope && parentTimeoutSignal.aborted) onParentTimeout()
 

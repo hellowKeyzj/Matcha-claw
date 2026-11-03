@@ -28,7 +28,7 @@ import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
 } from 'src/services/analytics/index.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
-import { logForDebugging } from 'src/utils/debug.js'
+import { debugIdentifierHash, logForDebugging, traceSessionTiming } from 'src/utils/debug.js'
 import {
   logForDiagnosticsNoPII,
   withDiagnosticsTiming,
@@ -236,6 +236,7 @@ import {
   areMcpConfigsEqual,
   reconnectMcpServerImpl,
 } from 'src/services/mcp/client.js'
+import { hasIabCapability, withIabInput } from 'src/services/mcp/iab-capability.js'
 import {
   filterMcpServersByPolicy,
   getMcpConfigByName,
@@ -940,14 +941,43 @@ export async function runHeadless(
     turnInterruptionState,
   )) {
     if (structuredIO.consumeOutputBarrier(message)) continue
+    const traceOutputKind = process.env.MATCHACLAW_TRACE === '1'
+      ? message.type === 'result' ? 'result'
+        : message.type === 'system' && message.subtype === 'session_state_changed' && message.state === 'idle'
+          ? 'idle' : undefined
+      : undefined
+    const outputStartedAt = traceOutputKind ? performance.now() : 0
+    let traceOutputWritten = false
+    if (traceOutputKind) {
+      traceSessionTiming('print.output.begin', () => ({
+        kind: traceOutputKind,
+        messageHash: 'uuid' in message && typeof message.uuid === 'string'
+          ? debugIdentifierHash(message.uuid) : undefined,
+        inputHash: message.type === 'result' && message.input_message_id
+          ? debugIdentifierHash(message.input_message_id) : undefined,
+      }))
+    }
     if (transformToStreamlined) {
       // Streamlined mode: transform messages and stream immediately
       const transformed = transformToStreamlined(message)
       if (transformed) {
         await structuredIO.write(transformed)
+        traceOutputWritten = true
       }
     } else if (options.outputFormat === 'stream-json' && options.verbose) {
       await structuredIO.write(message)
+      traceOutputWritten = true
+    }
+    if (traceOutputKind) {
+      traceSessionTiming('print.output.end', () => ({
+        kind: traceOutputKind,
+        messageHash: 'uuid' in message && typeof message.uuid === 'string'
+          ? debugIdentifierHash(message.uuid) : undefined,
+        inputHash: message.type === 'result' && message.input_message_id
+          ? debugIdentifierHash(message.input_message_id) : undefined,
+        written: traceOutputWritten,
+        elapsedMs: performance.now() - outputStartedAt,
+      }))
     }
     // Should not be getting control messages or stream events in non-stream mode.
     // Also filter out streamlined types since they're only produced by the transformer.
@@ -2199,9 +2229,21 @@ function runHeadlessStreaming(
         )
       ) {
         heldBackResult = message
+        traceSessionTiming('print.result.held', () => ({
+          messageHash: 'uuid' in message && typeof message.uuid === 'string'
+            ? debugIdentifierHash(message.uuid) : undefined,
+          inputHash: message.type === 'result' && message.input_message_id
+            ? debugIdentifierHash(message.input_message_id) : undefined,
+        }))
       } else {
         heldBackResult = null
         output.enqueue(message)
+        traceSessionTiming('print.result.enqueued', () => ({
+          messageHash: 'uuid' in message && typeof message.uuid === 'string'
+            ? debugIdentifierHash(message.uuid) : undefined,
+          inputHash: message.type === 'result' && message.input_message_id
+            ? debugIdentifierHash(message.input_message_id) : undefined,
+        }))
       }
     }
 
@@ -2222,7 +2264,14 @@ function runHeadlessStreaming(
 
     function releaseHeldBackResult() {
       if (!heldBackResult) return
+      const message = heldBackResult
       output.enqueue(heldBackResult)
+      traceSessionTiming('print.result.released', () => ({
+        messageHash: 'uuid' in message && typeof message.uuid === 'string'
+          ? debugIdentifierHash(message.uuid) : undefined,
+        inputHash: message.type === 'result' && message.input_message_id
+          ? debugIdentifierHash(message.input_message_id) : undefined,
+      }))
       if (heldBackResult === acceptedResult) acceptedResultEmitted = true
       heldBackResult = null
       emitPendingSuggestion()
@@ -2619,6 +2668,14 @@ function runHeadlessStreaming(
                   forwardMessagesToBridge()
 
                   if (message.type === 'result') {
+                    traceSessionTiming('print.result.received', () => ({
+                      inputHash: typeof message.input_message_id === 'string'
+                        ? debugIdentifierHash(message.input_message_id) : undefined,
+                      messageHash: typeof message.uuid === 'string'
+                        ? debugIdentifierHash(message.uuid) : undefined,
+                      outcome: message.is_error ? 'error' : 'success',
+                      acceptedInput: cmd.nativeExecution !== undefined,
+                    }))
                     lastResultIsError = !!(message as Record<string, unknown>)
                       .is_error
                     if (cmd.nativeExecution) {
@@ -2751,6 +2808,8 @@ function runHeadlessStreaming(
             }
           }
           const queuedCommand = command
+          const queuedInputHash = process.env.MATCHACLAW_TRACE === '1' && queuedCommand.uuid
+            ? debugIdentifierHash(queuedCommand.uuid) : undefined
           activeInputMessageId = queuedCommand.uuid
           activeInputReceipt = undefined
           acceptedResult = undefined
@@ -2759,23 +2818,41 @@ function runHeadlessStreaming(
           abortController = inputAbortController
           nativeInputActive = queuedCommand.nativeExecution !== undefined
           try {
-            await withInvestigation(queuedCommand.nativeExecution, {
-              request: (request, signal) => structuredIO.requestInvestigation(request, signal),
-              signal: inputAbortController.signal,
-            }, async () => {
-              try {
-                requireInvestigationEffects([])
-                if (queuedCommand.nativeExecution && (bridgeHandle || bridgeInitializing)) {
-                  throw new InvestigationAdmissionError('investigation_bridge_active_or_initializing')
+            await withIabInput(queuedCommand.uuid, () =>
+              withInvestigation(queuedCommand.nativeExecution, {
+                request: (request, signal) => structuredIO.requestInvestigation(request, signal),
+                signal: inputAbortController.signal,
+              }, async () => {
+                try {
+                  requireInvestigationEffects([])
+                  if (queuedCommand.nativeExecution && (bridgeHandle || bridgeInitializing)) {
+                    throw new InvestigationAdmissionError('investigation_bridge_active_or_initializing')
+                  }
+                  await processCommand(queuedCommand, batch, inputAbortController)
+                } finally {
+                  const receiptStartedAt = process.env.MATCHACLAW_TRACE === '1' ? performance.now() : 0
+                  traceSessionTiming('print.input.join.begin', () => ({
+                    inputHash: queuedInputHash,
+                  }))
+                  activeInputReceipt = await investigationInputReceipt()
+                  traceSessionTiming('print.input.join.end', () => ({
+                    inputHash: queuedInputHash,
+                    elapsedMs: performance.now() - receiptStartedAt,
+                    receiptPresent: activeInputReceipt !== undefined,
+                  }))
                 }
-                await processCommand(queuedCommand, batch, inputAbortController)
-              } finally {
-                activeInputReceipt = await investigationInputReceipt()
-              }
-            })
+              }),
+            )
           } catch (error) {
             if (!queuedCommand.nativeExecution || !(error instanceof InvestigationAdmissionError) || !hasDrainedInputReceipt()) throw error
             acceptedResult = executionErrorResult(error, acceptedResult)
+            if (!isSessionPersistenceDisabled()) {
+              try {
+                await flushSessionStorage()
+              } catch (flushError) {
+                acceptedResult = executionErrorResult(flushError, acceptedResult)
+              }
+            }
           } finally {
             nativeInputActive = false
           }
@@ -2831,12 +2908,25 @@ function runHeadlessStreaming(
 
       releaseHeldBackResult()
     } catch (error) {
+      traceSessionTiming('print.run.failed', () => ({
+        failure: error instanceof InvestigationAdmissionError ? 'admission' : 'execution',
+        resultAlreadyEmitted: acceptedResultEmitted,
+        aborted: abortController?.signal.aborted === true,
+      }))
       // Emit error result message before shutting down
       // Write directly to structuredIO to ensure immediate delivery
       try {
         if (!acceptedResultEmitted) {
           if (heldBackResult && heldBackResult === acceptedResult) heldBackResult = null
-          await structuredIO.write(executionErrorResult(error, acceptedResult))
+          let errorResult = executionErrorResult(error, acceptedResult)
+          if (!isSessionPersistenceDisabled()) {
+            try {
+              await flushSessionStorage()
+            } catch (flushError) {
+              errorResult = executionErrorResult(flushError, errorResult)
+            }
+          }
+          await structuredIO.write(errorResult)
         } else {
           logError(new Error(error instanceof InvestigationAdmissionError
             ? error.reason : 'Accepted input failed after result emission'))
@@ -2850,10 +2940,16 @@ function runHeadlessStreaming(
     } finally {
       runPhase = 'finally_flush'
       // Flush pending internal events before going idle
+      const internalFlushStartedAt = process.env.MATCHACLAW_TRACE === '1' ? performance.now() : 0
+      traceSessionTiming('print.idle.flush.begin', () => ({}))
       await structuredIO.flushInternalEvents()
+      traceSessionTiming('print.idle.flush.end', () => ({
+        elapsedMs: performance.now() - internalFlushStartedAt,
+      }))
       runPhase = 'finally_post_flush'
       if (!isShuttingDown()) {
         notifySessionStateChanged('idle')
+        traceSessionTiming('print.idle.notified', () => ({}))
         // Drain so the idle session_state_changed SDK event (plus any
         // terminal task_notification bookends emitted during bg-agent
         // teardown) reach the output stream before we block on the next
@@ -5112,7 +5208,8 @@ function runHeadlessStreaming(
               (userMsg.message as { content: ContentBlockParam[] }).content,
             ),
         uuid: userMsg.uuid as `${string}-${string}-${string}-${string}-${string}`,
-        nativeBudget,
+        // Preserve native input identity in both batch and mid-turn queue drains.
+        nativeBudget: nativeBudget ?? (hasIabCapability() ? {} : undefined),
         nativeExecution,
         nativeInputMessage: nativeExecution ? userMsg : undefined,
         priority: (userMsg as { priority?: string })

@@ -2,8 +2,9 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use workspace_module::session_images::{
     SessionImage, SessionImageData, SessionImageFailure, SessionImagePage,
 };
@@ -12,10 +13,11 @@ use super::{SessionOperation, next_request_id, protocol::AgentScopedSessionKey, 
 use crate::gateway::wire::GatewayResponse;
 
 pub(crate) const MAX_IMAGE_BYTES: usize = 50 * 1024 * 1024;
-const TRANSCRIPT_PREFIX: &str = "artifact_transcript_image_";
+const PAGE_SIZE: usize = 4;
+const TRANSCRIPT_PREFIX: &str = "artifact_";
 const MANAGED_PREFIX: &str = "artifact_managed_image_";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Artifact {
     id: String,
@@ -29,12 +31,12 @@ struct Artifact {
     download: DownloadMode,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct DownloadMode {
     mode: Mode,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Mode {
     Bytes,
@@ -46,9 +48,6 @@ enum Mode {
 #[serde(rename_all = "camelCase")]
 struct Page {
     artifacts: Vec<Artifact>,
-    next_cursor: Option<String>,
-    #[serde(default)]
-    omitted_oversized: bool,
 }
 
 #[derive(Deserialize)]
@@ -94,40 +93,62 @@ impl SessionOperation {
         cursor: Option<&str>,
     ) -> Result<SessionImagePage, SessionImageFailure> {
         validate_identity(session_key, agent_id)?;
-        if cursor.is_some_and(|cursor| !bounded_text(cursor, 256)) {
-            return Err(SessionImageFailure::CursorInvalid);
-        }
-        let mut params =
-            json!({"sessionKey":session_key,"agentId":agent_id,"type":"image","limit":4});
-        if let Some(cursor) = cursor {
-            params["cursor"] = json!(cursor);
-        }
-        let page: Page =
-            serde_json::from_value(self.artifact_query("artifacts.list", params).await?)
-                .map_err(|_| SessionImageFailure::Unavailable)?;
-        if page.artifacts.len() > 4
-            || page
-                .next_cursor
-                .as_deref()
-                .is_some_and(|cursor| !bounded_text(cursor, 256))
-        {
-            return Err(SessionImageFailure::Unavailable);
-        }
-        let mut items = Vec::with_capacity(page.artifacts.len());
-        for artifact in page.artifacts {
+        let cursor = cursor.map(decode_cursor).transpose()?;
+        let mut page: Page = serde_json::from_value(
+            self.artifact_query(
+                "artifacts.list",
+                json!({"sessionKey":session_key,"agentId":agent_id}),
+            )
+            .await?,
+        )
+        .map_err(|_| SessionImageFailure::Unavailable)?;
+        page.artifacts.retain(|artifact| artifact.kind == "image");
+        for artifact in &page.artifacts {
             artifact.validate(session_key)?;
-            let readable = artifact.readable();
-            items.push(SessionImage {
-                name: image_name(&artifact.title),
-                reference: artifact.id,
-                mime_type: artifact.mime_type,
-                readable,
-            });
         }
+        // Native lists all artifacts; bind local pages to this scope and ordered image metadata.
+        let fingerprint: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(&(agent_id, session_key, &page.artifacts))
+                .map_err(|_| SessionImageFailure::Unavailable)?,
+        )
+        .into();
+        let image_count = page.artifacts.len();
+        page.artifacts.retain(|artifact| {
+            artifact
+                .size_bytes
+                .is_none_or(|size| size <= MAX_IMAGE_BYTES as u64)
+        });
+        let omitted_oversized = page.artifacts.len() != image_count;
+        let offset = match cursor {
+            Some((expected, offset))
+                if expected == fingerprint && offset < page.artifacts.len() =>
+            {
+                offset
+            }
+            Some(_) => return Err(SessionImageFailure::CursorInvalid),
+            None => 0,
+        };
+        let next_cursor = (page.artifacts.len() - offset > PAGE_SIZE)
+            .then(|| encode_cursor(&fingerprint, offset + PAGE_SIZE));
+        let items = page
+            .artifacts
+            .into_iter()
+            .skip(offset)
+            .take(PAGE_SIZE)
+            .map(|artifact| {
+                let readable = artifact.readable();
+                SessionImage {
+                    name: image_name(&artifact.title),
+                    reference: artifact.id,
+                    mime_type: artifact.mime_type,
+                    readable,
+                }
+            })
+            .collect();
         Ok(SessionImagePage {
             items,
-            next_cursor: page.next_cursor,
-            omitted_oversized: page.omitted_oversized,
+            next_cursor,
+            omitted_oversized,
         })
     }
 
@@ -141,9 +162,16 @@ impl SessionOperation {
         if !transcript_reference(reference) && managed_attachment(reference).is_none() {
             return Err(SessionImageFailure::InvalidReference);
         }
-        let download: Download = serde_json::from_value(self.artifact_query("artifacts.download", json!({
-            "sessionKey":session_key,"agentId":agent_id,"artifactId":reference,"transport":"http",
-        })).await?).map_err(|_| SessionImageFailure::Unavailable)?;
+        let download: Download = serde_json::from_value(
+            self.artifact_query(
+                "artifacts.download",
+                json!({
+                    "sessionKey":session_key,"agentId":agent_id,"artifactId":reference,
+                }),
+            )
+            .await?,
+        )
+        .map_err(|_| SessionImageFailure::Unavailable)?;
         download.artifact.validate(session_key)?;
         if download.artifact.id != reference {
             return Err(SessionImageFailure::InvalidReference);
@@ -177,9 +205,9 @@ impl SessionOperation {
                 let mime = image_mime(&bytes, download.artifact.mime_type.as_deref())?;
                 (bytes, mime)
             }
-            // Native HTTP grants rewrite transcript byte artifacts to mode=url too.
             Mode::Url
-                if download.data.is_none()
+                if managed_attachment(reference).is_some()
+                    && download.data.is_none()
                     && download.encoding.is_none()
                     && download
                         .expires_at
@@ -214,10 +242,9 @@ impl SessionOperation {
     ) -> Result<Value, SessionImageFailure> {
         let id = next_request_id(method).map_err(|_| SessionImageFailure::Unavailable)?;
         let query = request(&id, method, params).map_err(|_| SessionImageFailure::Unavailable)?;
-        // Native cursors belong to this shared control connection, not a new socket per page.
         let response = self
             .gateway
-            .rpc_query(query)
+            .query_artifact(query)
             .await
             .map_err(|_| SessionImageFailure::Unavailable)?;
         if response.request_id() != id {
@@ -229,7 +256,6 @@ impl SessionOperation {
                 ..
             } => Ok(payload),
             GatewayResponse::Failure { error, .. } => Err(match error.artifact_error_type {
-                Some("artifact_cursor_invalid") => SessionImageFailure::CursorInvalid,
                 Some("artifact_not_found") => SessionImageFailure::InvalidReference,
                 Some("artifact_download_unsupported") => SessionImageFailure::Unsupported,
                 _ => SessionImageFailure::Unavailable,
@@ -272,40 +298,52 @@ fn bounded_text(value: &str, limit: usize) -> bool {
     !value.trim().is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TranscriptReference {
-    source: String,
-    raw_seq: u64,
-    message_id: String,
-    message_seq: u64,
-    content_index: u64,
+fn encode_cursor(fingerprint: &[u8; 32], offset: usize) -> String {
+    let mut bytes = [0_u8; 41];
+    bytes[0] = 1;
+    bytes[1..33].copy_from_slice(fingerprint);
+    bytes[33..].copy_from_slice(&(offset as u64).to_be_bytes());
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn decode_cursor(value: &str) -> Result<([u8; 32], usize), SessionImageFailure> {
+    if !bounded_text(value, 256) {
+        return Err(SessionImageFailure::CursorInvalid);
+    }
+    let bytes: [u8; 41] = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| SessionImageFailure::CursorInvalid)?
+        .try_into()
+        .map_err(|_| SessionImageFailure::CursorInvalid)?;
+    if bytes[0] != 1 || URL_SAFE_NO_PAD.encode(bytes) != value {
+        return Err(SessionImageFailure::CursorInvalid);
+    }
+    let fingerprint = bytes[1..33]
+        .try_into()
+        .map_err(|_| SessionImageFailure::CursorInvalid)?;
+    let offset = usize::try_from(u64::from_be_bytes(
+        bytes[33..]
+            .try_into()
+            .map_err(|_| SessionImageFailure::CursorInvalid)?,
+    ))
+    .map_err(|_| SessionImageFailure::CursorInvalid)?;
+    if offset == 0 || offset % PAGE_SIZE != 0 {
+        return Err(SessionImageFailure::CursorInvalid);
+    }
+    Ok((fingerprint, offset))
 }
 
 fn transcript_reference(value: &str) -> bool {
-    let Some(encoded) = value
-        .strip_prefix(TRANSCRIPT_PREFIX)
-        .filter(|_| value.len() <= 8192)
-    else {
-        return false;
-    };
-    let Ok(bytes) = URL_SAFE_NO_PAD.decode(encoded) else {
-        return false;
-    };
-    let Ok(reference) = serde_json::from_slice::<TranscriptReference>(&bytes) else {
-        return false;
-    };
-    URL_SAFE_NO_PAD.encode(&bytes) == encoded
-        && bounded_text(&reference.source, 128)
-        && bounded_text(&reference.message_id, 1024)
-        && reference.message_seq > 0
-        && reference.message_seq < 9_007_199_254_740_991
-        && reference.raw_seq <= 9_007_199_254_740_991
-        && reference.content_index <= 9_007_199_254_740_991
+    value.strip_prefix(TRANSCRIPT_PREFIX).is_some_and(|id| {
+        id.len() == 18
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    })
 }
 
 pub(crate) fn managed_attachment(reference: &str) -> Option<&str> {
-    let id = reference.strip_prefix(MANAGED_PREFIX)?;
+    let id = reference.strip_prefix(MANAGED_PREFIX).or_else(|| reference.strip_prefix("artifact_managed_media_"))?;
     (id.len() == 36
         && id.bytes().enumerate().all(|(index, byte)| match index {
             8 | 13 | 18 | 23 => byte == b'-',

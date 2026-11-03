@@ -142,6 +142,8 @@ fn media_protocol(value: &str) -> Result<ProviderMediaApiProtocol, ProviderMigra
         "google" => Ok(ProviderMediaApiProtocol::Google),
         "openai" => Ok(ProviderMediaApiProtocol::OpenAi),
         "openrouter" => Ok(ProviderMediaApiProtocol::OpenRouter),
+        "dashscope" => Ok(ProviderMediaApiProtocol::DashScope),
+        "ark" => Ok(ProviderMediaApiProtocol::Ark),
         _ => Err(ProviderMigrationFault::Decode),
     }
 }

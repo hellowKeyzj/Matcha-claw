@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import i18n from '@/i18n';
 import { hostIabCommand, hostIabSnapshot } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
-import type { IabEvent, IabSnapshot, IabUiCommand, IabUiResponse } from '@/types/desktop/iab';
+import type { IabEvent, IabSnapshot, IabTab, IabUiCommand, IabUiResponse } from '@/types/desktop/iab';
 
 interface IabState {
   ownerId: string | null;
@@ -21,6 +21,12 @@ let snapshotFlight: Promise<void> | null = null;
 const eventListeners = new Set<(event: IabEvent) => void>();
 export class IabProjectionDiscarded extends Error {}
 
+// Display grouping is not Agent authorization; Main owns claims and access.
+export function isIabTabVisible(tab: IabTab, sessionGroupId: string | null) {
+  return tab.createdBy === null || tab.sessionGroupId === null || tab.sessionGroupId === sessionGroupId
+    || sessionGroupId !== null && (tab.createdBy === sessionGroupId || tab.claimedBy === sessionGroupId);
+}
+
 function syncSnapshot(snapshot: IabSnapshot) {
   const current = useIabStore.getState();
   if ((current.revision >= 0 && snapshot.ownerId !== current.ownerId) || snapshot.revision < current.revision) return false;
@@ -30,7 +36,6 @@ function syncSnapshot(snapshot: IabSnapshot) {
     if (!previous) return tab;
     const next = {
       ...tab,
-      agentSessionIds: shallow(previous.agentSessionIds, tab.agentSessionIds) ? previous.agentSessionIds : tab.agentSessionIds,
       crash: shallow(previous.crash, tab.crash) ? previous.crash : tab.crash,
     };
     return shallow(previous, next) ? previous : next;

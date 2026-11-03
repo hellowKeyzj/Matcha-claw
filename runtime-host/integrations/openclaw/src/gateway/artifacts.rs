@@ -2,12 +2,43 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::{StatusCode, header::CONTENT_TYPE, redirect::Policy};
+use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use workspace_module::session_images::SessionImageFailure;
 
-use super::client::GatewayClient;
+use super::{
+    client::{GatewayClient, GatewayClientError, RPC_DEADLINE, close_quietly, exchange},
+    wire,
+};
 use crate::session::operation::artifacts::{MAX_IMAGE_BYTES, image_mime, managed_attachment};
 
+// A 50 MiB original expands to base64; leave bounded room for native metadata/envelope.
+const MAX_DOWNLOAD_RESPONSE_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024 * 1024;
+
 impl GatewayClient {
+    pub(crate) async fn query_artifact(
+        &self,
+        request: wire::RpcRequest,
+    ) -> Result<wire::GatewayResponse, GatewayClientError> {
+        let config = match request.method() {
+            "artifacts.list" => WebSocketConfig::default(),
+            "artifacts.download" => WebSocketConfig::default()
+                .max_message_size(Some(MAX_DOWNLOAD_RESPONSE_BYTES))
+                .max_frame_size(Some(MAX_DOWNLOAD_RESPONSE_BYTES)),
+            _ => return Err(GatewayClientError::Protocol),
+        };
+        // Keep large replies and transport failures off the shared control connection.
+        let (mut socket, _) = self
+            .connect_with_hello_config(&["operator.read"], config)
+            .await?;
+        let result = timeout(RPC_DEADLINE, exchange(&mut socket, &request))
+            .await
+            .map_err(|_| GatewayClientError::RpcDeadline)
+            .and_then(|result| result);
+        close_quietly(&mut socket).await;
+        result
+    }
+
     pub(crate) async fn read_artifact_image(
         &self,
         session_key: &str,
@@ -72,7 +103,7 @@ impl GatewayClient {
     }
 }
 
-fn artifact_url(
+pub(crate) fn artifact_url(
     origin: &str,
     session_key: &str,
     reference: &str,
@@ -89,23 +120,17 @@ fn artifact_url(
     let url = origin
         .join(locator)
         .map_err(|_| SessionImageFailure::InvalidReference)?;
-    let valid = if let Some(attachment) = managed_attachment(reference) {
-        let path = format!(
-            "/api/chat/media/outgoing/{}/{attachment}/full",
-            encode_component(session_key)
-        );
-        let mut query = url.query_pairs();
-        url.path() == path
-            && query
-                .next()
-                .is_some_and(|(key, value)| key == "mediaTicket" && valid_managed_ticket(&value))
-            && query.next().is_none()
-    } else {
-        url.path()
-            .strip_prefix("/api/artifacts/download/")
-            .is_some_and(valid_transcript_ticket)
-            && url.query().is_none()
-    };
+    let attachment = managed_attachment(reference).ok_or(SessionImageFailure::InvalidReference)?;
+    let path = format!(
+        "/api/chat/media/outgoing/{}/{attachment}/full",
+        encode_component(session_key)
+    );
+    let mut query = url.query_pairs();
+    let valid = url.path() == path
+        && query
+            .next()
+            .is_some_and(|(key, value)| key == "mediaTicket" && valid_managed_ticket(&value))
+        && query.next().is_none();
     if !valid
         || url.origin() != origin.origin()
         || !url.username().is_empty()
@@ -115,23 +140,6 @@ fn artifact_url(
         return Err(SessionImageFailure::InvalidReference);
     }
     Ok(url)
-}
-
-fn valid_transcript_ticket(locator: &str) -> bool {
-    let Some((connection, ticket)) = locator.split_once('/') else {
-        return false;
-    };
-    !connection.is_empty()
-        && connection.len() <= 256
-        && connection != "."
-        && connection != ".."
-        && connection
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
-        && ticket.len() == 43
-        && URL_SAFE_NO_PAD
-            .decode(ticket)
-            .is_ok_and(|bytes| bytes.len() == 32 && URL_SAFE_NO_PAD.encode(bytes) == ticket)
 }
 
 fn valid_managed_ticket(ticket: &str) -> bool {

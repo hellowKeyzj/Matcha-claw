@@ -26,11 +26,16 @@ Renderer public entry 由 Electron [capabilities.ts](../../electron/api/routes/c
 | `GET` | `/api/runtime-host/gateway-launch-plan` | Renderer allowlisted | sanitized projection. |
 | `GET` | `/api/runtime-host/team-webhook-auth` | Renderer allowlisted | public auth projection. |
 | `GET` | `/api/runtime-host/operations?owner=` | retired | generic operation query projection removed; async completion is exposed only through an owner/facade typed operation query/event. |
-| `GET` | `/api/runtime-host/usage/recent` | Renderer allowlisted | current code registers via cron route module. |
+| `GET` | `/api/runtime-host/usage/recent` | Renderer allowlisted | explicit runtime scope; strict `{entries,coverage}` via Usage route, not an array. |
+| `GET` | `/api/runtime-host/usage/session-timeseries` | Renderer allowlisted | same envelope; coverage is confined to the requested Agent/session. |
 | `GET` | `/api/workbench/bootstrap` | Renderer allowlisted | workbench bootstrap. |
 | `GET` | `/api/plugins/runtime` / `/api/plugins/catalog` | Renderer allowlisted | plugin projections. |
 
 Evidence: [capabilities.ts](../../electron/api/routes/capabilities.ts)、[cron.ts](../../electron/api/routes/cron.ts)、[runtime-host-delivery/control.ts](../../electron/main/runtime-host-delivery/control.ts)、[private_control.rs](../../runtime-host/host/src/module_registry/private_control.rs)、[http/router.rs](../../runtime-host/host/src/http/router.rs)。
+
+### Usage 覆盖信息合同（2026-11-04 显式批准）
+
+recent 与 session-timeseries 的成功值统一为 `{entries, coverage}`，不再返回 entries-only 数组。entry 数值字段不变。OpenClaw coverage 为 `{kind:"reported"}`，保留其原报告口径；Matcha 为 `{kind:"observed",hasMore,nativeOutcomeUnknown,unknownEntries}`，未知点只含 `sessionId/agentId/timestamp/reason`。五种 reason 与严格边界由 canonical desktop type 定义。合法未知计量仍为 200，已知记录正常返回；无法读取或协议损坏仍 503。`nativeOutcomeUnknown` 只描述原 native 查询范围，`hasMore` 仅表明 recent 截断，不承诺全历史或精确 UI 时间窗完整；详情只汇总请求 session 的覆盖信息。signed scope、权限与 native 协议不改，不支持旧数组 fallback。[VERIFY: src/types/desktop/usage.ts] [VERIFY: runtime-host/modules/usage/src/domain/model.rs] [VERIFY: runtime-host/integrations/matcha-agent/src/usage/mod.rs] [VERIFY: electron/main/runtime-host-delivery/transport/usage.ts:87] [VERIFY: electron/api/routes/runtime-host-usage.ts:25]
 
 ### World 独立评测私有入口（非 HTTP route）
 

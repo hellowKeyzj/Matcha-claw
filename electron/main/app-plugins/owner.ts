@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import type {
   AppPluginBuild,
   AppPluginCatalog,
@@ -8,13 +9,15 @@ import type {
 import { logger } from '../../utils/logger';
 import {
   AppPluginError,
+  MAX_APP_PLUGIN_ZIP_BYTES,
   requireDigest,
   requireObject,
   requirePluginId,
 } from './package';
 import type { AppPluginPackageWorker } from './package-client';
 import type { PackageRequest, PackageResults } from './package-contract';
-import { AppPluginStorage, MAX_INSTALLED_APP_PLUGINS } from './storage';
+import { compareAppPluginVersions, readBundledAppPlugins } from './bundled';
+import { AppPluginStorage, MAX_INSTALLED_APP_PLUGINS, readBoundedFile, type StoredAppPluginCatalog } from './storage';
 
 export interface ApplicationPluginOwnerOptions {
   readonly rootDir: string;
@@ -24,7 +27,7 @@ export interface ApplicationPluginOwnerOptions {
 
 export class ApplicationPluginOwner {
   private readonly storage: AppPluginStorage;
-  private catalog: AppPluginCatalog | undefined;
+  private catalog: StoredAppPluginCatalog | undefined;
   private tail: Promise<void> = Promise.resolve();
   private pending = 0;
   private closed = false;
@@ -35,8 +38,38 @@ export class ApplicationPluginOwner {
 
   list(): Promise<AppPluginCatalog> {
     if (this.closed) return Promise.reject(new AppPluginError('closed', 'App plugin owner is closing.'));
-    if (this.catalog) return Promise.resolve(structuredClone(this.catalog));
-    return this.enqueue(async () => structuredClone(await this.load()));
+    const snapshot = ({ revision, plugins }: AppPluginCatalog): AppPluginCatalog => structuredClone({ revision, plugins });
+    if (this.catalog) return Promise.resolve(snapshot(this.catalog));
+    return this.enqueue(async () => {
+      this.catalog ??= await this.load();
+      return snapshot(this.catalog);
+    });
+  }
+
+  installBundled(directory: string): Promise<void> {
+    return this.enqueue(async () => {
+      const receipts = await readBundledAppPlugins(directory);
+      for (const receipt of receipts) {
+        const catalog = await this.load();
+        const handled = catalog.bundled[receipt.id];
+        if (handled === receipt.digest) continue;
+        const current = catalog.plugins.find((plugin) => plugin.manifest.id === receipt.id);
+        // Keep the bundle baseline: recording a skipped package can erase a user's rollback choice.
+        if (handled && current?.digest !== handled) continue;
+        const bundled = { ...catalog.bundled, [receipt.id]: receipt.digest };
+        if (current && compareAppPluginVersions(receipt.version, current.manifest.version) <= 0) {
+          // Re-signing the same version must not turn the installed bundle into a user override.
+          if (!handled) await this.commit(catalog.plugins, undefined, bundled);
+          continue;
+        }
+        const bytes = await readBoundedFile(join(directory, `${receipt.id}.zip`), MAX_APP_PLUGIN_ZIP_BYTES);
+        const contents = await this.options.packageWorker.process({ operation: 'validate', bytes });
+        if (contents.digest !== receipt.digest || contents.manifest.id !== receipt.id || contents.manifest.version !== receipt.version) {
+          throw new AppPluginError('invalid_package', 'Bundled app plugin does not match its receipt.');
+        }
+        await this.installContents(contents, { digest: receipt.digest, origin: 'bundled' }, bundled);
+      }
+    });
   }
 
   inspect(packageBase64: string): Promise<AppPluginInspection> {
@@ -155,11 +188,22 @@ export class ApplicationPluginOwner {
     const contents = request.operation === 'import'
       ? await this.options.packageWorker.process({ operation: 'import', packageBase64: request.packageBase64 })
       : await this.options.packageWorker.process({ operation: 'validate', bytes: request.bytes });
+    return this.installContents(contents, input);
+  }
+
+  private async installContents(
+    contents: PackageResults['import'],
+    input: { digest: string; origin: InstalledAppPlugin['origin']; onlyIfNew?: boolean },
+    bundled?: StoredAppPluginCatalog['bundled'],
+  ): Promise<InstalledAppPlugin> {
     if (contents.digest !== input.digest) throw new AppPluginError('conflict', 'Package changed after inspection. Inspect it again before importing.');
     const catalog = await this.load();
     const previous = catalog.plugins.find((plugin) => plugin.manifest.id === contents.manifest.id);
     if (input.onlyIfNew && previous) throw new AppPluginError('conflict', 'New plugin development cannot replace an installed package.');
-    if (previous?.digest === contents.digest) return structuredClone(previous);
+    if (previous?.digest === contents.digest) {
+      if (bundled) await this.commit(catalog.plugins, undefined, bundled);
+      return structuredClone(previous);
+    }
     if (previous && [previous, previous.previous].some((version) => version
       && version.manifest.version === contents.manifest.version && version.digest !== contents.digest)) {
       throw new AppPluginError('conflict', 'This plugin version already has different contents. Build a new version before importing.');
@@ -181,13 +225,12 @@ export class ApplicationPluginOwner {
     await this.storage.stage(contents.manifest.id, contents.digest, Buffer.from(contents.bytes.buffer, contents.bytes.byteOffset, contents.bytes.byteLength));
     await this.commit([...catalog.plugins.filter((plugin) => plugin.manifest.id !== contents.manifest.id), installed],
       () => this.storage.prune(contents.manifest.id, contents.digest, installed.previous?.digest)
-        .catch(() => logger.warn('[AppPlugins] Could not prune retained package versions')));
+        .catch(() => logger.warn('[AppPlugins] Could not prune retained package versions')), bundled);
     return structuredClone(installed);
   }
 
-  private async load(): Promise<AppPluginCatalog> {
-    this.catalog ??= await this.storage.load();
-    return this.catalog;
+  private async load(): Promise<StoredAppPluginCatalog> {
+    return this.catalog ?? await this.storage.load();
   }
 
   private requireCurrent(catalog: AppPluginCatalog, id: string, digest: string): InstalledAppPlugin {
@@ -199,14 +242,19 @@ export class ApplicationPluginOwner {
     return installed;
   }
 
-  private async commit(plugins: readonly InstalledAppPlugin[], cleanup?: () => Promise<void>): Promise<void> {
-    const revision = (await this.load()).revision + 1;
+  private async commit(
+    plugins: readonly InstalledAppPlugin[],
+    cleanup?: () => Promise<void>,
+    bundled?: StoredAppPluginCatalog['bundled'],
+  ): Promise<void> {
+    const current = await this.load();
+    const revision = current.revision + 1;
     if (!Number.isSafeInteger(revision)) throw new Error('App plugin catalog revision limit reached.');
-    const catalog = { revision, plugins };
+    const catalog = { revision, plugins, bundled: bundled ?? current.bundled };
     await this.storage.publish(catalog);
     this.catalog = catalog;
     try {
-      await this.options.onChanged({ revision }, structuredClone(catalog));
+      await this.options.onChanged({ revision }, structuredClone({ revision, plugins }));
     } catch (cause) {
       const message = `App plugin catalog revision ${revision} was committed, but change notification or application cleanup failed. Refresh installed plugins before retrying.`;
       const error = cause instanceof AppPluginError

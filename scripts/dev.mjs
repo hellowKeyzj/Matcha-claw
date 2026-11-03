@@ -28,6 +28,7 @@ function run(command, args, options = {}) {
   }
 }
 
+run('node', ['scripts/patch-openclaw-dev.mjs']);
 run('node', ['sdk/app-plugins/build.mjs']);
 run('node', ['scripts/download-matcha-ripgrep.mjs']);
 run('node', ['scripts/build-matcha-agent.mjs', '--if-needed']);

@@ -1,7 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Worker } from 'node:worker_threads';
 import type { BrowserActionParams } from '../../../packages/openclaw-browser-relay-plugin/src/browser-action-contract';
+import { canAccessPage, canClosePage } from '../../../packages/openclaw-browser-relay-plugin/src/state/page-ownership';
 import type { IabJsonValue } from '../../../src/types/desktop/iab';
 import type { IabAutomation, IabAutomationOptions, IabCdpLease, IabTrustedContext } from './contracts';
 import type { AutomationEffect, AutomationReply, AutomationToMain, AutomationToWorker } from './automation-port';
@@ -13,12 +15,13 @@ type Invocation = {
   context: IabTrustedContext;
   controller: AbortController;
   work: Set<Promise<void>>;
-  grants: Map<string, { signal: AbortSignal; unsubscribe(): void }>;
+  claims: Map<string, { signal: AbortSignal; unsubscribe(): void }>;
+  openedTabId?: string;
   settled: Promise<void>;
   finish(): void;
   resolve(reply: AutomationReply): void;
 };
-type Lease = { lease: IabCdpLease; principalId: string; grant: AbortSignal; unsubscribe(): void; cleanup?: AbortController };
+type Lease = { lease: IabCdpLease; executorId: string; claim: AbortSignal; unsubscribe(): void; cleanup?: AbortController };
 let nextGeneration = 0;
 
 /** Main retains the original native authority and owns every physical side effect. */
@@ -53,17 +56,17 @@ export class IabAutomationWorker implements IabAutomation {
     return work;
   }
 
-  revokeAccess(tabId: string, principalId: string): Promise<void> {
-    const reason = iabError('IAB_ACCESS_REVOKED', 'Browser page access was revoked');
+  releaseClaim(tabId: string, executorId: string): Promise<void> {
+    const reason = iabError('IAB_CLAIM_RELEASED', 'Browser page claim was released');
     const affected: Invocation[] = [];
     for (const [id, request] of this.requests) {
-      if (request.context.principalId !== principalId || !request.grants.has(tabId)) continue;
+      if (request.context.executorId !== executorId || !request.claims.has(tabId)) continue;
       affected.push(request);
       request.controller.abort(reason);
       this.post({ type: 'cancel', id, error: serializeAutomationError(reason) });
     }
     for (const [id, state] of this.leases) {
-      if (state.lease.tabId !== tabId) continue;
+      if (state.lease.tabId !== tabId || state.executorId !== executorId) continue;
       this.removeEvents(id);
       this.queueEvent(id, { method: 'IAB.leaseRevoked', params: {} });
       state.unsubscribe(); state.lease.release(); this.leases.delete(id);
@@ -72,7 +75,7 @@ export class IabAutomationWorker implements IabAutomation {
     const drained = this.options.broker.revokeTarget(tabId, this.options.manager.ownerId);
     const settled = Promise.allSettled([...(previous ? [previous] : []), drained, ...affected.map((request) => request.settled)]).then((results) => {
       const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason);
-      if (failures.length) throw new AggregateError(failures, 'Browser page access revocation did not physically drain');
+      if (failures.length) throw new AggregateError(failures, 'Browser page claim release did not physically drain');
     });
     this.revoking.set(tabId, settled);
     const clear = () => { if (this.revoking.get(tabId) === settled) this.revoking.delete(tabId); };
@@ -140,7 +143,7 @@ export class IabAutomationWorker implements IabAutomation {
     const result = new Promise<AutomationReply>((done) => { resolve = done; });
     let finish!: () => void;
     const settled = new Promise<void>((done) => { finish = done; });
-    const request: Invocation = { context, controller, work: new Set(), grants: new Map(), settled, finish, resolve };
+    const request: Invocation = { context, controller, work: new Set(), claims: new Map(), settled, finish, resolve };
     this.requests.set(id, request);
     const abort = () => {
       controller.abort(signal.reason);
@@ -150,12 +153,7 @@ export class IabAutomationWorker implements IabAutomation {
     try {
       if (signal.aborted) abort();
       controller.signal.throwIfAborted();
-      const tabId = ('targetId' in params ? params.targetId : undefined) ?? (params.action === 'act' || params.action === 'utility' ? params.request?.targetId : undefined);
-      if (tabId) {
-        this.access(tabId, request);
-        this.options.broker.bindTarget(tabId, this.options.manager.ownerId, controller.signal);
-      }
-      this.post({ type: 'request', id, params, context: { principalId: context.principalId, sessionKey: context.sessionKey, workspaceDir: context.workspaceDir } });
+      this.post({ type: 'request', id, params, context: { principalId: context.principalId, executorId: context.executorId, sessionKey: context.sessionKey, workspaceDir: context.workspaceDir } });
       const reply = await result;
       // Logical rejects, worker exit and CDP invalidation are not physical drain.
       while (request.work.size) await Promise.all([...request.work]);
@@ -166,9 +164,23 @@ export class IabAutomationWorker implements IabAutomation {
       if (!reply.ok) throw deserializeAutomationError(reply.error);
       this.check(request);
       return reply.value as IabJsonValue;
+    } catch (error) {
+      if (request.openedTabId) {
+        try {
+          while (request.work.size) await Promise.all([...request.work]);
+          await this.options.broker.drain(controller.signal);
+          const ownership = this.options.manager.getPageOwnership(request.openedTabId);
+          if (ownership && canClosePage(ownership, context.executorId)) {
+            context.assertCurrent();
+            request.claims.get(request.openedTabId)?.unsubscribe(); request.claims.delete(request.openedTabId);
+            this.options.manager.close(request.openedTabId, this.options.manager.ownerId, context);
+          }
+        } catch { /* Failed-open cleanup must not replace the original action failure. */ }
+      }
+      throw error;
     } finally {
       signal.removeEventListener('abort', abort);
-      for (const grant of request.grants.values()) grant.unsubscribe();
+      for (const claim of request.claims.values()) claim.unsubscribe();
       this.requests.delete(id);
       request.finish();
     }
@@ -176,23 +188,23 @@ export class IabAutomationWorker implements IabAutomation {
 
   private check(request: Invocation): void {
     request.controller.signal.throwIfAborted(); request.context.assertCurrent();
-    for (const [tabId, grant] of request.grants) {
-      grant.signal.throwIfAborted();
-      if (this.options.manager.agentAccess(tabId, request.context.principalId) !== grant.signal) throw iabError('IAB_ACCESS_REVOKED', 'Browser page access changed during this invocation');
+    for (const [tabId, claim] of request.claims) {
+      claim.signal.throwIfAborted();
+      if (this.options.manager.agentAccess(tabId, request.context, false) !== claim.signal) throw iabError('IAB_CLAIM_RELEASED', 'Browser page claim changed during this invocation');
     }
   }
 
   private access(tabId: string, request: Invocation): AbortSignal {
     this.check(request);
-    const signal = this.options.manager.agentAccess(tabId, request.context.principalId);
+    const signal = this.options.manager.agentAccess(tabId, request.context);
     signal.throwIfAborted();
-    if (!request.grants.has(tabId)) {
+    if (!request.claims.has(tabId)) {
       const abort = () => {
         request.controller.abort(signal.reason);
         for (const [id, candidate] of this.requests) if (candidate === request) this.post({ type: 'cancel', id, error: serializeAutomationError(signal.reason) });
       };
       signal.addEventListener('abort', abort, { once: true });
-      request.grants.set(tabId, { signal, unsubscribe: () => signal.removeEventListener('abort', abort) });
+      request.claims.set(tabId, { signal, unsubscribe: () => signal.removeEventListener('abort', abort) });
     }
     return signal;
   }
@@ -228,7 +240,7 @@ export class IabAutomationWorker implements IabAutomation {
       case 'cancel-lease': {
         const request = this.requests.get(message.invocation);
         const state = this.leases.get(message.leaseId);
-        if (request && state?.principalId === request.context.principalId) state.lease.cancel(request.controller.signal);
+        if (request && state?.executorId === request.context.executorId) state.lease.cancel(request.controller.signal);
         return;
       }
       case 'release-download': {
@@ -291,58 +303,89 @@ export class IabAutomationWorker implements IabAutomation {
     }
     if (effect.kind === 'restore-screenshot-viewport') {
       const state = this.leases.get(effect.leaseId);
-      if (!state || state.principalId !== context.principalId || state.lease.ownerId !== manager.ownerId || state.lease.generation !== this.generation) throw iabError('IAB_LEASE_INVALID', 'Screenshot lease does not belong to this worker and verified principal');
+      if (!state || state.executorId !== context.executorId || state.lease.ownerId !== manager.ownerId || state.lease.generation !== this.generation) throw iabError('IAB_LEASE_INVALID', 'Screenshot lease does not belong to this worker and verified executor');
       return state.lease.executor.restoreScreenshotViewport(signal);
     }
     check();
     const ownedLease = (id: string) => {
       const state = this.leases.get(id);
-      if (!state || state.principalId !== context.principalId || state.lease.ownerId !== manager.ownerId || state.lease.generation !== this.generation) throw iabError('IAB_LEASE_INVALID', 'CDP lease does not belong to this worker and verified principal');
-      if (this.access(state.lease.tabId, request) !== state.grant) throw iabError('IAB_LEASE_INVALID', 'CDP lease belongs to a revoked page grant');
+      if (!state || state.executorId !== context.executorId || state.lease.ownerId !== manager.ownerId || state.lease.generation !== this.generation) throw iabError('IAB_LEASE_INVALID', 'CDP lease does not belong to this worker and verified executor');
+      state.claim.throwIfAborted();
+      if (manager.agentAccess(state.lease.tabId, context, false) !== state.claim) throw iabError('IAB_LEASE_INVALID', 'CDP lease belongs to an ended page claim');
+      this.access(state.lease.tabId, request);
       broker.bindTarget(state.lease.tabId, manager.ownerId, signal);
       return state.lease;
     };
     switch (effect.kind) {
       case 'tabs': {
-        const tabs = manager.listAllTabs().filter((tab) => tab.agentSessionIds.includes(context.principalId) && !this.access(tab.id, request).aborted);
+        const tabs = manager.listAllTabs().filter((tab) => canAccessPage(tab, context.executorId, context.principalId));
         const activeTabId = manager.getActiveTabId(manager.ownerId);
         return { tabs, activeTabId: tabs.some((tab) => tab.id === activeTabId) ? activeTabId : null };
       }
-      case 'check-target': this.access(effect.tabId, request); broker.bindTarget(effect.tabId, manager.ownerId, signal); return {};
+      case 'release-claims':
+        // Snapshot before receive tracks this release effect in the same work set.
+        await Promise.all([...request.work]);
+        await broker.drain(signal);
+        check();
+        // The releasing invocation must not cancel itself or join its own settled promise.
+        for (const claim of request.claims.values()) claim.unsubscribe();
+        request.claims.clear();
+        await manager.releaseSessionClaims(context.executorId);
+        return {};
+      case 'check-target': {
+        if (effect.operation === 'close' && manager.getOwner(effect.tabId) === null && manager.getWebContents(effect.tabId) === null) return false;
+        this.access(effect.tabId, request);
+        broker.bindTarget(effect.tabId, manager.ownerId, signal);
+        if (effect.operation === 'close') {
+          const ownership = manager.getPageOwnership(effect.tabId);
+          if (!ownership || !canClosePage(ownership, context.executorId)) throw iabError('IAB_AGENT_CLOSE_DENIED', 'Only this agent session\'s non-retained browser tabs can be closed');
+        }
+        return true;
+      }
       case 'open': {
-        const tabId = manager.open(effect.url, { creator: context });
+        const tabId = manager.open(effect.url, { creator: context, retain: effect.retain, background: true });
+        request.openedTabId = tabId;
         this.access(tabId, request);
         broker.bindTarget(tabId, manager.ownerId, signal);
         return tabId;
       }
       case 'close-tab':
         this.access(effect.tabId, request);
-        manager.close(effect.tabId, manager.ownerId);
-        request.grants.get(effect.tabId)?.unsubscribe(); request.grants.delete(effect.tabId);
+        request.claims.get(effect.tabId)?.unsubscribe(); request.claims.delete(effect.tabId);
+        manager.close(effect.tabId, manager.ownerId, trusted);
         return {};
       case 'show': this.access(effect.tabId, request); broker.bindTarget(effect.tabId, manager.ownerId, signal); manager.requestShow(manager.ownerId, effect.tabId); return {};
       case 'acquire': {
-        const grant = this.access(effect.tabId, request);
+        const claim = this.access(effect.tabId, request);
         const lease = await broker.acquire(effect.tabId, manager.ownerId, signal, this.generation, check);
         try { check(); } catch (error) { lease.release(); throw error; }
-        const stopEvents = lease.executor.onEvent((event) => this.queueEvent(lease.id, event));
-        const abort = () => {
-          const work = this.revokeAccess(effect.tabId, context.principalId);
-          this.inflight.add(work);
-          void work.then(() => this.inflight.delete(work), () => this.inflight.delete(work));
-        };
-        grant.addEventListener('abort', abort, { once: true });
-        const unsubscribe = () => { stopEvents(); grant.removeEventListener('abort', abort); };
-        this.leases.set(lease.id, { lease, principalId: context.principalId, grant, unsubscribe });
+        const unsubscribe = lease.executor.onEvent((event) => this.queueEvent(lease.id, event));
+        this.leases.set(lease.id, { lease, executorId: context.executorId, claim, unsubscribe });
         return { id: lease.id, tabId: lease.tabId, ownerId: lease.ownerId, generation: lease.generation };
       }
       case 'screenshot-viewport': return ownedLease(effect.leaseId).executor.setScreenshotViewport({ timeoutMs: effect.timeoutMs, signal, assertCurrent: check });
-      case 'command': return ownedLease(effect.leaseId).executor.send(effect.method, effect.params, { sessionId: effect.sessionId, timeoutMs: effect.timeoutMs, signal, assertCurrent: check });
+      case 'command': {
+        const result = await ownedLease(effect.leaseId).executor.send(effect.method, effect.params, { sessionId: effect.sessionId, timeoutMs: effect.timeoutMs, signal, assertCurrent: check });
+        if (effect.method !== 'Page.captureScreenshot') return result;
+        check();
+        return { ...result, data: await normalizeScreenshot(String(result.data), check) };
+      }
       case 'frames': return ownedLease(effect.leaseId).executor.listChildFrames({ signal, timeoutMs: effect.timeoutMs, assertCurrent: check });
       case 'intercept': return ownedLease(effect.leaseId).executor.setInterceptPolicy(effect.rules, { signal, assertCurrent: check });
       case 'read-script': {
-        const file = await resolveWorkspacePath(trusted, effect.path, false);
-        check(); return readFile(file, { encoding: 'utf8', signal });
+        const read = async () => {
+          const file = await resolveWorkspacePath(trusted, effect.path, false);
+          check();
+          const expression = await readFile(file, { encoding: 'utf8', signal });
+          check(); return expression;
+        };
+        try { return await read(); }
+        catch (error) {
+          check();
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          await delay(300, undefined, { signal });
+          check(); return read();
+        }
       }
       case 'resolve-files': return Promise.all(effect.paths.map((path) => resolveWorkspacePath(trusted, path, false)));
       case 'save-file': return saveWorkspaceFile(trusted, effect.path, Buffer.from(effect.bytes), signal, effect.atomic);
@@ -356,5 +399,29 @@ export class IabAutomationWorker implements IabAutomation {
         return finishWorkspaceDownload(trusted, effect.file, lease, manager.resolveBrokerTarget(lease.tabId, manager.ownerId), manager.data.downloads, signal, this.options.log);
       }
     }
+  }
+}
+
+async function normalizeScreenshot(data: string, check: () => void): Promise<string> {
+  const buffer = Buffer.from(data, 'base64');
+  if (buffer.byteLength <= 5 * 1024 * 1024) return data;
+  try {
+    const sharp = (await import('sharp')).default;
+    check();
+    const image = sharp(buffer);
+    const metadata = await image.metadata();
+    check();
+    const resize = { width: (metadata.width ?? 0) > (metadata.height ?? 0) ? 2000 : undefined, height: (metadata.height ?? 0) >= (metadata.width ?? 0) ? 2000 : undefined, fit: 'inside' as const, withoutEnlargement: true };
+    let compressionLevel = 6;
+    let output = await image.resize(resize).png({ compressionLevel }).toBuffer();
+    check();
+    while (output.byteLength > 5 * 1024 * 1024 && compressionLevel < 9) {
+      output = await sharp(buffer).resize(resize).png({ compressionLevel: ++compressionLevel }).toBuffer();
+      check();
+    }
+    return output.toString('base64');
+  } catch {
+    check();
+    return data;
   }
 }

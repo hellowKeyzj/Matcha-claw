@@ -38,9 +38,10 @@ function operationContext(signal?: AbortSignal): AutomationContext {
 }
 const services: AutomationServices = {
   tabs: (context) => effect(context, { kind: 'tabs' }),
-  checkTarget: (tabId, context) => effect(context, { kind: 'check-target', tabId }),
-  open: (url, context) => effect(context, { kind: 'open', url }),
+  checkTarget: (tabId, context, operation) => effect<boolean>(context, { kind: 'check-target', tabId, operation }),
+  open: (url, context, retain) => effect(context, { kind: 'open', url, retain }),
   closeTab: (tabId, context) => effect(context, { kind: 'close-tab', tabId }),
+  releaseSessionClaims: (context) => effect(context, { kind: 'release-claims' }),
   show: (tabId, context) => effect(context, { kind: 'show', tabId }),
   async acquire(tabId, context, signal) {
     signal.throwIfAborted();

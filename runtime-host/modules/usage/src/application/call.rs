@@ -1,7 +1,7 @@
 use platform::call::{CallContext, CallDetail, CallStatus};
 use serde::Serialize;
 
-use crate::domain::model::{UsageEntry, UsageReadError};
+use crate::domain::model::{UsageHistory, UsageReadError};
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -67,13 +67,13 @@ impl UsageCallDetail {
         self
     }
 
-    pub(crate) fn observed(mut self, result: &Result<Vec<UsageEntry>, UsageReadError>) -> Self {
+    pub(crate) fn observed(mut self, result: &Result<UsageHistory, UsageReadError>) -> Self {
         match result {
-            Ok(entries) => {
+            Ok(history) => {
                 match &mut self {
                     Self::Recent { entry_count, .. }
                     | Self::SessionTimeseries { entry_count, .. } => {
-                        *entry_count = Some(safe_count(entries.len()));
+                        *entry_count = Some(safe_count(history.entries.len()));
                     }
                 }
                 self

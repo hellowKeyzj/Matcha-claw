@@ -160,7 +160,7 @@ export type SessionWireContent =
   | { kind: 'largeText'; text: string; contentRef: string; totalBytes: number; loadedBytes: number }
   | { kind: 'toolUse'; name: string; toolCallId: string }
   | { kind: 'toolResult'; toolCallId: string; summary: string | null; isError: boolean }
-  | { kind: 'media'; mediaType: string | null; reference: string }
+  | { kind: 'media'; mediaType: string | null; reference: string; fileName?: string; sizeBytes?: number; resourceId?: string }
   | { kind: 'omitted'; reason: 'thinking' | 'unsafe_media' | 'unknown' };
 
 export type SessionWireItem =
@@ -259,6 +259,7 @@ export type SessionWireRuntime = {
   phase:
     | 'queued'
     | 'started'
+    | 'yielded'
     | 'waiting_for_approval'
     | 'cancellation_requested'
     | 'cancelled'
@@ -610,10 +611,19 @@ function decodeContent(value: unknown): SessionWireContent | null {
         ? { kind: 'toolResult', toolCallId: value.toolCallId, summary: value.summary, isError: value.isError }
         : null;
     case 'media':
-      return hasExactKeys(value, ['kind', 'mediaType', 'reference'])
+      return hasAllowedKeys(value, ['kind', 'mediaType', 'reference'], ['fileName', 'sizeBytes', 'resourceId'])
         && (value.mediaType === null || isNonEmptyIdentifier(value.mediaType))
         && isNonEmptyIdentifier(value.reference, MAX_CONTENT_REF_BYTES)
-        ? { kind: 'media', mediaType: value.mediaType, reference: value.reference }
+        && (!Object.hasOwn(value, 'fileName') || isNonEmptyIdentifier(value.fileName, 4096)
+          && value.fileName !== '.' && value.fileName !== '..' && !/[\\/\p{Cc}]/u.test(value.fileName))
+        && (!Object.hasOwn(value, 'sizeBytes') || isSafeInteger(value.sizeBytes) && value.sizeBytes >= 0)
+        && (!Object.hasOwn(value, 'resourceId') || typeof value.resourceId === 'string' && /^sha256:[a-f0-9]{64}$/u.test(value.resourceId))
+        ? {
+          kind: 'media', mediaType: value.mediaType, reference: value.reference,
+          ...(typeof value.fileName === 'string' ? { fileName: value.fileName } : {}),
+          ...(typeof value.sizeBytes === 'number' ? { sizeBytes: value.sizeBytes } : {}),
+          ...(typeof value.resourceId === 'string' ? { resourceId: value.resourceId } : {}),
+        }
         : null;
     case 'omitted':
       return hasExactKeys(value, ['kind', 'reason'])
@@ -830,7 +840,7 @@ function decodeRuntimeErrorDetail(value: unknown): SessionWireRuntimeErrorDetail
 }
 
 function isRuntimePhase(value: unknown): value is SessionWireRuntime['phase'] {
-  return value === 'queued' || value === 'started' || value === 'waiting_for_approval'
+  return value === 'queued' || value === 'started' || value === 'yielded' || value === 'waiting_for_approval'
     || value === 'cancellation_requested' || value === 'cancelled' || value === 'completed'
     || value === 'failed' || value === 'interrupted';
 }

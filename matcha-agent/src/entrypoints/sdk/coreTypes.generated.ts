@@ -359,6 +359,7 @@ export type SDKUserMessage = {
     [key: string]: unknown
   }
   tool_use_result?: unknown
+  source_tool_use_id?: string
   timestamp?: string
   [key: string]: unknown
 }

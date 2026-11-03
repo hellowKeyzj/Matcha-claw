@@ -18,9 +18,17 @@ import { errorMessage } from '../../utils/errors.js'
 import { logError } from '../../utils/log.js'
 import { sleep } from '../../utils/sleep.js'
 import { readSourceBytes } from '../../utils/readFileInRange.js'
-import { checkFileInvestigation, requestInvestigationFile, stageInvestigationFile } from './fileInvestigation.js'
+import {
+  checkFileInvestigation,
+  requestInvestigationFile,
+  stageInvestigationFile,
+} from './fileInvestigation.js'
 import { rethrowInvestigationAdmission } from './investigation.js'
-import { currentInvestigationScope, investigationSignal, InvestigationAdmissionError } from '../../world/investigation.js'
+import {
+  currentInvestigationScope,
+  investigationSignal,
+  InvestigationAdmissionError,
+} from '../../world/investigation.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -122,7 +130,14 @@ async function retryWithBackoff<T>(
       const delayMs = BASE_DELAY_MS * 2 ** (attempt - 1)
       logDebug(`Retrying ${operation} in ${delayMs}ms...`)
       const scopedSignal = investigationSignal()
-      await sleep(delayMs, scopedSignal ? signal ? AbortSignal.any([scopedSignal, signal]) : scopedSignal : undefined)
+      await sleep(
+        delayMs,
+        scopedSignal
+          ? signal
+            ? AbortSignal.any([scopedSignal, signal])
+            : scopedSignal
+          : undefined,
+      )
       checkFileInvestigation(signal)
     }
   }
@@ -155,9 +170,15 @@ export async function downloadFile(
   return retryWithBackoff(`Download file ${fileId}`, async () => {
     try {
       const response = currentInvestigationScope()
-        ? await requestInvestigationFile({ producer: 'matcha_files_api', operation: 'file_download',
-            url, method: 'GET', headers, timeoutMs: 60000,
-            records: (_body, status) => status === 200 ? 1n : 0n })
+        ? await requestInvestigationFile({
+            producer: 'matcha_files_api',
+            operation: 'file_download',
+            url,
+            method: 'GET',
+            headers,
+            timeoutMs: 60000,
+            records: (_body, status) => (status === 200 ? 1n : 0n),
+          })
         : await axios.get(url, {
             headers,
             responseType: 'arraybuffer',
@@ -250,8 +271,14 @@ export async function downloadAndSaveFile(
     const content = await downloadFile(fileId, config)
 
     if (currentInvestigationScope()) {
-      await stageInvestigationFile({ producer: 'matcha_files_api', operation: 'file_stage', sessionId: config.sessionId,
-        root: path.join(getCwd(), config.sessionId, 'uploads'), target: fullPath, data: content })
+      await stageInvestigationFile({
+        producer: 'matcha_files_api',
+        operation: 'file_stage',
+        sessionId: config.sessionId,
+        root: path.join(getCwd(), config.sessionId, 'uploads'),
+        target: fullPath,
+        data: content,
+      })
     } else {
       // Ensure the parent directory exists
       const parentDir = path.dirname(fullPath)
@@ -316,14 +343,18 @@ async function parallelWithLimit<T, R>(
 
   // Start workers up to the concurrency limit
   const workers: Promise<void>[] = []
-  const workerCount = currentInvestigationScope() ? Math.min(1, items.length) : Math.min(concurrency, items.length)
+  const workerCount = currentInvestigationScope()
+    ? Math.min(1, items.length)
+    : Math.min(concurrency, items.length)
   for (let i = 0; i < workerCount; i++) {
     workers.push(worker())
   }
 
   if (currentInvestigationScope()) {
     const completed = await Promise.allSettled(workers)
-    const failure = completed.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    const failure = completed.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    )
     if (failure) throw failure.reason
   } else {
     await Promise.all(workers)
@@ -483,93 +514,120 @@ export async function uploadFile(
   const body = Buffer.concat(bodyParts)
 
   try {
-    return await retryWithBackoff(`Upload file ${relativePath}`, async () => {
-      try {
-        const uploadHeaders = { ...headers,
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length.toString() }
-        const response = currentInvestigationScope()
-          ? await requestInvestigationFile({ producer: 'matcha_files_api', operation: 'file_upload',
-              url, method: 'POST', headers: uploadHeaders, body, timeoutMs: 120000, signal: opts?.signal,
-              records: (content, status) => {
-                const receipt: unknown = JSON.parse(content.toString('utf8'))
-                if ((status !== 200 && status !== 201) || !receipt || typeof receipt !== 'object'
-                  || !('id' in receipt) || typeof receipt.id !== 'string' || !receipt.id) {
-                  throw new InvestigationAdmissionError('investigation_file_upload_receipt_unknown')
-                }
-                return 1n
-              } }).then(result => ({ status: result.status, data: JSON.parse(result.data.toString('utf8')) }))
-          : await axios.post(url, body, {
-              headers: uploadHeaders,
-              timeout: 120000, // 2 minute timeout for uploads
-              signal: opts?.signal,
-              validateStatus: status => status < 500,
-            })
+    return await retryWithBackoff(
+      `Upload file ${relativePath}`,
+      async () => {
+        try {
+          const uploadHeaders = {
+            ...headers,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length.toString(),
+          }
+          const response = currentInvestigationScope()
+            ? await requestInvestigationFile({
+                producer: 'matcha_files_api',
+                operation: 'file_upload',
+                url,
+                method: 'POST',
+                headers: uploadHeaders,
+                body,
+                timeoutMs: 120000,
+                signal: opts?.signal,
+                records: (content, status) => {
+                  const receipt: unknown = JSON.parse(content.toString('utf8'))
+                  if (
+                    (status !== 200 && status !== 201) ||
+                    !receipt ||
+                    typeof receipt !== 'object' ||
+                    !('id' in receipt) ||
+                    typeof receipt.id !== 'string' ||
+                    !receipt.id
+                  ) {
+                    throw new InvestigationAdmissionError(
+                      'investigation_file_upload_receipt_unknown',
+                    )
+                  }
+                  return 1n
+                },
+              }).then(result => ({
+                status: result.status,
+                data: JSON.parse(result.data.toString('utf8')),
+              }))
+            : await axios.post(url, body, {
+                headers: uploadHeaders,
+                timeout: 120000, // 2 minute timeout for uploads
+                signal: opts?.signal,
+                validateStatus: status => status < 500,
+              })
 
-        if (response.status === 200 || response.status === 201) {
-          const fileId = response.data?.id
-          if (!fileId) {
+          if (response.status === 200 || response.status === 201) {
+            const fileId = response.data?.id
+            if (!fileId) {
+              return {
+                done: false,
+                error: 'Upload succeeded but no file ID returned',
+              }
+            }
+            logDebug(
+              `Uploaded file ${filePath} -> ${fileId} (${fileSize} bytes)`,
+            )
             return {
-              done: false,
-              error: 'Upload succeeded but no file ID returned',
+              done: true,
+              value: {
+                path: relativePath,
+                fileId,
+                size: fileSize,
+                success: true as const,
+              },
             }
           }
-          logDebug(`Uploaded file ${filePath} -> ${fileId} (${fileSize} bytes)`)
-          return {
-            done: true,
-            value: {
-              path: relativePath,
-              fileId,
-              size: fileSize,
-              success: true as const,
-            },
+
+          // Non-retriable errors - throw to exit retry loop
+          if (response.status === 401) {
+            logEvent('tengu_file_upload_failed', {
+              error_type:
+                'auth' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+            })
+            throw new UploadNonRetriableError(
+              'Authentication failed: invalid or missing API key',
+            )
           }
-        }
 
-        // Non-retriable errors - throw to exit retry loop
-        if (response.status === 401) {
-          logEvent('tengu_file_upload_failed', {
-            error_type:
-              'auth' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          })
-          throw new UploadNonRetriableError(
-            'Authentication failed: invalid or missing API key',
-          )
-        }
+          if (response.status === 403) {
+            logEvent('tengu_file_upload_failed', {
+              error_type:
+                'forbidden' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+            })
+            throw new UploadNonRetriableError('Access denied for upload')
+          }
 
-        if (response.status === 403) {
-          logEvent('tengu_file_upload_failed', {
-            error_type:
-              'forbidden' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          })
-          throw new UploadNonRetriableError('Access denied for upload')
-        }
+          if (response.status === 413) {
+            logEvent('tengu_file_upload_failed', {
+              error_type:
+                'size' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+            })
+            throw new UploadNonRetriableError('File too large for upload')
+          }
 
-        if (response.status === 413) {
-          logEvent('tengu_file_upload_failed', {
-            error_type:
-              'size' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          })
-          throw new UploadNonRetriableError('File too large for upload')
-        }
-
-        return { done: false, error: `status ${response.status}` }
-      } catch (error) {
-        rethrowInvestigationAdmission(error)
-        // Non-retriable errors propagate up
-        if (error instanceof UploadNonRetriableError) {
+          return { done: false, error: `status ${response.status}` }
+        } catch (error) {
+          rethrowInvestigationAdmission(error)
+          // Non-retriable errors propagate up
+          if (error instanceof UploadNonRetriableError) {
+            throw error
+          }
+          if (axios.isCancel(error)) {
+            throw new UploadNonRetriableError('Upload canceled')
+          }
+          // Network errors are retriable
+          if (axios.isAxiosError(error)) {
+            return { done: false, error: error.message }
+          }
           throw error
         }
-        if (axios.isCancel(error)) {
-          throw new UploadNonRetriableError('Upload canceled')
-        }
-        // Network errors are retriable
-        if (axios.isAxiosError(error)) {
-          return { done: false, error: error.message }
-        }
-        throw error
-      }
-    }, opts?.signal)
+      },
+      opts?.signal,
+    )
   } catch (error) {
     rethrowInvestigationAdmission(error)
     if (error instanceof UploadNonRetriableError) {
@@ -685,16 +743,32 @@ export async function listFilesCreatedAfter(
       async () => {
         try {
           const response = currentInvestigationScope()
-            ? await requestInvestigationFile({ producer: 'matcha_files_api', operation: 'file_list',
-                url: `${baseUrl}/v1/files?${new URLSearchParams(params)}`, method: 'GET', headers, timeoutMs: 60000,
+            ? await requestInvestigationFile({
+                producer: 'matcha_files_api',
+                operation: 'file_list',
+                url: `${baseUrl}/v1/files?${new URLSearchParams(params)}`,
+                method: 'GET',
+                headers,
+                timeoutMs: 60000,
                 records: (content, status) => {
                   if (status !== 200) return 0n
                   const page: unknown = JSON.parse(content.toString('utf8'))
-                  if (!page || typeof page !== 'object' || !('data' in page) || !Array.isArray(page.data)) {
-                    throw new InvestigationAdmissionError('investigation_file_list_response_invalid')
+                  if (
+                    !page ||
+                    typeof page !== 'object' ||
+                    !('data' in page) ||
+                    !Array.isArray(page.data)
+                  ) {
+                    throw new InvestigationAdmissionError(
+                      'investigation_file_list_response_invalid',
+                    )
                   }
                   return BigInt(page.data.length)
-                } }).then(result => ({ status: result.status, data: JSON.parse(result.data.toString('utf8')) }))
+                },
+              }).then(result => ({
+                status: result.status,
+                data: JSON.parse(result.data.toString('utf8')),
+              }))
             : await axios.get(`${baseUrl}/v1/files`, {
                 headers,
                 params,

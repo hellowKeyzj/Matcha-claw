@@ -6,6 +6,7 @@ import {
 } from '../runtime-host-delivery/control';
 import type { RuntimeHostLifecycle } from '../runtime-host-delivery/lifecycle-owner';
 import type { IabTrustedContext } from './contracts';
+import type { IabMatchaRuns } from './matcha-run';
 
 export type { IabMatchaCapability } from '../runtime-host-delivery/control';
 
@@ -33,26 +34,28 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 const reasons = new Set(['instance_closing', 'instance_replaced', 'native_exit', 'native_identity_changed', 'server_shutdown']);
 
-type Acquired = { leaseId: string; agentId: string; sessionId: string; workspaceDir: string };
+type Acquired = { leaseId: string; agentId: string; sessionId: string; workspaceDir: string; runId: string };
 function acquired(value: RuntimeHostJsonValue, invocationId: string, capability: IabMatchaCapability): Acquired {
-  if (!record(value) || Object.keys(value).length !== 6
-    || !isIabInvocationId(value.leaseId) || value.invocationId !== invocationId
+  if (!record(value) || Object.keys(value).length !== 7
+    || !isIabInvocationId(value.leaseId) || !isIabInvocationId(value.runId) || value.invocationId !== invocationId
     || value.sessionId !== capability.sessionId || value.instanceId !== capability.instanceId
     || typeof value.agentId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value.agentId)
     || typeof value.workspaceDir !== 'string' || value.workspaceDir.includes('\0') || !isAbsolute(value.workspaceDir)) {
     throw new LeaseError('PROTOCOL');
   }
-  return { leaseId: value.leaseId, agentId: value.agentId, sessionId: capability.sessionId, workspaceDir: value.workspaceDir };
+  return { leaseId: value.leaseId, agentId: value.agentId, sessionId: capability.sessionId, workspaceDir: value.workspaceDir, runId: value.runId };
 }
 
 export async function acquireIabMatchaContext(input: {
   capability: IabMatchaCapability;
   invocationId: string;
+  inputMessageId: string;
   runtime: Pick<RuntimeHostLifecycle, 'command' | 'onDisconnect'>;
+  runs: IabMatchaRuns;
   signal: AbortSignal;
 }): Promise<{ context: IabTrustedContext; signal: AbortSignal; release(): Promise<void> }> {
-  const { capability, invocationId, runtime, signal } = input;
-  if (!isIabMatchaCapability(capability) || !isIabInvocationId(invocationId)) throw new LeaseError('INVALID');
+  const { capability, invocationId, inputMessageId, runtime, runs, signal } = input;
+  if (!isIabMatchaCapability(capability) || !isIabInvocationId(invocationId) || !isIabInvocationId(inputMessageId)) throw new LeaseError('INVALID');
   if (signal.aborted) throw new LeaseError('CANCELLED');
   const controller = new AbortController();
   let active = true;
@@ -61,6 +64,12 @@ export async function acquireIabMatchaContext(input: {
   let leaseId: string | undefined;
   let watching: Promise<void> | undefined;
   let releasing: Promise<void> | undefined;
+  let run: { signal: AbortSignal; assertCurrent(): void } | undefined;
+  let acquiring: Promise<IabTrustedContext> | undefined;
+  let released!: () => void;
+  let releaseFailed!: (error: unknown) => void;
+  const releaseReceipt = new Promise<void>((resolve, reject) => { released = resolve; releaseFailed = reject; });
+  void releaseReceipt.catch(() => {});
 
   function invalidate(error: LeaseError): void {
     active = false;
@@ -82,6 +91,7 @@ export async function acquireIabMatchaContext(input: {
   }
   function assertCurrent(): void {
     if (!active || controller.signal.aborted) throw controller.signal.reason ?? new LeaseError('RELEASED');
+    run?.assertCurrent();
   }
   async function command(command: RuntimeHostControlCommand, timeoutMs: number, failed: Failure): Promise<RuntimeHostJsonValue> {
     if (disconnected) throw new LeaseError('DISCONNECTED');
@@ -128,9 +138,14 @@ export async function acquireIabMatchaContext(input: {
             || !(value.leaseId === null || isIabInvocationId(value.leaseId))
             || leaseId !== undefined && value.leaseId !== leaseId) throw new LeaseError('RELEASE_FAILED');
         } finally {
+          await acquiring?.catch(() => {});
           await watching;
         }
         if (disconnected) throw new LeaseError('DISCONNECTED');
+        released();
+      } catch (error) {
+        releaseFailed(error);
+        throw error;
       } finally {
         detach();
       }
@@ -146,25 +161,28 @@ export async function acquireIabMatchaContext(input: {
       stopAcquiring = () => controller.signal.removeEventListener('abort', abort);
     });
     started = true;
-    const pending = command({ name: 'iab.lease.acquire', input: { capability, invocationId } }, 30_000, 'ACQUIRE_FAILED')
-      .then((value) => acquired(value, invocationId, capability));
-    // Both settlements remain observed by the race. Cancellation is returned only after
-    // release acknowledges this invocation's tombstone, which also fences a late acquire.
-    const receipt = await Promise.race([pending, cancelled]);
-    leaseId = receipt.leaseId;
+    acquiring = command({ name: 'iab.lease.acquire', input: { capability, invocationId, inputMessageId } }, 30_000, 'ACQUIRE_FAILED')
+      .then(async (value): Promise<IabTrustedContext> => {
+        const receipt = acquired(value, invocationId, capability);
+        leaseId = receipt.leaseId;
+        const sessionKey = `matcha-agent:${receipt.agentId}:${receipt.sessionId}`;
+        const identity: SessionIdentity = Object.freeze({
+          endpoint: Object.freeze({ kind: 'native-runtime' as const, runtimeAdapterId: 'matcha-agent', runtimeInstanceId: 'local' }),
+          agentId: receipt.agentId,
+          sessionKey,
+        });
+        const principalId = buildSessionIdentityKey(identity);
+        watching = watch(receipt.leaseId);
+        // Register independently of caller cancellation: an unknown subscription ACK
+        // must retain its run owner, fixed connection and cleanup barrier.
+        run = await runs.admit({ ...receipt, instanceId: capability.instanceId, executorId: principalId, principalId }, runtime, releaseReceipt);
+        return Object.freeze({ principalId, executorId: principalId, identity, sessionKey, workspaceDir: receipt.workspaceDir, assertCurrent });
+      });
+    // Release's invocation tombstone fences a late acquire; its receipt remains observed
+    // until run subscription has settled, even if the HTTP caller already cancelled.
+    const context = await Promise.race([acquiring, cancelled]);
     assertCurrent();
-    const sessionKey = `matcha-agent:${receipt.agentId}:${receipt.sessionId}`;
-    const identity: SessionIdentity = Object.freeze({
-      endpoint: Object.freeze({ kind: 'native-runtime' as const, runtimeAdapterId: 'matcha-agent', runtimeInstanceId: 'local' }),
-      agentId: receipt.agentId,
-      sessionKey,
-    });
-    const context: IabTrustedContext = Object.freeze({
-      principalId: buildSessionIdentityKey(identity), identity, sessionKey, workspaceDir: receipt.workspaceDir, assertCurrent,
-    });
-    watching = watch(receipt.leaseId);
-    assertCurrent();
-    return { context, signal: controller.signal, release };
+    return { context, signal: AbortSignal.any([controller.signal, run!.signal]), release };
   } catch (error) {
     const failure = controller.signal.aborted ? controller.signal.reason
       : error instanceof LeaseError ? error : new LeaseError('ACQUIRE_FAILED');

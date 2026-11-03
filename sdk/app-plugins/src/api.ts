@@ -35,6 +35,25 @@ export interface AppModelResult {
   readonly outputs: readonly { data: string; mimeType: string }[];
 }
 
+export interface AppSpeechModelRequest {
+  readonly prompt: string;
+  readonly selectionId?: string;
+  readonly voice?: string;
+  readonly language?: string;
+}
+
+export interface AppTranscriptionModelRequest {
+  readonly audio: { readonly data: string; readonly mimeType: string };
+  readonly selectionId?: string;
+  readonly language?: string;
+}
+
+export interface AppMusicModelRequest {
+  readonly prompt: string;
+  readonly selectionId?: string;
+  readonly durationSeconds?: number;
+}
+
 export interface AppMediaModelListRequest {
   readonly kind: 'image' | 'video';
 }
@@ -80,12 +99,28 @@ export interface AppMediaModelList {
 }
 
 export interface AppVideoTask {
-  readonly kind: 'openai-video';
+  readonly kind: 'openai-video' | 'google-video' | 'openrouter-video' | 'dashscope-video' | 'ark-video';
   readonly selectionId: string;
   readonly accountId: string;
   readonly modelId: string;
   readonly endpointId: string;
   readonly remoteId: string;
+}
+
+export function isAppVideoTask(value: unknown): value is AppVideoTask {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const task = value as Record<string, unknown>;
+  const fields = ['kind', 'selectionId', 'accountId', 'modelId', 'endpointId', 'remoteId'];
+  if (Object.keys(task).length !== fields.length || !fields.every((field) => Object.hasOwn(task, field))
+    || typeof task.kind !== 'string' || !['openai-video', 'google-video', 'openrouter-video', 'dashscope-video', 'ark-video'].includes(task.kind)
+    || typeof task.selectionId !== 'string' || task.selectionId.length !== 'model-selection:v1:'.length + 64 || !/^model-selection:v1:[0-9a-f]{64}$/.test(task.selectionId)
+    || typeof task.accountId !== 'string' || !task.accountId.length || task.accountId.length > 128 || new TextEncoder().encode(task.accountId).length > 128
+    || typeof task.modelId !== 'string' || !task.modelId.length || task.modelId.length > 512 || new TextEncoder().encode(task.modelId).length > 512
+    || typeof task.endpointId !== 'string' || task.endpointId.length !== 'media-endpoint:v1:'.length + 64 || !/^media-endpoint:v1:[0-9a-f]{64}$/.test(task.endpointId)
+    || typeof task.remoteId !== 'string') return false;
+  if (task.kind === 'google-video' && !task.remoteId.startsWith('interactions/')) return false;
+  const remoteId = task.kind === 'google-video' ? task.remoteId.slice('interactions/'.length) : task.remoteId;
+  return remoteId.length > 0 && remoteId.length <= (task.kind === 'google-video' ? 2048 : 256) && !/[^A-Za-z0-9_-]/.test(remoteId);
 }
 
 export interface AppVideoTaskRequest {
@@ -108,12 +143,39 @@ export interface AppTextModelResult {
   readonly text: string;
 }
 
+export class AppConfirmationUnavailableError extends Error {
+  readonly code = 'approval_unavailable';
+}
+
+export interface AppConfirmationRequest {
+  readonly title: string;
+  readonly description: string;
+  readonly confirmLabel: string;
+  readonly details: readonly { readonly label: string; readonly value: string }[];
+}
+
+export function isAppConfirmationRequest(value: unknown): value is AppConfirmationRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const request = value as Record<string, unknown>;
+  const text = (input: unknown, maximum: number) => typeof input === 'string' && input.trim().length > 0 && input.length <= maximum;
+  return Object.keys(request).length === 4 && Object.keys(request).every((key) => ['title', 'description', 'confirmLabel', 'details'].includes(key))
+    && text(request.title, 200) && text(request.description, 4000) && text(request.confirmLabel, 80)
+    && Array.isArray(request.details) && request.details.length <= 32 && request.details.every((detail: unknown) => {
+      if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return false;
+      const item = detail as Record<string, unknown>;
+      return Object.keys(item).length === 2 && Object.keys(item).every((key) => key === 'label' || key === 'value')
+        && text(item.label, 200) && text(item.value, 24_000);
+    }) && new TextEncoder().encode(JSON.stringify(request)).byteLength <= 64 * 1024;
+}
+
 export interface AppPluginContext {
   readonly pluginId: string;
   readonly version: string;
   readonly storagePath: string;
   readonly packagePath: string;
   registerTool(name: string, handler: AppToolHandler): () => void;
+  /** Host-owned human decision for this active tool call only. Recheck business revisions after confirmation. Throws when no foreground owner is available. */
+  requestConfirmation(request: AppConfirmationRequest, signal?: AbortSignal): Promise<boolean>;
   publish(topic: string, data: AppJson): void;
   readonly models: {
     list(request: AppMediaModelListRequest, signal?: AbortSignal): Promise<AppMediaModelList>;
@@ -122,6 +184,9 @@ export interface AppPluginContext {
     queryVideo(request: AppVideoTaskRequest, signal?: AbortSignal): Promise<AppVideoTaskResult>;
     collectVideo(request: AppVideoTaskRequest, signal?: AbortSignal): Promise<AppModelResult>;
     generateText(request: AppTextModelRequest, signal?: AbortSignal): Promise<AppTextModelResult>;
+    generateSpeech(request: AppSpeechModelRequest, signal?: AbortSignal): Promise<AppModelResult>;
+    transcribe(request: AppTranscriptionModelRequest, signal?: AbortSignal): Promise<AppModelResult>;
+    generateMusic(request: AppMusicModelRequest, signal?: AbortSignal): Promise<AppModelResult>;
   };
   readonly log: {
     info(message: string): void;
@@ -149,6 +214,8 @@ export interface AppRuntimeEvent {
 
 export interface AppWebviewContext {
   readonly sessionIdentity?: SessionIdentity;
+  /** Opaque workspace draft incarnation, retained only when that draft creates its session. Not an authorization grant. */
+  readonly workspaceDraftId?: string;
   readonly language?: string;
   readonly theme?: 'light' | 'dark';
 }
@@ -212,7 +279,8 @@ export function validateAppComposeRequest(value: unknown): string | null {
         || new Set(indices).size !== indices.length || indices.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= (request.attachments as unknown[]).length)) return 'common:appFrame.invalidComposeContext';
     }
   }
-  if (typeof request.text !== 'string' || !request.text.trim() || new TextEncoder().encode(request.text).byteLength > 32 * 1024) return 'common:appFrame.composeTextLimit';
+  if (typeof request.text !== 'string' || (!request.text.trim() && !(request.context as { groupKey?: string } | undefined)?.groupKey)
+    || new TextEncoder().encode(request.text).byteLength > 32 * 1024) return 'common:appFrame.composeTextLimit';
   if (request.attachments === undefined) return null;
   if (!Array.isArray(request.attachments) || request.attachments.length > 16) return 'common:appFrame.attachmentCountLimit';
   let total = 0;

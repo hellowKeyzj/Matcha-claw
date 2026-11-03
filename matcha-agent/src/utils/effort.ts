@@ -39,12 +39,24 @@ export type EffortValue = EffortLevel | number
 // @[MODEL LAUNCH]: Add the new model to the allowlist if it supports the effort parameter.
 function effortSupport(model: string): { supported: boolean; source: string } {
   const provider = getAPIProvider()
-  if (provider === 'openaiResponses') return { supported: true, source: 'responses_contract' }
-  if (provider === 'openai' && isChatGPTAuthMode()) return { supported: true, source: 'chatgpt_responses_contract' }
-  if (provider === 'gemini' || provider === 'grok') return { supported: false, source: 'provider_route_unsupported' }
+  if (provider === 'openaiResponses')
+    return { supported: true, source: 'responses_contract' }
+  if (provider === 'openai' && isChatGPTAuthMode())
+    return { supported: true, source: 'chatgpt_responses_contract' }
+  if (provider === 'gemini' || provider === 'grok')
+    return { supported: false, source: 'provider_route_unsupported' }
   if (provider === 'openai') {
-    const override = get3PModelCapabilityOverride(normalizeModelStringForAPI(model), 'effort')
-    return { supported: override === true, source: override === undefined ? 'capability_unknown' : 'model_capability_override' }
+    const override = get3PModelCapabilityOverride(
+      normalizeModelStringForAPI(model),
+      'effort',
+    )
+    return {
+      supported: override === true,
+      source:
+        override === undefined
+          ? 'capability_unknown'
+          : 'model_capability_override',
+    }
   }
 
   const m = model.toLowerCase()
@@ -76,7 +88,11 @@ function effortSupport(model: string): { supported: boolean; source: string } {
   // Default to true for unknown model strings on 1P.
   // Do not default to true for 3P as they have different formats for their
   // model strings (ex. anthropics/claude-code#30795)
-  return { supported: provider === 'firstParty', source: provider === 'firstParty' ? 'first_party_default' : 'capability_unknown' }
+  return {
+    supported: provider === 'firstParty',
+    source:
+      provider === 'firstParty' ? 'first_party_default' : 'capability_unknown',
+  }
 }
 
 export function modelSupportsEffort(model: string): boolean {
@@ -86,7 +102,10 @@ export function modelSupportsEffort(model: string): boolean {
 // Generic completions need explicit capability facts for extended levels.
 // Other routes retain their existing max/xhigh defaults.
 export function modelSupportsMaxEffort(_model: string): boolean {
-  const model = getAPIProvider() === 'openai' && !isChatGPTAuthMode() ? normalizeModelStringForAPI(_model) : _model
+  const model =
+    getAPIProvider() === 'openai' && !isChatGPTAuthMode()
+      ? normalizeModelStringForAPI(_model)
+      : _model
   const supported3P = get3PModelCapabilityOverride(model, 'max_effort')
   if (supported3P !== undefined) {
     return supported3P
@@ -95,7 +114,10 @@ export function modelSupportsMaxEffort(_model: string): boolean {
 }
 
 export function modelSupportsXhighEffort(_model: string): boolean {
-  const model = getAPIProvider() === 'openai' && !isChatGPTAuthMode() ? normalizeModelStringForAPI(_model) : _model
+  const model =
+    getAPIProvider() === 'openai' && !isChatGPTAuthMode()
+      ? normalizeModelStringForAPI(_model)
+      : _model
   const supported3P = get3PModelCapabilityOverride(model, 'xhigh_effort')
   if (supported3P !== undefined) {
     return supported3P
@@ -172,14 +194,17 @@ export function resolveAdapterEffort(
     if (envOverride === 'auto' || envOverride === 'unset') return undefined
     if (envOverride && isEffortLevel(envOverride)) return envOverride
     if (typeof appStateEffortValue === 'number') return 'high'
-    if (appStateEffortValue && isEffortLevel(appStateEffortValue)) return appStateEffortValue
+    if (appStateEffortValue && isEffortLevel(appStateEffortValue))
+      return appStateEffortValue
     return provider === 'openai' ? 'medium' : undefined
   }
   if (provider === 'openai') {
     const value = resolveAppliedEffort(model, appStateEffortValue)
     if (value === undefined) return undefined
     const level = convertEffortValueToLevel(value)
-    return getModelEffortCapabilities(model).supportedEffortLevels.includes(level)
+    return getModelEffortCapabilities(model).supportedEffortLevels.includes(
+      level,
+    )
       ? level
       : undefined
   }
@@ -198,14 +223,23 @@ export function resolveAdapterEffort(
 }
 
 export function traceEffort(
-  reason: 'control_invalid' | 'control_unsupported' | 'control_applied' | 'settings_read' | 'sender_request',
+  reason:
+    | 'control_invalid'
+    | 'control_unsupported'
+    | 'control_applied'
+    | 'settings_read'
+    | 'sender_request',
   model: string,
   requested: EffortValue | null | undefined,
   details: {
     requestId?: string
     level?: EffortValue | null
     actual?: EffortValue | null
-    senderField?: 'reasoning_effort' | 'reasoning.effort' | 'output_config.effort' | 'anthropic_internal.effort_override'
+    senderField?:
+      | 'reasoning_effort'
+      | 'reasoning.effort'
+      | 'output_config.effort'
+      | 'anthropic_internal.effort_override'
     applied?: boolean
     persisted?: boolean
   } = {},
@@ -213,38 +247,83 @@ export function traceEffort(
   if (process.env.MATCHACLAW_TRACE !== '1') return
   try {
     const provider = getAPIProvider()
-    const responses = provider === 'openaiResponses' || (provider === 'openai' && isChatGPTAuthMode())
-    const protocol = responses ? 'responses' : provider === 'openai' ? 'chat_completions' : provider === 'gemini' ? 'gemini' : provider === 'grok' ? 'grok' : 'anthropic'
+    const responses =
+      provider === 'openaiResponses' ||
+      (provider === 'openai' && isChatGPTAuthMode())
+    const protocol = responses
+      ? 'responses'
+      : provider === 'openai'
+        ? 'chat_completions'
+        : provider === 'gemini'
+          ? 'gemini'
+          : provider === 'grok'
+            ? 'grok'
+            : 'anthropic'
     const support = effortSupport(model)
     const rawEnv = process.env.CLAUDE_CODE_EFFORT_LEVEL?.toLowerCase()
     const env = responses
-      ? rawEnv === 'auto' || rawEnv === 'unset' ? null : rawEnv && isEffortLevel(rawEnv) ? rawEnv : undefined
+      ? rawEnv === 'auto' || rawEnv === 'unset'
+        ? null
+        : rawEnv && isEffortLevel(rawEnv)
+          ? rawEnv
+          : undefined
       : getEffortEnvOverride()
-    const extraBody = !responses && protocol === 'anthropic'
-      ? safeParseJSON(process.env.CLAUDE_CODE_EXTRA_BODY ?? '', false)
-      : undefined
-    const outputConfig = extraBody && typeof extraBody === 'object' && 'output_config' in extraBody ? extraBody.output_config : undefined
-    const source = outputConfig && typeof outputConfig === 'object' && 'effort' in outputConfig
-      ? 'extra_body'
-      : env === null ? 'env_disabled' : env !== undefined ? 'env_override' : requested != null ? 'app_state' : 'model_default'
-    const hash = (value: string) => createHash('sha256').update(value).digest('hex')
-    const safeLevel = (value: unknown) => (typeof value === 'number' && Number.isInteger(value)) || (typeof value === 'string' && isEffortLevel(value)) ? value : null
-    logForDebugging(`[thinking] ${JSON.stringify({
-      reason, provider, protocol,
-      sessionHash: hash(getSessionId()),
-      modelHash: hash(provider === 'openai' && !responses ? normalizeModelStringForAPI(model) : model),
-      requestHash: details.requestId ? hash(details.requestId) : undefined,
-      requested: safeLevel(requested),
-      level: safeLevel(details.level === undefined ? requested : details.level),
-      ...getModelEffortCapabilities(model),
-      capabilitySource: support.source,
-      effective: safeLevel(resolveAdapterEffort(model, requested ?? undefined)),
-      source,
-      actual: safeLevel(details.actual),
-      senderField: details.senderField,
-      applied: details.applied,
-      persisted: details.persisted,
-    })}`, { matchaTrace: true })
+    const extraBody =
+      !responses && protocol === 'anthropic'
+        ? safeParseJSON(process.env.CLAUDE_CODE_EXTRA_BODY ?? '', false)
+        : undefined
+    const outputConfig =
+      extraBody && typeof extraBody === 'object' && 'output_config' in extraBody
+        ? extraBody.output_config
+        : undefined
+    const source =
+      outputConfig &&
+      typeof outputConfig === 'object' &&
+      'effort' in outputConfig
+        ? 'extra_body'
+        : env === null
+          ? 'env_disabled'
+          : env !== undefined
+            ? 'env_override'
+            : requested != null
+              ? 'app_state'
+              : 'model_default'
+    const hash = (value: string) =>
+      createHash('sha256').update(value).digest('hex')
+    const safeLevel = (value: unknown) =>
+      (typeof value === 'number' && Number.isInteger(value)) ||
+      (typeof value === 'string' && isEffortLevel(value))
+        ? value
+        : null
+    logForDebugging(
+      `[thinking] ${JSON.stringify({
+        reason,
+        provider,
+        protocol,
+        sessionHash: hash(getSessionId()),
+        modelHash: hash(
+          provider === 'openai' && !responses
+            ? normalizeModelStringForAPI(model)
+            : model,
+        ),
+        requestHash: details.requestId ? hash(details.requestId) : undefined,
+        requested: safeLevel(requested),
+        level: safeLevel(
+          details.level === undefined ? requested : details.level,
+        ),
+        ...getModelEffortCapabilities(model),
+        capabilitySource: support.source,
+        effective: safeLevel(
+          resolveAdapterEffort(model, requested ?? undefined),
+        ),
+        source,
+        actual: safeLevel(details.actual),
+        senderField: details.senderField,
+        applied: details.applied,
+        persisted: details.persisted,
+      })}`,
+      { matchaTrace: true },
+    )
   } catch {
     // Diagnostic failures must not change the setting or request result.
   }

@@ -370,9 +370,9 @@ export function buildCurrentConversationFromSessionRecord(
     return null;
   }
   const sessionRecordKey = buildSessionRecordKey(identity);
-  if (previous?.kind === 'session' && previous.sessionRecordKey === sessionRecordKey
-    && previous.endpointSessionId === record.meta.endpointSessionId) {
-    return previous;
+  const previousSession = previous?.kind === 'session' && previous.sessionRecordKey === sessionRecordKey ? previous : null;
+  if (previousSession && previousSession.endpointSessionId === record.meta.endpointSessionId) {
+    return previousSession;
   }
   return {
     kind: 'session',
@@ -382,6 +382,7 @@ export function buildCurrentConversationFromSessionRecord(
     sessionRecordKey,
     endpointSessionId: record.meta.endpointSessionId,
     sessionIdentity: identity,
+    ...(previousSession?.promotedDraft ? { promotedDraft: previousSession.promotedDraft } : {}),
   };
 }
 
@@ -391,6 +392,7 @@ export function createDraftCurrentConversation(
 ): ChatCurrentDraftConversation {
   return {
     kind: 'draft',
+    id: crypto.randomUUID(),
     runtimeScopeKey: buildRuntimeScopeKey(endpoint),
     endpoint,
     agentId,

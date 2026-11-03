@@ -176,7 +176,21 @@ impl Sessions {
         exited: &mut bool,
         titles: &mut tokio::task::JoinSet<Option<String>>,
     ) -> rpc::Result<()> {
+        let tracing = std::env::var("MATCHACLAW_TRACE").as_deref() == Ok("1");
+        let started = tracing.then(std::time::Instant::now);
+        let observed_at_ms = tracing.then(rpc::now_ms);
+        let mut timing_stages: Vec<_> = if tracing {
+            batch.iter().filter_map(|event| match event {
+                CliEvent::Message(message) | CliEvent::Result(message) => {
+                    crate::diagnostics::Diagnostics::session_stage(message)
+                }
+                _ => None,
+            }).collect()
+        } else { Vec::new() };
+        timing_stages.sort_unstable();
+        timing_stages.dedup();
         let mut execution = session.data.lock().await;
+        let lock_wait_ms = started.map(|started| started.elapsed().as_millis() as u64);
         if !execution
             .cli
             .as_ref()
@@ -206,6 +220,29 @@ impl Sessions {
                     }
                     execution.native.observe(&message);
                     if let Some(active) = execution.active.as_mut() {
+                        let tool_parent_observed =
+                            message.get("parent_tool_use_id").is_none_or(|id| {
+                                id.is_null()
+                                    || id
+                                        .as_str()
+                                        .is_some_and(|id| active.tool_use_ids.contains(id))
+                            });
+                        if active.input_started
+                            && active.acknowledged
+                            && tool_parent_observed
+                            && message["type"] == "assistant"
+                            && let Some(blocks) = message
+                                .pointer("/message/content")
+                                .and_then(Value::as_array)
+                        {
+                            active.tool_use_ids.extend(
+                                blocks
+                                    .iter()
+                                    .filter(|block| block["type"] == "tool_use")
+                                    .filter_map(|block| block["id"].as_str().filter(|id| !id.is_empty()))
+                                    .map(str::to_owned),
+                            );
+                        }
                         let interrupted = native::interrupted(&message);
                         if active.input_started
                             && message.get("type").and_then(Value::as_str) == Some("system")
@@ -223,7 +260,14 @@ impl Sessions {
                                 == Some(active.record.run.message_id.as_str())
                             {
                                 active.acknowledged = true;
-                            } else if !interrupted && !tool_result(&message) {
+                            } else if !interrupted
+                                && !tool_result(&message)
+                                && !(tool_parent_observed
+                                    && message
+                                        .get("source_tool_use_id")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|id| active.tool_use_ids.contains(id)))
+                            {
                                 active.ownership_ambiguous = true;
                             }
                         }
@@ -431,6 +475,18 @@ impl Sessions {
         }
         execution.idle.activity();
         session.wake.notify_one();
+        drop(execution);
+        if let Some(started) = started {
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            for stage in timing_stages {
+                self.0.diagnostics.trace("session", "timing", "observation_applied", json!({
+                    "stage": stage, "observedAtMs": observed_at_ms,
+                    "lockWaitMs": lock_wait_ms, "elapsedMs": elapsed_ms,
+                    "sessionHash": crate::diagnostics::Diagnostics::identifier_hash(&session_id),
+                    "instanceHash": crate::diagnostics::Diagnostics::identifier_hash(instance_id),
+                })).await;
+            }
+        }
         Ok(())
     }
 }

@@ -31,6 +31,7 @@
   "origin": "来源",
   "manual": "手动导入",
   "agent": "Agent 制作",
+  "bundled": "应用预装",
   "pluginId": "插件 ID",
   "capabilities": "提供的能力",
   "mixed": "此插件包含多类能力，需导入完整插件包更新。",

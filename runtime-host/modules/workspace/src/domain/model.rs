@@ -293,15 +293,24 @@ impl WorkspaceMediaReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedWorkspaceMedia {
     content: Vec<u8>,
+    mime_type: Option<String>,
 }
 
 impl ResolvedWorkspaceMedia {
     pub fn new(content: Vec<u8>) -> Self {
-        Self { content }
+        Self { content, mime_type: None }
+    }
+
+    pub fn playback(content: Vec<u8>, mime_type: String) -> Self {
+        Self { content, mime_type: Some(mime_type) }
     }
 
     pub fn content(&self) -> &[u8] {
         &self.content
+    }
+
+    pub fn mime_type(&self) -> Option<&str> {
+        self.mime_type.as_deref()
     }
 }
 

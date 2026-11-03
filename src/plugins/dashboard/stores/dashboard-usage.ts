@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { trackUiEvent } from '@/lib/telemetry';
-import type { UsageHistoryEntry, UsageSessionDetailEntry } from '../pages/usage-history';
+import type { UsageHistory } from '@/types/desktop/usage';
 import {
   runtimeEndpointsEqual,
   runtimeInstanceScope,
@@ -21,17 +21,15 @@ interface RefreshUsageHistoryOptions {
   silent?: boolean;
 }
 
-type UsageSessionDetailState =
+export type UsageSessionDetailState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'loaded'; entries: UsageSessionDetailEntry[] }
+  | ({ status: 'loaded' } & UsageHistory)
   | { status: 'error'; message: string };
 
 interface DashboardUsageState {
   endpoint: RuntimeEndpointRef | null;
-  usageHistory: UsageHistoryEntry[];
-  usageHistoryReady: boolean;
-  initialLoading: boolean;
+  usageHistory: UsageHistory | null;
   refreshing: boolean;
   sessionDetails: Record<string, UsageSessionDetailState>;
   error: string | null;
@@ -40,37 +38,11 @@ interface DashboardUsageState {
   refreshUsageHistory: (options?: RefreshUsageHistoryOptions) => Promise<void>;
 }
 
-let usageHistoryCache: UsageHistoryEntry[] = [];
-let usageHistoryReadyCache = false;
-let sessionDetailsCache: Record<string, UsageSessionDetailState> = {};
 let inflightUsageRefreshTask: Promise<void> | null = null;
 let inflightUsageRefreshMarker: string | null = null;
 let latestUsageRefreshRequestId = 0;
 let usageScopeGeneration = 0;
 const inflightSessionDetailTasks = new Map<string, Promise<void>>();
-
-function cloneUsageHistory(entries: UsageHistoryEntry[]): UsageHistoryEntry[] {
-  return entries.map((entry) => ({ ...entry }));
-}
-
-function cloneUsageSessionDetails(details: Record<string, UsageSessionDetailState>): Record<string, UsageSessionDetailState> {
-  return Object.fromEntries(Object.entries(details).map(([sessionId, detail]) => [
-    sessionId,
-    detail.status === 'loaded'
-      ? { ...detail, entries: cloneUsageHistory(detail.entries) }
-      : { ...detail },
-  ]));
-}
-
-function normalizeUsageSessionDetails(payload: unknown): UsageSessionDetailEntry[] {
-  if (Array.isArray(payload)) {
-    return cloneUsageHistory(payload as UsageSessionDetailEntry[]);
-  }
-  if (payload && typeof payload === 'object' && Array.isArray((payload as { entries?: unknown }).entries)) {
-    return cloneUsageHistory((payload as { entries: UsageSessionDetailEntry[] }).entries);
-  }
-  return [];
-}
 
 function resolveRetryDelayMs(): number {
   return document.visibilityState === 'visible'
@@ -86,11 +58,9 @@ function delay(ms: number): Promise<void> {
 
 export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => ({
   endpoint: null,
-  usageHistory: cloneUsageHistory(usageHistoryCache),
-  usageHistoryReady: usageHistoryReadyCache,
-  initialLoading: !usageHistoryReadyCache,
+  usageHistory: null,
   refreshing: false,
-  sessionDetails: cloneUsageSessionDetails(sessionDetailsCache),
+  sessionDetails: {},
   error: null,
 
   setEndpoint: (endpoint) => {
@@ -98,17 +68,12 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
     if (previous === endpoint || (previous && endpoint && runtimeEndpointsEqual(previous, endpoint))) return;
     usageScopeGeneration += 1;
     latestUsageRefreshRequestId += 1;
-    usageHistoryCache = [];
-    usageHistoryReadyCache = false;
-    sessionDetailsCache = {};
     inflightUsageRefreshTask = null;
     inflightUsageRefreshMarker = null;
     inflightSessionDetailTasks.clear();
     set({
       endpoint,
-      usageHistory: [],
-      usageHistoryReady: false,
-      initialLoading: false,
+      usageHistory: null,
       refreshing: false,
       sessionDetails: {},
       error: null,
@@ -128,36 +93,22 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
     }
 
     const task = (async () => {
-      set((state) => {
-        const next = {
-          ...state.sessionDetails,
-          [sessionId]: { status: 'loading' } as UsageSessionDetailState,
-        };
-        sessionDetailsCache = cloneUsageSessionDetails(next);
-        return { sessionDetails: next };
-      });
+      set((state) => ({
+        sessionDetails: { ...state.sessionDetails, [sessionId]: { status: 'loading' } },
+      }));
 
       try {
-        const payload = await hostApiFetch<unknown>(`/api/runtime-host/usage/session-timeseries?sessionId=${encodeURIComponent(sessionId)}&agentId=${encodeURIComponent(agentId)}&${runtimeScopeQuery(scope)}`);
+        const payload = await hostApiFetch<UsageHistory>(`/api/runtime-host/usage/session-timeseries?sessionId=${encodeURIComponent(sessionId)}&agentId=${encodeURIComponent(agentId)}&${runtimeScopeQuery(scope)}`);
         if (generation !== usageScopeGeneration) return;
-        const detail: UsageSessionDetailState = {
-          status: 'loaded',
-          entries: normalizeUsageSessionDetails(payload),
-        };
-        set((state) => {
-          const next = { ...state.sessionDetails, [sessionId]: detail };
-          sessionDetailsCache = cloneUsageSessionDetails(next);
-          return { sessionDetails: next };
-        });
+        set((state) => ({
+          sessionDetails: { ...state.sessionDetails, [sessionId]: { status: 'loaded', ...payload } },
+        }));
       } catch (error) {
         if (generation !== usageScopeGeneration) return;
         const message = error instanceof Error ? error.message : String(error);
-        const detail: UsageSessionDetailState = { status: 'error', message };
-        set((state) => {
-          const next = { ...state.sessionDetails, [sessionId]: detail };
-          sessionDetailsCache = cloneUsageSessionDetails(next);
-          return { sessionDetails: next };
-        });
+        set((state) => ({
+          sessionDetails: { ...state.sessionDetails, [sessionId]: { status: 'error', message } },
+        }));
       }
     })();
 
@@ -189,13 +140,9 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
     }
 
     const requestId = ++latestUsageRefreshRequestId;
-    const hasCache = get().usageHistoryReady;
-    if (hasCache) {
-      if (!silent) {
-        set({ refreshing: true, initialLoading: false, error: null });
-      }
-    } else {
-      set({ initialLoading: true, refreshing: false, error: null });
+    const hasCache = get().usageHistory !== null;
+    if (!hasCache || !silent) {
+      set({ refreshing: hasCache, error: null });
     }
 
     trackUiEvent('dashboard.token_usage_fetch_started', {
@@ -220,7 +167,6 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
           const timeoutMessage = `Token usage refresh timed out after ${String(USAGE_FETCH_SAFETY_TIMEOUT_MS)}ms`;
           set({
             error: timeoutMessage,
-            initialLoading: false,
             refreshing: false,
           });
           trackUiEvent('dashboard.token_usage_fetch_safety_timeout', {
@@ -239,33 +185,23 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
         });
 
         try {
-          const payload = await hostApiFetch<UsageHistoryEntry[]>(`/api/runtime-host/usage/recent?${runtimeScopeQuery(scope)}`);
+          const payload = await hostApiFetch<UsageHistory>(`/api/runtime-host/usage/recent?${runtimeScopeQuery(scope)}`);
           if (requestId !== latestUsageRefreshRequestId) {
             return;
           }
 
-          const normalized = Array.isArray(payload) ? payload : [];
-          const cloned = cloneUsageHistory(normalized);
-          usageHistoryCache = cloned;
-          usageHistoryReadyCache = true;
-
-          set({
-            usageHistory: cloned,
-            usageHistoryReady: true,
-            initialLoading: false,
-            refreshing: false,
-            error: null,
-          });
+          set({ usageHistory: payload, refreshing: false, error: null });
 
           trackUiEvent('dashboard.token_usage_fetch_succeeded', {
             requestId,
             reason,
             restartMarker,
             attempt,
-            records: cloned.length,
+            records: payload.entries.length,
           });
 
-          if (cloned.length === 0 && attempt < maxAttempts) {
+          const retryEmpty = payload.coverage.kind === 'reported' && payload.entries.length === 0;
+          if (retryEmpty && attempt < maxAttempts) {
             trackUiEvent('dashboard.token_usage_fetch_retry_scheduled', {
               requestId,
               reason,
@@ -277,7 +213,7 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
             continue;
           }
 
-          if (cloned.length === 0) {
+          if (retryEmpty) {
             trackUiEvent('dashboard.token_usage_fetch_exhausted', {
               requestId,
               reason,
@@ -315,7 +251,6 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
 
           set({
             error: message,
-            initialLoading: false,
             refreshing: false,
           });
           trackUiEvent('dashboard.token_usage_fetch_exhausted', {

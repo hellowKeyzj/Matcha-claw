@@ -77,6 +77,8 @@ pub enum ProviderMediaApiProtocol {
     Google,
     OpenAi,
     OpenRouter,
+    DashScope,
+    Ark,
 }
 
 #[derive(Clone, Eq, PartialEq)]

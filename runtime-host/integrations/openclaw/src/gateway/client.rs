@@ -20,8 +20,8 @@ use tokio::{
     time::{Instant, sleep, timeout, timeout_at},
 };
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{Bytes, Message, Utf8Bytes},
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{Bytes, Message, Utf8Bytes, protocol::WebSocketConfig},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -70,10 +70,26 @@ struct ControlDispatcher {
     epoch: Option<super::ingress::GatewayEpoch>,
     receive_task: Mutex<Option<OwnedTask<()>>>,
     supports_goal: bool,
+    max_payload: u64,
     metadata_subscribed: Mutex<bool>,
 }
 
 impl ControlDispatcher {
+    async fn mutate_session_request(
+        &self,
+        request: &wire::RpcRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<MutationDelivery, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let encoded = request.encode().map_err(|_| RuntimeOperationFailure::Unknown)?;
+        if encoded.len() as u64 > self.max_payload {
+            return Err(RuntimeOperationFailure::TargetRejected);
+        }
+        Ok(self.dispatcher.mutate_encoded_cancellable(
+            request.request_id().to_owned(), encoded, RPC_DEADLINE, cancellation,
+        ).await)
+    }
+
     async fn query<T>(
         &self,
         request: wire::RpcRequest,
@@ -757,6 +773,69 @@ impl GatewayClient {
         Err(RuntimeOperationFailure::Unknown)
     }
 
+    async fn hydrate_image_tasks(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64, sync: &mut sessions_module::ports::SessionSync) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::{ports::RuntimeOperationFailure, state::SessionFact};
+        let tools = match &sync.view.tools { SessionFact::Complete(tools) | SessionFact::Incomplete { facts: tools, .. } => tools, _ => return Ok(()) };
+        let task_ids = tools.iter().filter(|tool| crate::session::image_tasks::needs_read(tool))
+            .filter_map(|tool| crate::session::image_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>();
+        for task_id in task_ids {
+            let id = next_request_id("image-task-get");
+            let request = wire::session_request(id.clone(), "tasks.get", serde_json::json!({ "taskId": task_id })).map_err(|_| RuntimeOperationFailure::Unknown)?;
+            let (reply, result) = tokio::sync::oneshot::channel();
+            self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::ImageTask { identity: identity.clone(), generation, task_id, reply });
+            let response = control.dispatcher.ordered_query(request).await;
+            self.observations.pending.lock().expect("observation pending lock poisoned").remove(&id);
+            if response.is_err() {
+                trace::log_unscoped("runtime.openclaw.image_task.read_unavailable", || serde_json::json!({ "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "reason": "transport" }));
+                continue;
+            }
+            let current = match result.await {
+                Ok(Ok(current)) => current,
+                _ => {
+                    trace::log_unscoped("runtime.openclaw.image_task.read_unavailable", || serde_json::json!({ "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "reason": "native_or_binding" }));
+                    continue;
+                }
+            };
+            if let SessionFact::Complete(tools) | SessionFact::Incomplete { facts: tools, .. } = &mut sync.view.tools {
+                for tool in tools {
+                    if let Some(updated) = current.iter().find(|current| current.tool_call_id == tool.tool_call_id) {
+                        tool.details = updated.details.clone();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn cancel_image_tasks(&self, identity: &sessions_module::state::SessionIdentity, run_id: &str) -> Result<Option<crate::session::image_tasks::ImageTaskCancellation>, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let binding = self.observations.entries.lock().expect("observation registry lock poisoned")
+            .get(&identity_key(identity)).filter(|entry| !entry.paused).and_then(|entry| entry.source_epoch.map(|epoch| (entry.generation, epoch)));
+        let Some((generation, epoch)) = binding else { return Ok(None); };
+        let ingest = self.event_ingest.as_ref().ok_or(RuntimeOperationFailure::Unavailable)?;
+        let tools = ingest.image_task_tools(identity.clone(), generation, epoch, Arc::clone(&self.observations)).await?;
+        let task_ids = tools.iter().filter(|tool| crate::session::image_tasks::needs_read(tool))
+            .filter(|tool| tool.run_id.as_deref() == Some(run_id) || tool.details.as_ref().and_then(|details| details.get("runId")).and_then(serde_json::Value::as_str) == Some(run_id)
+                || tool.details.as_ref().and_then(|details| details.pointer("/task/runId")).and_then(serde_json::Value::as_str) == Some(run_id))
+            .filter_map(|tool| crate::session::image_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>();
+        if task_ids.is_empty() { return Ok(None); }
+        let standalone = !tools.iter().any(|tool| task_ids.contains(crate::session::image_tasks::task_id(tool).unwrap_or_default()) && tool.run_id.as_deref() == Some(run_id));
+        let mut cancelled = true;
+        for task_id in task_ids {
+            if !self.observations.is_active(identity, generation, epoch) { return Err(RuntimeOperationFailure::Unavailable); }
+            let request = wire::session_request(next_request_id("image-task-cancel"), "tasks.cancel", serde_json::json!({ "taskId": task_id })).map_err(|_| RuntimeOperationFailure::Unknown)?;
+            match self.rpc_mutation_once(request).await {
+                MutationDelivery::Response(wire::GatewayResponse::Success { payload: Some(payload), .. }) => {
+                    cancelled &= payload.get("cancelled").and_then(serde_json::Value::as_bool) == Some(true)
+                        && payload.get("task").and_then(|task| task.get("status")).and_then(serde_json::Value::as_str) == Some("cancelled");
+                }
+                MutationDelivery::Response(wire::GatewayResponse::Failure { .. }) => return Err(RuntimeOperationFailure::TargetRejected),
+                _ => return Err(RuntimeOperationFailure::Unknown),
+            }
+        }
+        Ok(Some(crate::session::image_tasks::ImageTaskCancellation { cancelled, standalone }))
+    }
+
     pub(crate) async fn sync_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64, input_ids: &[String]) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         if trace::enabled() {
@@ -795,6 +874,7 @@ impl GatewayClient {
             let history = self.history_observation(&control, identity, generation, page, host_epoch, input_ids).await;
             history_elapsed_ms = started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
             let mut history = history?;
+            self.hydrate_image_tasks(&control, identity, generation, &mut history).await?;
             history.view.model_state = model_state;
             Ok(history)
         }.await;
@@ -851,7 +931,7 @@ impl GatewayClient {
         self.observations.restart(identity, generation, next_generation)?;
         self.observations.pending.lock().expect("observation pending lock poisoned").retain(|_, context| {
             let (target, target_generation) = match context {
-                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } => (identity, generation),
+                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } | OrderedContext::ImageTask { identity, generation, .. } => (identity, generation),
             };
             target != identity || *target_generation != generation
         });
@@ -894,7 +974,7 @@ impl GatewayClient {
         }
         self.observations.pending.lock().expect("observation pending lock poisoned").retain(|_, context| {
             let (target, target_generation) = match context {
-                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } => (identity, generation),
+                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } | OrderedContext::ImageTask { identity, generation, .. } => (identity, generation),
             };
             *target != identity || *target_generation != generation
         });
@@ -1176,7 +1256,7 @@ impl GatewayClient {
                         (None, task)
                     };
                     let supports_goal = hello.features.capabilities.iter().any(|capability| capability == crate::session::goal::START_CAPABILITY);
-                    let control = Arc::new(ControlDispatcher { dispatcher, epoch, receive_task: Mutex::new(Some(receive_task)), supports_goal, metadata_subscribed: Mutex::new(false) });
+                    let control = Arc::new(ControlDispatcher { dispatcher, epoch, receive_task: Mutex::new(Some(receive_task)), supports_goal, max_payload: hello.policy.max_payload, metadata_subscribed: Mutex::new(false) });
                     {
                         let mut state = self.control_state.lock().await;
                         self.live_goal_capability.store(supports_goal, Ordering::Release);
@@ -1585,6 +1665,44 @@ impl GatewayClient {
         self.rpc_mutation_with_deadline_cancellable(request, RPC_DEADLINE, cancellation).await
     }
 
+    pub(crate) async fn rpc_chat_mutation_cancellable(
+        &self,
+        request: wire::RpcRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<MutationDelivery, sessions_module::ports::RuntimeOperationFailure> {
+        self.rpc_session_mutation_cancellable(request, false, cancellation).await
+    }
+
+    async fn rpc_session_mutation_cancellable(
+        &self,
+        request: wire::RpcRequest,
+        requires_goal: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<MutationDelivery, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        for attempt in 0..2 {
+            let control = match self.control_dispatcher_cancellable(cancellation).await {
+                Ok(control) => control,
+                Err(error) if !requires_goal || cancellation.is_cancelled() => {
+                    return Ok(MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)));
+                }
+                Err(_) => return Err(RuntimeOperationFailure::Unavailable),
+            };
+            if requires_goal && !control.supports_goal { return Err(RuntimeOperationFailure::Unsupported); }
+            let delivery = control.mutate_session_request(&request, cancellation).await?;
+            if attempt == 0 {
+                if let MutationDelivery::NotWritten(error) = delivery {
+                    if !cancellation.is_cancelled() && is_retryable_control_connection_error(dispatcher_error(error)) {
+                        self.mark_control_reconnecting_if_current(&control).await;
+                        continue;
+                    }
+                }
+            }
+            return Ok(delivery);
+        }
+        unreachable!("Chat mutation attempts are bounded")
+    }
+
     pub(crate) async fn rpc_mutation_with_deadline(
         &self,
         request: wire::RpcRequest,
@@ -1622,28 +1740,7 @@ impl GatewayClient {
     }
 
     pub(crate) async fn rpc_goal_mutation_cancellable(&self, request: wire::RpcRequest, cancellation: &CancellationToken) -> Result<MutationDelivery, sessions_module::ports::RuntimeOperationFailure> {
-        use sessions_module::ports::RuntimeOperationFailure;
-        for attempt in 0..2 {
-            let control = match self.control_dispatcher_cancellable(cancellation).await {
-                Ok(control) => control,
-                Err(error) if cancellation.is_cancelled() => {
-                    return Ok(MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)));
-                }
-                Err(_) => return Err(RuntimeOperationFailure::Unavailable),
-            };
-            if !control.supports_goal { return Err(RuntimeOperationFailure::Unsupported); }
-            let delivery = control.dispatcher.mutate_cancellable(request.clone(), cancellation).await;
-            if attempt == 0 {
-                if let MutationDelivery::NotWritten(error) = delivery {
-                    if !cancellation.is_cancelled() && is_retryable_control_connection_error(dispatcher_error(error)) {
-                        self.mark_control_reconnecting_if_current(&control).await;
-                        continue;
-                    }
-                }
-            }
-            return Ok(delivery);
-        }
-        unreachable!("Goal mutation attempts are bounded")
+        self.rpc_session_mutation_cancellable(request, true, cancellation).await
     }
 
     pub(crate) async fn rpc_encoded_mutation(
@@ -1707,12 +1804,24 @@ impl GatewayClient {
         &self,
         scopes: &[&str],
     ) -> Result<(GatewaySocket, wire::HelloOk), GatewayClientError> {
+        self.connect_with_hello_config(scopes, WebSocketConfig::default())
+            .await
+    }
+
+    pub(super) async fn connect_with_hello_config(
+        &self,
+        scopes: &[&str],
+        config: WebSocketConfig,
+    ) -> Result<(GatewaySocket, wire::HelloOk), GatewayClientError> {
         let deadline = handshake_deadline(Instant::now());
         let endpoint = self.endpoint.websocket_url();
-        let (mut socket, _) = timeout_at(deadline, connect_async(endpoint.as_str()))
-            .await
-            .map_err(|_| GatewayClientError::UpgradeDeadline)?
-            .map_err(|_| GatewayClientError::UpgradeFailed)?;
+        let (mut socket, _) = timeout_at(
+            deadline,
+            connect_async_with_config(endpoint.as_str(), Some(config), false),
+        )
+        .await
+        .map_err(|_| GatewayClientError::UpgradeDeadline)?
+        .map_err(|_| GatewayClientError::UpgradeFailed)?;
 
         let challenge = match timeout_at(deadline, receive_challenge(&mut socket)).await {
             Ok(Ok(challenge)) => challenge,
@@ -1828,7 +1937,7 @@ impl GatewayClient {
     }
 }
 
-const CONTROL_METHODS: [&str; 13] = [
+const CONTROL_METHODS: [&str; 15] = [
     "status",
     "config.get",
     "config.patch",
@@ -1838,6 +1947,8 @@ const CONTROL_METHODS: [&str; 13] = [
     "skills.status",
     "channels.pairing.list",
     "sessions.describe",
+    "tasks.get",
+    "tasks.cancel",
     "question.list",
     "question.get",
     wire::QUESTION_RESOLVE_METHOD,
@@ -2028,7 +2139,7 @@ async fn receive_challenge(
     }
 }
 
-async fn exchange(
+pub(super) async fn exchange(
     socket: &mut GatewaySocket,
     request: &wire::RpcRequest,
 ) -> Result<wire::GatewayResponse, GatewayClientError> {
@@ -2081,7 +2192,7 @@ async fn send_pong(socket: &mut GatewaySocket, payload: Bytes) -> Result<(), Gat
         .map_err(|_| GatewayClientError::Transport)
 }
 
-async fn close_quietly(socket: &mut GatewaySocket) {
+pub(super) async fn close_quietly(socket: &mut GatewaySocket) {
     close_with_deadline(socket.close(None)).await;
 }
 

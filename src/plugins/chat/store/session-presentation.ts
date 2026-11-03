@@ -1,10 +1,10 @@
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
-import type { SessionRenderItem } from '@/types/session/render-item';
+import type { SessionRenderItem, SessionRenderUserMessageItem } from '@/types/session/render-item';
 import type { SessionInputReceipt, SessionWireItem } from '@/types/session/snapshot';
 import * as openclaw from '@/plugins/chat/store/openclaw-session';
 import * as matcha from '@/plugins/chat/store/matcha-session';
 import { reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
-import type { ChatSessionAbortState, ChatSessionPending, ChatSessionRecord, ChatSessionRuntimeState, ChatSessionSendAdmission, ChatSessionSendState } from '@/plugins/chat/store/types';
+import type { ChatSendAttachment, ChatSessionAbortState, ChatSessionPending, ChatSessionRecord, ChatSessionRuntimeState, ChatSessionSendAdmission, ChatSessionSendState } from '@/plugins/chat/store/types';
 
 export type SessionMessageState = Pick<ChatSessionRecord, 'items' | 'runtime'> & {
   abort: ChatSessionAbortState | null;
@@ -76,6 +76,36 @@ export function reconcileSessionMessageItems(identity: SessionIdentity | undefin
 
 export function getSessionInputIds(record: ChatSessionRecord | undefined): string[] {
   return record?.meta.sessionIdentity ? messageModel(record).inputIds(record) : [];
+}
+
+export function buildPendingUserMessageItem(input: {
+  clientId: string;
+  sessionKey: string;
+  text: string;
+  createdAt: number;
+  attachments: readonly ChatSendAttachment[];
+}): SessionRenderUserMessageItem {
+  return {
+    key: `renderer-user:${input.clientId}`,
+    kind: 'user-message',
+    role: 'user',
+    sessionKey: input.sessionKey,
+    text: input.text,
+    clientId: input.clientId,
+    status: 'pending',
+    createdAt: input.createdAt,
+    updatedAt: input.createdAt,
+    images: [],
+    attachedFiles: input.attachments
+      .filter((attachment) => !attachment.mimeType.startsWith('image/') || attachment.sourcePath || attachment.preview)
+      .map((attachment) => ({
+        fileName: attachment.fileName,
+        mimeType: attachment.mimeType,
+        fileSize: attachment.fileSize,
+        preview: !attachment.sourcePath && attachment.mimeType.startsWith('image/') ? attachment.preview : null,
+        ...(attachment.sourcePath ? { filePath: attachment.sourcePath, source: 'user-upload' as const } : {}),
+      })),
+  };
 }
 
 export function startSessionSend(record: ChatSessionRecord, send: ChatSessionSendState, sessionKey: string): SessionMessageState {

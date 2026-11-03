@@ -24,6 +24,17 @@
       "checkedAt": "2026-09-06"
     },
     {
+      "modelId": "claude-haiku-5-5",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "source": "https://platform.claude.com/docs/en/models/overview",
+      "checkedAt": "2026-11-03"
+    },
+    {
       "modelId": "claude-opus-4-8",
       "capabilities": [
         "chat",
@@ -46,6 +57,17 @@
       "checkedAt": "2026-09-06"
     },
     {
+      "modelId": "claude-opus-5-5",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "source": "https://platform.claude.com/docs/en/models/overview",
+      "checkedAt": "2026-11-03"
+    },
+    {
       "modelId": "claude-sonnet-4-5-20250929",
       "capabilities": [
         "chat",
@@ -66,6 +88,17 @@
       "maxTokens": 128000,
       "source": "https://platform.claude.com/docs/en/models/sonnet-5/overview",
       "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "claude-sonnet-5-5",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "source": "https://platform.claude.com/docs/en/models/overview",
+      "checkedAt": "2026-11-03"
     },
     {
       "modelId": "chat-latest",
@@ -404,6 +437,28 @@
       "checkedAt": "2026-09-06"
     },
     {
+      "modelId": "gpt-5.4-mini",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4-mini",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "gpt-5.4-nano",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4-nano",
+      "checkedAt": "2026-11-03"
+    },
+    {
       "modelId": "gpt-5.5",
       "capabilities": [
         "chat",
@@ -490,6 +545,50 @@
       "maxTokens": 128000,
       "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
       "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-6-luna",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "gpt-6-sol",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-sol",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "gpt-6.1-sol",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "gpt-6.1-terra",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+      "checkedAt": "2026-11-03"
     },
     {
       "modelId": "o1",
@@ -630,6 +729,17 @@
       "checkedAt": "2026-09-06"
     },
     {
+      "modelId": "gemini-3.5-flash-lite",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite",
+      "checkedAt": "2026-11-03"
+    },
+    {
       "modelId": "gemini-3.8-flash",
       "capabilities": [
         "chat",
@@ -641,14 +751,49 @@
       "checkedAt": "2026-09-06"
     },
     {
+      "modelId": "gemini-4-argon",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://ai.google.dev/gemini-api/docs/models/gemini-4-argon",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "gemini-nano-banana-2.1",
+      "capabilities": [
+        "chat",
+        "imageUnderstand",
+        "imageGenerate"
+      ],
+      "contextWindow": 131072,
+      "maxTokens": 32768,
+      "source": "https://ai.google.dev/gemini-api/docs/models/gemini-nano-banana-2.1",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "deepseek-flash",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 393216,
+      "source": "https://api-docs.deepseek.com/api/list-models/",
+      "checkedAt": "2026-11-03"
+    },
+    {
       "modelId": "deepseek-v4-flash",
       "capabilities": [
-        "chat"
+        "chat",
+        "imageUnderstand"
       ],
       "contextWindow": 1048576,
       "maxTokens": 393216,
       "source": "https://api-docs.deepseek.com/quick_start/pricing",
-      "checkedAt": "2026-09-06"
+      "checkedAt": "2026-11-03"
     },
     {
       "modelId": "deepseek-v4-flash-vision-exp",
@@ -674,11 +819,12 @@
     {
       "modelId": "kimi-k2.6",
       "capabilities": [
-        "chat"
+        "chat",
+        "imageUnderstand"
       ],
       "contextWindow": 262144,
-      "source": "https://platform.kimi.com/docs/api/models-overview",
-      "checkedAt": "2026-09-06"
+      "source": "https://platform.kimi.com/docs/models",
+      "checkedAt": "2026-11-03"
     },
     {
       "modelId": "kimi-k2.7-code",
@@ -710,6 +856,26 @@
       "maxTokens": 1048576,
       "source": "https://platform.kimi.com/docs/models",
       "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "kimi-k3.1-pro",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "source": "https://platform.kimi.com/docs/models",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "kimi-k3.1-pro-highspeed",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "source": "https://platform.kimi.com/docs/models",
+      "checkedAt": "2026-11-03"
     },
     {
       "modelId": "qwen-long",
@@ -918,13 +1084,44 @@
     {
       "modelId": "glm-5.2",
       "capabilities": [
-        "chat",
-        "imageUnderstand"
+        "chat"
       ],
       "contextWindow": 1000000,
       "maxTokens": 131072,
       "source": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2",
-      "checkedAt": "2026-09-06"
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "glm-5.3",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "glm-5.3-flash",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 131072,
+      "source": "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "glm-5.3-flashx",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 131072,
+      "source": "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash",
+      "checkedAt": "2026-11-03"
     },
     {
       "modelId": "MiniMax-M2.5",
@@ -949,12 +1146,66 @@
     {
       "modelId": "MiniMax-M3",
       "capabilities": [
-        "chat"
+        "chat",
+        "imageUnderstand"
       ],
       "contextWindow": 1000000,
       "maxTokens": 524288,
-      "source": "https://platform.minimaxi.com/docs/guides/text-generation",
-      "checkedAt": "2026-09-06"
+      "source": "https://platform.minimax.cn/docs/api-reference/text-openai-api",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "MiniMax-M3.1-Flash",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "source": "https://platform.minimax.cn/docs/guides/text-generation",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "doubao-seed-2-1-pro-260915",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 262144,
+      "source": "https://docs.volcengine.com/docs/ark/model-list",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "doubao-seed-2-1-lite-260915",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 262144,
+      "source": "https://docs.volcengine.com/docs/ark/model-list",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "doubao-seed-2-1-turbo-260628",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 262144,
+      "maxTokens": 262144,
+      "source": "https://docs.volcengine.com/docs/ark/model-list",
+      "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "hy4-preview",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://cloud.tencent.com/document/product/1823/132252",
+      "checkedAt": "2026-11-03"
     }
   ]
 }

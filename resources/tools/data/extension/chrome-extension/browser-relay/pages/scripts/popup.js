@@ -1,4 +1,11 @@
-import { RelayState } from '../../lib/constants.js'
+import { RelayState, getRelayDisplayState } from '../../lib/constants.js'
+import {
+  getRelayErrorMessage,
+  matchesRelayErrorChange,
+  readRelayError,
+} from '../../lib/cdp/relay/error-state.js'
+import { escapeHtml } from './security.js'
+import { pageLanguage, relayText } from './relay-i18n.js'
 
 const statusCard = document.getElementById('status-card')
 const label = document.getElementById('label')
@@ -12,10 +19,13 @@ const errorBanner = document.getElementById('error-banner')
 const errorText = document.getElementById('error-text')
 const browserSelect = document.getElementById('browser-select')
 
-const ERROR_MESSAGES = {
-  encryption_unsupported:
-    'Desktop app does not support encrypted transport. Please update the desktop app to the latest version.',
-}
+toggle.setAttribute('aria-label', relayText.toggle)
+label.textContent = relayText.checking
+tabsHeader.querySelector('span').textContent = relayText.tabs
+tabsHeader.setAttribute('aria-label', relayText.tabs)
+document.getElementById('settings-label').textContent = relayText.settings
+browserSelect.textContent = relayText.useWindow
+
 let transientError = ''
 let currentPopupWindowId = null
 
@@ -24,19 +34,13 @@ try {
 } catch (_) {}
 
 const STATE_LABELS = {
-  [RelayState.DISABLED]: 'Offline',
-  [RelayState.DISCONNECTED]: 'Connecting…',
-  [RelayState.CONNECTED]: 'Connected',
+  [RelayState.DISABLED]: relayText.disabled,
+  [RelayState.DISCONNECTED]: relayText.disconnected,
+  [RelayState.CONNECTED]: relayText.connected,
 }
 
 const ARROW_SVG =
   '<svg class="tab-go" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4.5 2.5l4 3.5-4 3.5"/></svg>'
-
-function escapeHtml(str) {
-  const div = document.createElement('div')
-  div.appendChild(document.createTextNode(str))
-  return div.innerHTML
-}
 
 function isWindowSelected(status, windowId) {
   return typeof status?.browserInstanceId === 'string'
@@ -52,21 +56,21 @@ async function selectExecutionWindow(windowId) {
       windowId,
     })
     if (!response?.ok) {
-      transientError = response?.error || `select window failed: ${windowId}`
+      transientError = relayText.selectFailed
     }
-  } catch (error) {
-    transientError = error?.message || String(error)
+  } catch {
+    transientError = relayText.selectFailed
   }
   await refresh()
 }
 
 function render(status) {
-  const state = status?.state || RelayState.DISABLED
+  const state = getRelayDisplayState(status)
   const selected = isWindowSelected(status, currentPopupWindowId)
   statusCard.dataset.state = state
-  label.textContent = STATE_LABELS[state] || 'Unknown'
+  label.textContent = STATE_LABELS[state]
   browserSelect.dataset.selected = String(selected)
-  browserSelect.textContent = selected ? 'Using This Window' : 'Use This Window'
+  browserSelect.textContent = selected ? relayText.usingWindow : relayText.useWindow
 
   if (!toggleBusy) {
     toggle.checked = state !== RelayState.DISABLED
@@ -74,19 +78,19 @@ function render(status) {
 
   meta.innerHTML = ''
   if (status?.attachedTabs > 0) {
-    addChip(`${status.attachedTabs}`, status.attachedTabs === 1 ? 'tab' : 'tabs', 'tabs')
+    addChip(`${status.attachedTabs}`, status.attachedTabs === 1 ? relayText.tab : relayText.tabs, 'tabs')
   }
   if (status?.agentTabs > 0) {
     const nonRetained = status.agentTabs - (status.retainedTabs || 0)
-    if (nonRetained > 0) addChip(`${nonRetained}`, 'agent', 'agent')
-    if (status.retainedTabs > 0) addChip(`${status.retainedTabs}`, 'retained', 'retained')
+    if (nonRetained > 0) addChip(`${nonRetained}`, relayText.agent, 'agent')
+    if (status.retainedTabs > 0) addChip(`${status.retainedTabs}`, relayText.retained, 'retained')
   }
 }
 
 function addChip(num, text, kind) {
   const chip = document.createElement('span')
   chip.className = `chip chip-${kind}`
-  chip.innerHTML = `<span class="chip-num">${num}</span> ${text}`
+  chip.innerHTML = `<span class="chip-num">${escapeHtml(num)}</span> ${escapeHtml(text)}`
   meta.appendChild(chip)
 }
 
@@ -100,8 +104,8 @@ function tabSortKey(t) {
 function renderTabs(browserInstances, status) {
   const instance = browserInstances?.[0]
   const windows = instance?.windows || []
-  windows.forEach((window) => window.tabs.sort((a, b) => tabSortKey(a) - tabSortKey(b)))
-  const hasTabs = windows.some((window) => window.tabs.length > 0)
+  windows.forEach((browserWindow) => browserWindow.tabs.sort((a, b) => tabSortKey(a) - tabSortKey(b)))
+  const hasTabs = windows.some((browserWindow) => browserWindow.tabs.length > 0)
   tabsSection.dataset.empty = String(!hasTabs)
 
   if (!hasTabs) {
@@ -110,33 +114,40 @@ function renderTabs(browserInstances, status) {
   }
 
   tabsList.innerHTML = ''
-  windows.forEach((window) => {
+  windows.forEach((browserWindow) => {
     const header = document.createElement('div')
     header.className = 'tabs-header tabs-window-header'
 
     const title = document.createElement('span')
-    title.textContent = window.windowId != null ? `Window ${window.windowId}` : 'Window'
+    title.textContent = browserWindow.windowId != null ? `${relayText.window} ${browserWindow.windowId}` : relayText.window
     header.appendChild(title)
 
-    if (window.windowId != null) {
-      const selected = isWindowSelected(status, window.windowId)
+    if (browserWindow.windowId != null) {
+      const selected = isWindowSelected(status, browserWindow.windowId)
       const button = document.createElement('button')
       button.type = 'button'
       button.className = 'window-select-button'
       button.dataset.selected = String(selected)
-      button.textContent = selected ? 'Using This Window' : 'Use This Window'
+      button.textContent = selected ? relayText.usingWindow : relayText.useWindow
       button.addEventListener('click', async (event) => {
         event.stopPropagation()
-        await selectExecutionWindow(window.windowId)
+        await selectExecutionWindow(browserWindow.windowId)
       })
       header.appendChild(button)
     }
 
     tabsList.appendChild(header)
 
-    window.tabs.forEach((tab) => {
+    browserWindow.tabs.forEach((tab) => {
       const el = document.createElement('div')
       el.className = 'tab-item'
+      el.setAttribute('role', 'button')
+      el.tabIndex = 0
+      el.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        el.click()
+      })
       el.addEventListener('click', async () => {
         transientError = ''
 
@@ -153,28 +164,28 @@ function renderTabs(browserInstances, status) {
             tabId: tab.tabId,
           })
           if (!response?.ok) {
-            transientError = response?.error || `attach failed for tab ${tab.tabId}`
+            transientError = relayText.attachFailed
             await refresh()
             return
           }
           await refresh()
           window.close()
-        } catch (error) {
-          transientError = error?.message || String(error)
+        } catch {
+          transientError = relayText.attachFailed
           await refresh()
         }
       })
 
-      const displayTitle = tab.title || tab.url || `Tab ${tab.tabId}`
+      const displayTitle = tab.title || tab.url || `${relayText.tab} ${tab.tabId}`
       const safeTitle = escapeHtml(displayTitle)
       const safeState = escapeHtml(tab.state || 'virtual')
       let badge = ''
       if (tab.active) {
-        badge = '<span class="tab-badge tab-badge-agent">active</span>'
+        badge = `<span class="tab-badge tab-badge-agent">${escapeHtml(relayText.active)}</span>`
       } else if (tab.isAgent && !tab.isRetained) {
-        badge = '<span class="tab-badge tab-badge-agent">agent</span>'
+        badge = `<span class="tab-badge tab-badge-agent">${escapeHtml(relayText.agent)}</span>`
       } else if (tab.isRetained) {
-        badge = '<span class="tab-badge tab-badge-retained">retained</span>'
+        badge = `<span class="tab-badge tab-badge-retained">${escapeHtml(relayText.retained)}</span>`
       }
 
       el.innerHTML =
@@ -190,6 +201,12 @@ function renderTabs(browserInstances, status) {
 tabsHeader.addEventListener('click', () => {
   const isOpen = tabsSection.dataset.open === 'true'
   tabsSection.dataset.open = String(!isOpen)
+  tabsHeader.setAttribute('aria-expanded', String(!isOpen))
+})
+tabsHeader.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  event.preventDefault()
+  tabsHeader.click()
 })
 
 browserSelect.addEventListener('click', async () => {
@@ -197,9 +214,9 @@ browserSelect.addEventListener('click', async () => {
   await selectExecutionWindow(currentPopupWindowId)
 })
 
-function renderError(errorKey) {
+function renderError(errorKey, severity) {
   const message =
-    (errorKey && ERROR_MESSAGES[errorKey])
+    getRelayErrorMessage(errorKey, severity, pageLanguage)
     || (typeof errorKey === 'string' && errorKey.trim() ? errorKey.trim() : '')
     || transientError
 
@@ -217,13 +234,13 @@ async function refresh() {
     const [status, browserResp, stored, currentWindow] = await Promise.all([
       chrome.runtime.sendMessage({ type: 'getRelayStatus' }),
       chrome.runtime.sendMessage({ type: 'getBrowserInstanceList' }),
-      chrome.storage.local.get(['_relayError']),
+      readRelayError(),
       chrome.windows.getCurrent().catch(() => null),
     ])
     currentPopupWindowId = Number.isInteger(currentWindow?.id) ? currentWindow.id : null
     render(status)
     renderTabs(browserResp?.browserInstances, status)
-    renderError(stored._relayError)
+    renderError(stored.code, stored.severity)
   } catch {
     currentPopupWindowId = null
     render(null)
@@ -237,7 +254,11 @@ toggle.addEventListener('change', async () => {
   if (toggleBusy) return
   toggleBusy = true
   try {
-    await chrome.runtime.sendMessage({ type: 'toggleRelay' })
+    const response = await chrome.runtime.sendMessage({ type: 'toggleRelay' })
+    transientError = response?.error ? relayText.toggleFailed : ''
+    await refresh()
+  } catch {
+    transientError = relayText.toggleFailed
     await refresh()
   } finally {
     toggleBusy = false
@@ -252,7 +273,7 @@ document.getElementById('open-settings').addEventListener('click', () => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (
     area === 'local' &&
-    ('relayEnabled' in changes || '_relayState' in changes || '_relayError' in changes)
+    ('relayEnabled' in changes || '_relayState' in changes || matchesRelayErrorChange(changes))
   ) {
     void refresh()
   }

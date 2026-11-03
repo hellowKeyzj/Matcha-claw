@@ -51,7 +51,9 @@ export function decodeResponse(
     throw new Error('World response does not match the public protocol schema')
   if (
     envelope.success &&
-    !RESPONSE_KINDS[operation]?.includes((envelope.data as { kind: string }).kind)
+    !RESPONSE_KINDS[operation]?.includes(
+      (envelope.data as { kind: string }).kind,
+    )
   ) {
     throw new Error('World response does not match the requested operation')
   }

@@ -54,40 +54,60 @@ export class IabAutomationUtilities {
       }
       case 'sourceMap': return readSourceMap(this.page, request, operation);
       case 'events': {
-        const events = this.page.events.filter((entry) => (!request.filter || JSON.stringify(entry).toLowerCase().includes(request.filter.toLowerCase())) && (request.since === undefined || Number(entry.seq) > request.since));
-        if (request.clear) this.page.events.length = 0;
+        const events = this.page.events.filter((entry) => (!request.filter || entry.kind === request.filter) && (!Number.isFinite(request.since) || Number(entry.seq) > request.since!));
+        if (request.clear === true) this.page.events.length = 0;
         return { events };
       }
       case 'requests': {
         await this.page.settleEvents(operation);
-        const requests = this.page.requests.filter((entry) => !request.filter || JSON.stringify(entry).toLowerCase().includes(request.filter.toLowerCase()));
-        if (request.clear) this.page.requests.length = 0;
-        return { requests: request.last === undefined ? requests : requests.slice(-Math.max(1, Math.floor(request.last))) };
+        const requests = this.page.readRequests(request.filter);
+        if (request.clear === true) this.page.requests.length = 0;
+        return { requests: typeof request.last === 'number' && Number.isFinite(request.last) && request.last > 0 && requests.length > request.last ? requests.slice(requests.length - Math.floor(request.last)) : requests };
       }
       case 'har': {
+        if (typeof request.savePath !== 'string' || !request.savePath) throw iabError('IAB_HAR_PATH_REQUIRED', 'HAR savePath is required (a .har file inside the workspace)');
         await this.page.settleEvents(operation);
-        let requests = this.page.requests.filter((entry) => !request.filter || JSON.stringify(entry).toLowerCase().includes(request.filter.toLowerCase()));
-        if (request.last !== undefined) requests = requests.slice(-Math.max(1, Math.floor(request.last)));
-        const har = { log: { version: '1.2', creator: { name: 'Matcha', version: '1.0' }, entries: requests.map(harEntry) } };
-        const savedTo = request.savePath ? await context.saveFile(request.savePath, Buffer.from(JSON.stringify(har, null, 2)), operation.signal) : undefined;
-        if (request.clear) this.page.requests.length = 0;
-        return { har, ...(savedTo ? { savedTo } : {}) };
+        let requests = this.page.requests.filter((entry) => !request.filter || String((entry.request as IabJsonObject | undefined)?.url ?? '').toLowerCase().includes(request.filter.toLowerCase()));
+        if (typeof request.last === 'number' && Number.isFinite(request.last) && request.last > 0 && requests.length > request.last) requests = requests.slice(requests.length - Math.floor(request.last));
+        const har = { log: { version: '1.2', creator: { name: 'Matcha', version: '1.0' }, entries: requests.filter((entry) => (entry.request as IabJsonObject | undefined)?.url).map(harEntry) } };
+        const content = JSON.stringify(har, null, 2);
+        const savePath = await context.saveFile(request.savePath, Buffer.from(content), operation.signal);
+        if (request.clear === true) this.page.requests.length = 0;
+        return { entries: har.log.entries.length, savePath, bytes: content.length };
       }
       case 'settings': return this.updateSettings(request.settings, operation);
       case 'som': return captureSom(this.page, request, operation);
       case 'intercept': {
         const rules = typeof request.rules === 'string' ? JSON.parse(request.rules) : request.rules;
         if (rules !== undefined) validateRules(rules);
-        const nextRules = request.clear ? [] : rules ?? this.rules;
-        const changed = request.clear || rules !== undefined || request.cacheBypass !== undefined;
-        if (changed) {
+        if (request.clear !== undefined && request.clear !== true) throw iabError('IAB_INTERCEPT_CLEAR_INVALID', 'Interception clear must be true when provided');
+        if (request.cacheBypass !== undefined && typeof request.cacheBypass !== 'boolean') throw iabError('IAB_INTERCEPT_CACHE_INVALID', 'Interception cacheBypass must be a boolean');
+        if (request.clear === true || rules !== undefined) {
+          const nextRules = request.clear === true ? [] : rules!;
+          this.configuredSessions.delete('');
+          if (nextRules.length) {
+            await this.page.executor.setInterceptPolicy(nextRules, { signal: operation.signal, assertCurrent: operation.assertCurrent });
+            try { await this.page.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, operation); }
+            catch (error) {
+              const failures: unknown[] = [error];
+              try { await this.page.executor.setInterceptPolicy(this.rules, { signal: operation.signal, assertCurrent: operation.assertCurrent }); }
+              catch (cleanupError) { failures.push(cleanupError); }
+              if (failures.length > 1) throw new AggregateError(failures, 'Interception setup and policy restoration failed', { cause: error });
+              throw error;
+            }
+          } else {
+            await this.page.send('Fetch.disable', undefined, operation);
+            await this.page.executor.setInterceptPolicy(nextRules, { signal: operation.signal, assertCurrent: operation.assertCurrent });
+          }
           this.rules = nextRules;
-          if (request.cacheBypass !== undefined) this.cacheBypass = request.cacheBypass;
-          this.configuredSessions.clear();
-          await this.page.executor.setInterceptPolicy(this.rules, { signal: operation.signal, assertCurrent: operation.assertCurrent });
-          for (const frame of await this.page.refreshFrames(operation)) await this.configureSession(frame.sessionId, operation);
+          this.configuredSessions.add('');
         }
-        return { rules: this.rules as unknown as IabJsonValue, cacheBypass: this.cacheBypass, enabled: this.rules.length > 0 };
+        if (request.cacheBypass !== undefined && request.cacheBypass !== this.cacheBypass) {
+          await this.page.send('Network.setCacheDisabled', { cacheDisabled: request.cacheBypass }, operation);
+          this.cacheBypass = request.cacheBypass;
+        }
+        const enabled = this.rules.length > 0 && this.configuredSessions.has('');
+        return { rules: [...this.rules] as unknown as IabJsonValue, cacheBypass: this.cacheBypass, enabled, ...(enabled ? { note: 'intercept rules must be re-applied after navigation' } : {}) };
       }
       case 'metrics': {
         const failures: unknown[] = [];
@@ -95,11 +115,16 @@ export class IabAutomationUtilities {
         try {
           await this.page.send('Performance.enable', undefined, operation);
           const result = await this.page.send<any>('Performance.getMetrics', undefined, operation);
-          metrics = (result.metrics ?? []).filter((entry: any) => typeof entry.name === 'string' && Number.isFinite(entry.value));
+          metrics = (Array.isArray(result?.metrics) ? result.metrics : []).flatMap((entry: any) => {
+            if (!entry || typeof entry !== 'object' || typeof entry.name !== 'string') return [];
+            const value = typeof entry.value === 'number' ? entry.value : Number(entry.value);
+            return Number.isFinite(value) ? [{ name: entry.name, value }] : [];
+          });
         } catch (error) { failures.push(error); }
         try { await this.page.send('Performance.disable', undefined, operation); }
         catch (error) { failures.push(error); }
-        if (failures.length) throw new AggregateError(failures, 'Performance inspection or cleanup failed', { cause: failures[0] });
+        if (failures.length > 1) throw new AggregateError(failures, 'Performance inspection or cleanup failed', { cause: failures[0] });
+        if (failures.length) throw failures[0];
         return { metrics };
       }
       case 'emulate': return emulate(this.page, request, operation);
@@ -109,53 +134,78 @@ export class IabAutomationUtilities {
 
   private async navigate(request: Extract<BrowserUtilityRequest, { kind: 'goBack' | 'goForward' | 'reload' }>, operation: Operation): Promise<IabJsonObject> {
     const started = Date.now();
-    const readState = () => this.page.evaluate('({href:location.href,timeOrigin:performance.timeOrigin,entryId:window.navigation?.currentEntry?.id??null})', operation);
-    const before = await readState();
+    type NavigationState = { href: string; timeOrigin: number | null; entryId: string | null };
+    const readState = async (): Promise<NavigationState | null> => {
+      try {
+        const state = await this.page.evaluate('({href:location.href,timeOrigin:performance.timeOrigin,entryId:window.navigation?.currentEntry?.id??null})', operation);
+        if (!state || typeof state !== 'object') return null;
+        return { href: typeof state.href === 'string' ? state.href : '', timeOrigin: typeof state.timeOrigin === 'number' ? state.timeOrigin : null, entryId: typeof state.entryId === 'string' ? state.entryId : null };
+      } catch (error) {
+        operation.signal.throwIfAborted();
+        (operation.assertCurrent ?? this.page.assertCurrent)();
+        if (operation.deadline <= Date.now() || error instanceof Error && (error.name === 'TimeoutError' || 'code' in error && error.code !== 'IAB_EVALUATION_FAILED')) throw error;
+        return null;
+      }
+    };
+    let before: NavigationState | null;
     let entry: IabJsonObject | undefined;
     let history: IabJsonObject | undefined;
     if (request.kind === 'reload') {
       if (request.ignoreCache !== undefined && typeof request.ignoreCache !== 'boolean') throw iabError('IAB_RELOAD_CACHE_INVALID', 'ignoreCache must be a boolean');
-      await this.page.send('Page.reload', { ignoreCache: request.ignoreCache === true }, operation);
+      before = await readState();
+      await this.page.send('Page.reload', request.ignoreCache === true ? { ignoreCache: true } : undefined, operation);
     } else {
-      const current = await this.page.send<any>('Page.getNavigationHistory', undefined, operation);
-      const index = current.currentIndex + (request.kind === 'goBack' ? -1 : 1);
-      entry = current.entries?.[index];
+      let current;
+      try { current = await this.page.send<any>('Page.getNavigationHistory', undefined, operation); }
+      catch (error) {
+        operation.signal.throwIfAborted(); (operation.assertCurrent ?? this.page.assertCurrent)();
+        if (operation.deadline <= Date.now() || error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError' || 'code' in error)) throw error;
+        throw iabError('IAB_NO_HISTORY_ENTRY', `Navigation history could not be read for this tab: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const entries = Array.isArray(current?.entries) ? current.entries : [];
+      const currentIndex = typeof current?.currentIndex === 'number' ? current.currentIndex : -1;
+      const index = currentIndex + (request.kind === 'goBack' ? -1 : 1);
+      entry = currentIndex < 0 ? undefined : entries[index];
       if (!entry || typeof entry.id !== 'number') throw iabError('IAB_NO_HISTORY_ENTRY', `No ${request.kind === 'goBack' ? 'back' : 'forward'} history entry for this tab`);
-      history = { index, size: current.entries.length };
+      history = { index, size: entries.length };
+      before = await readState();
       await this.page.send('Page.navigateToHistoryEntry', { entryId: entry.id }, operation);
     }
-    this.page.invalidateRefs();
-    let after;
-    for (;;) {
-      after = await readState();
-      const committed = request.kind === 'reload' ? after.timeOrigin !== before.timeOrigin : after.href === entry!.url && (before.entryId !== null && after.entryId !== null ? before.entryId !== after.entryId : before.href !== after.href || before.timeOrigin !== after.timeOrigin);
-      if (committed) break;
-      await this.page.pause(100, operation);
+    let after = before;
+    const expectedUrl = typeof entry?.url === 'string' ? entry.url : '';
+    if (before && (request.kind === 'reload' ? before.timeOrigin !== null : expectedUrl !== '')) {
+      for (;;) {
+        after = await readState();
+        const committed = after && (request.kind === 'reload' ? after.timeOrigin !== null && after.timeOrigin !== before.timeOrigin : after.href === expectedUrl && (before.entryId !== null && after.entryId !== null ? before.entryId !== after.entryId : before.href !== after.href || before.timeOrigin !== null && after.timeOrigin !== null && before.timeOrigin !== after.timeOrigin));
+        if (committed) break;
+        await this.page.pause(100, operation);
+      }
     }
     await this.page.wait({ loadState: 'load' }, operation);
-    return { source: request.kind === 'reload' ? 'reload' : 'history', url: after.href, fromUrl: before.href, loadState: 'load', durationMs: Date.now() - started, ...(request.kind === 'reload' ? { ignoreCache: request.ignoreCache === true } : { direction: request.kind === 'goBack' ? 'back' : 'forward', entry: entry!, history: history! }) };
+    const url = expectedUrl || after?.href || before?.href || '';
+    return { source: request.kind === 'reload' ? 'reload' : 'history', url, fromUrl: before?.href ?? '', loadState: 'load', durationMs: Date.now() - started, targetState: { targetId: request.targetId!, url }, ...(request.kind === 'reload' ? request.ignoreCache === true ? { ignoreCache: true } : {} : { direction: request.kind === 'goBack' ? 'back' : 'forward', entry: entry!, history: history! }) };
   }
 
   private async updateSettings(input: BrowserRuntimeSettings | string | undefined, operation: Operation): Promise<IabJsonObject> {
     const settings = typeof input === 'string' ? JSON.parse(input) : input;
     if (settings !== undefined && (!settings || typeof settings !== 'object' || Array.isArray(settings))) throw iabError('IAB_SETTINGS_INVALID', 'settings must be an object');
+    if (settings?.stealth !== undefined && (!settings.stealth || typeof settings.stealth !== 'object' || settings.stealth.enabled !== true)) throw iabError('IAB_STEALTH_ONE_WAY', 'Stealth can only be enabled and remains active until the tab closes');
     if (settings?.pace !== undefined) {
-      if (settings.pace === null || settings.pace.minIntervalMs === 0) delete this.page.settings.pace;
+      if (settings.pace === null) delete this.page.settings.pace;
       else {
-        const pace = settings.pace;
-        if (!Number.isFinite(pace.minIntervalMs) || pace.minIntervalMs < 0 || !Number.isFinite(pace.jitterMs ?? 0) || (pace.jitterMs ?? 0) < 0) throw iabError('IAB_PACE_INVALID', 'Pace intervals must be nonnegative finite numbers');
-        this.page.settings.pace = { minIntervalMs: Math.floor(pace.minIntervalMs), ...(pace.jitterMs === undefined ? {} : { jitterMs: Math.floor(pace.jitterMs) }) };
+        const minIntervalMs = Math.max(0, Math.floor(settings.pace.minIntervalMs || 0));
+        const jitterMs = settings.pace.jitterMs === undefined ? undefined : Math.max(0, Math.floor(settings.pace.jitterMs));
+        if (minIntervalMs > 0) this.page.settings.pace = { minIntervalMs, ...(jitterMs === undefined ? {} : { jitterMs }) };
+        else delete this.page.settings.pace;
       }
     }
     if (settings?.humanize !== undefined) {
-      if (settings.humanize !== null && typeof settings.humanize !== 'boolean') throw iabError('IAB_HUMANIZE_INVALID', 'humanize must be a boolean or null');
-      if (settings.humanize) this.page.settings.humanize = true;
-      else delete this.page.settings.humanize;
+      if (settings.humanize === null || settings.humanize === false) delete this.page.settings.humanize;
+      else this.page.settings.humanize = true;
     }
-    if (settings?.stealth !== undefined) {
-      if (settings.stealth?.enabled !== true) throw iabError('IAB_STEALTH_ONE_WAY', 'Stealth can only be enabled and remains active until the tab closes');
+    if (settings?.stealth !== undefined && !this.page.settings.stealth) {
+      for (const sessionId of new Set([undefined, ...(await this.page.executor.listChildFrames({ signal: operation.signal, timeoutMs: Math.max(1, operation.deadline - Date.now()), assertCurrent: operation.assertCurrent ?? this.page.assertCurrent })).map((frame) => frame.sessionId)])) await this.configureStealth(sessionId, operation);
       this.page.settings.stealth = { enabled: true };
-      for (const frame of await this.page.refreshFrames(operation)) await this.configureSession(frame.sessionId, operation);
     }
     return { settings: { ...this.page.settings } };
   }
@@ -164,15 +214,20 @@ export class IabAutomationUtilities {
     const key = sessionId ?? '';
     if (key === '' && !this.configuredSessions.has(key)) {
       await this.page.send('Network.setCacheDisabled', { cacheDisabled: this.cacheBypass }, operation, sessionId);
+      await this.page.executor.setInterceptPolicy(this.rules, { signal: operation.signal, assertCurrent: operation.assertCurrent });
       if (this.rules.length) await this.page.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, operation, sessionId);
       else await this.page.send('Fetch.disable', undefined, operation, sessionId);
       this.configuredSessions.add(key);
     }
-    if (this.page.settings.stealth && !this.stealthSessions.has(key)) {
-      await this.page.send('Page.addScriptToEvaluateOnNewDocument', { source: stealthSource }, operation, sessionId);
-      await this.page.send('Runtime.evaluate', { expression: stealthSource, returnByValue: true }, operation, sessionId);
-      this.stealthSessions.add(key);
-    }
+    if (this.page.settings.stealth) await this.configureStealth(sessionId, operation);
+  }
+
+  private async configureStealth(sessionId: string | undefined, operation: Operation): Promise<void> {
+    const key = sessionId ?? '';
+    if (this.stealthSessions.has(key)) return;
+    await this.page.send('Page.addScriptToEvaluateOnNewDocument', { source: stealthSource }, operation, sessionId);
+    await this.page.send('Runtime.evaluate', { expression: stealthSource, returnByValue: true }, operation, sessionId);
+    this.stealthSessions.add(key);
   }
 
   private track(task: Promise<unknown>): void {

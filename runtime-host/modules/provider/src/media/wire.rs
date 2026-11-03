@@ -4,6 +4,8 @@ use serde_json::Value;
 
 use super::{Content, Failure, MAX_OUTPUT_BYTES, Protocol};
 
+pub(super) use super::download::download;
+
 pub(super) const MAX_JSON_BYTES: usize = MAX_OUTPUT_BYTES / 3 * 4 + 1024 * 1024;
 
 pub(super) fn endpoint(endpoint: &str, protocol: Protocol) -> Result<Url, Failure> {
@@ -102,6 +104,93 @@ pub(super) fn image_output(data: String, remaining: &mut usize) -> Result<Conten
         .to_owned();
     *remaining -= bytes.len();
     Ok(Content { data, mime_type })
+}
+
+pub(super) fn decode_audio_input(content: &Content) -> Result<Vec<u8>, Failure> {
+    if content.data.len() > 44 * 1024 * 1024 {
+        return Err(Failure::InvalidRequest);
+    }
+    let bytes = STANDARD
+        .decode(&content.data)
+        .map_err(|_| Failure::InvalidRequest)?;
+    let mime_type = normalized_mime(&content.mime_type);
+    if bytes.is_empty()
+        || bytes.len() > 32 * 1024 * 1024
+        || !mime_type.starts_with("audio/")
+        || !is_media_mime(&bytes, &mime_type)
+    {
+        return Err(Failure::InvalidRequest);
+    }
+    Ok(bytes)
+}
+
+pub(super) fn media_output(
+    bytes: Vec<u8>,
+    mime_type: &str,
+    remaining: &mut usize,
+) -> Result<Content, Failure> {
+    if bytes.len() > (*remaining).min(MAX_OUTPUT_BYTES) {
+        return Err(Failure::ResponseTooLarge);
+    }
+    let mime_type = normalized_mime(mime_type);
+    if bytes.is_empty() && mime_type != "text/plain" || !is_media_mime(&bytes, &mime_type) {
+        return Err(Failure::InvalidResponse);
+    }
+    *remaining -= bytes.len();
+    Ok(Content {
+        data: STANDARD.encode(bytes),
+        mime_type,
+    })
+}
+
+fn normalized_mime(mime_type: &str) -> String {
+    mime_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn is_media_mime(bytes: &[u8], mime_type: &str) -> bool {
+    match mime_type {
+        "image/png" | "image/jpeg" | "image/webp" => image_mime(bytes) == Some(mime_type),
+        "video/mp4" | "audio/mp4" | "audio/x-m4a" => {
+            bytes.len() >= 16
+                && bytes.get(4..8) == Some(b"ftyp")
+                && u32::from_be_bytes(bytes[..4].try_into().unwrap()) >= 16
+                && u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize <= bytes.len()
+        }
+        "audio/wav" | "audio/x-wav" | "audio/wave" => {
+            bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE")
+        }
+        "audio/flac" | "audio/x-flac" => bytes.len() >= 8 && bytes.starts_with(b"fLaC"),
+        "audio/ogg" | "audio/opus" => bytes.len() >= 27 && bytes.starts_with(b"OggS\0"),
+        "audio/mpeg" | "audio/mp3" => {
+            bytes.len() >= 10 && bytes.starts_with(b"ID3")
+                || bytes.len() >= 4
+                    && bytes[0] == 0xff
+                    && bytes[1] & 0xe0 == 0xe0
+                    && bytes[1] & 0x18 != 0x08
+                    && bytes[1] & 0x06 != 0
+                    && !matches!(bytes[2] & 0xf0, 0 | 0xf0)
+                    && bytes[2] & 0x0c != 0x0c
+        }
+        "audio/aac" => {
+            bytes.len() >= 7
+                && bytes[0] == 0xff
+                && bytes[1] & 0xf6 == 0xf0
+                && (bytes[2] >> 2) & 0x0f <= 12
+        }
+        "audio/webm" | "video/webm" => {
+            bytes.starts_with(b"\x1a\x45\xdf\xa3")
+                && bytes[..bytes.len().min(4096)]
+                    .windows(7)
+                    .any(|part| part == b"\x42\x82\x84webm")
+        }
+        "text/plain" => std::str::from_utf8(bytes).is_ok(),
+        _ => false,
+    }
 }
 
 pub(super) async fn send(request: RequestBuilder) -> Result<Response, Failure> {

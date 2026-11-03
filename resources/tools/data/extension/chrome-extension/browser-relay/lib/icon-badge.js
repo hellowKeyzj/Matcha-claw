@@ -24,7 +24,19 @@ async function loadIcon(size) {
  * Set the extension icon with an optional colored status dot.
  * @param {string|null} dotColor — CSS color for the dot, or null to remove it
  */
-export async function setIconWithDot(dotColor) {
+let iconRevision = 0
+let iconUpdates = Promise.resolve()
+
+export function setIconWithDot(dotColor) {
+  const revision = ++iconRevision
+  const update = iconUpdates.then(() => {
+    if (revision === iconRevision) return updateIconWithDot(dotColor)
+  })
+  iconUpdates = update.catch(() => {})
+  return update
+}
+
+async function updateIconWithDot(dotColor) {
   if (!dotColor) {
     await chrome.action.setIcon({
       path: { '16': 'icons/icon16.png', '32': 'icons/icon32.png', '48': 'icons/icon48.png', '128': 'icons/icon128.png' },

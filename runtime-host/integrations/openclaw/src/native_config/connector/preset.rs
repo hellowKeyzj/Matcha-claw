@@ -8,6 +8,7 @@ use crate::native_config::config_store::{OpenClawConfigMutation, OpenClawConfigS
 use super::external::{ConnectorProjectionEffect, projection_effect};
 
 pub const PRESET_MCP_SERVER_ID: &str = connectors::ports::PRESET_MCP_SERVER_ID;
+const MIN_REQUEST_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 const OLD_PRESET_MCP_SERVER_ID: &str = "matcha-teamrun";
 pub(super) const RETIRED_APP_PLUGIN_MCP_SERVER_ID: &str = "matcha-app-plugins";
 
@@ -93,6 +94,13 @@ pub(super) fn reconcile_server(servers: &mut Map<String, Value>, projected: &mut
         server.insert(key.into(), projected[key].clone());
     }
     server.entry("enabled").or_insert(Value::Bool(true));
+    if server
+        .get("requestTimeoutMs")
+        .and_then(Value::as_f64)
+        .is_none_or(|timeout| timeout < MIN_REQUEST_TIMEOUT_MS as f64)
+    {
+        server.insert("requestTimeoutMs".into(), MIN_REQUEST_TIMEOUT_MS.into());
+    }
     *projected = Value::Object(server);
     let changed = servers.get(PRESET_MCP_SERVER_ID) != Some(projected);
     if changed {

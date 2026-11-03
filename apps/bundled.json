@@ -1,0 +1,3 @@
+[
+  { "id": "matcha.design", "build": "apps/design/build.mjs" }
+]

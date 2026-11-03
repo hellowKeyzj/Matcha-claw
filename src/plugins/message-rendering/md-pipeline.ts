@@ -92,6 +92,9 @@ function buildAttachedFilesSignature(attachedFiles: AttachedFileMeta[]): string 
       file.mimeType,
       file.fileSize,
       file.filePath ?? '',
+      file.gatewayUrl ?? '',
+      file.mediaReference ?? '',
+      file.resourceId ?? '',
     ].join(':'));
   }
   return hashStringDjb2(parts.join('|'));

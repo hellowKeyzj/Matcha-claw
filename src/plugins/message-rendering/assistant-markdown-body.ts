@@ -17,7 +17,7 @@ import {
 type AssistantMarkdownSource = Pick<
   SessionTimelineAssistantTurnEntry,
   'key' | 'entryId' | 'messageId' | 'role' | 'createdAt' | 'text'
-> & { attachedFiles?: ReadonlyArray<unknown> } | Pick<
+> & { attachedFiles?: ReadonlyArray<AttachedFileMeta> } | Pick<
   SessionAssistantTurnItem,
   'key' | 'role' | 'createdAt' | 'text' | 'attachedFiles'
 >;
@@ -39,10 +39,12 @@ export function buildAssistantMarkdownCacheKey(source: AssistantMarkdownSource):
 }
 
 function prepareAssistantMarkdown(source: AssistantMarkdownSource): string {
-  const resolveFileHintPath = createFileHintPathResolver(getAssistantMarkdownSourceAttachedFiles(source));
+  const files = getAssistantMarkdownSourceAttachedFiles(source);
+  const resolveFileHintPath = createFileHintPathResolver(files);
   return linkifyFileHintsInMarkdown(
-    migrateLegacyMarkdownFileLinks(source.text, resolveFileHintPath),
+    migrateLegacyMarkdownFileLinks(source.text, resolveFileHintPath, files),
     resolveFileHintPath,
+    files.flatMap((file) => file.filePath ? [file.filePath] : []),
   );
 }
 

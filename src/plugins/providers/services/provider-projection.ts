@@ -4,6 +4,7 @@ import { isProviderMutationCommitted, waitForProviderMutation } from '@/plugins/
 import type { ProviderCallDetail } from '@/types/call-log/provider';
 import { PROVIDER_TYPE_INFO, type ProviderCredential, type ProviderOAuthMode, type ProviderType } from '@/plugins/providers/domain/providers';
 import { summarizeIdentifier } from '@/lib/session-trace';
+import { decodeDiscoveredModels, ProviderDiscoveryError, PROVIDER_DISCOVERY_REASONS, type ProviderModelDraft } from './provider-model-catalog';
 
 function invokePrivate<T>(channel: string, input: unknown): Promise<T> {
   return invokeIpc<T>(channel, input);
@@ -17,7 +18,7 @@ type AccountIntent = Readonly<{
   kind: 'chat' | 'media';
   endpoint?: string;
   protocol?: 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
-  mediaProtocol?: 'google' | 'openAi' | 'openRouter';
+  mediaProtocol?: 'google' | 'openAi' | 'openRouter' | 'dashScope' | 'ark';
   authMode: 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'token' | 'cliReuse' | 'local';
   revision: number;
 }>;
@@ -25,6 +26,7 @@ type AccountIntent = Readonly<{
 type ProjectionResult = Readonly<{
   success: boolean;
   error?: string;
+  reason?: 'rejected' | 'unknown';
   receipt?: ProviderCallDetail;
 }>;
 
@@ -70,6 +72,8 @@ function mediaProtocol(protocol: ProviderCredential['mediaApiProtocol']): NonNul
     case 'google': return 'google';
     case 'openai': return 'openAi';
     case 'openrouter': return 'openRouter';
+    case 'dashscope': return 'dashScope';
+    case 'ark': return 'ark';
     default: return 'openAi';
   }
 }
@@ -80,6 +84,8 @@ export async function hostProviderStartOAuth(input: {
   accountId: string;
   label: string;
   mode: ProviderOAuthMode;
+  baseUrl?: string;
+  apiProtocol?: ProviderCredential['apiProtocol'];
 }): Promise<{ flowId: string; status: 'started' }> {
   const provider = PROVIDER_TYPE_INFO.find((candidate) => candidate.id === input.provider);
   return await invokePrivate('providers:startOAuth', {
@@ -91,8 +97,8 @@ export async function hostProviderStartOAuth(input: {
       label: input.label,
       enabled: true,
       kind: 'chat',
-      ...(provider?.defaultBaseUrl ? { endpoint: provider.defaultBaseUrl } : {}),
-      ...(provider?.apiProtocol ? { protocol: apiProtocol(provider.apiProtocol) } : {}),
+      ...((input.baseUrl ?? provider?.defaultBaseUrl) ? { endpoint: input.baseUrl ?? provider?.defaultBaseUrl } : {}),
+      ...((input.apiProtocol ?? provider?.apiProtocol) ? { protocol: apiProtocol((input.apiProtocol ?? provider?.apiProtocol)!) } : {}),
       authMode: authMode(input.mode),
       revision: 1,
     },
@@ -114,6 +120,27 @@ export async function hostProviderSubmitOAuthCode(input: {
   code: string;
 }): Promise<{ flowId: string; status: 'submitted' }> {
   return await invokePrivate('providers:submitOAuthCode', { flowId: input.flowId, code: input.code });
+}
+
+export async function hostProviderDiscoverModels(account: ProviderCredential, secret: { apiKey?: string; token?: string }, revision = 1): Promise<ProviderModelDraft[]> {
+  let result: unknown;
+  try {
+    result = await invokePrivate('providers:discoverModels', {
+      account: toAccount(account, revision),
+      ...(secret.apiKey ? { apiKey: secret.apiKey } : {}),
+      ...(secret.token ? { token: secret.token } : {}),
+    });
+  } catch {
+    throw new ProviderDiscoveryError('unavailable');
+  }
+  if (!result || typeof result !== 'object' || Array.isArray(result) || Object.keys(result).length !== 1) {
+    throw new ProviderDiscoveryError('invalid-response');
+  }
+  if ('models' in result) return decodeDiscoveredModels(result.models);
+  if ('reason' in result && PROVIDER_DISCOVERY_REASONS.includes(result.reason as typeof PROVIDER_DISCOVERY_REASONS[number])) {
+    throw new ProviderDiscoveryError(result.reason as typeof PROVIDER_DISCOVERY_REASONS[number]);
+  }
+  throw new ProviderDiscoveryError('invalid-response');
 }
 
 export async function hostProviderCreateAccount(
@@ -203,7 +230,7 @@ async function mutate(
     if (isTraceEnabled()) logProviderConfigTrace('request-start', { channel, ...providerMutationInputTrace(input) });
     const response = await invokePrivate<unknown>(channel, input);
     const admissionError = privateMutationError(response, success);
-    if (admissionError) return { success: false, error: admissionError };
+    if (admissionError) return { success: false, error: admissionError, reason: (response as { status: string }).status === 'unknown' ? 'unknown' : 'rejected' };
     const receipt = await waitForProviderMutation(
       response,
       success === 'stored' ? 'providerAccounts.replace' : 'providerAccounts.delete',
@@ -217,10 +244,10 @@ async function mutate(
     if (isProviderMutationCommitted(receipt, success)) {
       return { success: true, receipt };
     }
-    return { success: false, error: outcomeError(receipt, success), receipt };
+    return { success: false, error: outcomeError(receipt, success), reason: receipt.outcome === 'rejected' || receipt.outcome === 'missing' ? 'rejected' : 'unknown', receipt };
   } catch {
     if (isTraceEnabled()) logProviderConfigTrace('request-failed', { channel, outcome: 'unknown' });
-    return { success: false, error: mutationUnknownError(success) };
+    return { success: false, error: mutationUnknownError(success), reason: 'unknown' };
   }
 }
 

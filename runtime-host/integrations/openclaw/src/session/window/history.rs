@@ -1,3 +1,6 @@
+#[path = "history_media.rs"]
+mod media;
+
 use serde_json::{Map, Value};
 
 use crate::session::protocol::{ChatHistoryResult, HistoryRole};
@@ -868,29 +871,7 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
     let identity_sequence = native.map(|meta| optional_u64_message(meta, index, "seq")).transpose()?.flatten().filter(|seq| *seq > 0)
         .or(envelope.map(|envelope| optional_u64_message(envelope, index, "messageSeq")).transpose()?.flatten().filter(|seq| *seq > 0));
     let sequence = identity_sequence.or(optional_alias_u64_pair_message(message, index, "seq", "sequence")?);
-    if let Some(media) = native.and_then(|meta| meta.get("media")).and_then(Value::as_array) {
-        for (fact_index, fact) in media.iter().enumerate() {
-            let Some(fact) = fact.as_object() else {
-                content.push(MessageContent::Omitted { kind: OmittedContentKind::UnsafeMedia });
-                continue;
-            };
-            if fact.get("hydrationSuppressed").and_then(Value::as_bool) == Some(true) { continue; }
-            let source = fact.get("url").and_then(Value::as_str);
-            let reference = source.and_then(|source| {
-                if crate::session::operation::media::inbound_source(source) {
-                    crate::session::operation::media::media_reference(
-                        native_session_id, identity_message_id.as_deref(), identity_sequence, fact_index, source,
-                    )
-                } else { safe_native_media_reference(source) }
-            });
-            let media_type = explicit_media_type(fact).or_else(|| fact.get("contentType").and_then(Value::as_str)
-                .filter(|value| valid_media_reference_shape(value, MAX_TOOL_NAME_BYTES)).map(str::to_owned))
-                .or_else(|| source.and_then(infer_media_type));
-            if reference.is_none() || !content.iter().any(|block| matches!(block, MessageContent::Media { reference: old, .. } if old == &reference)) {
-                content.push(MessageContent::Media { media_type, reference, bytes: None });
-            }
-        }
-    }
+    media::bind_sources(message, native, native_session_id, identity_message_id.as_deref(), identity_sequence, &mut content);
     let after_sequence = match envelope.and_then(|envelope| envelope.get("afterSequence")) {
         None if role == MessageRole::Assistant && identity_message_id.is_none() && identity_sequence.is_none() =>
             fallback.and_then(|fallback| fallback.get("afterSequence")).and_then(Value::as_u64).map(|seq| Some(seq)),
@@ -1204,7 +1185,7 @@ fn decode_content(
                     is_error,
                 });
             }
-            Some("image" | "audio" | "video" | "media" | "attachment") => {
+            Some("image" | "image_url" | "input_image" | "audio" | "video" | "media" | "attachment" | "document" | "omitted_media") => {
                 let media = block.get("attachment").and_then(Value::as_object).unwrap_or(block);
                 let source = media.get("source").and_then(Value::as_object);
                 let media_type = bounded_optional_block_string(
@@ -1222,10 +1203,23 @@ fn decode_content(
                     media.get("ref").or_else(|| media.get("reference")).or_else(|| media.get("viewId")),
                     MAX_MEDIA_REF_BYTES,
                 )?.or_else(|| native_media_reference(media));
-                let media_type = media_type.or_else(|| reference.as_deref().and_then(infer_media_type));
+                let media_type = media_type.or_else(|| reference.as_deref().and_then(infer_media_type))
+                    .or_else(|| match block.get("type").and_then(Value::as_str) {
+                        Some("image" | "image_url" | "input_image" | "omitted_media") => Some("image/*".to_owned()),
+                        Some("audio") => Some("audio/*".to_owned()),
+                        Some("video") => Some("video/*".to_owned()),
+                        Some("document") => Some("application/octet-stream".to_owned()),
+                        _ => None,
+                    });
                 let bytes = [Some(media), source].into_iter().flatten()
                     .find_map(|media| media.get("data").or_else(|| media.get("blob")).and_then(Value::as_str).map(str::len));
-                content.push(MessageContent::Media { media_type, reference, bytes });
+                content.push(MessageContent::Media {
+                    media_type, reference, bytes,
+                    file_name: crate::session::operation::media::media_file_name(media),
+                    size_bytes: crate::session::operation::media::media_size_bytes(media),
+                    resource_id: crate::session::operation::media::content_source(block)
+                        .map(crate::session::operation::media::resource_id),
+                });
             }
             Some(_) | None => content.push(MessageContent::Omitted {
                 kind: OmittedContentKind::Unknown,
@@ -1237,11 +1231,7 @@ fn decode_content(
 }
 
 fn native_media_reference(media: &Map<String, Value>) -> Option<String> {
-    let fields = ["url", "openUrl", "image_url", "audio_url", "video_url"];
-    [Some(media), media.get("source").and_then(Value::as_object)].into_iter().flatten()
-        .flat_map(|media| fields.into_iter().filter_map(move |field| media.get(field).and_then(Value::as_str)))
-        .chain(media.get("source").and_then(Value::as_str))
-        .find_map(safe_native_media_reference)
+    crate::session::operation::media::content_source(media).and_then(safe_native_media_reference)
 }
 
 fn safe_native_media_reference(reference: &str) -> Option<String> {
@@ -1635,30 +1625,32 @@ fn explicit_media_type(object: &Map<String, Value>) -> Option<String> {
 fn infer_media_type(reference: &str) -> Option<String> {
     let path = reference.split(['?', '#']).next().unwrap_or(reference);
     let lower = path.to_ascii_lowercase();
-    let media_type = if lower.ends_with(".svg") || lower.ends_with(".svgz") {
-        "image/svg+xml"
-    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if lower.ends_with(".png") {
-        "image/png"
-    } else if lower.ends_with(".gif") {
-        "image/gif"
-    } else if lower.ends_with(".webp") {
-        "image/webp"
-    } else if lower.ends_with(".bmp") {
-        "image/bmp"
-    } else if lower.ends_with(".avif") {
-        "image/avif"
-    } else if is_outgoing_media_reference(reference) {
-        "image/png"
-    } else {
-        return None;
+    let media_type = match lower.rsplit('.').next()? {
+        "svg" | "svgz" => "image/svg+xml",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "mp3" | "m2a" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "m4a" => "audio/mp4",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        _ => return None,
     };
     Some(media_type.to_owned())
-}
-
-fn is_outgoing_media_reference(reference: &str) -> bool {
-    reference.starts_with(OUTGOING_MEDIA_PREFIX) || reference.contains(OUTGOING_MEDIA_PREFIX)
 }
 
 fn non_empty_summary(text: &str) -> Option<String> {

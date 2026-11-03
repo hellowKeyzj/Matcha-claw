@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use crate::rpc;
@@ -134,6 +134,7 @@ pub(super) struct Active {
     pub acknowledged: bool,
     pub input_started: bool,
     pub native_cycle_observed: bool,
+    pub tool_use_ids: BTreeSet<String>,
     pub idle_observed: bool,
     pub interrupt_observed: bool,
     pub ownership_ambiguous: bool,

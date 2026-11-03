@@ -25,6 +25,27 @@
         Install the extension to connect your browser to MatchaClaw.
       </p>
 
+      <!-- Permissions & privacy disclosure (collapsed by default) -->
+      <section class="permissions-note">
+        <button class="permissions-note-toggle" id="permissions-note-toggle" aria-expanded="false" aria-controls="permissions-note-content">
+          <svg class="perm-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 1.5l5.5 2v4c0 3.5-2.4 6.4-5.5 7.5C4.9 13.9 2.5 11 2.5 7.5v-4l5.5-2z"/>
+            <path d="M5.8 8.2l1.6 1.6 2.8-3.2"/>
+          </svg>
+          <span class="perm-label" data-i18n="perm_title">Permissions &amp; privacy</span>
+          <svg class="perm-chevron" viewBox="0 0 8 12" fill="currentColor" aria-hidden="true">
+            <path d="M1.5 0L7.5 6L1.5 12L0 10.5L4.5 6L0 1.5Z"/>
+          </svg>
+        </button>
+        <div class="permissions-note-content" id="permissions-note-content">
+          <ul class="permissions-note-list">
+            <li data-i18n="perm_active"><strong>Runs only when enabled</strong> — use the popup switch to enable or disable browser control. The extension accepts control requests only while the switch is on and MatchaClaw desktop is connected; turning it off stops new requests.</li>
+            <li data-i18n="perm_capabilities"><strong>Capabilities</strong> — the extension reads and operates on relevant tabs within the selected browser window and authorized execution scope.</li>
+            <li data-i18n="perm_data"><strong>Data security</strong> — the extension communicates with MatchaClaw desktop over a local encrypted channel.</li>
+          </ul>
+        </div>
+      </section>
+
       <ol class="step-list">
 
         <li class="step">
@@ -200,6 +221,10 @@
         title: 'Install MatchaClaw Browser Relay',
         title_tag: 'Extension',
         subtitle: 'Install the extension to connect your browser to MatchaClaw.',
+        perm_title: 'Permissions & privacy',
+        perm_active: '<strong>Runs only when enabled</strong> — use the popup switch to enable or disable browser control. The extension accepts control requests only while the switch is on and MatchaClaw desktop is connected; turning it off stops new requests.',
+        perm_capabilities: '<strong>Capabilities</strong> — the extension reads and operates on relevant tabs within the selected browser window and authorized execution scope.',
+        perm_data: '<strong>Data security</strong> — the extension communicates with MatchaClaw desktop over a local encrypted channel.',
         webstore_label: 'Chrome Web Store',
         webstore_tag: 'Recommended',
         webstore_desc: 'Install directly from the Chrome Web Store — the simplest way.',
@@ -241,6 +266,10 @@
         title: '安装 MatchaClaw Browser Relay',
         title_tag: '扩展程序',
         subtitle: '安装扩展以将浏览器连接到 MatchaClaw。',
+        perm_title: '权限与隐私',
+        perm_active: '<strong>仅在启用时运行</strong> — 请通过弹窗开关启用或关闭浏览器控制。只有开关开启且已连接 MatchaClaw 桌面端时，扩展才会接受控制请求；关闭开关后不再接受新请求。',
+        perm_capabilities: '<strong>能力范围</strong> — 扩展可在选定浏览器窗口和已授权的执行范围内读取并操作相应标签页。',
+        perm_data: '<strong>数据安全</strong> — 扩展通过本地加密通道与 MatchaClaw 桌面端通信。',
         webstore_label: 'Chrome 应用商店',
         webstore_tag: '推荐',
         webstore_desc: '从 Chrome 应用商店一键安装，最简单的方式。',
@@ -282,6 +311,10 @@
         title: 'MatchaClaw Browser Relay installieren',
         title_tag: 'Erweiterung',
         subtitle: 'Installieren Sie die Erweiterung, um Ihren Browser mit MatchaClaw zu verbinden.',
+        perm_title: 'Berechtigungen & Datenschutz',
+        perm_active: '<strong>Nur aktiv, wenn eingeschaltet</strong> — aktivieren oder deaktivieren Sie die Browsersteuerung über den Schalter im Popup. Die Erweiterung nimmt Steuerungsanfragen nur an, wenn der Schalter eingeschaltet und MatchaClaw Desktop verbunden ist; nach dem Ausschalten werden keine neuen Anfragen angenommen.',
+        perm_capabilities: '<strong>Funktionsumfang</strong> — die Erweiterung liest und bedient die betreffenden Tabs im ausgewählten Browserfenster und im autorisierten Ausführungsbereich.',
+        perm_data: '<strong>Datensicherheit</strong> — die Erweiterung kommuniziert über einen lokalen verschlüsselten Kanal mit MatchaClaw Desktop.',
         webstore_label: 'Chrome Web Store',
         webstore_tag: 'Empfohlen',
         webstore_desc: 'Direkt aus dem Chrome Web Store installieren — der einfachste Weg.',
@@ -323,6 +356,10 @@
         title: 'Instalar MatchaClaw Browser Relay',
         title_tag: 'Extensión',
         subtitle: 'Instala la extensión para conectar tu navegador a MatchaClaw.',
+        perm_title: 'Permisos y privacidad',
+        perm_active: '<strong>Solo se ejecuta cuando está activada</strong> — activa o desactiva el control del navegador con el interruptor de la ventana emergente. La extensión solo acepta solicitudes de control cuando el interruptor está activado y MatchaClaw Desktop está conectado; al desactivarlo deja de aceptar nuevas solicitudes.',
+        perm_capabilities: '<strong>Alcance de capacidades</strong> — la extensión lee y opera sobre las pestañas correspondientes dentro de la ventana del navegador seleccionada y el ámbito de ejecución autorizado.',
+        perm_data: '<strong>Seguridad de los datos</strong> — la extensión se comunica con MatchaClaw Desktop a través de un canal local cifrado.',
         webstore_label: 'Chrome Web Store',
         webstore_tag: 'Recomendado',
         webstore_desc: 'Instalar directamente desde la Chrome Web Store — la forma más sencilla.',
@@ -364,6 +401,10 @@
         title: 'Installer MatchaClaw Browser Relay',
         title_tag: 'Extension',
         subtitle: "Installez l'extension pour connecter votre navigateur à MatchaClaw.",
+        perm_title: 'Autorisations et confidentialité',
+        perm_active: "<strong>Active uniquement lorsqu’elle est activée</strong> — utilisez l’interrupteur de la fenêtre contextuelle pour activer ou désactiver le contrôle du navigateur. L’extension n’accepte les demandes de contrôle que si l’interrupteur est activé et MatchaClaw Desktop est connecté ; sa désactivation empêche toute nouvelle demande.",
+        perm_capabilities: "<strong>Étendue des capacités</strong> — l’extension lit et agit sur les onglets concernés dans la fenêtre de navigateur sélectionnée et le périmètre d’exécution autorisé.",
+        perm_data: "<strong>Sécurité des données</strong> — l’extension communique avec MatchaClaw Desktop via un canal local chiffré.",
         webstore_label: 'Chrome Web Store',
         webstore_tag: 'Recommandé',
         webstore_desc: 'Installer directement depuis le Chrome Web Store — la méthode la plus simple.',
@@ -405,6 +446,10 @@
         title: 'Instalar MatchaClaw Browser Relay',
         title_tag: 'Extensão',
         subtitle: 'Instale a extensão para conectar seu navegador ao MatchaClaw.',
+        perm_title: 'Permissões e privacidade',
+        perm_active: '<strong>Ativa apenas quando ligada</strong> — use o interruptor da janela pop-up para ativar ou desativar o controle do navegador. A extensão só aceita solicitações de controle quando o interruptor está ligado e o MatchaClaw Desktop está conectado; ao desligá-lo, deixa de aceitar novas solicitações.',
+        perm_capabilities: '<strong>Alcance de capacidades</strong> — a extensão lê e opera nas abas relevantes dentro da janela do navegador selecionada e do escopo de execução autorizado.',
+        perm_data: '<strong>Segurança dos dados</strong> — a extensão se comunica com o MatchaClaw Desktop por meio de um canal local criptografado.',
         webstore_label: 'Chrome Web Store',
         webstore_tag: 'Recomendado',
         webstore_desc: 'Instale diretamente da Chrome Web Store — a maneira mais simples.',
@@ -443,9 +488,29 @@
         compare_methods: 'Comparar métodos de conexão',
       });
 
+      InstallI18n.register('ja', {
+        perm_title: '権限とプライバシー',
+        perm_active: '<strong>有効なときのみ動作</strong> — ポップアップのスイッチでブラウザー操作を有効または無効にできます。拡張機能は、スイッチがオンで MatchaClaw デスクトップに接続している間だけ操作リクエストを受け付けます。オフにすると、新しいリクエストは受け付けません。',
+        perm_capabilities: '<strong>機能の範囲</strong> — 拡張機能は、選択したブラウザーウィンドウと許可された実行範囲内で、対象タブの読み取りと操作を行います。',
+        perm_data: '<strong>データの安全性</strong> — 拡張機能は、ローカルの暗号化チャネルを通じて MatchaClaw デスクトップと通信します。',
+      });
+      InstallI18n.register('ru', {
+        perm_title: 'Разрешения и конфиденциальность',
+        perm_active: '<strong>Работает только при включении</strong> — включайте и отключайте управление браузером переключателем во всплывающем окне. Расширение принимает запросы управления, только когда переключатель включён и установлено соединение с настольным приложением MatchaClaw; после выключения новые запросы не принимаются.',
+        perm_capabilities: '<strong>Возможности</strong> — расширение читает и изменяет соответствующие вкладки в выбранном окне браузера и в пределах разрешённой области выполнения.',
+        perm_data: '<strong>Безопасность данных</strong> — расширение обменивается данными с настольным приложением MatchaClaw по локальному зашифрованному каналу.',
+      });
+
       InstallI18n.apply();
 
       var params = new URLSearchParams(window.location.search);
+      var permissionsLang = (params.get('lang') || params.get('language') || navigator.language || '').toLowerCase().split('-')[0];
+      if (permissionsLang === 'ja' || permissionsLang === 'ru') {
+        document.querySelector('.permissions-note').lang = permissionsLang;
+        document.querySelectorAll('.permissions-note [data-i18n]').forEach(function (el) {
+          el.innerHTML = InstallI18n.t(el.getAttribute('data-i18n'), permissionsLang);
+        });
+      }
       var browserVersion = parseInt(params.get('version') || '0', 10);
       if (browserVersion >= 144) {
         var altEl = document.getElementById('alt-direct-cdp');
@@ -456,6 +521,7 @@
       setupCopyBlock('copy-url-block', 'chrome://extensions');
       setupAllStepExtras();
       setupExtrasToggle('extras-toggle', 'extras-content');
+      setupExtrasToggle('permissions-note-toggle', 'permissions-note-content');
     </script>
   </body>
 </html>

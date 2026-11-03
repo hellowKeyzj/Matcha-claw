@@ -436,6 +436,27 @@
     "avatarCleared": "用户头像已清除",
     "avatarUpdateFailed": "更新用户头像失败: {{error}}"
   },
+  "graphicsAcceleration": {
+    "label": "GPU 硬件加速",
+    "description": "使用 GPU 渲染界面，切换后需重启应用。",
+    "automaticallyDisabled": "因图形稳定性问题已自动关闭。",
+    "loading": "读取中…",
+    "readFailed": "无法读取 GPU 设置。",
+    "retry": "重试",
+    "confirmTitle": "更改 GPU 硬件加速？",
+    "confirmEnable": "启用 GPU 硬件加速会改变界面渲染方式。保存后将立即重启应用。",
+    "confirmDisable": "关闭 GPU 硬件加速会改变界面渲染方式。保存后将立即重启应用。",
+    "confirmAction": "保存并重启",
+    "cancel": "取消",
+    "pending": "正在保存并重启…",
+    "changeFailed": "无法更改 GPU 设置，请重试。",
+    "blocked": {
+      "unsupported": "当前系统不支持此设置。",
+      "busy": "应用正忙，请稍后重试。",
+      "save-failed": "保存设置失败，请重试。",
+      "quit-cancelled": "重启已取消，请重试。"
+    }
+  },
   "providerRecovery": {
     "title": "模型配置已重置",
     "description": "旧模型配置无法转换，已备份。请重新添加模型。",
@@ -512,13 +533,36 @@
       "endpointPreset": "端点地区",
       "cliReuseHelp": "请先登录 Claude Code。保存前会验证本机 CLI 凭据，无需粘贴令牌。",
       "replaceToken": "替换令牌",
-      "tokenHelp": "运行 claude setup-token，将生成的令牌粘贴到这里。令牌仅保存在本机。"
+      "tokenHelp": "运行 claude setup-token，将生成的令牌粘贴到这里。令牌仅保存在本机。",
+      "editTitle": "编辑提供商",
+      "configureDescription": "配置连接与模型，完成后统一保存。",
+      "providerType": "提供商类型",
+      "nameRequired": "请填写名称。",
+      "keepCredential": "留空保留当前凭据",
+      "showKey": "显示凭据",
+      "hideKey": "隐藏凭据",
+      "authenticated": "已授权",
+      "noSecretRequired": "无需填写凭据。",
+      "authenticatedContinue": "授权已完成，请继续配置模型后保存。",
+      "authReadbackFailed": "授权已完成，账号暂时无法读取。请重试读取，不要重复登录。",
+      "loadingModels": "正在读取模型…",
+      "modelsUnavailable": "模型清单暂不可用，请关闭并刷新后重试。",
+      "savingAccount": "保存账号…",
+      "savingModels": "保存模型…",
+      "modelsSaveFailed": "账号已保存，模型未确认保存。草稿已保留。",
+      "saveErrors": {
+        "rejected": "请求未保存，请检查配置后重试。",
+        "unknown": "保存结果未确认，可能已执行。请关闭并刷新核对，确认前不要重复保存。"
+      },
+      "vendorProtocol": "使用提供商默认协议",
+      "projectionsUnavailable": "配置已保存，部分列表暂时无法刷新。请刷新核对。"
     },
     "protocols": {
       "openai": "OpenAI 兼容",
       "openaiCompletions": "OpenAI Completions",
       "openaiResponses": "OpenAI Responses",
-      "anthropic": "Anthropic 兼容"
+      "anthropic": "Anthropic 兼容",
+      "google": "Google Gemini"
     },
     "card": {
       "configured": "已配置",
@@ -526,7 +570,8 @@
       "credentialUnknown": "凭据状态未确认",
       "none": "无",
       "editKey": "编辑 API 密钥",
-      "delete": "删除提供商"
+      "delete": "删除提供商",
+      "edit": "编辑"
     },
     "toast": {
       "added": "提供商添加成功",
@@ -537,7 +582,8 @@
       "failedUpdate": "更新提供商失败",
       "invalidKey": "无效的 API 密钥",
       "minimaxConflict": "不能同时添加 MiniMax 国际站和国内站的服务商。",
-      "zaiConflict": "不能同时添加 Z.AI 国内站和国际站的服务商。"
+      "zaiConflict": "不能同时添加 Z.AI 国内站和国际站的服务商。",
+      "duplicateSingleProvider": "此提供商只支持一个账号。"
     },
     "oauth": {
       "loginMode": "OAuth 登录",
@@ -561,7 +607,9 @@
       "completeLogin": "完成登录",
       "manualHelp": "打开授权页面并登录，然后在下方粘贴回调链接或授权码。",
       "callbackPlaceholder": "粘贴回调链接或授权码",
-      "submitCode": "提交授权码"
+      "submitCode": "提交授权码",
+      "copyCode": "复制授权码",
+      "retryReadback": "重新读取账号"
     },
     "projectionErrors": {
       "providerProjectionPartial": "此运行时中部分账号暂不可用，请查看下方对应账号的状态。",
@@ -983,11 +1031,25 @@
       "loading": "正在获取模型...",
       "empty": "未发现可用模型",
       "error": "获取模型失败：{{error}}。请确认该账户可访问模型列表后重试。",
-      "rejected": "获取模型失败：后端拒绝了模型列表请求。请确认该账户的 API Key、权限、分组和余额状态可用后重试。",
+      "rejected": "模型列表请求被拒绝，请检查凭据与权限。",
       "importSelected": "导入所选",
       "duplicate": "已在清单中",
       "count_one": "· {{count}} 个模型",
-      "count_other": "· {{count}} 个模型"
+      "count_other": "· {{count}} 个模型",
+      "chooseCapabilities": "能力未知，请在导入后选择",
+      "reasons": {
+        "invalid-request": "配置无效，请检查协议与地址。",
+        "unsupported": "此接口不支持获取模型，请手动添加。",
+        "credential-missing": "请填写当前账号的凭据。",
+        "credential-unavailable": "本机凭据暂不可用，请重新填写。",
+        "authentication": "认证失败，请检查凭据。",
+        "permission-denied": "没有访问模型列表的权限，可手动添加。",
+        "rate-limited": "请求过于频繁，请稍后重试。",
+        "deadline": "获取超时，可稍后手动重试。",
+        "invalid-response": "服务返回的模型列表无效。",
+        "unavailable": "模型列表暂不可用，可手动添加。",
+        "outcome-unknown": "获取结果未确认，不会自动重试。"
+      }
     },
     "group": {
       "subtitle_one": "当前 1 个模型",
@@ -1006,7 +1068,8 @@
       "qualityLabel": "画质",
       "defaultOption": "默认",
       "advanced": "高级字段",
-      "remove": "删除"
+      "remove": "删除",
+      "modelIdPlaceholder": "输入模型 ID"
     },
     "qualities": {
       "low": "低",
@@ -1024,11 +1087,12 @@
       "transcribe": "转录"
     },
     "errors": {
-      "invalidEntry": "模型项 \"{{id}}\" 无效：context/maxTokens/timeoutMs 必须为正整数",
+      "invalidEntry": "模型“{{id}}”无效：请选择支持的能力，数值须为正整数。",
       "duplicate": "模型 ID \"{{id}}\" 重复",
       "emptyKey": "credentialId 不能为空",
       "duplicateKey": "该 credentialId 已存在",
       "invalidKey": "credentialId 仅允许字母、数字、点、下划线、连字符"
-    }
+    },
+    "draftHelp": "获取或手动添加模型，选择实际能力。所有更改将在保存时提交。"
   }
 }

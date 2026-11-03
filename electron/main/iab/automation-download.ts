@@ -28,7 +28,7 @@ export async function armDownload(page: IabAutomationPage, request: Extract<Brow
     }
     if (event.method !== 'Page.downloadProgress' || !entry || event.params.guid !== entry.guid || event.params.state === 'inProgress' || completed) return;
     completed = true;
-    if (event.params.state === 'canceled') { complete({ canceled: true, url: entry.url, savePath: '', bytes: Number(event.params.receivedBytes ?? 0) }); return; }
+    if (event.params.state === 'canceled') { fail(iabError('IAB_DOWNLOAD_CANCELED', `Download canceled by the browser (url: ${entry.url})`)); return; }
     const captured = entry;
     saving = (async () => {
       await page.pause(150, operation);

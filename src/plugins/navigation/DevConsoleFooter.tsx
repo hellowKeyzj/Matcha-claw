@@ -1,4 +1,4 @@
-import { Terminal } from 'lucide-react';
+import { ConsoleNavigationIcon } from '@/components/icons/navigation';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { hostApiFetch } from '@/lib/host-api';
@@ -40,7 +40,7 @@ export default function DevConsoleFooter() {
       onClick={openDevConsole}
       disabled={licenseLocked}
     >
-      <Terminal aria-hidden="true" className="h-[18px] w-[18px]" />
+      <ConsoleNavigationIcon aria-hidden="true" strokeWidth={1.75} className="h-5 w-5" />
     </Button>
   );
 }

@@ -1,4 +1,5 @@
 import type { MessagePartProps } from './extensions';
+import { ContentNotices } from './content-notices';
 import { AssistantMessageBody } from './assistant-message-body';
 import { AssistantEmbeddedToolResults, AssistantMessageMedia, ThinkingSection, ToolCardList } from './chat-message-parts';
 import type { SessionRenderAssistantBubbleToolResult } from '@/types/session/tool-card';
@@ -56,7 +57,7 @@ export function ToolPart({ segment, toolSlot, collapseVersion, toolSessionIdenti
   );
 }
 
-export function TextPart({ segment, itemKey, createdAt, renderText, isStreaming, sessionIdentity, endpointSessionId, onBodyClick }: MessagePartProps) {
+export function TextPart({ segment, itemKey, createdAt, renderText, attachedFiles, isStreaming, sessionIdentity, endpointSessionId, onBodyClick, onOpenFile }: MessagePartProps) {
   if (segment.kind !== 'message') return null;
   const text = renderText ?? segment.text;
   if (!segment.largeText && !text.trim()) return null;
@@ -65,16 +66,23 @@ export function TextPart({ segment, itemKey, createdAt, renderText, isStreaming,
       itemKey={`${itemKey}:segment:${segment.key}`}
       createdAt={createdAt}
       text={text}
+      attachedFiles={attachedFiles}
       isStreaming={isStreaming}
       largeText={segment.largeText}
       sessionIdentity={sessionIdentity}
       endpointSessionId={endpointSessionId}
       onBodyClick={onBodyClick}
+      onOpenFile={onOpenFile}
     />
   );
 }
 
-export function MediaPart({ segment, onPreview, onOpenFile }: MessagePartProps) {
+export function MediaPart({ segment, onPreview, onOpenFile, sessionIdentity }: MessagePartProps) {
   if (segment.kind !== 'media') return null;
-  return <AssistantMessageMedia images={segment.images} attachedFiles={segment.attachedFiles} onPreview={onPreview} onOpenFile={onOpenFile} />;
+  return (
+    <>
+      <AssistantMessageMedia images={segment.images} attachedFiles={segment.attachedFiles} sessionIdentity={sessionIdentity} onPreview={onPreview} onOpenFile={onOpenFile} />
+      <ContentNotices notices={segment.contentNotices} />
+    </>
+  );
 }

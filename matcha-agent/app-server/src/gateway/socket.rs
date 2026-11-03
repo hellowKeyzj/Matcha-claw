@@ -318,7 +318,10 @@ impl Connection {
             Err(rpc::Error::invalid("params must be an object or array"))
         } else if self.gateway.shutdown.is_cancelled()
             && (!self.initialized.load(Ordering::Acquire)
-                || !matches!(method.as_str(), "iab.lease.wait" | "iab.lease.release"))
+                || !matches!(
+                    method.as_str(),
+                    "iab.lease.wait" | "iab.lease.release" | "iab.run.wait" | "iab.run.release"
+                ))
         {
             Err(rpc::Error::unavailable(
                 "server_shutdown",
@@ -334,7 +337,8 @@ impl Connection {
             ))
         } else {
             match method.as_str() {
-                "iab.lease.acquire" | "iab.lease.wait" | "iab.lease.release" => {
+                "iab.lease.acquire" | "iab.lease.wait" | "iab.lease.release"
+                | "iab.run.wait" | "iab.run.release" => {
                     self.iab.dispatch(&method, params).await
                 }
                 "server.shutdown" => self.shutdown(params, &mut after_send),

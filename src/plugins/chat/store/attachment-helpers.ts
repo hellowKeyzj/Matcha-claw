@@ -91,6 +91,7 @@ function normalizeAttachedFiles(files: ReadonlyArray<SessionRenderAttachedFile>)
     ...(file.filePath ? { filePath: file.filePath } : {}),
     ...(file.gatewayUrl ? { gatewayUrl: file.gatewayUrl } : {}),
     ...(file.mediaReference ? { mediaReference: file.mediaReference } : {}),
+    ...(file.resourceId ? { resourceId: file.resourceId } : {}),
     ...(file.previewStatus ? { previewStatus: file.previewStatus } : {}),
     ...(file.attachmentStatus ? { attachmentStatus: file.attachmentStatus } : {}),
   }));
@@ -154,6 +155,7 @@ function areAttachedFilesEquivalent(
       || a.filePath !== b.filePath
       || a.gatewayUrl !== b.gatewayUrl
       || a.mediaReference !== b.mediaReference
+      || a.resourceId !== b.resourceId
       || a.source !== b.source
     ) {
       return false;
@@ -313,7 +315,9 @@ function mergeHydratedFileByRef(
     return file;
   }
   const hydrated = hydratedByRef.get(refKey);
-  if (!hydrated) {
+  if (!hydrated || file.mediaReference !== hydrated.mediaReference
+    || file.filePath !== hydrated.filePath || file.gatewayUrl !== hydrated.gatewayUrl
+    || file.source !== hydrated.source) {
     return file;
   }
   const preview = file.preview ?? hydrated.preview ?? null;
@@ -404,9 +408,7 @@ function fileNeedsPreviewLoad(file: AttachedFileMeta): boolean {
   if (!getAttachmentRefKey(file)) {
     return false;
   }
-  return file.mimeType.startsWith('image/')
-    ? !file.preview && file.previewStatus !== 'unavailable'
-    : file.fileSize === 0;
+  return file.mimeType.startsWith('image/') && !file.preview && file.previewStatus !== 'unavailable';
 }
 
 export function hasPendingItemPreviewLoads(items: SessionRenderItem[]): boolean {
@@ -567,6 +569,7 @@ async function loadPreviewWithRetry(
   context: AttachmentPreviewLoadContext,
   abortSignal?: AbortSignal,
 ): Promise<FileThumbnailResult> {
+  if (abortSignal) throwIfHistoryLoadAborted(abortSignal);
   let thumbnail = await loadPreview(entry, context);
   for (const delay of IMAGE_PREVIEW_RETRY_DELAYS_MS) {
     if (!shouldRetryPreviewLoad(entry, thumbnail)) {

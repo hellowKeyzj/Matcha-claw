@@ -29,7 +29,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const { t } = useTranslation('chat');
   const location = useLocation();
   const navigate = useNavigate();
-  const { currentWorkspaceIdentity, connectorSessionIdentity, currentComposerDraftKey } = useChatStore(useShallow(selectChatSelection));
+  const { currentWorkspaceIdentity, currentWorkspaceDraftId, currentWorkspacePromotion, connectorSessionIdentity, currentComposerDraftKey } = useChatStore(useShallow(selectChatSelection));
   const { runtime: currentConversationRuntime } = useChatRuntime();
   const currentChatRuntimeAvailable = currentConversationRuntime.state === 'ready';
   const workspaceActive = isActive;
@@ -66,6 +66,9 @@ export function Chat({ isActive = true }: ChatProps) {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
     return sendMessage(text, attachments);
   }, [sendMessage]);
+  const workspacePromotion = useMemo(() => currentWorkspacePromotion ? {
+    draftId: currentWorkspacePromotion.id, fromScopeKey: currentWorkspacePromotion.scopeKey, toScopeKey: currentComposerDraftKey,
+  } : undefined, [currentWorkspacePromotion, currentComposerDraftKey]);
   const runtimeActionOwner = useMemo(() => ({ identity: currentWorkspaceIdentity, enabled: chatSideEffectsActive, recoveryKey: questionRecoveryKey }), [currentWorkspaceIdentity, chatSideEffectsActive, questionRecoveryKey]);
   const runtimeActionOwnerRef = useRef<typeof runtimeActionOwner | null>(null);
   useLayoutEffect(() => {
@@ -95,7 +98,7 @@ export function Chat({ isActive = true }: ChatProps) {
     await invokeIpc('shell:openExternal', url);
   }, [runtimeActionOwner]);
   return (
-    <WorkspaceProvider scopeKey={currentComposerDraftKey} sessionIdentity={currentWorkspaceIdentity}>
+    <WorkspaceProvider scopeKey={currentComposerDraftKey} draftId={currentWorkspaceDraftId} promotion={workspacePromotion} sessionIdentity={currentWorkspaceIdentity}>
     <ChatComposer isActive={workspaceActive} composerRef={composerRef} viewportPaneRef={viewportPaneRef}>
       {(renderInput) => <ChatMessages isActive={workspaceActive} renderInput={renderInput} composerRef={composerRef} viewportPaneRef={viewportPaneRef}
         onRuntimeSendMessage={handleRuntimeSendMessage} onRuntimeOpenLink={handleRuntimeOpenLink}>

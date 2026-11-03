@@ -135,14 +135,21 @@ fn content_value(content: &SessionContent) -> Value {
         SessionContent::Media {
             media_type,
             reference,
+            file_name,
+            size_bytes,
+            resource_id,
         } => public_media_reference(reference).map_or_else(
             || json!({ "kind": "omitted", "reason": "unsafe_media" }),
             |reference| {
-                json!({
+                let mut value = json!({
                     "kind": "media",
                     "mediaType": media_type,
                     "reference": reference,
-                })
+                });
+                if let Some(name) = file_name { value["fileName"] = json!(name); }
+                if let Some(size) = size_bytes { value["sizeBytes"] = json!(size); }
+                if let Some(id) = resource_id { value["resourceId"] = json!(id); }
+                value
             },
         ),
         SessionContent::Omitted { reason } => {
@@ -277,6 +284,7 @@ fn run_phase(phase: RunPhase) -> &'static str {
     match phase {
         RunPhase::Queued => "queued",
         RunPhase::Started => "started",
+        RunPhase::Yielded => "yielded",
         RunPhase::WaitingForApproval => "waiting_for_approval",
         RunPhase::CancellationRequested => "cancellation_requested",
         RunPhase::Cancelled => "cancelled",
@@ -387,23 +395,28 @@ mod tests {
             items: SessionFact::Complete(vec![SessionItem::UserMessage {
                 item_id: "item-1".to_owned(),
                 message_id: Some("message-1".to_owned()),
+                input_ids: Vec::new(),
                 text: String::new(),
                 content: vec![
                     SessionContent::Media {
                         media_type: Some("image/png".to_owned()),
                         reference: "C:/private/image.png".to_owned(),
+                        file_name: None, size_bytes: None, resource_id: None,
                     },
                     SessionContent::Media {
                         media_type: Some("image/png".to_owned()),
                         reference: "/private/image.png".to_owned(),
+                        file_name: None, size_bytes: None, resource_id: None,
                     },
                     SessionContent::Media {
                         media_type: Some("image/png".to_owned()),
                         reference: "https://cdn.example.test/image.png?token=secret".to_owned(),
+                        file_name: None, size_bytes: None, resource_id: None,
                     },
                     SessionContent::Media {
                         media_type: Some("image/png".to_owned()),
                         reference: "/api/chat/media/outgoing/session-1/image.png".to_owned(),
+                        file_name: None, size_bytes: None, resource_id: None,
                     },
                 ],
                 status: ItemStatus::Final,

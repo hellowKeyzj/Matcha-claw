@@ -19,8 +19,11 @@ export interface ProviderAuthMethod {
 
 export type ProviderOAuthStartRequest = Omit<Parameters<typeof hostProviderStartOAuth>[0], 'flowId'>;
 
+export type ProviderOAuthOutcome = 'unconfirmed' | 'confirmed' | 'unknown';
+
 export interface ProviderOAuthPanelProps {
   oauthFlowing: boolean;
+  outcome: ProviderOAuthOutcome;
   oauthData: {
     mode: 'device';
     verificationUri: string;
@@ -42,6 +45,7 @@ export interface ProviderOAuthPanelProps {
 
 export interface ProviderOAuthInteraction {
   readonly flowing: boolean;
+  readonly outcome: ProviderOAuthOutcome;
   renderPanel: (
     Panel: ComponentType<ProviderOAuthPanelProps>,
     createRequest: () => ProviderOAuthStartRequest | null,
@@ -49,7 +53,7 @@ export interface ProviderOAuthInteraction {
 }
 
 export interface ProviderOAuthOwnerProps {
-  onCompleted: () => void;
+  onCompleted: (account: ProviderCredential) => void;
   children: (interaction: ProviderOAuthInteraction) => ReactNode;
 }
 
@@ -66,33 +70,35 @@ export interface ProviderSecretInput {
   token?: string;
 }
 
-export type ProviderAccountDraft = Pick<ProviderCredential,
-  'vendorId' | 'providerKind' | 'label' | 'authMode' | 'baseUrl' | 'apiProtocol' | 'mediaApiProtocol' | 'headers'
->;
-
-export interface ProviderEditPayload {
-  updates?: Partial<ProviderCredential>;
-  newApiKey?: string;
-  token?: string;
+interface ProviderConfigurationProps {
+  models: ProviderModelDraft[];
+  modelsReady: boolean;
+  modelsLoading: boolean;
+  modelsError: string | null;
+  onSubmit: (account: ProviderCredential, secret: ProviderSecretInput, creating: boolean) => Promise<ProviderCredential>;
+  onReplaceModels: (accountId: string, models: ProviderModelDraft[]) => Promise<void>;
+  onSaved: () => void;
+  onBusyChange: (busy: boolean) => void;
+  onAccountLocked: () => void;
 }
 
-export interface ProviderAddFormProps {
+export interface ProviderAddFormProps extends ProviderConfigurationProps {
   active: boolean;
   selection: 'brand' | 'variant';
   vendor: ProviderVendorContribution;
   accountVendor?: ProviderVendorInfo;
   existingVendorIds: ReadonlySet<string>;
   oauth: ProviderOAuthInteraction;
-  onSubmit: (draft: ProviderAccountDraft, secret: ProviderSecretInput) => Promise<void>;
+  completedAccount: ProviderCredential | null;
   onClose: () => void;
 }
 
-export interface ProviderEditFormProps {
+export interface ProviderEditFormProps extends ProviderConfigurationProps {
   active: boolean;
   account: ProviderCredential;
   vendor: ProviderVendorContribution;
   status?: Pick<ProviderWithKeyInfo, 'hasKey'>;
-  onSubmit: (payload: ProviderEditPayload) => Promise<void>;
+  accountVendor?: ProviderVendorInfo;
   onCancel: () => void;
 }
 
@@ -106,7 +112,7 @@ export type ProviderModelSourceContribution = {
   id: string;
   label: string;
   kind: 'discovery';
-  discover: (accountId: string, signal: AbortSignal) => Promise<ProviderModelDraft[]>;
+  discover: (account: ProviderCredential, secret: ProviderSecretInput) => Promise<ProviderModelDraft[]>;
 } | {
   id: string;
   label: string;

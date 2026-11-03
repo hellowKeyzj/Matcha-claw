@@ -4,9 +4,20 @@ import type {
   BetaRawMessageStreamEvent,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses.mjs'
-import { getOpenAIClient } from './client.js'
+import {
+  createOpenAIRequestTiming,
+  getOpenAIClient,
+  getOpenAIStreamTiming,
+  observeOpenAIStream,
+  timedOpenAIFetch,
+  type OpenAIRequestTiming,
+} from './client.js'
+import { debugIdentifierHash } from '../../../utils/debug.js'
 import { investigationFetch } from '../investigation.js'
-import { currentInvestigationScope, InvestigationAdmissionError } from '../../../world/investigation.js'
+import {
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+} from '../../../world/investigation.js'
 import { normalizeOpenAIUsage, type AnthropicUsage } from '@ant/model-provider'
 import { getValidChatGPTAuth } from './chatgptAuth.js'
 
@@ -236,32 +247,65 @@ export function buildResponsesRequest(params: {
 
 async function* parseSSE(
   response: Response,
+  timing?: OpenAIRequestTiming,
+  signal?: AbortSignal,
 ): AsyncGenerator<Record<string, unknown>, void> {
   if (!response.body) throw new Error('ChatGPT response did not include a body')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    let splitAt = buffer.indexOf('\n\n')
-    while (splitAt >= 0) {
-      const frame = buffer.slice(0, splitAt)
-      buffer = buffer.slice(splitAt + 2)
-      const data = frame
-        .split(/\r?\n/)
-        .filter(line => line.startsWith('data:'))
-        .map(line => line.slice(5).trimStart())
-        .join('\n')
-      if (data && data !== '[DONE]') {
-        const parsed = JSON.parse(data) as unknown
-        if (parsed && typeof parsed === 'object') {
-          yield parsed as Record<string, unknown>
-        }
+  let reads = 0
+  let bytes = 0
+  let readWaitTotalMs = 0
+  let readWaitMaxMs = 0
+  let readAt: number | undefined
+  let outcome = 'consumer_return'
+  const summary = () => ({ reads, bytes, readWaitTotalMs, readWaitMaxMs })
+  try {
+    while (true) {
+      readAt = performance.now()
+      if (reads === 0) timing?.mark('sse_first_read_begin')
+      const { done, value } = await reader.read()
+      const readMs = performance.now() - readAt
+      readAt = undefined
+      reads++
+      readWaitTotalMs += readMs
+      readWaitMaxMs = Math.max(readWaitMaxMs, readMs)
+      bytes += value?.byteLength ?? 0
+      if (reads === 1) timing?.mark('sse_first_read_return', summary())
+      if (done) {
+        outcome = signal?.aborted ? 'aborted' : 'eof'
+        break
       }
-      splitAt = buffer.indexOf('\n\n')
+      buffer += decoder.decode(value, { stream: true })
+      let splitAt = buffer.indexOf('\n\n')
+      while (splitAt >= 0) {
+        const frame = buffer.slice(0, splitAt)
+        buffer = buffer.slice(splitAt + 2)
+        const data = frame
+          .split(/\r?\n/)
+          .filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trimStart())
+          .join('\n')
+        if (data && data !== '[DONE]') {
+          const parsed = JSON.parse(data) as unknown
+          if (parsed && typeof parsed === 'object') {
+            yield parsed as Record<string, unknown>
+          }
+        }
+        splitAt = buffer.indexOf('\n\n')
+      }
     }
+  } catch (error) {
+    if (readAt !== undefined) {
+      const readMs = performance.now() - readAt
+      readWaitTotalMs += readMs
+      readWaitMaxMs = Math.max(readWaitMaxMs, readMs)
+    }
+    outcome = signal?.aborted ? 'aborted' : 'error'
+    throw error
+  } finally {
+    timing?.mark('sse_reader_end', { ...summary(), outcome })
   }
 }
 
@@ -315,6 +359,11 @@ export async function* adaptResponsesStreamToAnthropic(
   model: string,
 ): AsyncGenerator<BetaRawMessageStreamEvent, void> {
   const messageId = `msg_${randomUUID().replace(/-/g, '').slice(0, 24)}`
+  const timing = getOpenAIStreamTiming(stream)
+  if (timing) {
+    timing.providerMessageHash = debugIdentifierHash(messageId)
+    timing.mark('adapter_message_link')
+  }
   const toolBlocks = new Map<
     number,
     { contentIndex: number; open: boolean; name: string; id: string }
@@ -537,25 +586,38 @@ export async function createOpenAIResponsesStream(params: {
   fetchOverride?: typeof fetch
   maxRetries?: number
   source?: string
+  timing?: OpenAIRequestTiming
 }): Promise<AsyncIterable<Record<string, unknown>>> {
-  return (await getOpenAIClient({
+  const timing = params.timing ?? createOpenAIRequestTiming(params.source)
+  const stream = await getOpenAIClient({
     maxRetries: params.maxRetries ?? 0,
     fetchOverride: params.fetchOverride,
     source: params.source,
+    timing,
   }).responses.create(
     params.request as unknown as ResponseCreateParamsStreaming,
     { signal: params.signal },
-  )) as unknown as AsyncIterable<Record<string, unknown>>
+  ) as unknown as AsyncIterable<Record<string, unknown>>
+  return observeOpenAIStream(stream, timing, params.signal)
 }
 
 export async function createChatGPTResponsesStream(params: {
   request: ResponsesRequest
   signal: AbortSignal
   fetchOverride?: typeof fetch
+  source?: string
+  timing?: OpenAIRequestTiming
 }): Promise<AsyncIterable<Record<string, unknown>>> {
-  if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_exact_input_count_unavailable')
+  if (currentInvestigationScope())
+    throw new InvestigationAdmissionError(
+      'investigation_exact_input_count_unavailable',
+    )
+  const timing = params.timing ?? createOpenAIRequestTiming(params.source)
   const auth = await getValidChatGPTAuth()
-  const fetchFn = investigationFetch(params.fetchOverride ?? (globalThis.fetch as typeof fetch), 'chatgpt')
+  const fetchFn = investigationFetch(
+    timedOpenAIFetch(params.fetchOverride ?? (globalThis.fetch as typeof fetch), timing),
+    'chatgpt',
+  )
   const headers: Record<string, string> = {
     Authorization: `Bearer ${auth.accessToken}`,
     'Content-Type': 'application/json',
@@ -583,5 +645,10 @@ export async function createChatGPTResponsesStream(params: {
       `ChatGPT Responses API request failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ''}`,
     )
   }
-  return parseSSE(response)
+  return observeOpenAIStream(
+    parseSSE(response, timing, params.signal),
+    timing,
+    params.signal,
+    'sse_parser_delivery',
+  )
 }

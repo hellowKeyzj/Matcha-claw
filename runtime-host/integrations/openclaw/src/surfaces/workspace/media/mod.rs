@@ -12,7 +12,6 @@ use platform::state_dir::CanonicalStateDir;
 use store::MediaStore;
 
 const MAX_MEDIA_BYTES: usize = 50 * 1024 * 1024;
-const MAX_THUMBNAIL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BASE64_BYTES: usize = ((MAX_MEDIA_BYTES + 2) / 3) * 4;
 const HANDLE_BYTES: usize = 16;
 const HANDLE_PREFIX: &str = "media_";
@@ -113,12 +112,8 @@ impl WorkspaceMedia {
         let path = std::path::Path::new(original_path);
         let (content, size) = WorkspaceFiles::read_external_file(path, MAX_MEDIA_BYTES)
             .map_err(|_| WorkspaceMediaFailure::Unavailable)?;
-        let preview = if size as usize > MAX_THUMBNAIL_BYTES {
-            None
-        } else {
-            let normalized = normalized_mime_type(content_type, original_path, &content).map_err(|_| WorkspaceMediaFailure::Unavailable)?;
-            image_preview(&content, &normalized)
-        };
+        let normalized = normalized_mime_type(content_type, original_path, &content).map_err(|_| WorkspaceMediaFailure::Unavailable)?;
+        let preview = image_preview(&content, &normalized);
         Ok(WorkspaceMediaThumbnail {
             preview,
             file_size: size,
@@ -142,14 +137,8 @@ impl WorkspaceMedia {
         if entry_size > MAX_MEDIA_BYTES {
             return Err(WorkspaceMediaFailure::TooLarge);
         }
-        if entry_size > MAX_THUMBNAIL_BYTES {
-            return Ok(WorkspaceMediaThumbnail {
-                preview: None,
-                file_size: entry.size,
-            });
-        }
         let binary = files
-            .read_binary(relative_path, MAX_THUMBNAIL_BYTES)
+            .read_binary(relative_path, MAX_MEDIA_BYTES)
             .map_err(WorkspaceMediaFailure::from)?;
         let mime_type = normalized_mime_type(mime_type, relative_path, &binary.content).map_err(|_| WorkspaceMediaFailure::Unavailable)?;
         Ok(WorkspaceMediaThumbnail {

@@ -62,12 +62,12 @@ fn image_mime_type(content: &[u8]) -> Option<&'static str> {
     }
 }
 
+pub const MAX_PREVIEW_INPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PREVIEW_LONG_EDGE: u32 = 512;
 
 pub fn image_preview(content: &[u8], mime_type: &str) -> Option<String> {
     if !is_supported_image_mime(mime_type)
         || image_mime_type(content) != Some(mime_type)
-        || content.len() > (2 * 1024 * 1024)
     {
         return None;
     }
@@ -84,18 +84,25 @@ pub fn image_preview(content: &[u8], mime_type: &str) -> Option<String> {
         .decode()
         .ok()?;
     let (width, height) = (image.width(), image.height());
-    if width <= MAX_PREVIEW_LONG_EDGE && height <= MAX_PREVIEW_LONG_EDGE {
+    // Reuse small originals; larger inputs are re-encoded, never rejected by this byte threshold.
+    if width <= MAX_PREVIEW_LONG_EDGE && height <= MAX_PREVIEW_LONG_EDGE
+        && content.len() <= MAX_PREVIEW_INPUT_BYTES
+    {
         return Some(format!(
             "data:{mime_type};base64,{}",
             STANDARD.encode(content)
         ));
     }
 
-    let resized = image.resize(
-        MAX_PREVIEW_LONG_EDGE,
-        MAX_PREVIEW_LONG_EDGE,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let resized = if width <= MAX_PREVIEW_LONG_EDGE && height <= MAX_PREVIEW_LONG_EDGE {
+        image
+    } else {
+        image.resize(
+            MAX_PREVIEW_LONG_EDGE,
+            MAX_PREVIEW_LONG_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
     let mut encoded = Cursor::new(Vec::new());
     resized
         .write_to(&mut encoded, image::ImageFormat::Png)

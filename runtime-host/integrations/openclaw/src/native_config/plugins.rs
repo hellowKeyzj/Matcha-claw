@@ -44,8 +44,9 @@ type PluginEffectReceipts = BTreeMap<String, PendingPluginEffects>;
 fn read_effect_receipts(state_dir: &CanonicalStateDir) -> Result<PluginEffectReceipts, OpenClawConfigStoreError> {
     let Some(bytes) = state_dir.read_regular_file_bounded(EFFECT_RECEIPTS_FILE, MAX_EFFECT_RECEIPTS_BYTES)
         .map_err(|_| OpenClawConfigStoreError::ReadFailed)? else { return Ok(BTreeMap::new()) };
-    let receipts: PluginEffectReceipts = serde_json::from_slice(&bytes)
+    let mut receipts: PluginEffectReceipts = serde_json::from_slice(&bytes)
         .map_err(|_| OpenClawConfigStoreError::InvalidDocument)?;
+    receipts.remove("matchaclaw-media");
     if receipts.len() > MANAGED_PLUGIN_IDS.len()
         || receipts.keys().any(|id| !MANAGED_PLUGIN_IDS.contains(&id.as_str()))
     {
@@ -165,7 +166,6 @@ const MANAGED_PLUGIN_IDS: &[&str] = &[
     "security-core",
     "browser-relay",
     "memory-lancedb-pro",
-    "matchaclaw-media",
     "world-tools",
 ];
 
@@ -174,7 +174,6 @@ const MANUALLY_CONFIGURABLE_PLUGIN_IDS: &[&str] = &[
     "security-core",
     "browser-relay",
     "memory-lancedb-pro",
-    "matchaclaw-media",
     "world-tools",
 ];
 

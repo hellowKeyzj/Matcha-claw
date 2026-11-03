@@ -158,6 +158,7 @@ export type SessionDelta = Readonly<{
  type SessionRunPhase =
   | 'queued'
   | 'started'
+  | 'yielded'
   | 'waiting_for_approval'
   | 'cancellation_requested'
   | 'cancelled'
@@ -433,9 +434,14 @@ function isContent(value: unknown): boolean {
         && isNullableText(value.summary)
         && (value.isError === null || typeof value.isError === 'boolean');
     case 'media':
-      return hasExactKeys(value, ['kind', 'mediaType', 'reference'])
+      return hasAllowedKeys(value, ['kind', 'mediaType', 'reference'], ['fileName', 'sizeBytes', 'resourceId'])
         && isNullableId(value.mediaType)
-        && isContentRef(value.reference);
+        && isContentRef(value.reference)
+        && (!Object.hasOwn(value, 'fileName') || typeof value.fileName === 'string'
+          && isBoundedString(value.fileName, 4096, true)
+          && value.fileName !== '.' && value.fileName !== '..' && !/[\\/\p{Cc}]/u.test(value.fileName))
+        && (!Object.hasOwn(value, 'sizeBytes') || isSafeNonNegativeInteger(value.sizeBytes))
+        && (!Object.hasOwn(value, 'resourceId') || typeof value.resourceId === 'string' && /^sha256:[a-f0-9]{64}$/u.test(value.resourceId));
     case 'omitted':
       return hasExactKeys(value, ['kind', 'reason']) && isOmissionReason(value.reason);
     default:
@@ -606,7 +612,7 @@ function isGaps(value: unknown): boolean {
 }
 
 function isRunPhase(value: unknown): boolean {
-  return value === 'queued' || value === 'started' || value === 'waiting_for_approval'
+  return value === 'queued' || value === 'started' || value === 'yielded' || value === 'waiting_for_approval'
     || value === 'cancellation_requested' || value === 'cancelled' || value === 'completed'
     || value === 'failed' || value === 'interrupted';
 }

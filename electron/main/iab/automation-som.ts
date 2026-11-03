@@ -71,13 +71,21 @@ export async function captureSom(page: IabAutomationPage, request: Extract<Brows
   const anchor = readAnchor(collected.anchor);
   const result: IabJsonObject = { mode, viewport, marks, ...(anchor ? { anchor } : {}), ...(candidates.length > marks.length ? { truncated: true } : {}) };
   if (request.screenshot === false) return result;
+  const failures: unknown[] = [];
+  let imageBase64: string | undefined;
   try {
     await page.evaluate(overlaySource(marks), operation);
-    return { ...result, imageBase64: await page.captureScreenshot({ format: 'png', clip: { x: collected.anchor.scrollX, y: collected.anchor.scrollY, ...viewport } }, operation), imageType: 'png' };
-  } finally {
-    try { await page.evaluate(cleanupSource, operation); }
-    catch { /* The page overlay also removes itself after 15 seconds. */ }
+    imageBase64 = await page.captureScreenshot({ format: 'png', clip: { x: collected.anchor.scrollX, y: collected.anchor.scrollY, ...viewport } }, operation);
+  } catch (error) { failures.push(error); }
+  try { await page.evaluate(cleanupSource, operation); }
+  catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'IAB_CDP_OUTCOME_UNKNOWN') failures.push(error);
+    // The page overlay also removes itself after 15 seconds.
   }
+  operation.signal.throwIfAborted();
+  (operation.assertCurrent ?? page.assertCurrent)();
+  if (failures.length) throw failures.find((error) => error instanceof Error && 'code' in error && error.code === 'IAB_CDP_OUTCOME_UNKNOWN') ?? failures[0];
+  return { ...result, imageBase64: imageBase64!, imageType: 'png' };
 }
 
 function collectSource(selector: string): string {

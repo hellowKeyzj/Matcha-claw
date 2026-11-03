@@ -217,7 +217,12 @@ Write all title, description and prompt values in this requested language (JSON 
 Return only strict JSON with no markdown or extra keys, using this schema:
 {"candidates":[{"title":"short title","description":"brief concept","prompt":"complete actionable generation direction"}]}
 Propose 4–6 genuinely different candidates, never more than 8. Each title must be non-empty and at most 200 characters; description non-empty and at most 2000; prompt non-empty and at most 8000. If no grounded recommendation is possible, return {"candidates":[]}.`;
-        const response = await context.models.generateText({ prompt, images }, signal);
+        const response = await context.models.generateText({ prompt, images }, signal).catch((error: unknown) => {
+          if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
+            throw new DesignError(error.code === 'selection-unavailable' ? 'recommendation_unavailable' : error.code, error.message);
+          }
+          throw error;
+        });
         signal.throwIfAborted();
         const result = modelJson(response.text, 'recommendation', recommendations);
         // A refreshed request owns cache publication; older completions cannot restore stale results.

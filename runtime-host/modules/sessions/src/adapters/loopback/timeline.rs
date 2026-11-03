@@ -381,6 +381,7 @@ mod tests {
             items: SessionFact::Complete(vec![crate::state::SessionItem::UserMessage {
                 item_id: "message-1".to_owned(),
                 message_id: Some("message-1".to_owned()),
+                input_ids: Vec::new(),
                 text: "seeded history".to_owned(),
                 content: vec![crate::state::SessionContent::Text {
                     text: "seeded history".to_owned(),

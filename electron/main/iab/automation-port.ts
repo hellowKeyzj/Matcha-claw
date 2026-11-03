@@ -1,16 +1,18 @@
 import type { BrowserActionParams, BrowserInterceptRule } from '../../../packages/openclaw-browser-relay-plugin/src/browser-action-contract';
 import type { IabJsonObject, IabTab } from '../../../src/types/desktop/iab';
 import type { IabCdpEvent, IabCdpLease, IabTrustedContext } from './contracts';
+import type { PageOwnership } from '../../../packages/openclaw-browser-relay-plugin/src/state/page-ownership';
 
-export type AutomationIdentity = Pick<IabTrustedContext, 'principalId' | 'sessionKey' | 'workspaceDir'>;
+export type AutomationIdentity = Pick<IabTrustedContext, 'principalId' | 'executorId' | 'sessionKey' | 'workspaceDir'>;
 export type AutomationError = { message: string; code?: string; errors?: AutomationError[] };
 export type AutomationReply = { id: number } & ({ ok: true; value: unknown } | { ok: false; error: AutomationError });
 export type DownloadFile = { guid: string; filename: string; directory: string; savePath?: string; bytes: number };
 export type AutomationEffect =
   | { kind: 'tabs' }
-  | { kind: 'check-target'; tabId: string }
-  | { kind: 'open'; url: string }
+  | { kind: 'check-target'; tabId: string; operation?: 'close' }
+  | { kind: 'open'; url: string; retain?: boolean }
   | { kind: 'close-tab'; tabId: string }
+  | { kind: 'release-claims' }
   | { kind: 'show'; tabId: string }
   | { kind: 'acquire'; tabId: string }
   | { kind: 'command'; leaseId: string; method: string; params?: IabJsonObject; sessionId?: string; timeoutMs?: number }
@@ -51,10 +53,11 @@ export interface AutomationContext extends IabTrustedContext {
   releaseDownload(leaseId: string): void;
 }
 export interface AutomationServices {
-  tabs(context: AutomationContext): Promise<{ tabs: IabTab[]; activeTabId: string | null }>;
-  checkTarget(tabId: string, context: AutomationContext): Promise<void>;
-  open(url: string, context: AutomationContext): Promise<string>;
+  tabs(context: AutomationContext): Promise<{ tabs: (IabTab & PageOwnership)[]; activeTabId: string | null }>;
+  checkTarget(tabId: string, context: AutomationContext, operation?: 'close'): Promise<boolean>;
+  open(url: string, context: AutomationContext, retain?: boolean): Promise<string>;
   closeTab(tabId: string, context: AutomationContext): Promise<void>;
+  releaseSessionClaims(context: AutomationContext): Promise<void>;
   show(tabId: string, context: AutomationContext): Promise<void>;
   acquire(tabId: string, context: AutomationContext, signal: AbortSignal): Promise<IabCdpLease>;
   bindOperation(context: AutomationContext, signal: AbortSignal): () => void;

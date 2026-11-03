@@ -45,6 +45,8 @@ export function selectChatSelection(state: ChatStoreState) {
     currentComposerDraftKey: currentConversation?.kind === 'session' ? currentSessionRecordKey
       : currentConversation?.kind === 'draft' ? `${currentConversation.runtimeScopeKey}:agent:${currentConversation.agentId}:draft` : '',
     currentWorkspaceIdentity: currentConversation?.kind === 'session' ? currentConversation.sessionIdentity : meta.sessionIdentity,
+    currentWorkspaceDraftId: currentConversation?.kind === 'draft' ? currentConversation.id : currentConversation?.promotedDraft?.id,
+    currentWorkspacePromotion: currentConversation?.kind === 'session' ? currentConversation.promotedDraft : undefined,
     connectorSessionIdentity: meta.sessionIdentity,
     currentAgentId: currentConversation?.agentId ?? meta.agentId ?? '',
   };
@@ -62,6 +64,19 @@ export function useChatRuntime() {
     directoryEndpoints: directory.endpoints,
   })));
   return { runtime, directory };
+}
+
+export function isChatRuntimePreparing(
+  state: ChatStoreState,
+  runtime: ReturnType<typeof useChatRuntime>['runtime'],
+  directoryStatus: ReturnType<typeof useChatRuntime>['directory']['status'],
+): boolean {
+  const hasItems = Boolean(state.loadedSessions[selectChatSessionRecordKey(state)]?.items.length);
+  const catalogStatus = state.sessionRuntimeCatalog.status;
+  return !hasItems && (runtime.state === 'resolving'
+    || runtime.state === 'starting'
+    || (runtime.state === 'unselected' && directoryStatus !== 'error'
+      && (catalogStatus === 'idle' || catalogStatus === 'loading')));
 }
 
 export function useChatAgent() {

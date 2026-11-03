@@ -92,6 +92,7 @@ export function useLargeTextContent(input: {
 
   return {
     text,
+    complete,
     loading: activeState.loading,
     loadAll: (onLoaded: (text: string) => void) => { void loadContent(true, onLoaded); },
     loadMoreButton: (largeText && !complete && sessionIdentity) || activeState.failed ? (

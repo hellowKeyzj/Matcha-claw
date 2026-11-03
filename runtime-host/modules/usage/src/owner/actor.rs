@@ -11,7 +11,7 @@ use crate::{
         call::{self, CallFailure, UsageCallDetail},
         commands::{UsageCommand, UsageOwnerKey, UsageQuery},
     },
-    domain::model::{UsageEntry, UsageReadError},
+    domain::model::{UsageHistory, UsageReadError},
     ports::{UsageRequestAdmission, UsageRuntimeDirectory},
 };
 
@@ -152,7 +152,7 @@ async fn recent(
     endpoint: &RuntimeEndpoint,
     limit: usize,
     context: Option<&CallContext<UsageCallDetail>>,
-) -> Result<Vec<UsageEntry>, UsageReadError> {
+) -> Result<UsageHistory, UsageReadError> {
     let detail = UsageCallDetail::recent(limit);
     admit(shared, context, UsageCallDetail::recent(limit)).await?;
     let result = match shared.runtime_directory.usage_ops(endpoint) {
@@ -169,7 +169,7 @@ async fn session_timeseries(
     agent_id: &str,
     session_id: &str,
     context: Option<&CallContext<UsageCallDetail>>,
-) -> Result<Vec<UsageEntry>, UsageReadError> {
+) -> Result<UsageHistory, UsageReadError> {
     admit(shared, context, UsageCallDetail::session_timeseries()).await?;
     let result = match shared.runtime_directory.usage_ops(endpoint) {
         Some(ops) => ops.session_usage_timeseries(agent_id, session_id).await,
@@ -219,7 +219,7 @@ async fn admit(
 async fn settle(
     context: Option<&CallContext<UsageCallDetail>>,
     detail: UsageCallDetail,
-    result: &Result<Vec<UsageEntry>, UsageReadError>,
+    result: &Result<UsageHistory, UsageReadError>,
 ) {
     let status = if result.is_ok() {
         CallStatus::Succeeded

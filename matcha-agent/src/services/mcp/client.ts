@@ -116,7 +116,7 @@ import {
   runElicitationHooks,
   runElicitationResultHooks,
 } from './elicitationHandler.js'
-import { iabStdioEnv } from './iab-capability.js'
+import { iabInputMetadata, iabStdioEnv } from './iab-capability.js'
 import { buildMcpToolName } from './mcpStringUtils.js'
 import { normalizeNameForMCP } from './normalization.js'
 import { getLoggingSafeMcpBaseUrl } from './utils.js'
@@ -1750,7 +1750,7 @@ export function watchMcpToolChanges(
   let flight: Promise<void> | undefined
   const refresh = (): Promise<void> => {
     dirty = true
-    return flight ??= (async () => {
+    return (flight ??= (async () => {
       while (active && dirty) {
         dirty = false
         fetchToolsForClient.cache.delete(connection.name)
@@ -1760,15 +1760,21 @@ export function watchMcpToolChanges(
     })().finally(() => {
       flight = undefined
       if (active && dirty) void refresh()
-    })
+    }))
   }
   const dispose = () => {
     active = false
-    connection.client.removeNotificationHandler('notifications/tools/list_changed')
-    if (toolChangeDisposers.get(connection.client) === dispose) toolChangeDisposers.delete(connection.client)
+    connection.client.removeNotificationHandler(
+      'notifications/tools/list_changed',
+    )
+    if (toolChangeDisposers.get(connection.client) === dispose)
+      toolChangeDisposers.delete(connection.client)
   }
   toolChangeDisposers.set(connection.client, dispose)
-  connection.client.setNotificationHandler(ToolListChangedNotificationSchema, refresh)
+  connection.client.setNotificationHandler(
+    ToolListChangedNotificationSchema,
+    refresh,
+  )
   return refresh()
 }
 
@@ -1885,9 +1891,10 @@ export const fetchToolsForClient = memoizeWithLRU(
               onProgress?: ToolCallProgress<MCPProgress>,
             ) {
               const toolUseId = extractToolUseId(parentMessage)
-              const meta = toolUseId
-                ? { 'claudecode/toolUseId': toolUseId }
-                : {}
+              const meta = {
+                ...(toolUseId ? { 'claudecode/toolUseId': toolUseId } : {}),
+                ...iabInputMetadata(client.name, tool.name, client.config),
+              }
 
               // Emit progress when tool starts
               if (onProgress && toolUseId) {

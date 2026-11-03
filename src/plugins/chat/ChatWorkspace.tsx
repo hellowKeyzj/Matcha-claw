@@ -11,7 +11,7 @@ import { ChatOffline } from '@/plugins/chat/components/ChatOffline';
 import { ChatHeaderBar } from '@/plugins/chat/components/ChatHeaderBar';
 import type { ChatListHandle } from '@/plugins/chat/components/ChatList';
 import { useChatWindowDockController } from '@/plugins/chat/useChatWindowDockController';
-import { selectChatSessionRecordKey, useChatRuntime } from '@/plugins/chat/chat-session';
+import { isChatRuntimePreparing, selectChatSessionRecordKey, useChatRuntime } from '@/plugins/chat/chat-session';
 import { useWorkspace } from '@/plugins/workspace/context';
 import { workspacePanels } from '@/plugins/workspace/extensions';
 import { chatWorkspaceContent } from './extensions';
@@ -19,7 +19,7 @@ import type { ChatMessageSlots } from '@/plugins/chat/ChatMessages';
 
 function readPanelWidth(): number {
   try {
-    const width = Number(window.localStorage.getItem('chat:side-panel-width'));
+    const width = Number(window.sessionStorage.getItem('chat:side-panel-width'));
     if (Number.isFinite(width) && width > 0) return width;
   } catch { /* Storage may be unavailable. */ }
   return CHAT_WORKSPACE_LAYOUT.sidePanelDefaultWidth;
@@ -41,7 +41,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
   const panels = useContributions(workspacePanels);
   const contributions = useContributions(chatWorkspaceContent);
   const content = useMemo(() => [...contributions].sort((a, b) => a.order - b.order), [contributions]);
-  const { hasItems, ownership, catalogStatus, catalogError } = useChatStore(useShallow((state) => {
+  const { hasItems, ownership, catalogStatus, catalogError, sessionRuntimeInitializing } = useChatStore(useShallow((state) => {
     const record = state.loadedSessions[selectChatSessionRecordKey(state)];
     return {
       hasItems: Boolean(record?.items.length),
@@ -49,6 +49,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
         && sessionIdentitiesEqual(sessionIdentity, record.meta.sessionIdentity) ? record.meta.ownership : null,
       catalogStatus: state.sessionRuntimeCatalog.status,
       catalogError: state.sessionRuntimeCatalog.error,
+      sessionRuntimeInitializing: isChatRuntimePreparing(state, runtime, directory.status),
     };
   }));
   const [width, setWidth] = useState(readPanelWidth);
@@ -58,7 +59,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
     const width = clampChatSidePanelWidth(Math.round(next), chatLayoutRef.current?.clientWidth ?? window.innerWidth);
     setWidth(width);
     if (commit) {
-      try { window.localStorage.setItem('chat:side-panel-width', String(width)); } catch { /* Storage may be unavailable. */ }
+      try { window.sessionStorage.setItem('chat:side-panel-width', String(width)); } catch { /* Storage may be unavailable. */ }
     }
   }, []);
   useLayoutEffect(() => {
@@ -94,10 +95,6 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
   const handleComposerGeometryChange = useCallback(() => {
     viewportPaneRef.current?.notifyComposerGeometryChanged();
   }, [viewportPaneRef]);
-  const sessionRuntimeInitializing = !hasItems && (runtime.state === 'resolving'
-    || runtime.state === 'starting'
-    || (runtime.state === 'unselected' && directory.status !== 'error'
-      && (catalogStatus === 'idle' || catalogStatus === 'loading')));
   const offline = sessionRuntimeInitializing
     ? <ChatOffline title={t('runtimePreparing.title')} tone="loading" />
     : runtime.state === 'unselected' && !hasItems && (directory.status === 'error' || catalogStatus === 'error')

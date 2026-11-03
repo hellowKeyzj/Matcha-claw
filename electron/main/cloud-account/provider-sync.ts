@@ -1,16 +1,12 @@
 import type { CloudAccountSession } from './session-store';
 import type { CloudClientBootstrap } from './types';
 import type { ProviderAccountsTransport } from '../runtime-host-delivery/transport/providers/accounts';
-import type {
-  ProviderModelCapability,
-  ProviderModelsTransport,
-} from '../runtime-host-delivery/transport/providers/models';
+import type { ModelDraft, ProviderModelsTransport } from '../runtime-host-delivery/transport/providers/models';
 import {
   deleteProviderPrivateAccount,
   storeProviderPrivateAccount,
   type ProviderAccountIntent,
 } from '../providers/private-auth';
-import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
 import type { createProviderCallObserver } from '../providers/private-auth';
 import { logger } from '../../utils/logger';
 
@@ -22,17 +18,7 @@ type SyncDependencies = Readonly<{
   providerAccountsTransport: ProviderAccountsTransport;
   providerModelsTransport: ProviderModelsTransport;
   awaitProviderCall: ReturnType<typeof createProviderCallObserver>;
-}>;
-
-type ModelDraft = Readonly<{
-  modelId: string;
-  capabilities: readonly ProviderModelCapability[];
-  contextWindow?: number;
-  maxTokens?: number;
-  timeoutMs?: number;
-  aspectRatio?: string;
-  resolution?: string;
-  quality?: string;
+  onChanged?(): void;
 }>;
 
 export type CloudProviderSync = Readonly<{
@@ -111,7 +97,7 @@ async function reconcileNow(
     await removeCloudProvider(deps, owner, assertCurrent);
     return null;
   }
-  const account = await accountFromBootstrap(deps.providerAccountsTransport, bootstrap, owner);
+  const account = await accountFromBootstrap(deps.providerAccountsTransport, bootstrap);
   assertCurrent();
   if (!account) return active;
   const stored = await storeProviderPrivateAccount(
@@ -125,6 +111,7 @@ async function reconcileNow(
     logger.warn(`Cloud provider account sync failed: ${stored.status}`);
     return active;
   }
+  deps.onChanged?.();
   await replaceDiscoveredModels(deps, assertCurrent);
   return owner;
 }
@@ -144,12 +131,11 @@ function apiKeyFromBootstrap(bootstrap: CloudClientBootstrap): string | undefine
 async function accountFromBootstrap(
   transport: ProviderAccountsTransport,
   bootstrap: CloudClientBootstrap,
-  owner: string,
 ): Promise<ProviderAccountIntent | null> {
   const account = {
     id: ACCOUNT_ID,
     provider: 'custom',
-    label: `${ACCOUNT_LABEL} (${owner})`,
+    label: ACCOUNT_LABEL,
     enabled: true,
     kind: 'chat',
     endpoint: bootstrap.clients.openai?.baseUrl.trim() || bootstrap.baseUrl.trim(),
@@ -180,7 +166,7 @@ async function replaceDiscoveredModels(deps: SyncDependencies, assertCurrent: ()
     logger.warn(`Cloud provider model discovery failed: ${discovery.status}`);
     return;
   }
-  const receipt = decodeCallReceipt(discovery.body);
+  const receipt = discovery.body;
   const discovered = await deps.awaitProviderCall(receipt, 'providerModels.discover');
   assertCurrent();
   if (discovered.callId !== receipt.callId || discovered.module !== 'provider'
@@ -195,31 +181,62 @@ async function replaceDiscoveredModels(deps: SyncDependencies, assertCurrent: ()
   }
   const result = await transport.readDiscoveryResult(receipt.callId, ACCOUNT_ID);
   assertCurrent();
-  if (result.status !== 200 || !isModelDiscovery(result.body, receipt.callId, discovered.detail.count)) {
+  if (result.status !== 200) {
     logger.warn(`Cloud provider model discovery result failed: ${result.status}`);
     return;
+  }
+  if (result.body.models.length !== discovered.detail.count) {
+    logger.warn('Cloud provider model discovery count did not match the completed call');
+    return;
+  }
+  let models = result.body.models;
+  const unknownCount = models.filter((model) => model.capabilities.length === 0).length;
+  if (unknownCount > 0) {
+    const current = await transport.read();
+    assertCurrent();
+    if (current.status !== 200) {
+      logger.warn(`Cloud provider model catalog lookup failed: ${current.status}`);
+      return;
+    }
+    const saved = new Map<string, ModelDraft>(current.body.models
+      .filter((model) => model.accountId === ACCOUNT_ID)
+      .map(({ accountId: _accountId, label: _label, ...model }) => [model.modelId, model]));
+    models = result.body.models.flatMap((model) => {
+      const configured = model.capabilities.length > 0 ? model : saved.get(model.modelId);
+      return configured ? [configured] : [];
+    });
+    logger.warn('Cloud provider models with unknown capabilities', {
+      discovered: result.body.models.length,
+      unknown: unknownCount,
+      skipped: result.body.models.length - models.length,
+    });
+    if (models.length === 0) return;
   }
   const replacement = await transport.execute({
     id: 'provider.models',
     operationId: 'providerModels.replace',
     scope: { kind: 'provider-model-catalog' },
     target: { kind: 'provider-models' },
-    input: { kind: 'replace', accountId: ACCOUNT_ID, models: result.body.models },
+    input: { kind: 'replace', accountId: ACCOUNT_ID, models },
   });
   assertCurrent();
   if (replacement.status !== 202) {
     logger.warn(`Cloud provider model sync failed: ${replacement.status}`);
     return;
   }
-  const call = await deps.awaitProviderCall(decodeCallReceipt(replacement.body), 'providerModels.replace');
+  const call = await deps.awaitProviderCall(replacement.body, 'providerModels.replace');
   assertCurrent();
-  if (call.detail.kind !== 'replaceModels' || call.detail.accountId !== ACCOUNT_ID) {
+  if (call.callId !== replacement.body.callId || call.module !== 'provider'
+    || call.command !== 'providerModels.replace'
+    || call.detail.kind !== 'replaceModels' || call.detail.accountId !== ACCOUNT_ID) {
     throw new Error('Cloud provider model call identity is invalid');
   }
-  if (call.detail.phase !== 'terminal' || call.detail.outcome !== 'stored'
+  if (call.status !== 'succeeded' || call.detail.phase !== 'terminal' || call.detail.outcome !== 'stored'
     || call.detail.persisted !== 'confirmed' || call.detail.commit !== 'committed') {
     logger.warn('Cloud provider model sync result was not confirmed');
+    return;
   }
+  deps.onChanged?.();
 }
 
 async function getAccount(transport: ProviderAccountsTransport): ReturnType<ProviderAccountsTransport['execute']> {
@@ -248,6 +265,8 @@ async function removeCloudProvider(deps: SyncDependencies, active: SyncState, as
   );
   if (deleted.status !== 'deleted') {
     logger.warn(`Cloud provider cleanup failed: ${deleted.status}`);
+  } else {
+    deps.onChanged?.();
   }
 }
 
@@ -273,47 +292,6 @@ function sameCloudProviderAccount(current: ProviderAccountIntent, next: Provider
     && current.endpoint === next.endpoint
     && current.protocol === next.protocol
     && current.authMode === next.authMode;
-}
-
-function isModelDiscovery(value: unknown, callId: string, count: number): value is Readonly<{ models: readonly ModelDraft[] }> {
-  return isRecord(value)
-    && Object.keys(value).length === 3
-    && value.callId === callId
-    && value.accountId === ACCOUNT_ID
-    && Array.isArray(value.models)
-    && value.models.length === count
-    && value.models.every(isModelDraft);
-}
-
-function isModelDraft(value: unknown): value is ModelDraft {
-  return isRecord(value)
-    && typeof value.modelId === 'string'
-    && Array.isArray(value.capabilities)
-    && value.capabilities.every(isProviderModelCapability)
-    && optionalNumber(value.contextWindow)
-    && optionalNumber(value.maxTokens)
-    && optionalNumber(value.timeoutMs)
-    && optionalString(value.aspectRatio)
-    && optionalString(value.resolution)
-    && optionalString(value.quality);
-}
-
-function isProviderModelCapability(value: unknown): value is ProviderModelCapability {
-  return value === 'chat'
-    || value === 'imageUnderstand'
-    || value === 'imageGenerate'
-    || value === 'videoGenerate'
-    || value === 'musicGenerate'
-    || value === 'tts'
-    || value === 'transcribe';
-}
-
-function optionalNumber(value: unknown): boolean {
-  return value === undefined || typeof value === 'number';
-}
-
-function optionalString(value: unknown): boolean {
-  return value === undefined || typeof value === 'string';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

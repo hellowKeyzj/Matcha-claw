@@ -43,7 +43,7 @@
     {
       "slug": "tavily-search",
       "repo": "tavily-ai/skills",
-      "repoPath": "skills/tavily-search",
+      "repoPath": "skills/core/tavily-search",
       "ref": "main",
       "version": "main",
       "autoEnable": true

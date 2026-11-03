@@ -60,6 +60,19 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+pub(crate) fn is_no_response_sentinel(row: &Value) -> bool {
+    row["type"] == "assistant"
+        && row["message"]["model"] == "<synthetic>"
+        && row["isApiErrorMessage"] != true
+        && row.get("error").is_none_or(Value::is_null)
+        && row
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                matches!(blocks.as_slice(), [block] if block["type"] == "text" && block["text"] == "No response requested.")
+            })
+}
+
 pub(crate) enum UserPresentation {
     Content,
     Hidden,
@@ -141,7 +154,7 @@ fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-fn initial_replay(row: &Value) -> bool {
+pub(crate) fn initial_replay(row: &Value) -> bool {
     if [
         "isMeta",
         "toolUseResult",

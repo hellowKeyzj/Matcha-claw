@@ -127,13 +127,30 @@ fn rejected(row: &Value, reason: &'static str, event: Option<&crate::client::Eve
     Failure::InvalidReadback
 }
 
-pub(crate) fn message(row: &Value, status: ItemStatus) -> Result<Option<Message>, Failure> {
-    message_with_event(row, status, None)
+pub(crate) fn message(
+    row: &Value,
+    status: ItemStatus,
+    session_id: &str,
+) -> Result<Option<Message>, Failure> {
+    project_message(row, status, None, session_id)
 }
 fn message_with_event(
     row: &Value,
     status: ItemStatus,
     event: Option<&crate::client::Event>,
+) -> Result<Option<Message>, Failure> {
+    project_message(
+        row,
+        status,
+        event,
+        event.map_or("", |event| event.session_id.as_str()),
+    )
+}
+fn project_message(
+    row: &Value,
+    status: ItemStatus,
+    event: Option<&crate::client::Event>,
+    session_id: &str,
 ) -> Result<Option<Message>, Failure> {
     let rejected = |row: &Value, reason| rejected(row, reason, event);
     let kind = row
@@ -164,6 +181,9 @@ fn message_with_event(
     };
     if blocks.len() > MAX_SEGMENTS {
         return Err(rejected(row, "message.segment_limit"));
+    }
+    if normalization::is_no_response_sentinel(row) {
+        return Ok(None);
     }
     let mut content = Vec::new();
     let mut tools = Vec::new();
@@ -269,10 +289,23 @@ fn message_with_event(
                     details: None,
                     is_error: Some(error),
                 });
+                if let Some(blocks) = output.as_array() {
+                    for (nested_index, block) in blocks.iter().enumerate() {
+                        if matches!(block["type"].as_str(), Some("image" | "document")) {
+                            content.push(super::media::project(
+                                session_id,
+                                uuid,
+                                index,
+                                Some(nested_index),
+                                block,
+                            ));
+                        }
+                    }
+                }
             }
-            Some("image" | "document") => content.push(SessionContent::Omitted {
-                reason: OmissionReason::UnsafeMedia,
-            }),
+            Some("image" | "document") => {
+                content.push(super::media::project(session_id, uuid, index, None, block))
+            }
             _ => content.push(SessionContent::Omitted {
                 reason: OmissionReason::Unknown,
             }),
@@ -280,6 +313,9 @@ fn message_with_event(
     }
     if kind == "user" && !user_content && !native_text {
         return Ok(None);
+    }
+    if content.len() > MAX_SEGMENTS {
+        return Err(rejected(row, "message.segment_limit"));
     }
     let item = match kind {
         "assistant" => SessionItem::AssistantTurn {

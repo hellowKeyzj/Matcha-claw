@@ -159,6 +159,7 @@ export function* normalizeMessage(message: Message): Generator<SDKMessage> {
                 type: 'user',
                 message: _.message,
                 parent_tool_use_id: message.parentToolUseID as string,
+                source_tool_use_id: _.sourceToolUseID,
                 session_id: getSessionId(),
                 uuid: _.uuid,
                 timestamp: _.timestamp,
@@ -226,6 +227,7 @@ export function* normalizeMessage(message: Message): Generator<SDKMessage> {
           type: 'user',
           message: _.message,
           parent_tool_use_id: null,
+          source_tool_use_id: _.sourceToolUseID,
           session_id: getSessionId(),
           uuid: _.uuid,
           timestamp: _.timestamp,
@@ -375,6 +377,9 @@ export async function* handleOrphanedPermission(
 
       const sdkMessage: SDKMessage = {
         ...update.message,
+        ...(update.message.type === 'user' && {
+          source_tool_use_id: update.message.sourceToolUseID,
+        }),
         session_id: getSessionId(),
         parent_tool_use_id: null,
       } as SDKMessage

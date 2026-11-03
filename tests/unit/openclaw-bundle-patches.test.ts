@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { applyOpenClawBundlePatches } from '../../scripts/openclaw-bundle-patches.mjs';
 
@@ -790,6 +793,88 @@ describe('openclaw bundle patches', () => {
       status: 'clean',
     })]);
   });
+
+  it('keeps the owner stop pipe private without changing CLI or explicit command input', async () => {
+    const openclawDir = createTempOpenClawPackage();
+    const require = createRequire(import.meta.url);
+    const distDir = path.dirname(fs.realpathSync(require.resolve('openclaw')));
+    const execName = fs.readdirSync(distDir).find((name) => name.startsWith('exec-')
+      && name.endsWith('.mjs') && fs.readFileSync(path.join(distDir, name), 'utf8').includes('async function runCommandWithOutputEncoding('));
+    expect(execName).toBeDefined();
+    const execSource = fs.readFileSync(path.join(distDir, execName!), 'utf8')
+      .replace(/hasInput \? "pipe" : [^\n]+/, 'hasInput ? "pipe" : "inherit",')
+      .replace(/(from |import )"(\.\/[^"]+)"/g, (_, prefix, specifier) => `${prefix}${JSON.stringify(pathToFileURL(path.resolve(distDir, specifier)).href)}`);
+    seedDistFile(openclawDir, 'exec-test.mjs', `${execSource}\nexport { runCommandWithOutputEncoding as run };`);
+    const runFile = seedDistFile(openclawDir, 'run-test.mjs', `
+import assert from 'node:assert/strict';
+import { run } from './exec-test.mjs';
+async function runGatewayLoop(params) {
+  let stopped;
+  const stop = new Promise(resolve => { stopped = resolve; });
+  const cleanupSignals = () => {};
+  const request = () => stopped();
+  const onSigint = () => request("stop", "SIGINT");
+  const onSigusr1 = () => {};
+  process.on("SIGUSR1", onSigusr1);
+  try {
+    const git = await run(['git', '--version'], { timeoutMs: 2000 });
+    assert.equal(git.termination, 'exit');
+    assert.equal(git.code, 0);
+    assert.match(git.stdout, /git version/);
+    const reader = [process.execPath, '-e', 'process.stdout.write(require("node:fs").readFileSync(0,"utf8"))'];
+    for (const input of ['', 'explicit-input']) {
+      const result = await run(reader, { input, timeoutMs: 2000 });
+      assert.equal(result.termination, 'exit');
+      assert.equal(result.stdout, input);
+    }
+    if (params.ownsProcessLifecycle) {
+      console.log('commands-done');
+      await stop;
+    } else {
+      console.log('inherit-ready');
+      const result = await run(reader, { timeoutMs: 2000 });
+      assert.equal(result.termination, 'exit');
+      assert.equal(result.stdout, 'cli-input');
+    }
+  } finally { cleanupSignals(); }
+  assert.equal(process.stdin[Symbol.for('matchaclaw.openclaw.ownedStdin')], undefined);
+  console.log('verified');
+}
+await runGatewayLoop({ ownsProcessLifecycle: process.argv[2] === 'owned' });
+process.exit(0);
+`.replace(/^ {2}/gm, '\t'));
+    const options = { log: () => undefined, patchIds: ['owned-stdin-stop'] };
+    expect(applyOpenClawBundlePatches(openclawDir, options)[0].status).toBe('applied');
+    expect(applyOpenClawBundlePatches(openclawDir, options)[0].status).toBe('clean');
+
+    for (const mode of ['owned', 'cli']) {
+      const output = await new Promise<string>((resolve, reject) => {
+        const child = spawn(require('electron'), [runFile, mode], {
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', MATCHACLAW_OPENCLAW_OWNED_STDIN: '1' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        let sent = false;
+        const deadline = setTimeout(() => child.kill(), 8000);
+        child.stdout.on('data', (chunk) => {
+          stdout += chunk;
+          if (!sent && stdout.includes(mode === 'owned' ? 'commands-done' : 'inherit-ready')) {
+            sent = true;
+            child.stdin.end(mode === 'owned' ? 'matchaclaw.openclaw.stop.v1\n' : 'cli-input');
+          }
+        });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        child.on('error', (error) => { clearTimeout(deadline); reject(error); });
+        child.on('close', (code) => {
+          clearTimeout(deadline);
+          if (code === 0) resolve(stdout);
+          else reject(new Error(`stdin contract failed (${mode}, ${code}): ${stderr}`));
+        });
+      });
+      expect(output).toContain('verified');
+    }
+  }, 20000);
 
   it('does not allow retired OpenClaw logic patches to be requested', () => {
     const openclawDir = createTempOpenClawPackage();

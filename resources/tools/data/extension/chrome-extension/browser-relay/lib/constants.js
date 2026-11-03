@@ -2,6 +2,8 @@
  * Shared constants for the MatchaClaw Browser Relay extension.
  */
 
+import { getRelayText } from '../pages/scripts/relay-i18n.js'
+
 export const DEFAULT_CONTROL_PORT = 9234
 export const RELAY_PORT_OFFSET = 2
 
@@ -23,20 +25,37 @@ export const RelayState = Object.freeze({
   CONNECTED: 'connected',
 })
 
-export const TabType = Object.freeze({
-  USER: 'user',
-  AGENT: 'agent',
-  RETAINED: 'retained',
-})
+export function getRelayDisplayState(status) {
+  if (!status || status.state === RelayState.DISABLED) return RelayState.DISABLED
+  return status.connected === true && status.handshakeReady === true
+    ? RelayState.CONNECTED
+    : RelayState.DISCONNECTED
+}
 
+const text = getRelayText()
 export const STATE_UI = {
-  [RelayState.DISABLED]:     { dotColor: null,      title: 'MatchaClaw Browser Relay — disabled' },
-  [RelayState.DISCONNECTED]: { dotColor: '#F59E0B', title: 'MatchaClaw Browser Relay — connecting…' },
-  [RelayState.CONNECTED]:    { dotColor: '#22C55E', title: 'MatchaClaw Browser Relay — connected' },
+  [RelayState.DISABLED]:     { dotColor: null,      title: `MatchaClaw Browser Relay — ${text.disabled}` },
+  [RelayState.DISCONNECTED]: { dotColor: '#F59E0B', title: `MatchaClaw Browser Relay — ${text.disconnected}` },
+  [RelayState.CONNECTED]:    { dotColor: '#22C55E', title: `MatchaClaw Browser Relay — ${text.connected}` },
 }
 
 export const STATE_TEXT = {
-  [RelayState.DISABLED]:     { label: 'Not Enabled', detail: 'Click the toggle or toolbar icon to enable.' },
-  [RelayState.DISCONNECTED]: { label: 'Connecting…', detail: 'Relay is enabled. Trying to connect…' },
-  [RelayState.CONNECTED]:    { label: 'Connected',   detail: 'Relay is active — agent can control your browser.' },
+  [RelayState.DISABLED]:     { label: text.disabled, detail: text.disabledDetail },
+  [RelayState.DISCONNECTED]: { label: text.disconnected, detail: text.disconnectedDetail },
+  [RelayState.CONNECTED]:    { label: text.connected, detail: text.connectedDetail },
+}
+
+// ── Settings keys ──
+
+export const SETTINGS_KEYS = Object.freeze({
+  CLOSE_GROUP_ON_DISABLE: 'closeGroupOnDisable',
+})
+
+export async function getSetting(key, defaultValue = false) {
+  const stored = await chrome.storage.local.get([key])
+  return stored[key] ?? defaultValue
+}
+
+export async function setSetting(key, value) {
+  await chrome.storage.local.set({ [key]: value })
 }

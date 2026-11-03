@@ -368,8 +368,12 @@ function buildFetch(
 ): ClientOptions['fetch'] {
   // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
   const provider = getAPIProvider()
-  const protocol = provider === 'bedrock' || provider === 'vertex' ? provider : 'anthropic'
-  const inner = investigationFetch((fetchOverride ?? globalThis.fetch) as typeof fetch, protocol)
+  const protocol =
+    provider === 'bedrock' || provider === 'vertex' ? provider : 'anthropic'
+  const inner = investigationFetch(
+    (fetchOverride ?? globalThis.fetch) as typeof fetch,
+    protocol,
+  )
   // Only send to the first-party API — Bedrock/Vertex/Foundry don't log it
   // and unknown headers risk rejection by strict proxies (inc-4029 class).
   const injectClientRequestId =

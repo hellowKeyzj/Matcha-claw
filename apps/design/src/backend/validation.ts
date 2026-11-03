@@ -165,7 +165,8 @@ export const generationActions: GenerationAction[] = ['image', 'edit', 'remove-b
 const singleSourceActions = new Set<GenerationAction>(['remove-background', 'upscale', 'erase', 'white', 'watermark', 'resize', 'translate', 'edit-text', 'angle', 'erase-text']);
 
 // Stored v1 requests predate single-source shortcuts and structured recolor inputs.
-export function generationRequest(value: unknown, historical = false): GenerationRequest {
+export function generationRequest(value: unknown, mode: 'request' | 'draft' | 'snapshot' = 'request'): GenerationRequest {
+  const historical = mode === 'snapshot';
   const raw = object(value, ['documentId', 'action', 'prompt', 'sourceLayerIds', 'referenceAssetIds', 'anglePreset', 'annotationAssetId', 'logoAssetId', 'modelAssetId', 'selectionId', 'size', 'durationSeconds', 'count', 'scenes', 'colors', 'aspectRatio', 'targetLanguage', 'markedAssetId', 'expectedSourceAssetId', 'expectedSourceCrop', 'textEdits', 'material']);
   if (!generationActions.includes(raw.action as GenerationAction)) invalid('Unknown generation action.');
   const action = raw.action as GenerationAction;
@@ -237,7 +238,7 @@ export function generationRequest(value: unknown, historical = false): Generatio
   if (action !== 'storyboard' && scenes) invalid('scenes is only valid for storyboard.');
   if (action === 'storyboard' && raw.count !== undefined && raw.count !== 1) invalid('Storyboard count must be 1; every returned scene output is still saved.');
   const prompt = text(raw.prompt, 'prompt', 20000, true);
-  if (!prompt.trim() && !['remove-background', 'upscale', 'erase', 'storyboard', 'white', 'watermark', 'resize', 'translate', 'edit-text', 'angle', 'erase-text'].includes(action)) invalid('This action requires a prompt.');
+  if (mode !== 'draft' && !prompt.trim() && !['remove-background', 'upscale', 'erase', 'storyboard', 'white', 'watermark', 'resize', 'translate', 'edit-text', 'angle', 'erase-text', 'recolor', 'model-display', 'logo'].includes(action)) invalid('This action requires a prompt.');
   return { documentId: id(raw.documentId, 'documentId'), action, prompt,
     ...(sourceLayerIds === undefined ? {} : { sourceLayerIds }),
     ...(referenceAssetIds === undefined ? {} : { referenceAssetIds }),

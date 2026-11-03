@@ -88,7 +88,7 @@ export function validateAppPluginManifest(value: unknown): AppPluginManifest {
         && ['x64', 'arm64'].includes(backend.arch as string), 'Rust backend requires a supported platform and architecture.');
     }
   }
-  const contributes = requireObject(manifest.contributes, ['readers', 'connectors', 'applications', 'tools']);
+  const contributes = requireObject(manifest.contributes, ['readers', 'connectors', 'applications', 'chat', 'tools']);
   for (const key of ['readers', 'connectors', 'applications', 'tools'] as const) {
     requireValid(contributes[key] === undefined || (Array.isArray(contributes[key]) && contributes[key].length <= 32), `At most 32 ${key} are supported.`);
   }
@@ -98,6 +98,11 @@ export function validateAppPluginManifest(value: unknown): AppPluginManifest {
   const tools = (contributes.tools ?? []) as unknown[];
   requireValid(readers.length + connectors.length + applications.length + tools.length > 0, 'An app plugin must contribute a reader, connector, application, or tool.');
   requireValid(applications.length === 0 || manifest.apiVersion === 1, 'Applications require apiVersion 1.');
+  if (contributes.chat !== undefined) {
+    const chat = requireObject(contributes.chat, ['contextTag']);
+    requireValid(typeof chat.contextTag === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.exec(chat.contextTag)?.[0] === chat.contextTag, 'Invalid chat context tag.');
+    requireValid(applications.length > 0, 'Chat contributions require an application.');
+  }
   requireValid(tools.length === 0 || manifest.main !== undefined || manifest.backend !== undefined, 'Plugin tools require a declared backend entry.');
   const readerIds = new Set<string>();
   for (const value of readers) {

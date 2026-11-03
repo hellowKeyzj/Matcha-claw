@@ -1,10 +1,5 @@
 import { extractMessageText, isRecord } from '@/plugins/chat/store/message-content';
-
-const assistantArtifactExtensions = 'html?|pdf|xlsx?|csv|md|mdx|png|jpe?g|gif|webp|svg|bmp|ts|tsx|js|jsx|json|txt|log';
-const assistantMediaArtifactPattern = String.raw`(?<![A-Za-z0-9/\\])MEDIA:(?:(?:https?:\/\/|\/api\/chat\/media\/outgoing\/)[^\s\n"'()\[\],<>]+|(?:\/|~\/|[A-Za-z]:\\)[^\n"'()\[\],<>]*?\.(?:${assistantArtifactExtensions}))(?=$|[\s\n"'()\[\],<>]|[，。；;,.!?])`;
-const assistantMediaArtifactLineRegex = new RegExp(`^\\s*${assistantMediaArtifactPattern}\\s*$`, 'i');
-const assistantMediaArtifactRegex = new RegExp(assistantMediaArtifactPattern, 'gi');
-const assistantOpenClawMediaArtifactRegex = new RegExp(String.raw`(^|[\s([{>])(?:(?:\/|~\/|[A-Za-z]:\\)[^\n"'()\[\],<>]*?\.openclaw[\\/]media[\\/][^\n"'()\[\],<>]*?\.(?:${assistantArtifactExtensions}))(?=$|[\s\n"'()\[\],<>]|[，。；;,.!?])`, 'gi');
+import { mapMarkdownLinks, mapMediaDirectives } from '@/plugins/message-rendering/md-link';
 
 function stripLeadingUntrustedMetadataBlocks(text: string): string {
   const fencedPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?```[a-z]*\n[\s\S]*?```\s*/i;
@@ -211,7 +206,6 @@ function stripInternalDeliveryPlanning(text: string): string {
 function isInternalAssistantLine(line: string): boolean {
   const value = line.trim();
   return /^(?:HEARTBEAT_OK|NO_REPLY)$/i.test(value)
-    || assistantMediaArtifactLineRegex.test(value)
     || isInternalDeliveryPlanningText(value)
     || /^\[Inter-session message\]/i.test(value)
     || isOpenClawRuntimeEventPrompt(value)
@@ -222,13 +216,14 @@ function stripInternalAssistantArtifactLines(text: string): string {
   if (!text) {
     return text;
   }
-  return stripInternalDeliveryPlanning(text)
+  return mapMarkdownLinks(stripInternalDeliveryPlanning(text), (full, label, href) => (
+    label.startsWith('!') && /^(?:\/api\/chat\/media\/outgoing\/|https?:\/\/[^\s]+\/api\/chat\/media\/outgoing\/)/i.test(href) ? '' : full
+  ), undefined, (chunk) => mapMediaDirectives(chunk, (reference) => (
+    /^(?:https?:\/\/|\/api\/)/i.test(reference) ? '' : reference
+  )))
     .split('\n')
     .filter((line) => !isInternalAssistantLine(line))
     .join('\n')
-    .replace(/!\[[^\]\n]*\]\((?:\/api\/chat\/media\/outgoing\/|https?:\/\/[^)]+\/api\/chat\/media\/outgoing\/)[^)]+\)/gi, '')
-    .replace(assistantMediaArtifactRegex, '')
-    .replace(assistantOpenClawMediaArtifactRegex, '$1')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();

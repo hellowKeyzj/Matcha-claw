@@ -1,3 +1,12 @@
+import { DEFAULT_CDP_OPERATION_TIMEOUT_MS, awaitWithDeadline } from './deadline.js'
+
+function awaitOperation(context, stage, operation) {
+  return awaitWithDeadline(context, stage, operation, {
+    maxWaitMs: DEFAULT_CDP_OPERATION_TIMEOUT_MS,
+    native: true,
+  })
+}
+
 function asNonEmptyString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
@@ -57,21 +66,25 @@ function buildCookieRemovalUrl(cookie, pageUrl) {
   return `${protocol}//${host}${path}`
 }
 
-async function getCookiePageUrl(tabId) {
-  const tab = await chrome.tabs.get(tabId).catch(() => null)
+async function getCookiePageUrl(tabId, context) {
+  const tab = await awaitOperation(context, 'chrome.tabs.get:cookies', () =>
+    chrome.tabs.get(tabId).catch(() => null),
+  )
   return resolveCookieCapableUrl(tab)
 }
 
-export async function extGetCookies(tabId) {
-  const pageUrl = await getCookiePageUrl(tabId)
+export async function extGetCookies(tabId, context) {
+  const pageUrl = await getCookiePageUrl(tabId, context)
   if (!pageUrl) return []
 
-  const cookies = await chrome.cookies.getAll({ url: pageUrl.toString() })
+  const cookies = await awaitOperation(context, 'chrome.cookies.getAll', () =>
+    chrome.cookies.getAll({ url: pageUrl.toString() }),
+  )
   return cookies.map(normalizeCookieResult).filter(Boolean)
 }
 
-export async function extSetCookies(tabId, params) {
-  const pageUrl = await getCookiePageUrl(tabId)
+export async function extSetCookies(tabId, params, context) {
+  const pageUrl = await getCookiePageUrl(tabId, context)
   const cookies = Array.isArray(params?.cookies)
     ? params.cookies.map(normalizeCookieInput).filter(Boolean)
     : []
@@ -85,32 +98,32 @@ export async function extSetCookies(tabId, params) {
     if (!url) {
       throw new Error('A cookie url is required when the current page has no cookie-capable URL.')
     }
-    await chrome.cookies.set({
+    await awaitOperation(context, 'chrome.cookies.set', () => chrome.cookies.set({
       name: cookie.name,
       value: cookie.value,
       url,
       domain: cookie.domain || undefined,
       path: cookie.path || undefined,
-    })
+    }))
   }
 
   return { ok: true }
 }
 
-export async function extClearCookies(tabId) {
-  const pageUrl = await getCookiePageUrl(tabId)
-  if (!pageUrl) {
-    return { ok: true }
-  }
+export async function extClearCookies(tabId, context) {
+  const pageUrl = await getCookiePageUrl(tabId, context)
+  if (!pageUrl) return { ok: true }
 
-  const cookies = await chrome.cookies.getAll({ url: pageUrl.toString() })
+  const cookies = await awaitOperation(context, 'chrome.cookies.getAll', () =>
+    chrome.cookies.getAll({ url: pageUrl.toString() }),
+  )
   for (const cookie of cookies) {
     if (!cookie?.name) continue
-    await chrome.cookies.remove({
+    await awaitOperation(context, 'chrome.cookies.remove', () => chrome.cookies.remove({
       url: buildCookieRemovalUrl(cookie, pageUrl),
       name: cookie.name,
       storeId: typeof cookie.storeId === 'string' ? cookie.storeId : undefined,
-    })
+    }))
   }
 
   return { ok: true }

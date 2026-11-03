@@ -81,7 +81,7 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     };
     Some(RouteHeadPlan::new(
         body_policy_for_method(head.method.as_str(), max_bytes),
-        DEFAULT_DEADLINE,
+        if path == media::AUTHORIZATION_ENDPOINT { Duration::from_secs(140) } else { DEFAULT_DEADLINE },
         timeout_response,
     ))
 }

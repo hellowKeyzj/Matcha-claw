@@ -110,7 +110,7 @@ export class InstalledProfileAutoLauncher {
       throw error
     }
 
-    this.options.logger.info(
+    this.options.logger.info?.(
       `[browser-relay] auto-launched ${profile.browserName} profile "${profile.profileDirectory}" and relay reconnected`,
     )
 
@@ -178,7 +178,7 @@ export class InstalledProfileAutoLauncher {
       })
     })
 
-    this.options.logger.info(
+    this.options.logger.info?.(
       `[browser-relay] auto-launching ${profile.browserName} profile "${profile.profileDirectory}"`,
     )
   }

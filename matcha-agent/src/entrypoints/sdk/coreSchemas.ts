@@ -1287,6 +1287,7 @@ const SDKUserMessageContentSchema = lazySchema(() =>
     message: APIUserMessagePlaceholder(),
     parent_tool_use_id: z.string().nullable(),
     isSynthetic: z.boolean().optional(),
+    source_tool_use_id: z.string().min(1).optional(),
     tool_use_result: z.unknown().optional(),
     priority: z.enum(['now', 'next', 'later']).optional(),
     timestamp: z

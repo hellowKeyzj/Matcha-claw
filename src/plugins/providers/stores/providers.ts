@@ -3,6 +3,8 @@
  * Manages AI provider configurations
  */
 import { create } from 'zustand';
+import i18n from '@/i18n';
+import { ProviderMutationError } from '../domain/provider-projection-errors';
 import type { ProviderCredential } from '@/plugins/providers/domain/providers';
 import {
   fetchProviderSnapshot,
@@ -174,8 +176,8 @@ interface ProviderState {
   init: () => Promise<void>;
   refreshProviderSnapshot: (options: ProviderRefreshOptions) => Promise<void>;
   resetProviderScope: (scopeKey?: string) => void;
-  createAccount: (account: ProviderCredential, apiKey?: string, token?: string) => Promise<void>;
-  updateAccount: (accountId: string, updates: Partial<ProviderCredential>, apiKey?: string, token?: string) => Promise<void>;
+  createAccount: (account: ProviderCredential, apiKey?: string, token?: string) => Promise<ProviderCredential>;
+  updateAccount: (accountId: string, updates: Partial<ProviderCredential>, apiKey?: string, token?: string) => Promise<ProviderCredential>;
   removeAccount: (accountId: string) => Promise<void>;
 }
 
@@ -358,7 +360,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       const result = await hostProviderCreateAccount(account, apiKey, token);
       if (!result.success) {
         set({ lastMutationReceipt: result.receipt ?? null });
-        throw new Error(result.error || 'Failed to create provider account');
+        throw new ProviderMutationError(result.reason ?? 'unknown');
       }
       set({ lastMutationReceipt: result.receipt ?? null });
       await refreshProviderPostMutationProjections({
@@ -367,7 +369,8 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
           trigger: 'reconcile',
           reason: 'mutation_create',
         }),
-      });
+      }).catch(() => { set({ error: i18n.t('settings:aiProviders.dialog.projectionsUnavailable') }); });
+      return account;
     } catch (error) {
       console.error('Failed to add account:', error);
       throw error;
@@ -407,7 +410,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       const result = await hostProviderUpdateAccount(patchedAccount, nextRevision, apiKey, token);
       if (!result.success) {
         set({ lastMutationReceipt: result.receipt ?? null });
-        throw new Error(result.error || 'Failed to update provider account');
+        throw new ProviderMutationError(result.reason ?? 'unknown');
       }
       set({ lastMutationReceipt: result.receipt ?? null });
       await refreshProviderPostMutationProjections({
@@ -416,7 +419,8 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
           trigger: 'reconcile',
           reason: 'mutation_update',
         }),
-      });
+      }).catch(() => { set({ error: i18n.t('settings:aiProviders.dialog.projectionsUnavailable') }); });
+      return patchedAccount;
     } catch (error) {
       console.error('Failed to update account:', error);
       throw error;

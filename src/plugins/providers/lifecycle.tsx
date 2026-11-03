@@ -1,11 +1,20 @@
 import { useEffect } from 'react';
 import type { ApplicationLifecycleProps } from '@/app/extensions';
 import { isTraceEnabled, startupTrace } from '@/lib/trace-logger';
+import { subscribeHostEvent } from '@/lib/host-events';
+import { refreshProviderPostMutationProjections } from './stores/provider-post-mutation-refresh';
 import { useProviderStore } from './stores/providers';
 import { ProviderRecoveryDialog } from './components/ProviderRecoveryDialog';
 
 export function ProvidersLifecycle({ hostReady, contentVisible }: ApplicationLifecycleProps) {
   const initProviders = useProviderStore((state) => state.init);
+
+  useEffect(() => {
+    if (!hostReady) return;
+    return subscribeHostEvent('providers:changed', () => {
+      void refreshProviderPostMutationProjections().catch(() => undefined);
+    });
+  }, [hostReady]);
 
   useEffect(() => {
     if (!hostReady) return;

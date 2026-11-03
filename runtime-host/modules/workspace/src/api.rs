@@ -191,6 +191,17 @@ impl WorkspaceHandle {
         .await
     }
 
+    pub(crate) async fn playback_media(
+        &self,
+        endpoint: RuntimeEndpoint,
+        session_key: String,
+        reference: String,
+    ) -> Result<Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>, ()> {
+        self.request_command(Operation::PlaybackMedia, 1, |reply| {
+            WorkspaceOperation::PlaybackMedia { endpoint, session_key, reference, reply }
+        }).await
+    }
+
     pub(crate) async fn thumbnail_media(
         &self,
         endpoint: RuntimeEndpoint,

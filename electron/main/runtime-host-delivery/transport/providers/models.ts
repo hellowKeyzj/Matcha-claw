@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { logger } from '../../../../utils/logger';
+import { parseAccount, isSecret, type ProviderAccountIntent } from '../../../providers/account-intent';
 import { traceDebug } from '../../../../utils/trace-logger';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
@@ -35,7 +37,7 @@ export type ProviderModelCapability =
   | 'tts'
   | 'transcribe';
 
-type ModelDraft = Readonly<{
+export type ModelDraft = Readonly<{
   modelId: string;
   capabilities: readonly ProviderModelCapability[];
   contextWindow?: number;
@@ -45,6 +47,21 @@ type ModelDraft = Readonly<{
   resolution?: string;
   quality?: string;
 }>;
+
+export type ProviderDraftDiscoveryInput = Readonly<{ account: ProviderAccountIntent; apiKey?: string; token?: string }>;
+export type ProviderDraftDiscoveryReason = 'invalid-request' | 'unsupported' | 'credential-missing' | 'credential-unavailable'
+  | 'authentication' | 'permission-denied' | 'rate-limited' | 'deadline' | 'invalid-response' | 'unavailable' | 'outcome-unknown';
+export type ProviderDraftDiscoveryResult = Readonly<{ models: ModelDraft[] }> | Readonly<{ reason: ProviderDraftDiscoveryReason }>;
+
+export function parseProviderDraftDiscoveryInput(input: unknown): ProviderDraftDiscoveryInput | null {
+  if (!isRecord(input) || !Object.keys(input).every((key) => ['account', 'apiKey', 'token'].includes(key))
+    || !isRecord(input.account) || !Object.keys(input.account).every((key) =>
+      ['id', 'provider', 'label', 'enabled', 'kind', 'endpoint', 'protocol', 'mediaProtocol', 'authMode', 'revision'].includes(key))) return null;
+  const account = parseAccount(input.account);
+  if (!account || input.apiKey !== undefined && (account.authMode !== 'apiKey' || !isSecret(input.apiKey))
+    || input.token !== undefined && (account.authMode !== 'token' || !isSecret(input.token))) return null;
+  return { account, ...(typeof input.apiKey === 'string' ? { apiKey: input.apiKey } : {}), ...(typeof input.token === 'string' ? { token: input.token } : {}) };
+}
 
 type DiscoverRequest = Readonly<{
   id: 'provider.models';
@@ -85,17 +102,24 @@ type DiscoverResponse = Readonly<{ callId: string; accountId: string; models: Mo
 type SelectableResponse = Readonly<{ models: SelectableProviderModel[] }>;
 type ReplaceResponse = CallReceipt;
 
-export type ProviderModelsTransportResponse = Readonly<{
-  status: 200 | 202 | 400 | 409 | 410 | 422 | 503;
-  body: ListResponse | DiscoverResponse | SelectableResponse | ReplaceResponse | typeof INVALID_REQUEST | typeof REJECTED | typeof UNAVAILABLE | typeof DISCOVERY_PENDING | typeof DISCOVERY_EXPIRED;
-}>;
+export type ProviderModelsTransportResponse<
+  T = ListResponse | DiscoverResponse | SelectableResponse | ReplaceResponse,
+  S extends 200 | 202 = 200 | 202,
+> =
+  | Readonly<{ status: S; body: T }>
+  | Readonly<{ status: 400; body: typeof INVALID_REQUEST }>
+  | Readonly<{ status: 409; body: typeof DISCOVERY_PENDING }>
+  | Readonly<{ status: 410; body: typeof DISCOVERY_EXPIRED }>
+  | Readonly<{ status: 422; body: typeof REJECTED }>
+  | Readonly<{ status: 503; body: typeof UNAVAILABLE }>;
 
 export interface ProviderModelsTransport {
-  read(): Promise<ProviderModelsTransportResponse>;
-  discover(accountId: string): Promise<ProviderModelsTransportResponse>;
-  readDiscoveryResult(callId: string, accountId: string): Promise<ProviderModelsTransportResponse>;
-  readSelectable(capability: ProviderModelCapability): Promise<ProviderModelsTransportResponse>;
-  execute(request: unknown): Promise<ProviderModelsTransportResponse>;
+  read(): Promise<ProviderModelsTransportResponse<ListResponse, 200>>;
+  discoverDraft(input: ProviderDraftDiscoveryInput, signal: AbortSignal): Promise<ProviderDraftDiscoveryResult>;
+  discover(accountId: string): Promise<ProviderModelsTransportResponse<CallReceipt, 202>>;
+  readDiscoveryResult(callId: string, accountId: string): Promise<ProviderModelsTransportResponse<DiscoverResponse, 200>>;
+  readSelectable(capability: ProviderModelCapability): Promise<ProviderModelsTransportResponse<SelectableResponse, 200>>;
+  execute(request: unknown): Promise<ProviderModelsTransportResponse<ReplaceResponse, 202>>;
 }
 
 const PROVIDER_MODEL_KEYS: readonly string[] = [
@@ -112,7 +136,28 @@ export function createProviderModelsTransport(
   fetcher: typeof fetch = fetch,
 ): ProviderModelsTransport {
   return {
-    async read(): Promise<ProviderModelsTransportResponse> {
+    async discoverDraft(input: ProviderDraftDiscoveryInput, signal: AbortSignal): Promise<ProviderDraftDiscoveryResult> {
+      const parsed = parseProviderDraftDiscoveryInput(input);
+      if (!parsed) return { reason: 'invalid-request' };
+      const serializedBody = JSON.stringify(parsed);
+      if (Buffer.byteLength(serializedBody) > 64 * 1024) return { reason: 'invalid-request' };
+      const path = '/api/provider-models/discover-draft';
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort, path, issuer,
+        decision: { endpoint: path, scope: 'providers:models', capability: 'providerModels.discoverDraft', subject: 'provider-models',
+          revision: createHash('sha256').update(serializedBody).digest('hex') },
+        method: 'POST', fetcher, serializedBody, signal, timeoutMs: 20_000,
+      });
+      if (response?.status === 200 && isRecord(response.body) && hasExactKeys(response.body, ['models'])
+        && Array.isArray(response.body.models) && response.body.models.length <= 4096
+        && response.body.models.every(isDiscoveryDraft)) return { models: response.body.models };
+      if (response && isRecord(response.body) && hasExactKeys(response.body, ['reason']) && isDraftDiscoveryReason(response.body.reason)) {
+        return { reason: response.body.reason };
+      }
+      return { reason: 'outcome-unknown' };
+    },
+
+    async read(): Promise<ProviderModelsTransportResponse<ListResponse, 200>> {
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: PROVIDER_MODELS_PATH,
@@ -132,7 +177,7 @@ export function createProviderModelsTransport(
       return { status: 503, body: UNAVAILABLE };
     },
 
-    async discover(accountId: string): Promise<ProviderModelsTransportResponse> {
+    async discover(accountId: string): Promise<ProviderModelsTransportResponse<CallReceipt, 202>> {
       const request: DiscoverRequest = {
         id: 'provider.models',
         operationId: 'providerModels.discover',
@@ -177,7 +222,7 @@ export function createProviderModelsTransport(
       return { status: 503, body: UNAVAILABLE };
     },
 
-    async readDiscoveryResult(callId: string, accountId: string): Promise<ProviderModelsTransportResponse> {
+    async readDiscoveryResult(callId: string, accountId: string): Promise<ProviderModelsTransportResponse<DiscoverResponse, 200>> {
       if (!/^[0-9a-f]{32}$/.test(callId) || !isIdentifier(accountId)) return { status: 400, body: INVALID_REQUEST };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
@@ -202,7 +247,7 @@ export function createProviderModelsTransport(
       return { status: 503, body: UNAVAILABLE };
     },
 
-    async readSelectable(capability: ProviderModelCapability): Promise<ProviderModelsTransportResponse> {
+    async readSelectable(capability: ProviderModelCapability): Promise<ProviderModelsTransportResponse<SelectableResponse, 200>> {
       if (!isProviderModelCapability(capability)) return { status: 400, body: INVALID_REQUEST };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
@@ -224,7 +269,7 @@ export function createProviderModelsTransport(
       return { status: 503, body: UNAVAILABLE };
     },
 
-    async execute(request: unknown): Promise<ProviderModelsTransportResponse> {
+    async execute(request: unknown): Promise<ProviderModelsTransportResponse<ReplaceResponse, 202>> {
       if (!isRequest(request)) return { status: 400, body: INVALID_REQUEST };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
@@ -306,7 +351,7 @@ function isDiscoverResponse(value: unknown): value is DiscoverResponse {
     && typeof value.callId === 'string' && /^[0-9a-f]{32}$/.test(value.callId)
     && isIdentifier(value.accountId)
     && Array.isArray(value.models)
-    && value.models.every(isModelDraft);
+    && value.models.every(isDiscoveryDraft);
 }
 
 function isSelectableResponse(value: unknown): value is SelectableResponse {
@@ -336,16 +381,25 @@ function isSelectableProviderModel(value: unknown): value is SelectableProviderM
     && hasModelFields(value);
 }
 
+function isDraftDiscoveryReason(value: unknown): value is ProviderDraftDiscoveryReason {
+  return typeof value === 'string' && ['invalid-request', 'unsupported', 'credential-missing', 'credential-unavailable',
+    'authentication', 'permission-denied', 'rate-limited', 'deadline', 'invalid-response', 'unavailable', 'outcome-unknown'].includes(value);
+}
+
+function isDiscoveryDraft(value: unknown): value is ModelDraft {
+  return isRecord(value) && Object.keys(value).every((key) => MODEL_DRAFT_KEYS.includes(key)) && hasModelFields(value, true);
+}
+
 function isModelDraft(value: unknown): value is ModelDraft {
   return isRecord(value)
     && Object.keys(value).every((key) => MODEL_DRAFT_KEYS.includes(key))
     && hasModelFields(value);
 }
 
-function hasModelFields(value: Record<string, unknown>): boolean {
+function hasModelFields(value: Record<string, unknown>, discovery = false): boolean {
   return isModelId(value.modelId)
     && Array.isArray(value.capabilities)
-    && value.capabilities.length > 0
+    && (discovery || value.capabilities.length > 0)
     && value.capabilities.every(isProviderModelCapability)
     && optionalPositive(value.contextWindow)
     && optionalPositive(value.maxTokens)

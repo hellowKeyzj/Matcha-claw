@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use foundation::execution::OwnedTask;
 use serde_json::{Value, json};
@@ -246,6 +249,7 @@ struct Projection {
     source_epoch: u64,
     cursor: u64,
     streaming: Streaming,
+    input: events::InputBinding,
     state: SessionState,
 }
 impl Projection {
@@ -260,6 +264,7 @@ impl Projection {
             source_epoch,
             cursor: 0,
             streaming: Streaming::default(),
+            input: events::InputBinding::default(),
             state,
         }
     }
@@ -302,6 +307,48 @@ impl Projection {
         cancel: &CancellationToken,
         restoring: bool,
     ) -> Result<Option<RunRecord>, ObservationFailure> {
+        let boundary = match event.kind.as_str() {
+            "native.message" => match event.payload["type"].as_str() {
+                Some("stream_event") => {
+                    match event.payload.pointer("/event/type").and_then(Value::as_str) {
+                        Some("message_start") => Some("message_start"),
+                        Some("content_block_stop") => Some("content_block_stop"),
+                        Some("message_stop") => Some("message_stop"),
+                        _ => None,
+                    }
+                }
+                Some("assistant") => Some("assistant"),
+                Some("user") => Some("user"),
+                Some("system")
+                    if event.payload["subtype"] == "session_state_changed"
+                        && event.payload["state"] == "idle" =>
+                {
+                    Some("idle")
+                }
+                _ => None,
+            },
+            "native.result" => Some("native.result"),
+            "run.changed" | "run.terminal" | "cli.started" | "cli.exited" | "cli.fault" => {
+                Some(events::trace_kind(&event.kind))
+            }
+            _ => None,
+        }
+        .or((event.seq == 1).then_some("first"));
+        let started = (platform::trace::enabled() && boundary.is_some()).then(Instant::now);
+        let trace_context = started.map(|_| json!({
+            "sessionHash": platform::trace::identifier_hash(self.native_id.as_str()),
+            "publicSessionHash": platform::trace::identifier_hash(&self.request.identity.session_key),
+            "runHash": event.run_id.as_deref().map(platform::trace::identifier_hash),
+            "messageHash": event.payload.get("uuid").or_else(|| event.payload.get("messageId")).and_then(Value::as_str).map(platform::trace::identifier_hash),
+            "nativeSeq": event.seq, "sourceEpoch": self.source_epoch,
+            "generation": self.request.generation, "boundary": boundary, "restoring": restoring,
+            // Native at_ms is the DB event serialization time, not stdout or transport arrival.
+            "nativeAtMs": event.at_ms,
+        }));
+        if let Some(context) = &trace_context {
+            platform::trace::runtime_trace("matcha.session.event_received", || context.clone());
+        }
+        let projection_started = started.map(|_| Instant::now());
         if event.session_id != self.native_id.as_str()
             || event.seq != self.cursor + 1
             || event.seq > sessions_module::state::MAX_SAFE_INTEGER
@@ -312,7 +359,8 @@ impl Projection {
             return Err(failure(Failure::InvalidReadback));
         }
         let mut streaming = self.streaming.clone();
-        let projected = events::project(&mut streaming, &event, &self.state)
+        let mut input = self.input.clone();
+        let projected = events::project(&mut streaming, &mut input, &event, &self.state)
             .inspect_err(|error| {
                 platform::trace::runtime_trace("matcha.session.observation.failed", || {
                     json!({
@@ -351,6 +399,17 @@ impl Projection {
                 return Err(failure(Failure::InvalidReadback));
             }
         }
+        let projection_elapsed_ms =
+            projection_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+        if trace_context.is_some() {
+            platform::trace::runtime_trace("matcha.session.event_projected", || {
+                json!({
+                    "event": trace_context, "projectionElapsedMs": projection_elapsed_ms,
+                    "changeCount": projected.changes.len(), "historyRefresh": projected.history_refresh,
+                    "terminal": projected.run.as_ref().is_some_and(|run| run.status.terminal()),
+                })
+            });
+        }
         let ingress = if restoring {
             projected
                 .run
@@ -381,8 +440,10 @@ impl Projection {
                 },
             ))
         };
+        let mut receipt_timing = None;
         if let Some(ingress) = ingress {
             let (ingress, receipt) = ingress.with_receipt();
+            let ingress_started = started.map(|_| Instant::now());
             tokio::select! {
                 _ = cancel.cancelled() => return Err(RuntimeOperationFailure::Unavailable.into()),
                 result = output.send(ingress) => result.map_err(|_| {
@@ -390,6 +451,9 @@ impl Projection {
                     RuntimeOperationFailure::Unavailable
                 })?,
             }
+            let ingress_elapsed_ms =
+                ingress_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+            let receipt_started = started.map(|_| Instant::now());
             let accepted = tokio::select! {
                 biased;
                 result = receipt => result.map_err(|_| {
@@ -398,18 +462,30 @@ impl Projection {
                 })?,
                 _ = cancel.cancelled() => return Err(RuntimeOperationFailure::Unavailable.into()),
             };
+            receipt_timing = ingress_elapsed_ms
+                .zip(receipt_started.map(|started| started.elapsed().as_secs_f64() * 1000.0));
             if !accepted {
                 self.trace_failure("event.receipt_rejected", None, None);
                 return Err(RuntimeOperationFailure::Unknown.into());
             }
         }
-        if !restoring {
-            platform::trace::runtime_trace(
-                "matcha.session.event_consumed",
-                || json!({"sessionHash":platform::trace::identifier_hash(self.native_id.as_str()),"nativeSeq":event.seq,"sourceEpoch":self.source_epoch,"runtimeKnown":candidate.runtime() != &SessionFact::Unknown}),
-            );
+        if !restoring || started.is_some() {
+            platform::trace::runtime_trace("matcha.session.event_consumed", || {
+                json!({
+                    "sessionHash": platform::trace::identifier_hash(self.native_id.as_str()),
+                    "nativeSeq": event.seq, "sourceEpoch": self.source_epoch,
+                    "runtimeKnown": candidate.runtime() != &SessionFact::Unknown,
+                    "boundary": trace_context, "projectionElapsedMs": projection_elapsed_ms,
+                    "ingressSendElapsedMs": receipt_timing.map(|timing| timing.0),
+                    "receiptWaitElapsedMs": receipt_timing.map(|timing| timing.1),
+                    "receiptObserved": receipt_timing.is_some(),
+                    "consumeElapsedMs": started.map(|started| started.elapsed().as_secs_f64() * 1000.0),
+                    "timingScope": "consume_including_trace",
+                })
+            });
         }
         self.streaming = streaming;
+        self.input = input;
         self.state = candidate;
         self.cursor = event.seq;
         Ok(projected.run)
@@ -754,6 +830,7 @@ async fn sync_request(
         cut: sync.cut,
         reply,
     });
+    let receipt_started = platform::trace::enabled().then(Instant::now);
     let delivered = request.reply.send(Ok(sync)).is_ok();
     let accepted = delivered
         && tokio::select! {
@@ -761,6 +838,18 @@ async fn sync_request(
             result = accepted => result.is_ok(),
             _ = cancel.cancelled() => false,
         };
+    if let Some(started) = receipt_started {
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        platform::trace::runtime_trace("matcha.session.sync.receipt", || {
+            json!({
+                "sessionHash": platform::trace::identifier_hash(current.native_id.as_str()),
+                "publicSessionHash": platform::trace::identifier_hash(&current.request.identity.session_key),
+                "sourceEpoch": current.source_epoch, "generation": current.request.generation,
+                "nativeCursor": current.cursor, "restoring": restoring,
+                "delivered": delivered, "accepted": accepted, "receiptWaitElapsedMs": elapsed_ms,
+            })
+        });
+    }
     acceptance
         .lock()
         .expect("observation acceptance lock is not poisoned")

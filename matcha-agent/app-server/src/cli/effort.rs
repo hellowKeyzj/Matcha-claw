@@ -157,6 +157,7 @@ pub(crate) fn ensure_current(
         "WEIXIN_STATE_DIR",
         "CLAUDE_CONFIG_DIR",
         "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS",
+        "CLAUDE_CODE_EAGER_FLUSH",
     ] {
         if let Some(value) = expected.env.get(name) {
             environment.insert(name.into(), value.clone());

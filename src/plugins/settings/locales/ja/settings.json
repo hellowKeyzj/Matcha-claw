@@ -170,6 +170,27 @@
     "avatarCleared": "ユーザーアバターをクリアしました",
     "avatarUpdateFailed": "ユーザーアバターの更新に失敗しました: {{error}}"
   },
+  "graphicsAcceleration": {
+    "label": "GPU ハードウェアアクセラレーション",
+    "description": "GPU で画面を描画します。変更後はアプリの再起動が必要です。",
+    "automaticallyDisabled": "グラフィックスの安定性の問題により、自動的に無効になりました。",
+    "loading": "読み込み中…",
+    "readFailed": "GPU 設定を読み込めませんでした。",
+    "retry": "再試行",
+    "confirmTitle": "GPU ハードウェアアクセラレーションを変更しますか？",
+    "confirmEnable": "GPU ハードウェアアクセラレーションを有効にすると、画面の描画方法が変わります。保存後、アプリはすぐに再起動します。",
+    "confirmDisable": "GPU ハードウェアアクセラレーションを無効にすると、画面の描画方法が変わります。保存後、アプリはすぐに再起動します。",
+    "confirmAction": "保存して再起動",
+    "cancel": "キャンセル",
+    "pending": "保存して再起動中…",
+    "changeFailed": "GPU 設定を変更できませんでした。再試行してください。",
+    "blocked": {
+      "unsupported": "このシステムでは、この設定はサポートされていません。",
+      "busy": "アプリが処理中です。しばらくしてから再試行してください。",
+      "save-failed": "設定を保存できませんでした。再試行してください。",
+      "quit-cancelled": "再起動がキャンセルされました。再試行してください。"
+    }
+  },
   "providerRecovery": {
     "title": "モデル設定をリセットしました",
     "description": "以前のモデル設定を変換できなかったため、バックアップしました。モデルを追加し直してください。",
@@ -246,13 +267,36 @@
       "endpointPreset": "エンドポイント地域",
       "cliReuseHelp": "先に Claude Code にログインしてください。保存前にローカルの CLI 認証情報を確認するため、トークンの貼り付けは不要です。",
       "replaceToken": "トークンを置き換える",
-      "tokenHelp": "claude setup-token を実行し、生成されたトークンを貼り付けてください。トークンはローカルに保存されます。"
+      "tokenHelp": "claude setup-token を実行し、生成されたトークンを貼り付けてください。トークンはローカルに保存されます。",
+      "editTitle": "プロバイダーを編集",
+      "configureDescription": "接続とモデルを設定し、まとめて保存します。",
+      "providerType": "プロバイダーの種類",
+      "nameRequired": "名前を入力してください。",
+      "keepCredential": "空欄で現在の認証情報を保持",
+      "showKey": "認証情報を表示",
+      "hideKey": "認証情報を隠す",
+      "authenticated": "認証済み",
+      "noSecretRequired": "認証情報の入力は不要です。",
+      "authenticatedContinue": "認証が完了しました。モデルを設定して保存してください。",
+      "authReadbackFailed": "認証は完了しましたが、アカウントを読み取れません。再ログインせず、読み取りを再試行してください。",
+      "loadingModels": "モデルを読み込み中…",
+      "modelsUnavailable": "モデル一覧を読み取れません。閉じて更新後に再試行してください。",
+      "savingAccount": "アカウントを保存中…",
+      "savingModels": "モデルを保存中…",
+      "modelsSaveFailed": "アカウントは保存済みです。モデルの保存は未確認で、下書きは保持されています。",
+      "saveErrors": {
+        "rejected": "保存されませんでした。設定を確認して再試行してください。",
+        "unknown": "保存結果は未確認で、実行済みの可能性があります。閉じて一覧を更新し、確認するまで再保存しないでください。"
+      },
+      "vendorProtocol": "プロバイダーの既定プロトコルを使用",
+      "projectionsUnavailable": "設定は保存されましたが、一部の一覧を更新できません。更新して確認してください。"
     },
     "protocols": {
       "openai": "OpenAI 互換",
       "openaiCompletions": "OpenAI Completions",
       "openaiResponses": "OpenAI Responses",
-      "anthropic": "Anthropic 互換"
+      "anthropic": "Anthropic 互換",
+      "google": "Google Gemini"
     },
     "card": {
       "configured": "構成済み",
@@ -260,7 +304,8 @@
       "credentialUnknown": "認証情報の状態は未確認",
       "none": "なし",
       "editKey": "API キーを編集",
-      "delete": "プロバイダーを削除"
+      "delete": "プロバイダーを削除",
+      "edit": "編集"
     },
     "toast": {
       "added": "プロバイダーが正常に追加されました",
@@ -271,7 +316,8 @@
       "failedUpdate": "プロバイダーの更新に失敗しました",
       "invalidKey": "無効な API キー",
       "minimaxConflict": "MiniMax (Global) と MiniMax (CN) は同時に追加できません。",
-      "zaiConflict": "Z.AI (CN) と Z.AI (Global) は同時に追加できません。"
+      "zaiConflict": "Z.AI (CN) と Z.AI (Global) は同時に追加できません。",
+      "duplicateSingleProvider": "このプロバイダーは1アカウントのみ対応しています。"
     },
     "oauth": {
       "loginMode": "OAuthログイン",
@@ -294,7 +340,9 @@
       "completeLogin": "ログインを完了",
       "manualHelp": "認証ページでログインし、コールバック URL またはコードを下に貼り付けてください。",
       "callbackPlaceholder": "コールバック URL またはコード",
-      "submitCode": "コードを送信"
+      "submitCode": "コードを送信",
+      "copyCode": "認証コードをコピー",
+      "retryReadback": "アカウントを再読み込み"
     },
     "projectionErrors": {
       "providerProjectionPartial": "このランタイムでは一部のアカウントを利用できません。以下のアカウント状態を確認してください。",
@@ -716,11 +764,25 @@
       "loading": "モデルを取得中...",
       "empty": "利用可能なモデルは見つかりませんでした",
       "error": "モデルの取得に失敗しました: {{error}}。このアカウントがモデル一覧にアクセスできることを確認してから再試行してください。",
-      "rejected": "モデルの取得に失敗しました: バックエンドがモデル一覧リクエストを拒否しました。このアカウントの API キー、権限、グループ、残高が利用可能であることを確認してから再試行してください。",
+      "rejected": "モデル一覧の取得が拒否されました。認証情報と権限を確認してください。",
       "importSelected": "選択項目をインポート",
       "duplicate": "カタログに登録済み",
       "count_one": "· {{count}} 件",
-      "count_other": "· {{count}} 件"
+      "count_other": "· {{count}} 件",
+      "chooseCapabilities": "能力は不明です。インポート後に選択してください",
+      "reasons": {
+        "invalid-request": "設定が無効です。プロトコルとアドレスを確認してください。",
+        "unsupported": "この接続先はモデル一覧に未対応です。手動で追加してください。",
+        "credential-missing": "このアカウントの認証情報を入力してください。",
+        "credential-unavailable": "保存済み認証情報を利用できません。再入力してください。",
+        "authentication": "認証に失敗しました。認証情報を確認してください。",
+        "permission-denied": "モデル一覧へのアクセス権がありません。手動で追加できます。",
+        "rate-limited": "リクエストが多すぎます。しばらくして再試行してください。",
+        "deadline": "取得がタイムアウトしました。後で手動で再試行してください。",
+        "invalid-response": "サービスが無効なモデル一覧を返しました。",
+        "unavailable": "モデル一覧を利用できません。手動で追加できます。",
+        "outcome-unknown": "取得結果は未確認です。自動で再試行しません。"
+      }
     },
     "group": {
       "subtitle_one": "1 件のモデル",
@@ -739,7 +801,8 @@
       "qualityLabel": "品質",
       "defaultOption": "デフォルト",
       "advanced": "詳細項目",
-      "remove": "削除"
+      "remove": "削除",
+      "modelIdPlaceholder": "モデル ID を入力"
     },
     "qualities": {
       "low": "低",
@@ -757,11 +820,12 @@
       "transcribe": "文字起こし"
     },
     "errors": {
-      "invalidEntry": "モデル \"{{id}}\" が無効です: context / maxTokens / timeoutMs は正の整数である必要があります",
+      "invalidEntry": "モデル「{{id}}」が無効です。対応する能力を選び、数値は正の整数にしてください。",
       "duplicate": "モデル ID \"{{id}}\" が重複しています",
       "emptyKey": "credentialId は空にできません",
       "duplicateKey": "この credentialId は既に存在します",
       "invalidKey": "credentialId は英数字・ドット・アンダースコア・ハイフンのみ使用できます"
-    }
+    },
+    "draftHelp": "モデルを取得または手動追加し、実際の能力を選択してください。変更は保存時に反映されます。"
   }
 }

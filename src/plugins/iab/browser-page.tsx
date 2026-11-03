@@ -14,7 +14,7 @@ export function browserPage(tab: IabTab, workspace: WorkspaceController): Worksp
   const icon: WorkspacePage['icon'] = workspace.pages.find((page) => page.id === id)?.icon
     ?? ((props) => <Favicon {...props} ownerId={tab.ownerId} tabId={tab.id} />);
   return {
-    id, providerId: 'iab', icon, mount: 'active', lifetime: 'workspace',
+    id, providerId: 'iab', icon, mount: 'active', lifetime: tab.createdBy === null ? 'workspace' : undefined, promoteWithDraft: true,
     title: tab.internalPage ? i18n.t(`iab:${tab.internalPage === 'downloads' ? 'downloadHistory' : 'history'}`)
       : tab.title.trim() && tab.title.trim() !== 'about:blank' ? tab.title.trim()
         : tab.url.trim() !== 'about:blank' ? tab.url.trim() : i18n.t('iab:newTab'),
@@ -22,7 +22,7 @@ export function browserPage(tab: IabTab, workspace: WorkspaceController): Worksp
     onSelect: async () => {
       const current = useIabStore.getState();
       if (current.ownerId !== tab.ownerId || !current.tabs.some((entry) => entry.id === tab.id && entry.ownerId === tab.ownerId)) throw new IabProjectionDiscarded();
-      await iabCommand({ action: 'switch', tabId: tab.id });
+      if (current.activeTabId !== tab.id) await iabCommand({ action: 'switch', tabId: tab.id });
     },
     onClose: async () => {
       const current = useIabStore.getState();

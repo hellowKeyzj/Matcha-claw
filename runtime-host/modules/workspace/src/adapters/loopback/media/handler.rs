@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::WorkspaceMediaPath;
 
 use super::{
-    WorkspaceMediaDelivery, WorkspaceMediaRequest, map_prepare, map_resolve, map_stage_buffer,
+    WorkspaceMediaDelivery, WorkspaceMediaRequest, map_playback, map_prepare, map_resolve, map_stage_buffer,
     map_stage_paths, map_thumbnail, map_thumbnails,
 };
 
@@ -65,6 +65,10 @@ async fn handle_request(request: Request, dependencies: super::super::Dependenci
             .await
             .unwrap_or(Err(crate::WorkspaceMediaFailure::Unavailable));
         map_resolve(result)
+    } else if request.is_playback() {
+        map_playback(dependencies.workspace.playback_media(
+            request.endpoint(), request.session_key().to_owned(), request.reference().to_owned(),
+        ).await.unwrap_or(Err(crate::WorkspaceMediaFailure::Unavailable)))
     } else if request.is_thumbnail() {
         let result = if !request.reference().is_empty() {
             dependencies

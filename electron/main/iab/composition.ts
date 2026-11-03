@@ -52,7 +52,7 @@ export function createIab(input: {
   const manager: IabManager = new IabManager({
     window: input.window, session: browserSession.session, data, ready, log: logger, emit: input.emit,
     prepareCdp: (tabId, ownerId, contents) => broker.prepareTarget(tabId, ownerId, contents),
-    revokeAgentAccess: (tabId, principalId) => automation.revokeAccess(tabId, principalId),
+    releaseClaim: (tabId, executorId) => automation.releaseClaim(tabId, executorId),
   });
   broker = new IabBroker({
     resolveTarget: (tabId, ownerId) => manager.resolveBrokerTarget(tabId, ownerId),
@@ -65,6 +65,7 @@ export function createIab(input: {
   ];
   const bridge = startIabAgentBridge({
     automation, ready, isEnabled: input.isAgentEnabled, runtime: input.runtime,
+    cleanupSession: (executorId, principalId, scope) => manager.cleanupSession(executorId, principalId, scope),
     controlSignal: () => control.signal,
     assertControlCurrent: () => {
       if (modeWrites || modeUnconfirmed) throw Object.assign(new Error(modeUnconfirmed

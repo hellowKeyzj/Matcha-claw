@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 pub use super::state::SessionDeliveryContext;
-use super::state::{SessionIdentity, SessionSourceBinding};
+use super::state::{SessionIdentity, SessionProvider, SessionSourceBinding};
 use crate::goal::{SessionGoalReceipt, SessionSendIntent};
 
 pub use super::endpoint::NativeEndpoint;
@@ -11,7 +11,7 @@ const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 const MAX_RUN_ID_BYTES: usize = 4096;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
 const MAX_ATTACHMENTS: usize = 16;
-const MAX_ATTACHMENT_DECODED_BYTES: usize = 5 * 1024 * 1024;
+const MATCHA_ATTACHMENT_MAX_BYTES: usize = 5 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_DECODED_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,8 +30,9 @@ impl Attachment {
             && self.file_name.len() <= 255
             && !self.file_name.contains(['/', '\\'])
             && !self.file_name.chars().any(char::is_control)
-            && self.content.len() <= canonical_base64_len(MAX_ATTACHMENT_DECODED_BYTES)
-            && canonical_base64_decoded_len(&self.content).is_some()
+            && self.content.len() <= canonical_base64_len(MAX_TOTAL_ATTACHMENT_DECODED_BYTES)
+            && canonical_base64_decoded_len(&self.content)
+                .is_some_and(|bytes| bytes <= MAX_TOTAL_ATTACHMENT_DECODED_BYTES)
     }
 
     fn decoded_bytes(&self) -> usize {
@@ -82,6 +83,10 @@ impl SessionSendCommand {
             || !valid_optional_identity(idempotency_key.as_deref(), MAX_IDEMPOTENCY_KEY_BYTES)
             || attachments.len() > MAX_ATTACHMENTS
             || attachments.iter().any(|attachment| !attachment.is_valid())
+            || (identity.endpoint.runtime_adapter_id == SessionProvider::MatchaAgent
+                && attachments
+                    .iter()
+                    .any(|attachment| attachment.decoded_bytes() > MATCHA_ATTACHMENT_MAX_BYTES))
             || attachments
                 .iter()
                 .map(Attachment::decoded_bytes)

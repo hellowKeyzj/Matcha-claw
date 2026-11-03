@@ -71,6 +71,11 @@ pub fn media_descriptor(scope: Value) -> Value {
                 "workspace-media",
             ),
             operation(
+                "media.playback",
+                "Read workspace media playback",
+                "workspace-media",
+            ),
+            operation(
                 "media.thumbnail",
                 "Read workspace media thumbnail",
                 "workspace-media",

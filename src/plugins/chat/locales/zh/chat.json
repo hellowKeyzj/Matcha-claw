@@ -244,6 +244,7 @@
         "composeReceiverConflict": "当前聊天输入框状态异常，请重新打开聊天后重试。",
         "composeAttachmentFailed": "附件暂存失败或已移除，请重新添加后重试。",
         "editContextPrompt": "编辑操作要求",
+        "invalidModelContext": "操作上下文超出限制或已失效，请移除部分操作后重试。",
         "composeChanged": "草稿已变更，本次操作未应用，请重试。",
         "composeEditFailed": "参考图片未移除：{{error}}。请重试或移除整项操作。",
         "moreActions": "更多操作",
@@ -394,9 +395,23 @@
         "contextUsageTitle": "上下文已用 {{pct}}%（{{detail}}）"
     },
     "goal": {
-        "title": "会话目标", "set": "设定目标", "edit": "编辑目标", "cancel": "取消目标模式", "placeholder": "输入目标正文，Enter 提交，Shift+Enter 换行", "pause": "暂停", "resume": "恢复", "complete": "标记完成", "block": "标记阻塞", "clear": "清除目标", "more": "更多目标操作", "refresh": "确认最新状态", "unknown": "目标状态待确认", "note": "说明", "tokens": "已用 {{count}} tokens", "budget": "预算 {{count}} tokens", "inlineOnly": "目标模式仅支持 5 MB 以内的文件附件，请移除大文件或目录。", "noAttachmentsOnEdit": "编辑仅修改目标，请先移除附件。",
+        "title": "会话目标", "set": "设定目标", "edit": "编辑目标", "cancel": "取消目标模式", "placeholder": "输入目标正文，Enter 提交，Shift+Enter 换行", "pause": "暂停", "resume": "恢复", "complete": "标记完成", "block": "标记阻塞", "clear": "清除目标", "more": "更多目标操作", "refresh": "确认最新状态", "unknown": "目标状态待确认", "note": "说明", "tokens": "已用 {{count}} tokens", "budget": "预算 {{count}} tokens", "inlineOnly": "目标模式仅支持可直接发送的文件，请移除目录、仅提供路径或超过当前运行时限制的附件。", "noAttachmentsOnEdit": "编辑仅修改目标，请先移除附件。",
         "status": { "active": "进行中", "paused": "已暂停", "blocked": "受阻", "complete": "已完成", "budget_limited": "预算已用尽", "usage_limited": "用量受限" },
-        "errors": { "unknown": "结果尚未确认，正文已保留；请点击“确认最新状态”，不要重复提交。", "unsupported": "当前运行时不支持目标，请切换到支持目标的运行时或取消目标模式。", "unavailable": "目标操作暂不可用，请检查运行时连接后重试。", "target_rejected": "运行时拒绝了目标操作；请确认最新状态，并在当前回复结束后重试。", "empty": "请先输入目标正文。", "active": "当前回复仍在运行或停止中，请等待结束后再提交目标。", "missing-session": "会话尚未就绪，请等待加载完成或重新打开会话后提交。", "goal-attachments": "目标仅支持 5 MB 以内的文件附件，请移除大文件或目录后提交。", "error": "目标操作失败，正文已保留；请确认最新状态后再重试。" }
+        "errors": { "goal-model-context": "请退出目标模式后发送应用操作。", "unknown": "结果尚未确认，正文已保留；请点击“确认最新状态”，不要重复提交。", "unsupported": "当前运行时不支持目标，请切换到支持目标的运行时或取消目标模式。", "unavailable": "目标操作暂不可用，请检查运行时连接后重试。", "target_rejected": "运行时拒绝了目标操作；请确认最新状态，并在当前回复结束后重试。", "empty": "请先输入目标正文。", "active": "当前回复仍在运行或停止中，请等待结束后再提交目标。", "missing-session": "会话尚未就绪，请等待加载完成或重新打开会话后提交。", "goal-attachments": "请移除目录、仅提供路径或超过当前运行时限制的附件后提交目标。", "error": "目标操作失败，正文已保留；请确认最新状态后再重试。" }
+    },
+    "media": {
+        "unavailable": "媒体暂时无法加载，请重新打开会话，或让 Agent 重新提供。",
+        "contentOmitted": "这条消息的部分内容暂时无法显示。",
+        "imageLoading": "图片加载中…",
+        "loading": "媒体加载中…",
+        "download": "下载附件",
+        "previewUnavailable": "暂时无法预览",
+        "imageUnavailable": "图片无法加载，请重新打开会话或打开源文件。",
+        "file": "文件",
+        "folder": "文件夹",
+        "uploaded": "用户上传",
+        "toolResult": "工具产物",
+        "messageReference": "消息附件"
     },
     "reuseMessage": "填入输入框",
     "noLogs": "（暂无日志）",
@@ -419,6 +434,8 @@
         "mutating": "正在应用变更..."
     },
     "pending": {
+        "creatingSession": "正在创建会话",
+        "configuringSession": "正在配置会话",
         "typing": "正在思考",
         "activity": "正在调用工具",
         "compacting": "正在压缩上下文，完成后会继续回复",
@@ -539,6 +556,12 @@
         "copyPathCopied": "路径已复制",
         "copyPathFailed": "复制路径失败：{{error}}",
         "openFailed": "打开文件失败：{{error}}",
+        "fileNotFound": "文件或目录不存在，请确认路径或让 Agent 重新生成。",
+        "fileAccessFailed": "无法读取文件或目录，请检查访问权限和运行时连接后重试。",
+        "fileInvalidPath": "路径无效，请检查路径后重试。",
+        "localPathUnavailable": "无法确定本机路径，请在工作区中定位文件后重试。",
+        "previewOutsideWorkspace": "此文件不在当前 Agent 工作区内，请用系统应用打开。",
+        "fileOpenRecovery": "请检查路径、访问权限和系统默认应用后重试。",
         "confirmOpenTitle": "打开文件",
         "confirmOpenMessage": "确认用系统应用打开“{{fileName}}”吗？",
         "confirmOpenDetail": "该文件将使用系统默认应用打开。",

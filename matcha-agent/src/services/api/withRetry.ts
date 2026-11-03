@@ -179,7 +179,13 @@ export async function* withRetry<T>(
   options: RetryOptions,
 ): AsyncGenerator<SystemAPIErrorMessage, T> {
   const scopedSignal = investigationSignal()
-  if (scopedSignal) options = { ...options, signal: options.signal ? AbortSignal.any([options.signal, scopedSignal]) : scopedSignal }
+  if (scopedSignal)
+    options = {
+      ...options,
+      signal: options.signal
+        ? AbortSignal.any([options.signal, scopedSignal])
+        : scopedSignal,
+    }
   const maxRetries = getMaxRetries(options)
   const retryContext: RetryContext = {
     model: options.model,

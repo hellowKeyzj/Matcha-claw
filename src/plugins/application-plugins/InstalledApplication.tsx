@@ -13,6 +13,7 @@ export interface InstalledApplicationProps {
   entry: string;
   title: string;
   sessionIdentity?: SessionIdentity;
+  workspaceDraftId?: string;
   onCompose?: (request: AppComposeRequest, source: AppComposeSource, signal: AbortSignal) => Promise<void>;
   registerCloseHandler?: AppWebviewApi['onCloseRequested'];
 }
@@ -24,7 +25,7 @@ type BundleState = { key: string } & (
 
 const bundles = new Map<string, { digest: string; promise: Promise<{ html: string }> }>();
 
-export function InstalledApplication({ pluginId, digest, entry, title, sessionIdentity, onCompose, registerCloseHandler }: InstalledApplicationProps) {
+export function InstalledApplication({ pluginId, digest, entry, title, sessionIdentity, workspaceDraftId, onCompose, registerCloseHandler }: InstalledApplicationProps) {
   const { t } = useTranslation('common');
   const key = JSON.stringify([pluginId, digest, entry]);
   const [state, setState] = useState<BundleState | null>(null);
@@ -52,5 +53,5 @@ export function InstalledApplication({ pluginId, digest, entry, title, sessionId
     <p className="max-w-prose text-destructive [overflow-wrap:anywhere]">{state.message}</p>
     <Button type="button" variant="outline" size="sm" onClick={() => { setState(null); setAttempt((value) => value + 1); }}>{t('appFrame.retry')}</Button>
   </div>;
-  return <AppFrame pluginId={pluginId} digest={digest} html={state.html} title={title} sessionIdentity={sessionIdentity} onCompose={onCompose} registerCloseHandler={registerCloseHandler} />;
+  return <AppFrame pluginId={pluginId} digest={digest} html={state.html} title={title} sessionIdentity={sessionIdentity} workspaceDraftId={workspaceDraftId} onCompose={onCompose} registerCloseHandler={registerCloseHandler} />;
 }

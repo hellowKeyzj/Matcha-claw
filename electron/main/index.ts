@@ -25,6 +25,8 @@ import {
 import { createSignalQuitHandler } from './lifecycle/signals';
 import { acquireProcessInstanceFileLock } from './lifecycle/instance-lock';
 import { configureE2EWorldBootstrap } from '@electron/e2e-fixture-loader';
+import { createGraphicsController } from './desktop/graphics';
+import { registerGraphicsHandlers } from '../api/ipc/graphics-ipc';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.MatchaClaw.desktop';
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
@@ -33,22 +35,6 @@ const requestedUserDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
 // Chromium's native smooth scrolling causes visible shimmer on Windows in
 // Electron. Renderer-owned stable scrolling restores controlled wheel feel.
 app.commandLine.appendSwitch('disable-smooth-scrolling');
-
-// Disable GPU hardware acceleration globally for maximum stability across
-// all GPU configurations (no GPU, integrated, discrete).
-//
-// Rationale (following VS Code's philosophy):
-// - Page/file loading is async data fetching — zero GPU dependency.
-// - The original per-platform GPU branching was added to avoid CPU rendering
-//   competing with sync I/O on Windows, but all file I/O is now async
-//   (fs/promises), so that concern no longer applies.
-// - Software rendering is deterministic across all hardware; GPU compositing
-//   behaviour varies between vendors (Intel, AMD, NVIDIA, Apple Silicon) and
-//   driver versions, making it the #1 source of rendering bugs in Electron.
-//
-// Users who want GPU acceleration can pass `--enable-gpu` on the CLI or
-// set `"disable-hardware-acceleration": false` in the app config (future).
-app.disableHardwareAcceleration();
 
 // On Linux, set CHROME_DESKTOP so Chromium can find the correct .desktop file.
 // On Wayland this maps the running window to matchaclaw.desktop (→ icon + app grouping);
@@ -107,6 +93,9 @@ let hostEventBus!: HostEventBus;
 let application: MainApplication | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+const graphics = createGraphicsController({
+  isShuttingDown: () => quitLifecycleState.cleanupStarted || isQuitting(),
+});
 
 async function handleBootstrapFailure(error: unknown): Promise<void> {
   if (isQuitting()) return;
@@ -203,12 +192,17 @@ if (gotTheLock) {
   }
 
   hostEventBus = new HostEventBus();
+  const stopGraphicsIpc = registerGraphicsHandlers(graphics, () => mainWindow);
+  app.once('will-quit', () => {
+    stopGraphicsIpc();
+    graphics.dispose();
+  });
 
   // Application lifecycle
   app.whenReady().then(async () => {
-    if (isQuitting()) return;
+    if (isQuitting() || quitLifecycleState.cleanupStarted) return;
     if (isE2EMode) await configureE2EWorldBootstrap(defaultUserDataDir);
-    if (isQuitting()) return;
+    if (isQuitting() || quitLifecycleState.cleanupStarted) return;
     application = bootstrapMainApplication({
       hostEventBus,
       setMainWindow: (window) => {
@@ -268,6 +262,14 @@ if (gotTheLock) {
       logger.warn('Quit cancelled because browser data could not be saved:', error);
       focusMainWindow();
       hostEventBus.emit('iab:event', { type: 'quit-blocked' });
+      graphics.cancelRestart('quit-cancelled');
+      return;
+    }
+
+    if (!await graphics.commitRestart()) {
+      application?.cancelQuit();
+      cancelQuitCleanup(quitLifecycleState);
+      focusMainWindow();
       return;
     }
 
@@ -284,6 +286,7 @@ if (gotTheLock) {
       () => application?.readShutdownStage() ?? 'bootstrap',
     );
     markQuitCleanupCompleted(quitLifecycleState);
+    graphics.relaunchAfterQuit(result);
     if (result.outcome === 'graceful') app.quit();
     else app.exit(result.outcome === 'forced' ? 1 : 2);
   });

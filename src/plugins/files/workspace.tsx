@@ -1,14 +1,17 @@
-import { createElement } from 'react';
+import { createElement, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { FileCode2, FolderTree, GitCompare } from 'lucide-react';
 import i18n from '@/i18n';
 import { lazyWithPreload } from '@/plugin-host/core';
-import { buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
+import { buildCapabilityScopeKey, buildSessionIdentityKey } from '@/types/desktop/runtime-address';
 import type { WorkspaceController, WorkspacePageProps } from '@/plugins/workspace/extensions';
-import type { WorkspaceFileContext } from '@/lib/host-api';
+import { hostFileStat, type WorkspaceFileContext } from '@/lib/host-api';
 import type { ChatArtifactGroup } from '@/plugins/chat/artifacts';
 import type { ArtifactPreviewTarget } from './types';
-import { formatWorkspacePathForDisplay, resolveWorkspaceRelativePath } from './types';
-import type { FilePreviewMode } from './extensions';
+import { formatWorkspacePathForDisplay, resolveArtifactLocalPath, resolveWorkspaceRelativePath } from './types';
+import { useFilePreviewSupport, type FilePreviewMode } from './extensions';
+import { artifactFileErrorMessage, openArtifactPathExternally } from './open-file-utils';
 
 export interface FileWorkspacePageProps extends WorkspacePageProps {
   file: ArtifactPreviewTarget;
@@ -24,6 +27,9 @@ const BrowserPage = lazyWithPreload<WorkspacePageProps>(() => import('./Workspac
 const ArtifactsPage = lazyWithPreload<WorkspacePageProps & { mode: FilePreviewMode }>(() => import('./WorkspacePages').then((module) => ({ default: module.GeneratedFilesPage })));
 
 function filePageId(workspace: WorkspaceController, file: ArtifactPreviewTarget, context: WorkspaceFileContext): string {
+  if (file.mediaSource) {
+    return JSON.stringify(['files', workspace.scopeKey, 'media', buildSessionIdentityKey(file.mediaSource.sessionIdentity), file.mediaSource.reference]);
+  }
   const root = formatWorkspacePathForDisplay(context.workspaceRoot ?? '').replace(/\\/g, '/');
   const relativePath = resolveWorkspaceRelativePath(file.relativePath ?? file.filePath, context.workspaceRoot)
     ?? formatWorkspacePathForDisplay(file.filePath).replace(/\\/g, '/');
@@ -37,12 +43,58 @@ function filePageId(workspace: WorkspaceController, file: ArtifactPreviewTarget,
   ]);
 }
 
-export function openFileWorkspacePage(workspace: WorkspaceController, options: {
+interface OpenFileWorkspaceOptions {
   file: ArtifactPreviewTarget;
   workspaceContext: WorkspaceFileContext;
   group?: ChatArtifactGroup | null;
   mode?: FilePreviewMode;
-}): void {
+}
+
+export function useOpenFileWorkspacePage(workspace: WorkspaceController): (options: OpenFileWorkspaceOptions) => void {
+  const { t } = useTranslation('chat');
+  const supportsPreview = useFilePreviewSupport('preview');
+  return useCallback((options) => {
+    const { file, workspaceContext, mode = 'preview' } = options;
+    if (file.mediaSource) {
+      openFileWorkspacePage(workspace, { ...options, mode: 'preview' });
+      return;
+    }
+    const relativePath = resolveWorkspaceRelativePath(file.relativePath ?? file.filePath, workspaceContext.workspaceRoot);
+    const hasSnapshot = mode === 'diff' || (file.sourceTool !== 'write' && !!file.content && supportsPreview(file));
+    if (hasSnapshot) {
+      openFileWorkspacePage(workspace, options);
+      return;
+    }
+    void (async () => {
+      const scope = workspaceContext.agentScope;
+      if (scope && relativePath) {
+        const stat = await hostFileStat({ endpoint: scope.endpoint, agentId: scope.agentId, relativePath });
+        if (!stat.ok) throw new Error(stat.error ?? 'unavailable');
+        const target = { ...file, isDirectory: stat.isDirectory, fileSize: stat.size };
+        if (target.isDirectory || supportsPreview(target)) {
+          openFileWorkspacePage(workspace, { ...options, file: target });
+          return;
+        }
+      } else if (scope && relativePath === '') {
+        openFileWorkspacePage(workspace, { ...options, file: { ...file, isDirectory: true } });
+        return;
+      }
+      const localPath = resolveArtifactLocalPath(file.filePath, workspaceContext.workspaceRoot);
+      if (!localPath) {
+        toast.error(t('artifacts.localPathUnavailable'));
+        return;
+      }
+      const error = await openArtifactPathExternally(localPath);
+      if (error) throw new Error(error);
+    })().catch((error: unknown) => {
+      toast.error(t('artifacts.openFailed', { error: artifactFileErrorMessage(error, t) }), {
+        description: t('artifacts.fileOpenRecovery'),
+      });
+    });
+  }, [supportsPreview, t, workspace]);
+}
+
+export function openFileWorkspacePage(workspace: WorkspaceController, options: OpenFileWorkspaceOptions): void {
   const { file, workspaceContext, group = null, mode = 'preview' } = options;
   workspace.openPage({
     id: filePageId(workspace, file, workspaceContext),
@@ -56,8 +108,9 @@ export function openFileWorkspacePage(workspace: WorkspaceController, options: {
 export function openFileWorkspaceSection(workspace: WorkspaceController, section: FileWorkspaceSection): void {
   const key = section === 'workspace' ? 'artifacts.workspaceTab' : section === 'changes' ? 'artifacts.changesTab' : 'artifacts.sectionLabel';
   workspace.openPage({
-    id: JSON.stringify(['files', workspace.scopeKey, section]),
+    id: JSON.stringify(section === 'workspace' ? ['files', section] : ['files', workspace.scopeKey, section]),
     providerId: 'files',
+    lifetime: section === 'workspace' ? 'workspace' : undefined,
     title: i18n.t(`chat:${key}`),
     icon: section === 'workspace' ? FolderTree : section === 'changes' ? GitCompare : FileCode2,
     render: (props) => section === 'workspace'

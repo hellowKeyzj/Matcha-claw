@@ -86,9 +86,11 @@ export type WorldEvaluationConfiguration = Readonly<{
 export type IabMatchaCapability = Readonly<{ sessionId: string; instanceId: string; token: string }>;
 
 export type RuntimeHostControlCommand =
-  | { readonly name: 'iab.lease.acquire'; readonly input: Readonly<{ capability: IabMatchaCapability; invocationId: string }> }
+  | { readonly name: 'iab.lease.acquire'; readonly input: Readonly<{ capability: IabMatchaCapability; invocationId: string; inputMessageId: string }> }
   | { readonly name: 'iab.lease.wait'; readonly input: Readonly<{ leaseId: string; invocationId: string }> }
   | { readonly name: 'iab.lease.release'; readonly input: Readonly<{ invocationId: string; leaseId?: string; drained: true }> }
+  | { readonly name: 'iab.run.wait'; readonly input: Readonly<{ sessionId: string; instanceId: string; runId: string; wait: boolean }> }
+  | { readonly name: 'iab.run.release'; readonly input: Readonly<{ sessionId: string; instanceId: string; runId: string; drained: true }> }
   | { readonly name: 'host.health' }
   | { readonly name: 'host.runtime.snapshot' }
   | { readonly name: 'world.storage.connect'; readonly input: Readonly<{ connectionString: string }> }
@@ -552,8 +554,8 @@ export function isRuntimeHostControlCommand(value: unknown): value is RuntimeHos
   switch (value.name) {
     case 'iab.lease.acquire':
       return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
-        && hasExactKeys(value.input, ['capability', 'invocationId']) && isIabInvocationId(value.input.invocationId)
-        && isIabMatchaCapability(value.input.capability);
+        && hasExactKeys(value.input, ['capability', 'invocationId', 'inputMessageId']) && isIabInvocationId(value.input.invocationId)
+        && isIabInvocationId(value.input.inputMessageId) && isIabMatchaCapability(value.input.capability);
     case 'iab.lease.wait':
       return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
         && hasExactKeys(value.input, ['leaseId', 'invocationId'])
@@ -563,6 +565,12 @@ export function isRuntimeHostControlCommand(value: unknown): value is RuntimeHos
         && hasExactKeys(value.input, ['invocationId', 'drained', ...(Object.hasOwn(value.input, 'leaseId') ? ['leaseId'] : [])])
         && isIabInvocationId(value.input.invocationId) && value.input.drained === true
         && (value.input.leaseId === undefined || isIabInvocationId(value.input.leaseId));
+    case 'iab.run.wait':
+    case 'iab.run.release':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['sessionId', 'instanceId', 'runId', ...(value.name === 'iab.run.release' ? ['drained'] : ['wait'])])
+        && isIabInvocationId(value.input.sessionId) && isIabInvocationId(value.input.instanceId) && isIabInvocationId(value.input.runId)
+        && (value.name === 'iab.run.release' ? value.input.drained === true : typeof value.input.wait === 'boolean');
     case 'host.health':
     case 'host.runtime.snapshot':
       return hasExactKeys(value, ['name']);
@@ -688,7 +696,7 @@ function isEvaluationObligation(value: unknown): boolean {
 }
 
 function isMutatingCommand(command: RuntimeHostControlCommand): boolean {
-  return command.name === 'iab.lease.acquire' || command.name === 'iab.lease.release'
+  return command.name === 'iab.lease.acquire' || command.name === 'iab.lease.release' || command.name === 'iab.run.wait' || command.name === 'iab.run.release'
     || command.name === 'world.storage.connect' || command.name === 'world.initial.provision'
     || command.name === 'world.access.grant' || command.name === 'world.evaluation.install'
     || command.name === 'world.storage.transfer.prepare' || command.name === 'world.storage.transfer';

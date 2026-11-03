@@ -76,6 +76,7 @@ export type UserMessage = Message & {
   type: 'user'
   message: NonNullable<Message['message']>
   imagePasteIds?: number[]
+  sourceToolUseID?: string
 }
 export type NormalizedUserMessage = UserMessage
 export type RequestStartEvent = { type: string; [key: string]: unknown }

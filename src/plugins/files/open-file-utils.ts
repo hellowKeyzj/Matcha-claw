@@ -22,17 +22,40 @@ export function shouldOfferDirectOpenFallback(ext?: string | null, size?: number
   return isDirectOpenFallbackExt(ext) && typeof size === 'number' && size > DIRECT_OPEN_FALLBACK_MIN_BYTES;
 }
 
+export function artifactFileErrorMessage(error: unknown, t: (key: string) => string): string {
+  const message = error instanceof Error ? error.message : String(error ?? 'unavailable');
+  switch (message) {
+    case 'notFound':
+    case 'not_found':
+      return t('artifacts.fileNotFound');
+    case 'invalidPath':
+    case 'empty_path':
+    case 'relative_path_not_supported':
+      return t('artifacts.fileInvalidPath');
+    case 'unavailable':
+      return t('artifacts.fileAccessFailed');
+    case 'Workspace media is unavailable':
+    case 'Workspace media reference is invalid':
+      return t('media.unavailable');
+    case 'notDirectory':
+      return t('common:calls.values.notDirectory');
+    default:
+      return message;
+  }
+}
+
 export async function openArtifactPathExternally(filePath: string): Promise<string | null> {
   const result = await invokeIpc<unknown>('shell:openPath', filePath);
-  return typeof result === 'string' && result.trim() ? result : null;
+  if (typeof result !== 'string') throw new Error('unavailable');
+  return result.trim() ? result : null;
 }
 
 export async function revealArtifactPathInFileManager(filePath: string): Promise<boolean> {
   const result = await invokeIpc<unknown>('shell:showItemInFolder', filePath);
-  if (!result || typeof result !== 'object') {
-    return false;
-  }
-  return (result as { success?: boolean }).success === true;
+  if (!result || typeof result !== 'object') throw new Error('unavailable');
+  const response = result as { success?: boolean; error?: string };
+  if (response.success === true) return true;
+  throw new Error(response.error || 'unavailable');
 }
 
 export async function confirmAndOpenArtifactPath(params: {

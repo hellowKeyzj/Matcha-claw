@@ -1,21 +1,15 @@
 import { useMarkdownExtensions, useToolRenderers } from './use-renderers';
-import { useCallback, useMemo, useRef, useState, memo, type MouseEvent, type PointerEvent } from 'react';
-import { Copy, Check, ChevronDown, ChevronRight, CornerDownLeft, SquareTerminal, Code2, FileText, FilePenLine, FilePlus2, Search, Globe, Wrench, ExternalLink, Film, Music, FileArchive, File, ZoomIn, Loader2 } from 'lucide-react';
+import { useCallback, useMemo, useState, memo } from 'react';
+import { Copy, Check, ChevronDown, ChevronRight, CornerDownLeft, SquareTerminal, Code2, FileText, FilePenLine, FilePlus2, Search, Globe, Wrench, ExternalLink, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { invokeIpc } from '@/lib/api-client';
-import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import type {
   SessionRenderAssistantBubbleToolResult,
   SessionRenderToolCard,
 } from '@/types/session/tool-card';
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
-import type { ChatMessageImage } from '@/plugins/message-rendering/chat-message-view';
 import { formatTimestamp } from '@/plugins/message-rendering/message-utils';
 import { buildMarkdownCacheKey, getOrBuildMarkdownBody } from '@/plugins/message-rendering/md-pipeline';
-import { DIRECTORY_MIME_TYPE } from '@/plugins/files/types';
-import { useFilePreviewSupport } from '@/plugins/files/extensions';
-import { shouldKeepAssistantAttachmentVisible } from '@/plugins/message-rendering/attachments';
 import {
   buildCanvasActivityViewModel,
   buildToolActivityPreview,
@@ -30,13 +24,7 @@ import { useToolActivityDisclosure } from '@/plugins/message-rendering/useToolAc
 import ToolBrowserCard from '@/plugins/message-rendering/tool-browser-card';
 import { ToolWidgetCard } from '@/plugins/message-rendering/tool-widget-card';
 
-export interface MessageLightboxState {
-  src: string;
-  fileName: string;
-  filePath?: string;
-  base64?: string;
-  mimeType?: string;
-}
+export { UserMessageMedia, AssistantMessageMedia, type MessageLightboxState } from './chat-message-media';
 
 const COMPACT_SIDE_RAIL_EXPANDED_WIDTH = 'w-full max-w-[46rem]';
 const COMPACT_SIDE_RAIL_TRACK = `${COMPACT_SIDE_RAIL_EXPANDED_WIDTH} flex max-w-full flex-col self-start`;
@@ -46,12 +34,6 @@ const COMPACT_OUTPUT_SCROLL_AREA = 'max-h-72 overflow-auto overscroll-contain wh
 const COMPACT_ICON_TOGGLE = 'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] text-muted-foreground transition-colors hover:text-foreground';
 const COMPACT_STRUCTURED_CARD = 'w-full overflow-hidden rounded-[16px] border border-border/45 bg-card px-3.5 py-3 shadow-sm';
 const COMPACT_META_CHIP = 'inline-flex max-w-full items-center rounded-full border border-border/45 bg-muted/55 px-2 py-0.5 text-[11px] leading-4 text-muted-foreground';
-
-function imageSrc(img: ChatMessageImage): string | null {
-  if (img.url) return img.url;
-  if (img.data) return `data:${img.mimeType};base64,${img.data}`;
-  return null;
-}
 
 function useVersionedDisclosure(collapseVersion: number) {
   const [state, setState] = useState({ version: collapseVersion, expanded: false });
@@ -437,26 +419,31 @@ function ToolActivitySurfaceButton({
 
 function ToolActivityPreview({
   tool,
-  activity,
+  activity: preview,
   showTitle = false,
+  expanded = false,
   sessionIdentity,
   latestBrowserTool,
-  onOpenToolSurface,
+  onOpen,
   onRuntimeSendMessage,
   onRuntimeOpenLink,
 }: {
   tool: SessionRenderToolCard;
-  activity: ToolActivityViewModel;
+  activity: ToolActivityViewModel | null;
   showTitle?: boolean;
+  expanded?: boolean;
   sessionIdentity?: SessionIdentity;
   latestBrowserTool?: boolean;
-  onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
+  onOpen?: () => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
-  const onOpen = activity.canOpenSurface && onOpenToolSurface && sessionIdentity ? () => onOpenToolSurface(tool, sessionIdentity) : undefined;
+  const renderers = useToolRenderers();
+  const { t } = useTranslation('chat');
+  const activity = useMemo(() => expanded ? buildToolActivityViewModel(tool, t, sessionIdentity, renderers) : preview, [expanded, tool, t, sessionIdentity, renderers, preview]);
+  if (!activity) return null;
   return (
-    <div data-tool-activity-preview="true" className="w-full space-y-2">
+    <div data-tool-activity-preview="true" className={showTitle ? 'w-full space-y-2' : 'w-full'}>
       {showTitle ? (
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate text-[12px] text-muted-foreground">{activity.title}</span>
@@ -465,7 +452,12 @@ function ToolActivityPreview({
           ) : null}
         </div>
       ) : null}
-      <ToolActivityStructuredContent activity={activity} sessionIdentity={sessionIdentity} onOpen={onOpen} tool={tool} latestBrowserTool={latestBrowserTool} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
+      {expanded && activity.trailingLabels.length > 0 ? (
+        <div className={`flex flex-wrap items-center gap-2 text-[11px] ${activity.isError ? 'text-destructive' : 'text-muted-foreground'}`}>
+          {activity.trailingLabels.map((label, index) => <span key={`${label.text}-${index}`}>{label.text}</span>)}
+        </div>
+      ) : null}
+      <ToolActivityBody activity={activity} expanded={expanded} className={expanded ? 'mt-2' : undefined} sessionIdentity={sessionIdentity} onOpen={onOpen} tool={tool} latestBrowserTool={latestBrowserTool} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
     </div>
   );
 }
@@ -563,9 +555,6 @@ export const ToolCardList = memo(function ToolCardList({
         className={`${COMPACT_SIDE_RAIL_HEADER} w-full text-left`}
         onClick={() => activeDisclosure.toggle(disclosureKey)}
       >
-        <span className={COMPACT_ICON_TOGGLE}>
-          {runningTool ? <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-500" /> : expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-        </span>
         <span className="min-w-0 truncate text-[14px] leading-6" title={title}>{title}</span>
         <span className="shrink-0 text-[11px] text-muted-foreground/75">{tools.length}</span>
         {approvalStatus ? <span className={`${COMPACT_META_CHIP} ${approvalStatus === 'denied' ? 'text-destructive' : ''}`}>{t('toolActivity.approvalReview')} · {approvalStatus}</span> : null}
@@ -574,40 +563,27 @@ export const ToolCardList = memo(function ToolCardList({
             {t(`toolStatus.${status}`)} {count}
           </span>
         ))}
+        <span className={COMPACT_ICON_TOGGLE} aria-hidden="true">
+          {runningTool ? <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-500" /> : expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </span>
       </button>
-      {expanded ? (
-        <div className="flex w-full flex-col items-start gap-1.5 border-l border-border/40 pl-4">
-          {tools.map((tool, index) => (
-            <ToolCard
-              key={getToolDisclosureKey(tool)}
-              tool={tool}
-              preview={previews[index]}
-              disclosure={activeDisclosure}
-              sessionIdentity={sessionIdentity}
-              latestBrowserTool={latestBrowserTools?.has(tool) ?? false}
-              onOpenToolSurface={onOpenToolSurface}
-              onRuntimeSendMessage={onRuntimeSendMessage}
-              onRuntimeOpenLink={onRuntimeOpenLink}
-            />
-          ))}
-        </div>
-      ) : collapsedPreviews.some(Boolean) ? (
-        <div className="w-full space-y-2 pl-7">
-          {tools.map((tool, index) => collapsedPreviews[index] ? (
-            <ToolActivityPreview
-              key={getToolDisclosureKey(tool)}
-              tool={tool}
-              activity={collapsedPreviews[index]!}
-              showTitle
-              sessionIdentity={sessionIdentity}
-              latestBrowserTool={latestBrowserTools?.has(tool) ?? false}
-              onOpenToolSurface={onOpenToolSurface}
-              onRuntimeSendMessage={onRuntimeSendMessage}
-              onRuntimeOpenLink={onRuntimeOpenLink}
-            />
-          ) : null)}
-        </div>
-      ) : null}
+      {expanded || collapsedPreviews.some(Boolean) ? <div className={expanded ? 'flex w-full flex-col items-start gap-1.5 border-l border-border/40 pl-4' : 'w-full space-y-2 pl-7'}>
+        {tools.map((tool, index) => expanded || collapsedPreviews[index] ? (
+          <ToolCard
+            key={getToolDisclosureKey(tool)}
+            tool={tool}
+            preview={previews[index]}
+            collapsedPreview={collapsedPreviews[index]}
+            groupExpanded={expanded}
+            disclosure={activeDisclosure}
+            sessionIdentity={sessionIdentity}
+            latestBrowserTool={latestBrowserTools?.has(tool) ?? false}
+            onOpenToolSurface={onOpenToolSurface}
+            onRuntimeSendMessage={onRuntimeSendMessage}
+            onRuntimeOpenLink={onRuntimeOpenLink}
+          />
+        ) : null)}
+      </div> : null}
     </div>
   );
 });
@@ -692,130 +668,6 @@ export const ThinkingSection = memo(function ThinkingSection({
   );
 });
 
-export function UserMessageMedia({
-  images,
-  attachedFiles,
-  onPreview,
-}: {
-  images: ReadonlyArray<ChatMessageImage>;
-  attachedFiles: ReadonlyArray<AttachedFileMeta>;
-  onPreview: (item: MessageLightboxState) => void;
-}) {
-  return (
-    <>
-      {images.length > 0 && (
-        <div className="flex flex-wrap gap-2.5">
-          {images.map((img, index) => {
-            const src = imageSrc(img);
-            if (!src) return null;
-            return (
-              <ImageThumbnail
-                key={`content-${index}`}
-                src={src}
-                fileName="image"
-                onPreview={() => onPreview({ src, fileName: 'image', base64: img.data, mimeType: img.mimeType })}
-              />
-            );
-          })}
-        </div>
-      )}
-      {attachedFiles.length > 0 && (
-        <div className="flex flex-wrap gap-2.5">
-          {attachedFiles.map((file, index) => {
-            const isImage = file.mimeType.startsWith('image/');
-            if (isImage && images.length > 0 && !file.mediaReference && !(file.source === 'user-upload' && file.filePath)) return null;
-            if (!isImage || (file.source === 'user-upload' && file.filePath)) {
-              return <FileCard key={`local-${index}`} file={file} />;
-            }
-            if (!file.preview) {
-              if (file.filePath) {
-                return <FileCard key={`local-${index}`} file={file} />;
-              }
-              return <MissingImagePreview key={`local-${index}`} unavailable={file.previewStatus === 'unavailable'} label={attachmentImageLabel(file)} />;
-            }
-            return (
-              <ImageThumbnail
-                key={`local-${index}`}
-                src={file.preview}
-                fileName={file.fileName}
-                onPreview={() => onPreview({
-                  src: file.preview!,
-                  fileName: file.fileName,
-                  filePath: file.filePath,
-                  mimeType: file.mimeType,
-                })}
-              />
-            );
-          })}
-        </div>
-      )}
-    </>
-  );
-}
-
-export function AssistantMessageMedia({
-  images,
-  attachedFiles,
-  onPreview,
-  onOpenFile,
-}: {
-  images: ReadonlyArray<ChatMessageImage>;
-  attachedFiles: ReadonlyArray<AttachedFileMeta>;
-  onPreview: (item: MessageLightboxState) => void;
-  onOpenFile?: (file: AttachedFileMeta) => void;
-}) {
-  return (
-    <>
-      {images.length > 0 && (
-        <div className="flex flex-wrap gap-2.5">
-          {images.map((img, index) => {
-            const src = imageSrc(img);
-            if (!src) return null;
-            return (
-              <ImagePreviewCard
-                key={`content-${index}`}
-                src={src}
-                fileName="image"
-                onPreview={() => onPreview({ src, fileName: 'image', base64: img.data, mimeType: img.mimeType })}
-              />
-            );
-          })}
-        </div>
-      )}
-      {attachedFiles.length > 0 && (
-        <div className="flex flex-wrap gap-2.5">
-          {attachedFiles.map((file, index) => {
-            const isImage = file.mimeType.startsWith('image/');
-            if (isImage && images.length > 0 && !file.mediaReference) return null;
-            if (!isImage) {
-              return <FileCard key={`local-${index}`} file={file} onOpen={onOpenFile} />;
-            }
-            if (!file.preview) {
-              if (file.filePath) {
-                return <FileCard key={`local-${index}`} file={file} onOpen={onOpenFile} />;
-              }
-              return <MissingImagePreview key={`local-${index}`} unavailable={file.previewStatus === 'unavailable'} label={attachmentImageLabel(file)} />;
-            }
-            return (
-              <ImagePreviewCard
-                key={`local-${index}`}
-                src={file.preview}
-                fileName={file.fileName}
-                onPreview={() => onPreview({
-                  src: file.preview!,
-                  fileName: file.fileName,
-                  filePath: file.filePath,
-                  mimeType: file.mimeType,
-                })}
-              />
-            );
-          })}
-        </div>
-      )}
-    </>
-  );
-}
-
 export const UserMessageMetaBar = memo(function UserMessageMetaBar({
   timestamp,
   onReuse,
@@ -876,7 +728,7 @@ export const AssistantMessageMetaBar = memo(function AssistantMessageMetaBar({
   }, [canCopy, text]);
 
   return (
-    <div className="mt-0.5 flex w-full justify-end opacity-0 transition-opacity duration-200 select-none group-hover:opacity-100">
+    <div className="mt-0.5 flex w-full justify-start opacity-0 transition-opacity duration-200 select-none group-hover:opacity-100">
       <div className="inline-flex items-center gap-1.5 px-1 text-[11px] leading-5 text-muted-foreground/80">
         <span>{statusLabel ?? (timestamp ? formatTimestamp(timestamp) : '')}</span>
         {canCopy ? (
@@ -898,7 +750,7 @@ export const AssistantMessageMetaBar = memo(function AssistantMessageMetaBar({
 function ToolActivityBody({
   activity,
   expanded,
-  showCanvasFrame = false,
+  className,
   sessionIdentity,
   onOpen,
   tool,
@@ -908,7 +760,7 @@ function ToolActivityBody({
 }: {
   activity: ToolActivityViewModel;
   expanded: boolean;
-  showCanvasFrame?: boolean;
+  className?: string;
   sessionIdentity?: SessionIdentity;
   onOpen?: () => void;
   tool?: SessionRenderToolCard;
@@ -924,14 +776,14 @@ function ToolActivityBody({
     setCopiedText(text);
     window.setTimeout(() => setCopiedText(null), 1600);
   }, []);
-  const hideRawDetails = shouldHideRawDetailsBlock(activity, t);
-  const textBlocks = activity.textBlocks.filter((block) =>
+  const hideRawDetails = expanded && shouldHideRawDetailsBlock(activity, t);
+  const textBlocks = expanded ? activity.textBlocks.filter((block) =>
     !(hideRawDetails && block.kind === 'details')
-    && !(activity.canvasPreview?.rawText && block.kind === 'output' && block.text === activity.canvasPreview.rawText));
-  const parameters = activity.parameters ?? [];
+    && !(activity.canvasPreview?.rawText && block.kind === 'output' && block.text === activity.canvasPreview.rawText)) : [];
+  const parameters = expanded ? activity.parameters ?? [] : [];
   const parameterText = parameters.map(({ name, value }) => `${name}: ${value}`).join('\n');
-  const details = (
-    <>
+  return (
+    <div className={`w-full space-y-2 ${className ?? ''}`}>
       {parameters.length > 0 ? (
         <div className={COMPACT_STRUCTURED_CARD}>
           <div className="flex items-center justify-between gap-2 text-[12px] font-medium text-foreground">
@@ -959,14 +811,8 @@ function ToolActivityBody({
           onCopy={block.copyable || block.kind === 'output' ? () => copyBlockText(block.text) : undefined}
         />
       ))}
-    </>
-  );
-
-  return expanded ? <div className="mt-2 w-full space-y-2">{details}</div> : showCanvasFrame && activity.canvasPreview ? (
-    <div className="mt-2 w-full">
-      <ToolWidgetCard preview={activity.canvasPreview} sessionIdentity={sessionIdentity} onOpen={onOpen} onSendMessage={onRuntimeSendMessage} onOpenLink={onRuntimeOpenLink} />
     </div>
-  ) : null;
+  );
 }
 
 function ToolActivityRail({
@@ -1007,37 +853,16 @@ function ToolActivityRail({
         ))}
         {canExpand ? expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : null}
       </button>
-      <ToolActivityBody activity={activity} expanded={expanded && canExpand} showCanvasFrame sessionIdentity={sessionIdentity} onOpen={onOpen} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
+      <ToolActivityBody activity={activity} expanded={expanded && canExpand} className="mt-2" sessionIdentity={sessionIdentity} onOpen={onOpen} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
     </div>
-  );
-}
-
-function ToolActivityDetails({ tool, sessionIdentity, onOpen, latestBrowserTool, onRuntimeSendMessage, onRuntimeOpenLink }: {
-  tool: SessionRenderToolCard;
-  sessionIdentity?: SessionIdentity;
-  onOpen?: () => void;
-  latestBrowserTool?: boolean;
-  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
-  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
-}) {
-  const renderers = useToolRenderers();
-  const { t } = useTranslation('chat');
-  const activity = useMemo(() => buildToolActivityViewModel(tool, t, sessionIdentity, renderers), [tool, t, sessionIdentity, renderers]);
-  return (
-    <>
-      {activity.trailingLabels.length > 0 ? (
-        <div className={`flex flex-wrap items-center gap-2 text-[11px] ${activity.isError ? 'text-destructive' : 'text-muted-foreground'}`}>
-          {activity.trailingLabels.map((label, index) => <span key={`${label.text}-${index}`}>{label.text}</span>)}
-        </div>
-      ) : null}
-      <ToolActivityBody activity={activity} expanded sessionIdentity={sessionIdentity} onOpen={onOpen} tool={tool} latestBrowserTool={latestBrowserTool} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
-    </>
   );
 }
 
 const ToolCard = memo(function ToolCard({
   tool,
   preview,
+  collapsedPreview,
+  groupExpanded,
   disclosure,
   sessionIdentity,
   latestBrowserTool,
@@ -1047,6 +872,8 @@ const ToolCard = memo(function ToolCard({
 }: {
   tool: SessionRenderToolCard;
   preview: ToolActivityViewModel | null;
+  collapsedPreview: ToolActivityViewModel | null;
+  groupExpanded: boolean;
   disclosure: ToolActivityDisclosure;
   sessionIdentity?: SessionIdentity;
   latestBrowserTool?: boolean;
@@ -1059,11 +886,13 @@ const ToolCard = memo(function ToolCard({
   const descriptor = useMemo(() => describeToolActivity(tool, t, renderers), [tool, t, renderers]);
   const status = getToolActivityStatus(tool);
   const key = getToolDisclosureKey(tool);
-  const expanded = disclosure.expandedKeys.has(key);
-  const onOpen = preview?.canOpenSurface && onOpenToolSurface && sessionIdentity ? () => onOpenToolSurface(tool, sessionIdentity) : undefined;
+  const expanded = groupExpanded && disclosure.expandedKeys.has(key);
+  const activity = groupExpanded ? preview : collapsedPreview;
+  const onOpen = activity?.canOpenSurface && onOpenToolSurface && sessionIdentity ? () => onOpenToolSurface(tool, sessionIdentity) : undefined;
+  if (!groupExpanded && !activity) return null;
   return (
-    <div data-compact-rail="tool" className={`${COMPACT_SIDE_RAIL_TRACK} text-sm`}>
-      <div className="flex w-full min-w-0 items-center gap-1">
+    <div data-compact-rail={groupExpanded ? 'tool' : undefined} className={groupExpanded ? `${COMPACT_SIDE_RAIL_TRACK} text-sm` : 'w-full'}>
+      {groupExpanded ? <div className="flex w-full min-w-0 items-center gap-1">
         <button
           type="button"
           data-chat-local-geometry-anchor="true"
@@ -1078,12 +907,10 @@ const ToolCard = memo(function ToolCard({
           {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
         </button>
         {!preview?.browserTabPreview && !preview?.canvasPreview && onOpen ? <ToolActivitySurfaceButton title={descriptor.title} onOpen={onOpen} /> : null}
-      </div>
-      {expanded ? (
-        <div className="w-full pl-7"><ToolActivityDetails tool={tool} sessionIdentity={sessionIdentity} onOpen={onOpen} latestBrowserTool={latestBrowserTool} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} /></div>
-      ) : preview ? (
-        <div className="mt-1 w-full pl-7"><ToolActivityPreview tool={tool} activity={preview} sessionIdentity={sessionIdentity} latestBrowserTool={latestBrowserTool} onOpenToolSurface={onOpenToolSurface} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} /></div>
-      ) : null}
+      </div> : null}
+      {activity || expanded ? <div className={groupExpanded ? `${expanded ? '' : 'mt-1 '}w-full pl-7` : 'w-full'}>
+        <ToolActivityPreview tool={tool} activity={activity} showTitle={!groupExpanded} expanded={expanded} sessionIdentity={sessionIdentity} latestBrowserTool={latestBrowserTool} onOpen={onOpen} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
+      </div> : null}
     </div>
   );
 });
@@ -1116,192 +943,5 @@ function AssistantEmbeddedToolResultCard({
     <ToolActivityRail activity={activity} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity}
       onOpen={activity.canOpenSurface && sourceTool && sessionIdentity && onOpenToolSurface ? () => onOpenToolSurface(sourceTool, sessionIdentity) : undefined}
       onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
-  );
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function FileIcon({ mimeType, className }: { mimeType: string; className?: string }) {
-  if (mimeType === DIRECTORY_MIME_TYPE) return <FileArchive className={className} />;
-  if (mimeType.startsWith('video/')) return <Film className={className} />;
-  if (mimeType.startsWith('audio/')) return <Music className={className} />;
-  if (mimeType.startsWith('text/') || mimeType === 'application/json' || mimeType === 'application/xml') return <FileText className={className} />;
-  if (mimeType.includes('zip') || mimeType.includes('compressed') || mimeType.includes('archive') || mimeType.includes('tar') || mimeType.includes('rar') || mimeType.includes('7z')) return <FileArchive className={className} />;
-  if (mimeType === 'application/pdf') return <FileText className={className} />;
-  return <File className={className} />;
-}
-
-function attachmentStatusLabel(file: AttachedFileMeta): string | null {
-  if (file.attachmentStatus === 'preview-unavailable' || file.previewStatus === 'unavailable') return '预览不可用';
-  if (file.attachmentStatus === 'unsafe-media-omitted') return '不安全媒体已省略';
-  if (file.attachmentStatus === 'thinking-omitted') return '思考内容已省略';
-  if (file.attachmentStatus === 'unknown-omitted') return '附件已省略';
-  return null;
-}
-
-function attachmentSourceLabel(source: AttachedFileMeta['source']): string | null {
-  if (source === 'message-ref') return '消息附件';
-  if (source === 'tool-result') return '工具结果';
-  if (source === 'user-upload') return '用户上传';
-  return null;
-}
-
-function attachmentImageLabel(file: AttachedFileMeta): string | null {
-  return attachmentStatusLabel(file) ?? attachmentSourceLabel(file.source);
-}
-
-function FileCard({
-  file,
-  onOpen,
-}: {
-  file: AttachedFileMeta;
-  onOpen?: (file: AttachedFileMeta) => void;
-}) {
-  const supportsPreview = useFilePreviewSupport('preview');
-  const filePath = typeof file.filePath === 'string' ? file.filePath.trim() : '';
-  const isDirectory = file.mimeType === DIRECTORY_MIME_TYPE;
-  const canOpenDirectly = file.source === 'user-upload' && filePath.length > 0;
-  const canOpenArtifact = !canOpenDirectly && filePath.length > 0 && Boolean(onOpen) && shouldKeepAssistantAttachmentVisible(file, supportsPreview);
-  const canOpen = canOpenDirectly || canOpenArtifact;
-  const visiblePath = canOpenDirectly ? filePath : null;
-  const statusLabel = attachmentStatusLabel(file);
-  const sourceLabel = attachmentSourceLabel(file.source);
-  const baseDetail = visiblePath ?? (isDirectory ? '文件夹' : file.fileSize > 0 ? formatFileSize(file.fileSize) : 'File');
-  const detail = statusLabel ?? (sourceLabel ? `${sourceLabel} · ${baseDetail}` : baseDetail);
-  const lastOpenEventRef = useRef<{ kind: 'pointerdown' | 'mousedown' | 'click'; at: number } | null>(null);
-  const handleOpen = useCallback(() => {
-    if (!canOpen) {
-      return;
-    }
-    if (canOpenDirectly) {
-      void invokeIpc('shell:openPath', filePath);
-      return;
-    }
-    onOpen?.(file);
-  }, [canOpen, canOpenDirectly, file, filePath, onOpen]);
-  const triggerOpen = useCallback((kind: 'pointerdown' | 'mousedown' | 'click') => {
-    const previous = lastOpenEventRef.current;
-    const now = Date.now();
-    if (previous && now - previous.at < 250) {
-      if (previous.kind === 'pointerdown' && (kind === 'mousedown' || kind === 'click')) {
-        return;
-      }
-      if (previous.kind === 'mousedown' && kind === 'click') {
-        return;
-      }
-    }
-    lastOpenEventRef.current = { kind, at: now };
-    handleOpen();
-  }, [handleOpen]);
-  const handlePointerDown = useCallback((event: PointerEvent<HTMLButtonElement>) => {
-    if (event.button !== 0) {
-      return;
-    }
-    triggerOpen('pointerdown');
-  }, [triggerOpen]);
-  const handleMouseDown = useCallback((event: MouseEvent<HTMLButtonElement>) => {
-    if (event.button !== 0) {
-      return;
-    }
-    triggerOpen('mousedown');
-  }, [triggerOpen]);
-  const handleClick = useCallback((event: MouseEvent<HTMLButtonElement>) => {
-    if (event.button !== 0) {
-      return;
-    }
-    triggerOpen('click');
-  }, [triggerOpen]);
-
-  if (canOpen) {
-    return (
-      <button
-        type="button"
-        data-testid="chat-attached-file-card"
-        data-chat-attached-file-path={file.filePath}
-        data-chat-attached-file-name={file.fileName}
-        onPointerDown={handlePointerDown}
-        onMouseDown={handleMouseDown}
-        onClick={handleClick}
-        title={visiblePath ?? 'Open file'}
-        className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-card px-3 py-2 text-left shadow-sm transition-colors hover:bg-background/95"
-      >
-        <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
-        <div className="min-w-0 overflow-hidden">
-          <p className="text-xs font-medium truncate">{file.fileName}</p>
-          <p aria-hidden="true" className="truncate text-[10px] text-muted-foreground">{detail}</p>
-        </div>
-      </button>
-    );
-  }
-
-  return (
-    <div className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-card px-3 py-2 shadow-sm">
-      <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
-      <div className="min-w-0 overflow-hidden">
-        <p className="text-xs font-medium truncate">{file.fileName}</p>
-        <p aria-hidden="true" className="truncate text-[10px] text-muted-foreground">{detail}</p>
-      </div>
-    </div>
-  );
-}
-
-function MissingImagePreview({ unavailable = false, label }: { unavailable?: boolean; label?: string | null }) {
-  return (
-    <div
-      data-testid={unavailable ? 'chat-image-preview-unavailable' : 'chat-missing-image-preview'}
-      className="w-36 h-36 rounded-xl border overflow-hidden bg-muted flex flex-col gap-2 items-center justify-center text-muted-foreground"
-    >
-      <File className="h-8 w-8" />
-      {label ? <span className="px-3 text-center text-[11px] leading-4">{label}</span> : null}
-    </div>
-  );
-}
-
-function ImageThumbnail({
-  src,
-  fileName,
-  onPreview,
-}: {
-  src: string;
-  fileName: string;
-  onPreview: () => void;
-}) {
-  return (
-    <div
-      className="group/img relative h-36 w-36 cursor-zoom-in overflow-hidden rounded-[18px] border border-border/42 bg-card shadow-sm"
-      onClick={onPreview}
-    >
-      <img src={src} alt={fileName} className="w-full h-full object-cover" />
-      <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/25 transition-colors flex items-center justify-center">
-        <ZoomIn className="h-6 w-6 text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow" />
-      </div>
-    </div>
-  );
-}
-
-function ImagePreviewCard({
-  src,
-  fileName,
-  onPreview,
-}: {
-  src: string;
-  fileName: string;
-  onPreview: () => void;
-}) {
-  return (
-    <div
-      className="group/img relative max-w-xs cursor-zoom-in overflow-hidden rounded-[18px] border border-border/42 bg-card shadow-sm"
-      onClick={onPreview}
-    >
-      <img src={src} alt={fileName} className="block w-full" />
-      <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/20 transition-colors flex items-center justify-center">
-        <ZoomIn className="h-6 w-6 text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow" />
-      </div>
-    </div>
   );
 }

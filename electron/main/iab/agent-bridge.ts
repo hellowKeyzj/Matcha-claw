@@ -5,13 +5,14 @@ import { chmod, mkdir, readFile, rename, rmdir, unlink, writeFile } from 'node:f
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { browserIabToolActions, type BrowserActionParams } from '../../../packages/openclaw-browser-relay-plugin/src/browser-action-contract';
+import { browserIabToolActions, type BrowserActionContext, type BrowserActionParams, type BrowserSessionCleanup } from '../../../packages/openclaw-browser-relay-plugin/src/browser-action-contract';
 import { createBrowserToolCatalog } from '../../../packages/openclaw-browser-relay-plugin/src/application/browser-relay-tool';
 import type { RuntimeHostLifecycle } from '../runtime-host-delivery/lifecycle-owner';
 import { isIabInvocationId, isIabMatchaCapability, type IabMatchaCapability } from '../runtime-host-delivery/control';
 import type { IabAutomation } from './contracts';
-import { resolveIabOpenClawContext } from './openclaw-context';
+import { IabOpenClawRuns } from './openclaw-context';
 import { acquireIabMatchaContext } from './matcha-context';
+import { IabMatchaRuns } from './matcha-run';
 import { getOpenClawConfigDir, getRuntimeHostStateDir } from '../../utils/paths';
 
 const executeFile = promisify(execFile);
@@ -19,27 +20,38 @@ const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function identity(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0 && value.length <= 16_384 && !value.includes('\0'); }
 
-function decode(value: unknown): { params: BrowserActionParams; context: { agentId: string; sessionKey: string; sessionId: string; workspaceDir?: string } } {
-  if (!record(value) || !record(value.params) || !record(value.context)
-    || typeof value.params.action !== 'string' || !browserIabToolActions.includes(value.params.action as BrowserActionParams['action'])
-    || !identity(value.context.sessionKey) || !identity(value.context.agentId)
-    || value.context.workspaceDir !== undefined && !identity(value.context.workspaceDir)
-    || !identity(value.context.sessionId)) {
+function decodeContext(value: unknown): BrowserActionContext {
+  if (!record(value) || !identity(value.sessionKey) || !identity(value.agentId) || !identity(value.sessionId)
+    || ['workspaceDir', 'runId', 'rootSessionKey', 'sessionGroupId'].some((key) => value[key] !== undefined && !identity(value[key]))) {
+    throw Object.assign(new Error('A trusted OpenClaw session context is required'), { code: 'IAB_CONTEXT_INVALID' });
+  }
+  // Root/group hints are not authority: Main derives them from the installed SDK.
+  return { agentId: value.agentId, sessionKey: value.sessionKey, sessionId: value.sessionId,
+    ...(typeof value.workspaceDir === 'string' ? { workspaceDir: value.workspaceDir } : {}),
+    ...(typeof value.runId === 'string' ? { runId: value.runId } : {}) };
+}
+function decode(value: unknown): { params: BrowserActionParams; context: BrowserActionContext } {
+  if (!record(value) || !record(value.params) || typeof value.params.action !== 'string'
+    || !browserIabToolActions.includes(value.params.action as BrowserActionParams['action'])) {
     throw Object.assign(new Error('A browser action and trusted OpenClaw session context are required'), { code: 'IAB_CONTEXT_INVALID' });
   }
-  return {
-    params: value.params as BrowserActionParams,
-    context: { agentId: value.context.agentId, sessionKey: value.context.sessionKey, sessionId: value.context.sessionId,
-      ...(typeof value.context.workspaceDir === 'string' ? { workspaceDir: value.context.workspaceDir } : {}) },
-  };
+  return { params: value.params as BrowserActionParams, context: decodeContext(value.context) };
 }
-function decodeMatcha(value: unknown): { params: BrowserActionParams; capability: IabMatchaCapability; invocationId: string } {
-  if (!record(value) || Object.keys(value).length !== 3 || !record(value.params)
+function decodeCleanup(value: unknown): BrowserSessionCleanup {
+  if (!record(value) || Object.keys(value).length !== 2 || !(value.scope === 'executor' || value.scope === 'group')) {
+    throw Object.assign(new Error('A trusted browser run and cleanup scope are required'), { code: 'IAB_CONTEXT_INVALID' });
+  }
+  const context = decodeContext(value.context);
+  if (!context.runId) throw Object.assign(new Error('Browser cleanup requires an admitted run'), { code: 'IAB_CONTEXT_INVALID' });
+  return { context, scope: value.scope };
+}
+function decodeMatcha(value: unknown): { params: BrowserActionParams; capability: IabMatchaCapability; invocationId: string; inputMessageId: string } {
+  if (!record(value) || Object.keys(value).length !== 4 || !record(value.params)
     || typeof value.params.action !== 'string' || !browserIabToolActions.includes(value.params.action as BrowserActionParams['action'])
-    || !isIabMatchaCapability(value.capability) || !isIabInvocationId(value.invocationId)) {
+    || !isIabMatchaCapability(value.capability) || !isIabInvocationId(value.invocationId) || !isIabInvocationId(value.inputMessageId)) {
     throw Object.assign(new Error('A browser action and native Matcha invocation capability are required'), { code: 'IAB_CONTEXT_INVALID' });
   }
-  return { params: value.params as BrowserActionParams, capability: value.capability, invocationId: value.invocationId };
+  return { params: value.params as BrowserActionParams, capability: value.capability, invocationId: value.invocationId, inputMessageId: value.inputMessageId };
 }
 async function waitForCaller<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
@@ -123,6 +135,7 @@ async function publish(port: number, token: string): Promise<() => Promise<void>
 /** Private browser adapter transport. It exposes no CDP socket, renderer token or arbitrary target. */
 export async function startIabAgentBridge(input: {
   automation: IabAutomation;
+  cleanupSession(executorId: string, principalId: string, scope: 'executor' | 'group'): Promise<void>;
   ready: Promise<void>;
   isEnabled(): Promise<boolean>;
   controlSignal(): AbortSignal;
@@ -133,6 +146,8 @@ export async function startIabAgentBridge(input: {
   const authorization = Buffer.from(`Bearer ${token}`);
   const requests = new Set<AbortController>();
   const inflight = new Set<Promise<void>>();
+  const openclawRuns = new IabOpenClawRuns(input.cleanupSession);
+  const matchaRuns = new IabMatchaRuns(input.cleanupSession);
   let closed = false;
   const server = createServer((request, response) => {
     const pending = (async () => {
@@ -142,7 +157,8 @@ export async function startIabAgentBridge(input: {
       }
       const catalog = request.method === 'GET' && request.url === '/matcha/catalog';
       const matcha = request.url === '/matcha/browser';
-      if (!catalog && (request.method !== 'POST' || !matcha && request.url !== '/browser'
+      const sessionEnd = request.url === '/browser/session-end';
+      if (!catalog && (request.method !== 'POST' || !matcha && !sessionEnd && request.url !== '/browser'
         || !request.headers['content-type']?.startsWith('application/json'))) {
         request.resume(); json(response, 400, { error: { code: 'IAB_REQUEST_INVALID', message: 'Invalid browser bridge request' } }); return;
       }
@@ -155,7 +171,7 @@ export async function startIabAgentBridge(input: {
       request.once('aborted', abort);
       response.once('close', close);
       try {
-        input.assertControlCurrent();
+        if (!sessionEnd) input.assertControlCurrent();
         if (catalog) {
           request.resume();
           const enabled = await waitForCaller(input.isEnabled(), signal);
@@ -165,13 +181,19 @@ export async function startIabAgentBridge(input: {
           return;
         }
         const payload = await body(request);
+        if (sessionEnd) {
+          // Cleanup remains available after mode changes and caller disconnects.
+          await openclawRuns.end(decodeCleanup(payload));
+          json(response, 200, { result: { released: true } });
+          return;
+        }
         await waitForCaller(input.ready, signal);
         if (closed || !await waitForCaller(input.isEnabled(), signal)) throw Object.assign(new Error('Agent control of the in-app browser is disabled'), { code: 'IAB_DISABLED' });
         input.assertControlCurrent(); signal.throwIfAborted();
         if (matcha) {
           const decoded = decodeMatcha(payload);
           const runtime = await waitForCaller(input.runtime(), signal);
-          const lease = await acquireIabMatchaContext({ ...decoded, runtime, signal });
+          const lease = await acquireIabMatchaContext({ ...decoded, runtime, signal, runs: matchaRuns });
           try {
             lease.context.assertCurrent();
             const result = await input.automation.handleRequest(decoded.params, lease.context, lease.signal);
@@ -185,9 +207,10 @@ export async function startIabAgentBridge(input: {
           }
         } else {
           const decoded = decode(payload);
-          const context = await resolveIabOpenClawContext(decoded.context, signal);
-          context.assertCurrent();
-          const result = await input.automation.handleRequest(decoded.params, context, signal);
+          const result = await openclawRuns.execute(decoded.context, signal, (context, current) => {
+            context.assertCurrent();
+            return input.automation.handleRequest(decoded.params, context, current);
+          });
           signal.throwIfAborted();
           json(response, 200, { result });
         }
@@ -217,8 +240,14 @@ export async function startIabAgentBridge(input: {
         for (const controller of requests) controller.abort(new Error('Browser bridge is closing'));
         const stopped = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
         server.closeAllConnections();
+        const drainingRuns = Promise.allSettled([openclawRuns.close(), matchaRuns.close()]);
         await Promise.allSettled([...inflight]);
-        try { await stopped; } finally { await retire(); }
+        const outcomes = await drainingRuns;
+        try {
+          await stopped;
+          const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected').map((outcome) => outcome.reason);
+          if (failures.length) throw new AggregateError(failures, 'Browser run cleanup could not be confirmed');
+        } finally { await retire(); }
       })();
     },
   };

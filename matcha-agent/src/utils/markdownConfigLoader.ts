@@ -166,7 +166,8 @@ function rethrowSourceFailure(error: unknown, signal?: AbortSignal): void {
     isAbortError(error) ||
     (error instanceof Error &&
       (error.name === 'TimeoutError' || error.cause !== undefined))
-  ) throw error
+  )
+    throw error
 }
 
 /**
@@ -292,7 +293,9 @@ export function getProjectDirsUpToHome(
   cwd: string,
 ): string[] {
   if (currentInvestigationScope()) {
-    throw new InvestigationAdmissionError('investigation_sync_project_dirs_unavailable')
+    throw new InvestigationAdmissionError(
+      'investigation_sync_project_dirs_unavailable',
+    )
   }
   const dirs: string[] = []
   for (const current of projectDirAncestors(cwd, resolveStopBoundary(cwd))) {
@@ -314,7 +317,10 @@ export async function getProjectDirsUpToHomeAsync(
   if (!currentInvestigationScope()) return getProjectDirsUpToHome(subdir, cwd)
   requireInvestigationEffects(['source_read'])
   const dirs: string[] = []
-  for (const current of projectDirAncestors(cwd, await resolveStopBoundaryAsync(cwd))) {
+  for (const current of projectDirAncestors(
+    cwd,
+    await resolveStopBoundaryAsync(cwd),
+  )) {
     const claudeSubdir = join(current, '.claude', subdir)
     try {
       await statSourcePath(claudeSubdir)
@@ -327,7 +333,10 @@ export async function getProjectDirsUpToHomeAsync(
   return dirs
 }
 
-function* projectDirAncestors(cwd: string, gitRoot: string | null): Generator<string> {
+function* projectDirAncestors(
+  cwd: string,
+  gitRoot: string | null,
+): Generator<string> {
   const home = resolve(homedir()).normalize('NFC')
   let current = resolve(cwd)
 
@@ -379,7 +388,9 @@ const pendingMarkdownLoads = new WeakMap<
 
 export const loadMarkdownFilesForSubdir = memoize(
   (subdir: ClaudeConfigDirectory, cwd: string): Promise<MarkdownFile[]> => {
-    const loading = trackInvestigationOperation(loadMarkdownFilesForSubdirUncached(subdir, cwd))
+    const loading = trackInvestigationOperation(
+      loadMarkdownFilesForSubdirUncached(subdir, cwd),
+    )
     pendingMarkdownLoads.set(loading, currentInvestigationScope())
     void loading.then(
       () => {
@@ -405,11 +416,14 @@ export const loadMarkdownFilesForSubdir = memoize(
     const key = `${subdir}:${cwd}`
     const cached = loadMarkdownFilesForSubdir.cache.get(key)
     const scope = currentInvestigationScope()
-    if (cached && scope !== undefined && (
-      pendingMarkdownLoads.has(cached)
+    if (
+      cached &&
+      scope !== undefined &&
+      (pendingMarkdownLoads.has(cached)
         ? pendingMarkdownLoads.get(cached) !== scope
-        : !fulfilledMarkdownLoads.has(cached)
-    )) loadMarkdownFilesForSubdir.cache.delete(key)
+        : !fulfilledMarkdownLoads.has(cached))
+    )
+      loadMarkdownFilesForSubdir.cache.delete(key)
     return key
   },
 )
@@ -678,7 +692,8 @@ async function loadMarkdownFiles(dir: string): Promise<
   //
   // Why both? Ripgrep has poor startup performance in native builds.
   const scoped = currentInvestigationScope() !== undefined
-  const useNative = scoped || isEnvTruthy(process.env.CLAUDE_CODE_USE_NATIVE_FILE_SEARCH)
+  const useNative =
+    scoped || isEnvTruthy(process.env.CLAUDE_CODE_USE_NATIVE_FILE_SEARCH)
   const signal = investigationSignal() ?? AbortSignal.timeout(3000)
   let files: string[]
   try {
@@ -701,9 +716,11 @@ async function loadMarkdownFiles(dir: string): Promise<
   const results = await Promise.all(
     files.map(async filePath => {
       try {
-        const rawContent = (await readSourceBytes(filePath, {
-          signal: scoped ? signal : undefined,
-        })).toString('utf-8')
+        const rawContent = (
+          await readSourceBytes(filePath, {
+            signal: scoped ? signal : undefined,
+          })
+        ).toString('utf-8')
         const { frontmatter, content } = parseFrontmatter(rawContent, filePath)
 
         return {

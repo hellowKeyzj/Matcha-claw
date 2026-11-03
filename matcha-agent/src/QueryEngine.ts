@@ -52,6 +52,7 @@ import { currentInvestigation } from './world/investigation.js'
 import type { AttributionState } from './utils/commitAttribution.js'
 import { getGlobalConfig } from './utils/config.js'
 import { getCwd } from './utils/cwd.js'
+import { debugIdentifierHash, traceSessionTiming } from './utils/debug.js'
 import { isBareMode, isEnvTruthy } from './utils/envUtils.js'
 import { getFastModeState } from './utils/fastMode.js'
 import {
@@ -263,6 +264,11 @@ export class QueryEngine {
     const startTime = Date.now()
     const nativeStartedAt = performance.now()
     const inputMessageId = options?.uuid ?? randomUUID()
+    const tracing = process.env.MATCHACLAW_TRACE === '1'
+    const traceInputHash = tracing ? debugIdentifierHash(inputMessageId) : undefined
+    let tracedFirstStreamEvent = false
+    let tracedFirstContentDelta = false
+    let tracedAssistantResponseId: string | undefined
     const nativeInvestigation = currentInvestigation() !== undefined
     const tokenFields = [
       'input_tokens',
@@ -545,17 +551,35 @@ export class QueryEngine {
     // — the single largest controllable critical-path cost after module eval.
     // Transcript is still written (for post-hoc debugging); just not blocking.
     if (persistSession && messagesFromUserInput.length > 0) {
+      const recordStartedAt = tracing ? performance.now() : 0
+      traceSessionTiming('query.input.record.begin', () => ({
+        inputHash: traceInputHash,
+        entryCount: messages.length,
+        inputEntryCount: messagesFromUserInput.length,
+        awaited: !isBareMode() || nativeInvestigation,
+      }))
       const transcriptPromise = recordTranscript(messages)
       if (isBareMode() && !nativeInvestigation) {
         void transcriptPromise
+        traceSessionTiming('query.input.record.detached', () => ({ inputHash: traceInputHash }))
       } else {
         await transcriptPromise
+        traceSessionTiming('query.input.record.end', () => ({
+          inputHash: traceInputHash,
+          elapsedMs: performance.now() - recordStartedAt,
+        }))
         if (
           nativeInvestigation ||
           isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
           isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
         ) {
+          const flushStartedAt = tracing ? performance.now() : 0
+          traceSessionTiming('query.input.flush.begin', () => ({ inputHash: traceInputHash }))
           await flushSessionStorage()
+          traceSessionTiming('query.input.flush.end', () => ({
+            inputHash: traceInputHash,
+            elapsedMs: performance.now() - flushStartedAt,
+          }))
         }
       }
     }
@@ -577,6 +601,11 @@ export class QueryEngine {
       hasAcknowledgedInitialMessages = true
       for (const msgToAck of messagesToAck) {
         if (msgToAck.type === 'user') {
+          traceSessionTiming('query.input.ack', () => ({
+            inputHash: traceInputHash,
+            messageHash: debugIdentifierHash(msgToAck.uuid),
+            persistenceEnabled: persistSession,
+          }))
           yield {
             type: 'user',
             message: msgToAck.message,
@@ -589,7 +618,7 @@ export class QueryEngine {
         }
       }
     }
-    if (nativeInvestigation) yield* acknowledgeInitialMessages()
+    yield* acknowledgeInitialMessages()
 
     // Update the ToolPermissionContext based on user input processing (as necessary)
     setAppState(prev => ({
@@ -735,6 +764,9 @@ export class QueryEngine {
         }
       }
 
+      traceSessionTiming('query.result.ready', () => ({
+        inputHash: traceInputHash, outcome: 'success', resultKind: 'local_command',
+      }))
       yield {
         type: 'result',
         ...nativeResult(true),
@@ -883,8 +915,19 @@ export class QueryEngine {
     async function* withUsageSettlement() {
       try {
         yield* queryMessages
+      } catch (error) {
+        traceSessionTiming('query.failed', () => ({
+          inputHash: traceInputHash,
+          failure: 'query_iteration',
+          aborted: processUserInputContext.abortController.signal.aborted,
+        }))
+        throw error
       } finally {
         settleCompletedUsage()
+        traceSessionTiming('query.iteration.end', () => ({
+          inputHash: traceInputHash,
+          elapsedMs: performance.now() - nativeStartedAt,
+        }))
       }
     }
 
@@ -932,14 +975,26 @@ export class QueryEngine {
           // useLogMessages.ts fire-and-forgets. enqueueWrite is
           // order-preserving so fire-and-forget here is safe.
           if (message.type === 'assistant') {
+            if (tracing) {
+              const assistant = message as Message
+              const responseId = assistant.message?.id || assistant.uuid
+              if (responseId !== tracedAssistantResponseId) {
+                tracedAssistantResponseId = responseId
+                traceSessionTiming('query.assistant.record.begin', () => ({
+                  inputHash: traceInputHash,
+                  assistantHash: debugIdentifierHash(assistant.uuid),
+                  providerMessageHash: assistant.message?.id
+                    ? debugIdentifierHash(assistant.message.id) : undefined,
+                  entryCount: messages.length,
+                  awaited: false,
+                }))
+              }
+            }
             void recordTranscript(messages)
           } else {
             await recordTranscript(messages)
           }
         }
-
-        // Non-investigation inputs retain the original first-message ACK timing.
-        yield* acknowledgeInitialMessages()
       }
 
       if (message.type === 'user') {
@@ -997,6 +1052,32 @@ export class QueryEngine {
           const event = (
             message as unknown as { event: Record<string, unknown> }
           ).event
+          if (tracing) {
+            const milestone = event.type === 'message_start' ? 'message_start'
+              : event.type === 'message_stop' ? 'message_stop'
+              : event.type === 'message_delta' &&
+                  (event.delta as { stop_reason?: string | null })?.stop_reason != null
+                ? 'stop_delta'
+              : event.type === 'content_block_delta' && !tracedFirstContentDelta
+                ? 'first_content_delta' : undefined
+            if (!tracedFirstStreamEvent || milestone) {
+              traceSessionTiming('query.stream.milestone', () => {
+                const providerId = event.type === 'message_start'
+                  ? (event.message as { id?: string }).id : currentMessageId
+                return {
+                  inputHash: traceInputHash,
+                  milestone: milestone ?? 'first_event',
+                  firstEvent: !tracedFirstStreamEvent,
+                  providerMessageHash: providerId ? debugIdentifierHash(providerId) : undefined,
+                  assistantHash: event.type !== 'message_start' && currentAssistantMessage?.uuid
+                    ? debugIdentifierHash(currentAssistantMessage.uuid) : undefined,
+                }
+              })
+            }
+            tracedFirstStreamEvent = true
+            if (event.type === 'message_start') tracedFirstContentDelta = false
+            if (event.type === 'content_block_delta') tracedFirstContentDelta = true
+          }
           if (event.type === 'message_start') {
             const eventMessage = event.message as {
               id?: string
@@ -1112,6 +1193,9 @@ export class QueryEngine {
                 await flushSessionStorage()
               }
             }
+            traceSessionTiming('query.result.ready', () => ({
+              inputHash: traceInputHash, outcome: 'error_max_turns',
+            }))
             yield {
               type: 'result',
               ...nativeResult(),
@@ -1252,6 +1336,9 @@ export class QueryEngine {
             await flushSessionStorage()
           }
         }
+        traceSessionTiming('query.result.ready', () => ({
+          inputHash: traceInputHash, outcome: 'error_max_budget_usd',
+        }))
         yield {
           type: 'result',
           ...nativeResult(),
@@ -1299,6 +1386,9 @@ export class QueryEngine {
               await flushSessionStorage()
             }
           }
+          traceSessionTiming('query.result.ready', () => ({
+            inputHash: traceInputHash, outcome: 'error_max_structured_output_retries',
+          }))
           yield {
             type: 'result',
             ...nativeResult(),
@@ -1349,6 +1439,12 @@ export class QueryEngine {
           )?.type ?? 'none')
         : 'n/a'
 
+    traceSessionTiming('query.stream.end', () => ({
+      inputHash: traceInputHash,
+      providerMessageHash: currentMessageId ? debugIdentifierHash(currentMessageId) : undefined,
+      assistantHash: result?.type === 'assistant' ? debugIdentifierHash(result.uuid) : undefined,
+      aborted: this.abortController.signal.aborted,
+    }))
     // Flush buffered transcript writes before yielding result.
     // The desktop app kills the CLI process immediately after receiving the
     // result message, so any unflushed writes would be lost.
@@ -1357,11 +1453,20 @@ export class QueryEngine {
         isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
         isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
       ) {
+        const flushStartedAt = tracing ? performance.now() : 0
+        traceSessionTiming('query.result.flush.begin', () => ({ inputHash: traceInputHash }))
         await flushSessionStorage()
+        traceSessionTiming('query.result.flush.end', () => ({
+          inputHash: traceInputHash,
+          elapsedMs: performance.now() - flushStartedAt,
+        }))
       }
     }
 
     if (!isResultSuccessful(result, lastStopReason)) {
+      traceSessionTiming('query.result.ready', () => ({
+        inputHash: traceInputHash, outcome: 'error_during_execution',
+      }))
       yield {
         type: 'result',
         ...nativeResult(),
@@ -1418,6 +1523,10 @@ export class QueryEngine {
       isApiError = Boolean(result.isApiErrorMessage)
     }
 
+    traceSessionTiming('query.result.ready', () => ({
+      inputHash: traceInputHash,
+      outcome: isApiError ? 'api_error' : 'success',
+    }))
     yield {
       type: 'result',
       ...nativeResult(!isApiError),

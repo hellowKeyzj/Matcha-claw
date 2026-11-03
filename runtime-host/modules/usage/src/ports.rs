@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin};
 
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 
-use crate::domain::model::{UsageEntry, UsageReadError};
+use crate::domain::model::{UsageHistory, UsageReadError};
 
 pub type UsageFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -21,13 +21,13 @@ pub trait UsageOps: Send + Sync {
     fn usage_recent<'a>(
         &'a self,
         limit: usize,
-    ) -> UsageFuture<'a, Result<Vec<UsageEntry>, UsageReadError>>;
+    ) -> UsageFuture<'a, Result<UsageHistory, UsageReadError>>;
 
     fn session_usage_timeseries<'a>(
         &'a self,
         agent_id: &'a str,
         session_id: &'a str,
-    ) -> UsageFuture<'a, Result<Vec<UsageEntry>, UsageReadError>>;
+    ) -> UsageFuture<'a, Result<UsageHistory, UsageReadError>>;
 
     fn default_usage_limit(&self) -> usize;
 

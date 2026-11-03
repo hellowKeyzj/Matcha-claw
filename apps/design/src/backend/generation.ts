@@ -124,10 +124,10 @@ export function createGenerations(context: AppPluginContext, documents: Document
     const referenceAssetIds = request.referenceAssetIds ?? [];
     const extraImages = ['annotationAssetId', 'markedAssetId', 'logoAssetId', 'modelAssetId'] as const;
     if (sourceLayerIds.length + referenceAssetIds.length + extraImages.filter((field) => request[field]).length > 16) invalid('Use at most 16 source and reference images in total.');
-    const images: { data: string; mimeType: string }[] = [];
-    const inputAssets: Asset[] = [];
+    const inputs: { asset: Asset; image: { data: string; mimeType: string } }[] = [];
+    const markedOnly = request.action === 'edit-text' || (request.action === 'erase' && request.annotationAssetId !== undefined);
     const sourceInputs = new Map<string, { asset: Asset; image: { data: string; mimeType: string }; width?: number; height?: number }>();
-    let firstSource: { width?: number; height?: number } | undefined;
+    let firstSource: { asset: Asset; width?: number; height?: number } | undefined;
     let sourceCrop: ImageLayer['crop'];
     for (const layerId of sourceLayerIds) {
       const layer = document.layers.find((layer) => layer.id === layerId);
@@ -143,10 +143,9 @@ export function createGenerations(context: AppPluginContext, documents: Document
         sourceInputs.set(key, input);
       }
       if (!firstSource) { firstSource = input; sourceCrop = layer.crop; }
-      images.push(input.image);
-      inputAssets.push(input.asset);
+      if (!markedOnly) inputs.push(input);
     }
-    if (requiresImage.has(request.action) && !images.length) invalid(`${request.action} requires a real source image layer. Import an image and select it first.`);
+    if (requiresImage.has(request.action) && !firstSource) invalid(`${request.action} requires a real source image layer. Import an image and select it first.`);
     for (const field of extraImages) {
       const assetId = request[field];
       if (!assetId) continue;
@@ -154,30 +153,30 @@ export function createGenerations(context: AppPluginContext, documents: Document
       const { asset } = source;
       signal.throwIfAborted();
       if (!asset.mimeType.startsWith('image/')) invalid(`${field} must reference an image asset.`);
-      const sourceSize = field === 'annotationAssetId' ? inputAssets[0] : firstSource;
+      const sourceSize = field === 'annotationAssetId' ? firstSource?.asset : firstSource;
       if ((field === 'annotationAssetId' || field === 'markedAssetId')
         && (asset.mimeType !== 'image/png' || asset.width !== sourceSize?.width || asset.height !== sourceSize?.height)) invalid(`${field} must reference a PNG with the same dimensions as its source image.`);
       const image = await prepareImageInput(source, field === 'annotationAssetId' ? sourceCrop : undefined, signal);
-      images.push({ data: image.bytes.toString('base64'), mimeType: image.mimeType });
-      inputAssets.push(asset);
+      const input = { asset, image: { data: image.bytes.toString('base64'), mimeType: image.mimeType } };
+      if (field === 'annotationAssetId' && request.action === 'edit') inputs.unshift(input);
+      else inputs.push(input);
     }
     for (const assetId of referenceAssetIds) {
       const source = await assets.read(assetId);
       signal.throwIfAborted();
       if (!source.asset.mimeType.startsWith('image/')) invalid(`Reference asset ${assetId} must be an image.`);
       const image = await prepareImageInput(source, undefined, signal);
-      images.push({ data: image.bytes.toString('base64'), mimeType: image.mimeType });
-      inputAssets.push(source.asset);
+      inputs.push({ asset: source.asset, image: { data: image.bytes.toString('base64'), mimeType: image.mimeType } });
     }
-    const size = targetSize(request, firstSource ?? inputAssets[0] ?? {});
+    const size = targetSize(request, firstSource ?? inputs[0]?.asset ?? {});
     const editing: GenerationEditing = {
       ...(size ? { size: `${size.width}x${size.height}` } : request.size === undefined ? {} : { size: request.size }),
       ...(request.action === 'video' && request.durationSeconds !== undefined ? { durationSeconds: request.durationSeconds } : {}),
       ...(request.action === 'storyboard' ? { scenes: request.scenes } : {}),
       ...(request.referenceAssetIds === undefined ? {} : { referenceAssetIds }),
     };
-    const source: Pick<AppModelRequest, 'images'> = images.length ? { images } : {};
-    return { source, sourceLayerIds, inputAssetIds: inputAssets.map((asset) => asset.id), size, editing };
+    const source: Pick<AppModelRequest, 'images'> = inputs.length ? { images: inputs.map((input) => input.image) } : {};
+    return { source, sourceLayerIds, inputAssetIds: inputs.map((input) => input.asset.id), size, editing };
   }
 
   function reservations(documentId: string, generationId: string): Placement[] {
@@ -373,7 +372,7 @@ export function createGenerations(context: AppPluginContext, documents: Document
       const scenes = request.action === 'storyboard' ? request.scenes! : [{ prompt: request.prompt, durationSeconds: request.durationSeconds }];
       const sceneVideos: Asset[] = [];
       const modelRequests: AppModelRequest[] = scenes.map((scene) => ({
-        kind: isVideo ? 'video' : 'image', prompt: generationPrompt(request, scene.prompt, prepared.size),
+        kind: isVideo ? 'video' : 'image', prompt: generationPrompt(request, scene.prompt),
         ...prepared.source, ...(request.selectionId ? { selectionId: request.selectionId } : {}),
         ...(prepared.editing.size === undefined ? {} : { size: prepared.editing.size }),
         ...(scene.durationSeconds === undefined ? {} : { durationSeconds: scene.durationSeconds }),

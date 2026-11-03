@@ -1,4 +1,5 @@
 import type { SessionRenderAttachedFile } from '@/types/session/tool-card';
+import type { SessionIdentity } from '@/types/desktop/runtime-address';
 import {
   builtinFileFormats,
   classifyFileContentType,
@@ -26,6 +27,7 @@ export interface ArtifactPreviewTarget {
   lineStats?: GeneratedFileLineStats;
   toolId?: string;
   relativePath?: string;
+  mediaSource?: { reference: string; sessionIdentity: SessionIdentity };
 }
 
 export function formatWorkspacePathForDisplay(value: string): string {
@@ -63,7 +65,7 @@ function parseWorkspacePath(value: string, trimTrailingSeparators = false): Pars
     return null;
   }
 
-  const source = normalizeWorkspacePathSeparators(formatWorkspacePathForDisplay(value));
+  const source = normalizeWorkspacePathSeparators(formatWorkspacePathForDisplay(value)).replace(/^(?:\.\/)+/, '');
   const normalized = trimTrailingSeparators ? trimWorkspaceRootTrailingSeparators(source) : source;
   if (normalized.includes(':') && !/^[A-Za-z]:\//u.test(normalized)) {
     return null;
@@ -111,7 +113,8 @@ export function resolveWorkspaceRelativePath(
   displayPath: string,
   workspaceRoot?: string,
 ): string | null {
-  const candidate = parseWorkspacePath(displayPath);
+  if (/^~[\\/]/u.test(displayPath)) return null;
+  const candidate = parseWorkspacePath(displayPath, true);
   if (!candidate) {
     return null;
   }
@@ -144,6 +147,15 @@ export function resolveWorkspaceRelativePath(
   return candidate.segments.slice(root.segments.length).join('/');
 }
 
+export function resolveArtifactLocalPath(filePath: string, workspaceRoot?: string): string | null {
+  if (!filePath || filePath.includes('\0')) return null;
+  if (/^(?:[A-Za-z]:[\\/]|\/|\\\\|~[\\/])/u.test(filePath)) return filePath;
+  const relativePath = resolveWorkspaceRelativePath(filePath);
+  if (relativePath == null || !workspaceRoot || !resolveArtifactLocalPath(workspaceRoot)) return null;
+  const separator = workspaceRoot.includes('\\') ? '\\' : '/';
+  return `${workspaceRoot.replace(/[\\/]+$/u, '')}${separator}${relativePath.replace(/\//g, separator)}`;
+}
+
 export function buildArtifactPreviewTargetFromGeneratedFile(file: GeneratedFile): ArtifactPreviewTarget {
   return {
     filePath: file.filePath,
@@ -160,21 +172,25 @@ export function buildArtifactPreviewTargetFromGeneratedFile(file: GeneratedFile)
   };
 }
 
-export function buildArtifactPreviewTargetFromAttachedFile(file: SessionRenderAttachedFile): ArtifactPreviewTarget | null {
-  if (!file.filePath) {
-    return null;
-  }
-  const isDirectory = file.mimeType === DIRECTORY_MIME_TYPE;
-  const ext = extnameOf(file.filePath);
-  const mimeType = isDirectory ? DIRECTORY_MIME_TYPE : (file.mimeType || getMimeTypeForPath(file.filePath));
+export function buildArtifactPreviewTargetFromAttachedFile(
+  file: SessionRenderAttachedFile,
+  sessionIdentity?: SessionIdentity,
+): ArtifactPreviewTarget | null {
+  if (file.mediaReference && !sessionIdentity) return null;
+  const filePath = file.mediaReference ? file.fileName : file.filePath;
+  if (!filePath) return null;
+  const isDirectory = !file.mediaReference && file.mimeType === DIRECTORY_MIME_TYPE;
+  const ext = extnameOf(filePath);
+  const mimeType = isDirectory ? DIRECTORY_MIME_TYPE : (file.mimeType || getMimeTypeForPath(filePath));
   return {
-    filePath: file.filePath,
-    fileName: file.fileName || file.filePath.split(/[\\/]/).pop() || 'file',
+    filePath,
+    fileName: file.fileName || filePath.split(/[\\/]/).pop() || 'file',
     ext,
     mimeType,
     contentType: isDirectory ? 'binary' : classifyFileContentType(ext, mimeType),
     isDirectory,
     fileSize: file.fileSize > 0 ? file.fileSize : undefined,
+    ...(file.mediaReference && sessionIdentity ? { mediaSource: { reference: file.mediaReference, sessionIdentity } } : {}),
   };
 }
 

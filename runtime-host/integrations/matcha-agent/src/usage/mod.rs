@@ -3,7 +3,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{client::Client, driver::MatchaRuntimeDriver};
-use ::usage::{UsageEntry, UsageOps, UsageReadError, ports::UsageFuture};
+use ::usage::{
+    UsageCoverage, UsageEntry, UsageHistory, UsageOps, UsageReadError, UsageUnknownEntry,
+    UsageUnknownReason, ports::UsageFuture,
+};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1_000;
@@ -13,7 +16,7 @@ impl UsageOps for MatchaRuntimeDriver {
     fn usage_recent<'a>(
         &'a self,
         limit: usize,
-    ) -> UsageFuture<'a, Result<Vec<UsageEntry>, UsageReadError>> {
+    ) -> UsageFuture<'a, Result<UsageHistory, UsageReadError>> {
         Box::pin(async move {
             if limit == 0 || limit > MAX_LIMIT {
                 return Err(UsageReadError::Unavailable);
@@ -24,7 +27,19 @@ impl UsageOps for MatchaRuntimeDriver {
                 json!({ "limit": limit }),
             )
             .await?;
-            page.entries.into_iter().map(project).collect()
+            let mut entries = Vec::with_capacity(page.entries.len());
+            let mut unknown_entries = Vec::new();
+            for point in page.entries {
+                project(point, &mut entries, &mut unknown_entries)?;
+            }
+            Ok(UsageHistory {
+                entries,
+                coverage: UsageCoverage::Observed {
+                    has_more: page.next_before.is_some(),
+                    native_outcome_unknown: page.native_outcome_unknown,
+                    unknown_entries,
+                },
+            })
         })
     }
 
@@ -32,11 +47,13 @@ impl UsageOps for MatchaRuntimeDriver {
         &'a self,
         agent_id: &'a str,
         session_id: &'a str,
-    ) -> UsageFuture<'a, Result<Vec<UsageEntry>, UsageReadError>> {
+    ) -> UsageFuture<'a, Result<UsageHistory, UsageReadError>> {
         Box::pin(async move {
             let client = self.native_client();
             let mut before = None;
             let mut entries = Vec::new();
+            let mut unknown_entries = Vec::new();
+            let mut native_outcome_unknown = false;
             loop {
                 let page = read_page(
                     &client,
@@ -47,11 +64,12 @@ impl UsageOps for MatchaRuntimeDriver {
                     }),
                 )
                 .await?;
+                native_outcome_unknown |= page.native_outcome_unknown;
                 for point in page.entries {
                     if point.session_id != session_id || point.agent_id != agent_id {
                         return Err(UsageReadError::Unavailable);
                     }
-                    entries.push(project(point)?);
+                    project(point, &mut entries, &mut unknown_entries)?;
                 }
                 let Some(next) = page.next_before else { break };
                 if next.session_id != session_id
@@ -62,7 +80,15 @@ impl UsageOps for MatchaRuntimeDriver {
                 before = Some(next);
             }
             entries.reverse();
-            Ok(entries)
+            unknown_entries.reverse();
+            Ok(UsageHistory {
+                entries,
+                coverage: UsageCoverage::Observed {
+                    has_more: false,
+                    native_outcome_unknown,
+                    unknown_entries,
+                },
+            })
         })
     }
 
@@ -117,6 +143,7 @@ struct QueryUsage {
     status: String,
     scope: String,
     value: Tokens,
+    reason: Option<UsageUnknownReason>,
 }
 
 #[derive(Deserialize)]
@@ -136,24 +163,48 @@ async fn read_page(client: &Client, method: &str, params: Value) -> Result<Page,
         .map_err(|_| UsageReadError::Unavailable)?;
     let page: Page = serde_json::from_value(value).map_err(|_| UsageReadError::Unavailable)?;
     // An empty page reports no metering observations, not zero usage.
-    if page.coverage != "observedDurableResultsOnly" || page.native_outcome_unknown {
+    if page.coverage != "observedDurableResultsOnly" {
         return Err(UsageReadError::Unavailable);
     }
     Ok(page)
 }
 
-fn project(point: Point) -> Result<UsageEntry, UsageReadError> {
-    if point.usage.status != "available"
-        || point.usage.scope != "observedNativeQuery"
-        || point.instance_id.as_deref().is_none_or(str::is_empty)
-        || point.uuid.as_deref().is_none_or(str::is_empty)
+fn project(
+    point: Point,
+    entries: &mut Vec<UsageEntry>,
+    unknown_entries: &mut Vec<UsageUnknownEntry>,
+) -> Result<(), UsageReadError> {
+    if point.usage.scope != "observedNativeQuery"
         || point.seq == 0
+        || point.seq > i64::MAX as u64
         || !safe_session_id(&point.session_id)
         || !safe_agent_id(&point.agent_id)
     {
         return Err(UsageReadError::Unavailable);
     }
-    // The existing public chart DTO has no unknown/partial token representation.
+    let timestamp = DateTime::from_timestamp_millis(
+        i64::try_from(point.at_ms).map_err(|_| UsageReadError::Unavailable)?,
+    )
+    .ok_or(UsageReadError::Unavailable)?
+    .to_rfc3339_opts(SecondsFormat::Millis, true);
+    match (point.usage.status.as_str(), point.usage.reason) {
+        ("unknown", Some(reason)) => {
+            unknown_entries.push(UsageUnknownEntry {
+                session_id: point.session_id,
+                agent_id: point.agent_id,
+                timestamp,
+                reason,
+            });
+            return Ok(());
+        }
+        ("available", None) => {}
+        _ => return Err(UsageReadError::Unavailable),
+    }
+    if point.instance_id.as_deref().is_none_or(str::is_empty)
+        || point.uuid.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(UsageReadError::Unavailable);
+    }
     let [Some(input), Some(output), Some(read), Some(write)] = [
         point.usage.value.input_tokens,
         point.usage.value.output_tokens,
@@ -167,12 +218,7 @@ fn project(point: Point) -> Result<UsageEntry, UsageReadError> {
         .try_fold(0_u64, |sum, value| sum.checked_add(value))
         .filter(|total| *total <= MAX_SAFE_INTEGER)
         .ok_or(UsageReadError::Unavailable)?;
-    let timestamp = DateTime::from_timestamp_millis(
-        i64::try_from(point.at_ms).map_err(|_| UsageReadError::Unavailable)?,
-    )
-    .ok_or(UsageReadError::Unavailable)?
-    .to_rfc3339_opts(SecondsFormat::Millis, true);
-    Ok(UsageEntry {
+    entries.push(UsageEntry {
         session_id: point.session_id,
         agent_id: point.agent_id,
         timestamp,
@@ -185,7 +231,8 @@ fn project(point: Point) -> Result<UsageEntry, UsageReadError> {
         cache_write_tokens: write,
         total_tokens: total,
         cost_usd: None,
-    })
+    });
+    Ok(())
 }
 
 fn safe_session_id(value: &str) -> bool {

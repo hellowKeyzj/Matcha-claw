@@ -7,34 +7,42 @@ type ScriptRequest = Extract<BrowserUtilityRequest, { kind: 'scripts' }>;
 type SourceMapRequest = Extract<BrowserUtilityRequest, { kind: 'sourceMap' }>;
 
 export async function readScripts(page: IabAutomationPage, request: ScriptRequest, operation: Operation): Promise<IabJsonObject[]> {
-  if (request.includeSource && !request.filter) throw iabError('IAB_SCRIPT_FILTER_REQUIRED', 'includeSource requires a URL filter');
-  const frames = await page.refreshFrames(operation);
+  if (request.includeSource === true && !request.filter) throw iabError('IAB_SCRIPT_FILTER_REQUIRED', 'includeSource requires a URL filter');
+  const frames = await page.executor.listChildFrames({ signal: operation.signal, timeoutMs: Math.max(1, operation.deadline - Date.now()), assertCurrent: operation.assertCurrent ?? page.assertCurrent });
   const sessions = new Set<string | undefined>();
   const resumes = new Set<Promise<void>>();
   const failures: unknown[] = [];
+  const parsedScripts: IabJsonObject[] = [];
   const result: IabJsonObject[] = [];
   const stop = page.executor.onEvent((event) => {
-    if (event.method !== 'Debugger.paused' || !sessions.has(event.sessionId)) return;
+    if (!sessions.has(event.sessionId)) return;
+    if (event.method === 'Debugger.scriptParsed' && typeof event.params.scriptId === 'string' && event.params.scriptId && event.params.scriptLanguage !== 'WebAssembly') {
+      parsedScripts.push({ ...event.params, url: typeof event.params.url === 'string' ? event.params.url : '', ...(event.sessionId ? { sessionId: event.sessionId } : {}) });
+    }
+    if (event.method !== 'Debugger.paused') return;
     try {
-      const task = page.send('Debugger.resume', undefined, operation, event.sessionId).then(() => {}, (error: unknown) => { failures.push(error); });
+      const task = page.send('Debugger.resume', undefined, operation, event.sessionId).then(() => {}, (error: unknown) => {
+        try { rethrowOperationFailure(error, page, operation); }
+        catch (failure) { failures.push(failure); }
+      });
       resumes.add(task); page.trackOperation(task);
       void task.then(() => resumes.delete(task));
     } catch (error) { failures.push(error); }
   });
   try {
-    for (const sessionId of new Set(frames.map((frame) => frame.sessionId))) {
+    for (const sessionId of new Set([undefined, ...frames.map((frame) => frame.sessionId)])) {
       sessions.add(sessionId);
-      for (const [key, script] of page.scripts) if (script.sessionId === sessionId) page.scripts.delete(key);
       await page.send('Debugger.enable', undefined, operation, sessionId);
     }
     await page.pause(150, operation);
     const filter = request.filter?.toLowerCase();
-    const limit = Math.min(1000, Math.max(1, Math.floor(request.limit ?? 100)));
-    const maxChars = Math.min(1048576, Math.max(1, Math.floor(request.maxChars ?? 131072)));
-    const scripts = [...page.scripts.values()].filter((script) => script.scriptLanguage !== 'WebAssembly' && (filter ? String(script.url).toLowerCase().includes(filter) : !!script.url)).slice(-limit);
+    const limit = typeof request.limit === 'number' && Number.isFinite(request.limit) && request.limit > 0 ? Math.floor(request.limit) : 100;
+    const maxChars = typeof request.maxChars === 'number' && Number.isFinite(request.maxChars) && request.maxChars > 0 ? Math.min(1048576, Math.floor(request.maxChars)) : 131072;
+    const matched = parsedScripts.filter((script) => filter ? String(script.url).toLowerCase().includes(filter) : !!script.url);
+    const scripts = matched.length > limit ? matched.slice(matched.length - limit) : matched;
     for (const script of scripts) {
       const entry: IabJsonObject = { scriptId: script.scriptId, url: script.url, ...(typeof script.length === 'number' ? { length: script.length } : {}), ...(script.hash ? { hash: script.hash } : {}), ...(script.sourceMapURL ? { sourceMappingURL: script.sourceMapURL } : {}), ...(script.sessionId ? { sessionId: script.sessionId } : {}) };
-      if (request.includeSource) {
+      if (request.includeSource === true) {
         try {
           const source = await page.send<any>('Debugger.getScriptSource', { scriptId: script.scriptId }, operation, script.sessionId as string | undefined);
           let text: string = typeof source?.scriptSource === 'string' ? source.scriptSource : '';
@@ -79,14 +87,14 @@ export async function readSourceMap(page: IabAutomationPage, request: SourceMapR
   }
   base.sourceMapURL = sourceMapURL;
   let map: SourceMap;
-  try { map = parseSourceMap(await loadSourceMap(page, sourceMapURL, String(script.url), operation)); }
+  try { map = parseSourceMap(await loadSourceMap(page, sourceMapURL, String(script.url), operation, typeof script.sessionId === 'string' ? script.sessionId : undefined)); }
   catch (error) {
     rethrowOperationFailure(error, page, operation);
     return { ...base, error: `source map load/parse failed: ${error instanceof Error ? error.message : String(error)}` };
   }
-  if (request.line === undefined) return { ...base, sources: map.sources };
-  if (!Number.isFinite(request.line) || request.line < 1) return { ...base, error: 'line must be a positive 1-based integer' };
-  const line = Math.floor(request.line), column = request.column !== undefined && request.column >= 1 ? request.column : 1;
+  if (typeof request.line !== 'number' || !Number.isFinite(request.line)) return { ...base, sources: map.sources };
+  if (request.line < 1) return { ...base, error: 'line must be a positive 1-based integer' };
+  const line = Math.floor(request.line), column = typeof request.column === 'number' && Number.isFinite(request.column) && request.column >= 1 ? request.column : 1;
   const position = originalPosition(map, line, column);
   return position ? { ...base, requested: { line, column }, original: position } : { ...base, requested: { line, column }, error: 'generated position maps to no original source (unmapped region)' };
 }
@@ -97,7 +105,7 @@ function rethrowOperationFailure(error: unknown, page: IabAutomationPage, operat
   if (operation.deadline <= Date.now() || error instanceof Error && (error.name === 'TimeoutError' || 'code' in error && typeof error.code === 'string' && error.code.startsWith('IAB_'))) throw error;
 }
 
-async function loadSourceMap(page: IabAutomationPage, sourceMapURL: string, scriptURL: string, operation: Operation): Promise<string> {
+async function loadSourceMap(page: IabAutomationPage, sourceMapURL: string, scriptURL: string, operation: Operation, sessionId?: string): Promise<string> {
   operation.signal.throwIfAborted();
   (operation.assertCurrent ?? page.assertCurrent)();
   if (operation.deadline <= Date.now()) throw iabError('IAB_TIMEOUT', 'Browser operation timed out');
@@ -116,9 +124,9 @@ async function loadSourceMap(page: IabAutomationPage, sourceMapURL: string, scri
   }
   const url = safeMapUrl(sourceMapURL, 'source map'), scriptUrl = safeMapUrl(scriptURL, 'script');
   if (url.origin !== scriptUrl.origin) throw new Error('external source map must be same-origin with its script');
-  const current = safeMapUrl((await page.send<any>('Page.getFrameTree', undefined, operation))?.frameTree?.frame?.url ?? '', 'page');
+  const current = safeMapUrl((await page.send<any>('Page.getFrameTree', undefined, operation, sessionId))?.frameTree?.frame?.url ?? '', 'page');
   if (url.origin !== current.origin) throw new Error('external source map must be same-origin with the page');
-  const response = await page.send<any>('Runtime.evaluate', { expression: `(async()=>{const response=await fetch(${JSON.stringify(url.href)},{credentials:'omit',redirect:'error'});if(!response.ok)throw new Error('source map request failed: '+response.status);const text=await response.text();if(text.length>${maxSize})throw new Error('source map exceeds size limit');return text;})()`, returnByValue: true, awaitPromise: true }, operation);
+  const response = await page.send<any>('Runtime.evaluate', { expression: `(async()=>{const response=await fetch(${JSON.stringify(url.href)},{credentials:'omit',redirect:'error'});if(!response.ok)throw new Error('source map request failed: '+response.status);const text=await response.text();if(text.length>${maxSize})throw new Error('source map exceeds size limit');return text;})()`, returnByValue: true, awaitPromise: true }, operation, sessionId);
   const text = response?.result?.value;
   if (!response?.exceptionDetails && typeof text === 'string' && text) return text;
   throw new Error('same-origin source map fetch failed');

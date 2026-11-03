@@ -89,7 +89,10 @@ export async function findModifiedFiles(
     filePaths.map(async filePath => {
       if (currentInvestigationScope()) signal?.throwIfAborted()
       requireInvestigationEffects([])
-      const stat = await statSourcePath(filePath, { followSymlinks: false, signal })
+      const stat = await statSourcePath(filePath, {
+        followSymlinks: false,
+        signal,
+      })
       // Skip if it became a symlink between readdir and stat (race condition)
       if (stat.isSymbolicLink()) {
         return null
@@ -105,7 +108,11 @@ export async function findModifiedFiles(
   for (const result of statResults) {
     if (result.status === 'rejected') {
       rethrowInvestigationAdmission(result.reason)
-      if (currentInvestigationScope() && result.reason instanceof Error && result.reason.cause !== undefined) {
+      if (
+        currentInvestigationScope() &&
+        result.reason instanceof Error &&
+        result.reason.cause !== undefined
+      ) {
         throw result.reason
       }
       // File may have been deleted between readdir and stat

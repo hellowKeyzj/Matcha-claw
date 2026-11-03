@@ -18,6 +18,7 @@ export interface MessagePartProps {
   itemKey: string;
   createdAt?: number;
   renderText?: string;
+  attachedFiles?: ReadonlyArray<AttachedFileMeta>;
   isStreaming: boolean;
   showThinking: boolean;
   collapseVersion: number;
@@ -30,7 +31,7 @@ export interface MessagePartProps {
   endpointSessionId?: string | null;
   onBodyClick: () => void;
   onPreview: (item: MessageLightboxState) => void;
-  onOpenFile?: (file: AttachedFileMeta) => void;
+  onOpenFile?: (file: AttachedFileMeta) => boolean | void;
   onOpenToolSurface: (tool: SessionRenderToolCard, identity: SessionIdentity) => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
@@ -78,6 +79,13 @@ export interface ImagePreviewAction {
   readonly component: ComponentType<ImagePreviewActionProps>;
 }
 
+export interface MessageContextTag {
+  readonly pluginId: string;
+  readonly digest: string;
+  readonly tag: string;
+}
+
+export const messageContextTags = defineExtensionPoint<MessageContextTag>('message-rendering.context-tags');
 export const imagePreviewActions = defineExtensionPoint<ImagePreviewAction>('message-rendering.image-preview-actions');
 export const toolRenderers = defineExtensionPoint<ToolRendererContribution>('message-rendering.tools');
 export const messageParts = defineExtensionPoint<MessagePartRenderer>('message-rendering.parts');

@@ -1,21 +1,9 @@
-export type BrowserTabRecord = {
+import type { PageOwnership } from './page-ownership.js'
+
+export type BrowserTabRecord = PageOwnership & {
   targetId: string
-  kind: 'agent' | 'retained'
   createdAt: number
   lastCommandAt: number
-  sessionKey?: string
-  rootSessionKey?: string
-}
-
-function resolveRootSessionKey(sessionKey?: string): string | undefined {
-  if (!sessionKey) return undefined
-  let current = sessionKey
-  while (current.startsWith('agent:')) {
-    const splitIndex = current.indexOf(':sub:')
-    if (splitIndex === -1) break
-    current = current.slice(6, splitIndex)
-  }
-  return current
 }
 
 export class BrowserTabState {
@@ -24,18 +12,18 @@ export class BrowserTabState {
   private currentTarget: string | null = null
   private syncChain = Promise.resolve()
 
-  registerTab(targetId: string, options: { retain?: boolean; sessionKey?: string } = {}): void {
+  registerTab(targetId: string, options: Partial<PageOwnership> = {}): void {
     if (!targetId || this.recentlyClosed.has(targetId)) return
     const existing = this.tabs.get(targetId)
     const now = Date.now()
-    const sessionKey = options.sessionKey ?? existing?.sessionKey
     this.tabs.set(targetId, {
       targetId,
-      kind: options.retain ? 'retained' : 'agent',
+      createdBy: options.createdBy !== undefined ? options.createdBy : existing?.createdBy ?? null,
+      claimedBy: options.claimedBy !== undefined ? options.claimedBy : existing?.claimedBy ?? null,
+      sessionGroupId: options.sessionGroupId !== undefined ? options.sessionGroupId : existing?.sessionGroupId ?? null,
+      retained: options.retained ?? existing?.retained ?? false,
       createdAt: existing?.createdAt ?? now,
       lastCommandAt: now,
-      sessionKey,
-      rootSessionKey: sessionKey ? resolveRootSessionKey(sessionKey) : existing?.rootSessionKey,
     })
   }
 
@@ -65,24 +53,24 @@ export class BrowserTabState {
   markRetained(targetId: string, retained: boolean): void {
     const current = this.tabs.get(targetId)
     if (!current) return
-    current.kind = retained ? 'retained' : 'agent'
+    current.retained = retained
   }
 
   get agentTabCount(): number {
-    return this.tabs.size
+    return [...this.tabs.values()].filter((entry) => entry.createdBy !== null).length
   }
 
   get retainedTabCount(): number {
     let count = 0
     for (const entry of this.tabs.values()) {
-      if (entry.kind === 'retained') count += 1
+      if (entry.createdBy && entry.retained) count += 1
     }
     return count
   }
 
   get nonRetainedIds(): string[] {
     return [...this.tabs.entries()]
-      .filter(([, entry]) => entry.kind === 'agent')
+      .filter(([, entry]) => entry.createdBy && !entry.retained)
       .map(([targetId]) => targetId)
   }
 
@@ -90,22 +78,16 @@ export class BrowserTabState {
     return [...this.tabs.keys()]
   }
 
-  getTargetIdsBySessionTree(sessionKey: string): string[] {
-    return [...this.tabs.values()]
-      .filter((entry) => entry.rootSessionKey === sessionKey)
-      .map((entry) => entry.targetId)
-  }
-
   getTab(targetId?: string): BrowserTabRecord | undefined {
     return targetId ? this.tabs.get(targetId) : undefined
   }
 
   isAgent(targetId: string): boolean {
-    return this.tabs.has(targetId)
+    return Boolean(this.tabs.get(targetId)?.createdBy)
   }
 
   isRetained(targetId: string): boolean {
-    return this.tabs.get(targetId)?.kind === 'retained'
+    return this.tabs.get(targetId)?.retained === true
   }
 
   setCurrentTarget(targetId: string): void {
@@ -136,7 +118,7 @@ export class BrowserTabState {
     const now = Date.now()
     const result: string[] = []
     for (const [targetId, entry] of this.tabs.entries()) {
-      if (entry.kind !== 'agent') continue
+      if (!entry.createdBy || entry.retained) continue
       if (now - entry.lastCommandAt > idleMs) {
         result.push(targetId)
       }

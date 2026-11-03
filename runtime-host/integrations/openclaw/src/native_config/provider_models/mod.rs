@@ -19,8 +19,6 @@ use crate::native_config::{
     },
 };
 
-const MEDIA_PLUGIN_ID: &str = "matchaclaw-media";
-
 /// The private OpenClaw configuration effect of the desired provider-model catalog.
 ///
 /// This is not runtime acceptance, health, Applied evidence, or an observation.
@@ -92,13 +90,10 @@ impl ProviderModelRuntimeIdentity {
 
 pub fn public_provider_model_ref(
     provider_key: &str,
-    kind: ProviderAccountKind,
+    _kind: ProviderAccountKind,
     model_id: &str,
 ) -> String {
-    match kind {
-        ProviderAccountKind::Chat => format!("{provider_key}/{model_id}"),
-        ProviderAccountKind::Media => format!("{MEDIA_PLUGIN_ID}/{provider_key}/{model_id}"),
-    }
+    format!("{provider_key}/{model_id}")
 }
 
 pub fn public_provider_model_identities(
@@ -225,11 +220,32 @@ impl ProviderModelProjection {
             .collect::<BTreeMap<_, _>>();
         let keys = projection_keys(&enabled, true)?;
         for (account_id, account) in &enabled {
-            if !required_auth_accounts.contains(account.id())
-                || account_failures
-                    .iter()
-                    .any(|failure| failure.account_id == *account_id)
+            if account_failures
+                .iter()
+                .any(|failure| failure.account_id == *account_id)
             {
+                continue;
+            }
+            if account.configuration().kind() == ProviderAccountKind::Media
+                && account
+                    .configuration()
+                    .media_protocol()
+                    .is_some_and(|protocol| media_protocol(protocol).is_none())
+            {
+                account_failures.push(ProviderAccountExecution {
+                    account_id: account_id.clone(),
+                    account_revision: account.revision().get(),
+                    execution: ProviderAccountExecutionStatus::Unsupported,
+                    diagnostic: Some(ProviderCallDiagnostic {
+                        reason: Some(
+                            ProviderCallDiagnosticReason::ProviderAccountConfigurationInvalid,
+                        ),
+                        private_resolver_code: None,
+                    }),
+                });
+                continue;
+            }
+            if !required_auth_accounts.contains(account.id()) {
                 continue;
             }
             let Some(credential) = account.configuration().credential() else {
@@ -400,16 +416,35 @@ impl<'a> ProjectionPlan<'a> {
                     }
                 }
                 ProviderAccountKind::Media => {
-                    let provider = media_models(account, key.as_str(), &models)?;
                     for model in &models {
                         valid_model_references.insert(format!(
-                            "{MEDIA_PLUGIN_ID}/{}/{}",
+                            "{}/{}",
                             key.as_str(),
                             model.model_id()
                         ));
                     }
-                    media.push(provider);
                 }
+            }
+            let media_models = models
+                .iter()
+                .copied()
+                .filter(|model| {
+                    model
+                        .capabilities()
+                        .iter()
+                        .any(|capability| is_media(*capability))
+                })
+                .collect::<Vec<_>>();
+            if !media_models.is_empty()
+                && let Some(protocol) = account_media_protocol(account)
+            {
+                media.push(project_media_models(
+                    account,
+                    key.as_str(),
+                    protocol,
+                    &media_models,
+                )?);
+                provider_plugins.insert(media_provider_plugin(protocol), true);
             }
         }
 
@@ -474,9 +509,11 @@ impl<'a> ProjectionPlan<'a> {
             changed |= ProviderProjection::remove_from_document(provider, document);
             changed |= remove_keyless_auth_profile(provider, document);
         }
-        changed |= self
-            .media
-            .apply_to_document(document, &self.preserved_provider_keys);
+        changed |= self.media.apply_to_document(
+            document,
+            &self.owned_model_providers,
+            &self.preserved_provider_keys,
+        );
         changed |= apply_model_allowlist(
             document,
             &self.owned_model_providers,
@@ -934,25 +971,34 @@ fn text_models(
     Ok((provider, projected))
 }
 
-fn media_models(
+fn project_media_models(
     account: &ProviderAccount,
     key: &str,
+    protocol: media_models::Protocol,
     models: &[&ProviderModel],
 ) -> Result<media_models::ProviderModels, ProviderModelProjectionError> {
     let configuration = account.configuration();
     let endpoint = configuration
         .endpoint()
-        .ok_or(ProviderModelProjectionError::AccountConfiguration)?;
-    let protocol = configuration
-        .media_protocol()
-        .ok_or(ProviderModelProjectionError::AccountConfiguration)?;
+        .map(|endpoint| endpoint.as_str())
+        .or_else(|| default_provider_endpoint(account.provider().as_str()))
+        .unwrap_or(match protocol {
+            media_models::Protocol::OpenAi => "https://api.openai.com/v1",
+            media_models::Protocol::Google => "https://generativelanguage.googleapis.com/v1beta",
+            media_models::Protocol::OpenRouter => "https://openrouter.ai/api/v1",
+        });
     let projected = models
         .iter()
         .map(|model| {
             media_models::Model::try_new(
                 media_models::ModelId::try_new(model.model_id().to_owned())
                     .map_err(|_| ProviderModelProjectionError::InvalidModelIdentifier)?,
-                model.capabilities().to_vec(),
+                model
+                    .capabilities()
+                    .iter()
+                    .copied()
+                    .filter(|capability| is_media(*capability))
+                    .collect(),
                 model.timeout_ms(),
                 model.aspect_ratio().map(str::to_owned),
                 model.resolution().map(str::to_owned),
@@ -965,9 +1011,9 @@ fn media_models(
         media_models::ProviderKey::try_new(key.to_owned())
             .map_err(|_| ProviderModelProjectionError::AccountConfiguration)?,
         configuration.label().to_owned(),
-        media_models::Endpoint::try_new(endpoint.as_str().to_owned())
+        media_models::Endpoint::try_new(endpoint.to_owned())
             .map_err(|_| ProviderModelProjectionError::AccountConfiguration)?,
-        media_protocol(protocol),
+        protocol,
         projected,
     )
     .map_err(provider_model_error_from_media_catalog)
@@ -1082,12 +1128,52 @@ fn base_provider_key(account: &ProviderAccount) -> Result<String, ProviderModelP
         .ok_or(ProviderModelProjectionError::AccountConfiguration)
 }
 
-fn media_protocol(protocol: ProviderMediaApiProtocol) -> media_models::Protocol {
+fn media_protocol(protocol: ProviderMediaApiProtocol) -> Option<media_models::Protocol> {
     match protocol {
-        ProviderMediaApiProtocol::Google => media_models::Protocol::Google,
-        ProviderMediaApiProtocol::OpenAi => media_models::Protocol::OpenAi,
-        ProviderMediaApiProtocol::OpenRouter => media_models::Protocol::OpenRouter,
+        ProviderMediaApiProtocol::Google => Some(media_models::Protocol::Google),
+        ProviderMediaApiProtocol::OpenAi => Some(media_models::Protocol::OpenAi),
+        ProviderMediaApiProtocol::OpenRouter => Some(media_models::Protocol::OpenRouter),
+        ProviderMediaApiProtocol::DashScope | ProviderMediaApiProtocol::Ark => None,
     }
+}
+
+fn account_media_protocol(account: &ProviderAccount) -> Option<media_models::Protocol> {
+    if account.configuration().kind() == ProviderAccountKind::Media {
+        return account
+            .configuration()
+            .media_protocol()
+            .and_then(media_protocol);
+    }
+    match provider_protocol(account)? {
+        ProviderProtocol::GoogleGenerativeAi => Some(media_models::Protocol::Google),
+        ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
+            match account.provider().as_str() {
+                "provider:openrouter" => Some(media_models::Protocol::OpenRouter),
+                "provider:ark" => None,
+                _ => Some(media_models::Protocol::OpenAi),
+            }
+        }
+        ProviderProtocol::AnthropicMessages | ProviderProtocol::OpenAiChatGptResponses => None,
+    }
+}
+
+const fn media_provider_plugin(protocol: media_models::Protocol) -> &'static str {
+    match protocol {
+        media_models::Protocol::OpenAi => "openai",
+        media_models::Protocol::Google => "google",
+        media_models::Protocol::OpenRouter => "openrouter",
+    }
+}
+
+const fn is_media(capability: ProviderModelCapability) -> bool {
+    matches!(
+        capability,
+        ProviderModelCapability::ImageGenerate
+            | ProviderModelCapability::VideoGenerate
+            | ProviderModelCapability::MusicGenerate
+            | ProviderModelCapability::TextToSpeech
+            | ProviderModelCapability::Transcribe
+    )
 }
 
 fn text_input(

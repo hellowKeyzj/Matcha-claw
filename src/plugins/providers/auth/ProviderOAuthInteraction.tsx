@@ -12,7 +12,7 @@ import {
   hostProviderSubmitOAuthCode,
 } from '@/plugins/providers/services/provider-projection';
 import { useProviderStore } from '../stores/providers';
-import type { ProviderOAuthOwnerProps, ProviderOAuthPanelProps, ProviderOAuthStartRequest } from '../extensions';
+import type { ProviderOAuthOutcome, ProviderOAuthOwnerProps, ProviderOAuthPanelProps, ProviderOAuthStartRequest } from '../extensions';
 
 type OAuthData = ProviderOAuthPanelProps['oauthData'];
 
@@ -26,20 +26,49 @@ type PendingOAuth = {
 export function ProviderOAuthOwner({ onCompleted, children }: ProviderOAuthOwnerProps) {
   const { t } = useTranslation('settings');
   const [oauthFlowing, setOauthFlowing] = useState(false);
+  const [outcome, setOutcome] = useState<ProviderOAuthOutcome>('unconfirmed');
+  const outcomeRef = useRef<ProviderOAuthOutcome>('unconfirmed');
   const [oauthData, setOauthData] = useState<OAuthData>(null);
   const [manualCodeInput, setManualCodeInput] = useState('');
   const [oauthError, setOauthError] = useState<string | null>(null);
   const [pendingOAuth, setPendingOAuth] = useState<PendingOAuth | null>(null);
   const latestRef = useRef({ onCompleted, t });
+  const pendingRef = useRef<PendingOAuth | null>(null);
 
   useEffect(() => {
     latestRef.current = { onCompleted, t };
   });
 
+  const readCompletedAccount = useCallback(async (binding: PendingOAuth) => {
+    if (outcomeRef.current !== 'confirmed') return;
+    setOauthFlowing(true);
+    setOauthError(null);
+    try {
+      await useProviderStore.getState().refreshProviderSnapshot({
+        trigger: 'reconcile', reason: 'oauth_success_reconcile',
+      });
+      const state = useProviderStore.getState();
+      const account = state.providerSnapshot.credentials.find((candidate) => candidate.id === binding.accountId && candidate.vendorId === binding.vendorId);
+      if (state.error || !account || !state.providerSnapshot.revisions[binding.accountId]) {
+        throw new Error('OAuth account readback unavailable');
+      }
+      pendingRef.current = null;
+      setPendingOAuth(null);
+      latestRef.current.onCompleted(account);
+    } catch {
+      setOauthError(latestRef.current.t('aiProviders.dialog.authReadbackFailed'));
+    } finally {
+      setOauthFlowing(false);
+    }
+  }, []);
+
   useEffect(() => {
     const handleCode = (data: unknown) => {
       const payload = data as Record<string, unknown>;
-      if (payload?.mode === 'manual') {
+      const binding = pendingRef.current;
+      if (outcomeRef.current !== 'unconfirmed' || !binding || payload?.flowId !== binding.flowId
+        || payload.accountId !== binding.accountId || payload.provider !== binding.vendorId) return;
+      if (payload.mode === 'manual') {
         setOauthData({
           mode: 'manual',
           authorizationUrl: String(payload.authorizationUrl || ''),
@@ -56,25 +85,33 @@ export function ProviderOAuthOwner({ onCompleted, children }: ProviderOAuthOwner
       setOauthError(null);
     };
 
-    const handleSuccess = async () => {
-      setOauthFlowing(false);
+    const handleSuccess = async (data: unknown) => {
+      const payload = data as Record<string, unknown>;
+      const binding = pendingRef.current;
+      if (outcomeRef.current !== 'unconfirmed' || !binding || payload?.success !== true || payload.flowId !== binding.flowId
+        || payload.accountId !== binding.accountId || payload.provider !== binding.vendorId) return;
+      outcomeRef.current = 'confirmed';
+      setOutcome('confirmed');
       setOauthData(null);
       setManualCodeInput('');
-      try {
-        await useProviderStore.getState().refreshProviderSnapshot({
-          trigger: 'reconcile',
-          reason: 'oauth_success_reconcile',
-        });
-      } catch (refreshError) {
-        console.error('Failed to refresh providers after OAuth:', refreshError);
-      }
-      setPendingOAuth(null);
-      latestRef.current.onCompleted();
+      await readCompletedAccount(binding);
     };
 
     const handleError = (data: unknown) => {
-      setOauthError((data as { message: string }).message);
+      const payload = data as Record<string, unknown>;
+      const binding = pendingRef.current;
+      if (outcomeRef.current !== 'unconfirmed' || !binding || payload?.flowId !== binding.flowId
+        || payload.accountId !== binding.accountId || payload.provider !== binding.vendorId) return;
+      if (payload.outcome !== 'rejected' && payload.outcome !== 'unknown' && payload.outcome !== 'unavailable') return;
+      if (payload.outcome === 'unknown') {
+        outcomeRef.current = 'unknown';
+        setOutcome('unknown');
+      }
+      setOauthFlowing(false);
+      setOauthError(payload.outcome === 'unknown' ? latestRef.current.t('aiProviders.dialog.saveErrors.unknown') : String(payload.message ?? ''));
       setOauthData(null);
+      setManualCodeInput('');
+      pendingRef.current = null;
       setPendingOAuth(null);
     };
 
@@ -86,9 +123,10 @@ export function ProviderOAuthOwner({ onCompleted, children }: ProviderOAuthOwner
       offSuccess();
       offError();
     };
-  }, [latestRef]);
+  }, [readCompletedAccount]);
 
   const handleStartOAuth = useCallback(async (createRequest: () => ProviderOAuthStartRequest | null) => {
+    if (outcomeRef.current !== 'unconfirmed') return;
     const request = createRequest();
     if (!request) return;
 
@@ -99,17 +137,27 @@ export function ProviderOAuthOwner({ onCompleted, children }: ProviderOAuthOwner
 
     try {
       const flowId = `${request.accountId}:${Date.now().toString(36)}`;
-      setPendingOAuth({ flowId, accountId: request.accountId, vendorId: request.provider, label: request.label });
+      const pending = { flowId, accountId: request.accountId, vendorId: request.provider, label: request.label };
+      pendingRef.current = pending;
+      setPendingOAuth(pending);
       await hostProviderStartOAuth({ ...request, flowId });
     } catch (oauthStartError) {
+      if (outcomeRef.current !== 'unconfirmed') return;
       setOauthError(String(oauthStartError));
       setOauthFlowing(false);
+      pendingRef.current = null;
       setPendingOAuth(null);
     }
   }, []);
 
   const handleCancelOAuth = async () => {
-    const binding = pendingOAuth;
+    const binding = pendingRef.current;
+    if (outcomeRef.current === 'unknown') return;
+    if (outcomeRef.current === 'confirmed') {
+      if (binding) await readCompletedAccount(binding);
+      return;
+    }
+    pendingRef.current = null;
     setOauthFlowing(false);
     setOauthData(null);
     setManualCodeInput('');
@@ -126,7 +174,7 @@ export function ProviderOAuthOwner({ onCompleted, children }: ProviderOAuthOwner
 
   const handleSubmitManualOAuthCode = async () => {
     const value = manualCodeInput.trim();
-    if (!value || !pendingOAuth) return;
+    if (outcomeRef.current !== 'unconfirmed' || !value || !pendingOAuth) return;
     try {
       await hostProviderSubmitOAuthCode({
         flowId: pendingOAuth.flowId,
@@ -134,17 +182,21 @@ export function ProviderOAuthOwner({ onCompleted, children }: ProviderOAuthOwner
         vendorId: pendingOAuth.vendorId,
         code: value,
       });
+      if (outcomeRef.current !== 'unconfirmed') return;
       setOauthError(null);
     } catch (submitError) {
+      if (outcomeRef.current !== 'unconfirmed') return;
       setOauthError(String(submitError));
     }
   };
 
   return children({
     flowing: oauthFlowing,
+    outcome,
     renderPanel: (Panel, createRequest) => (
       <Panel
         oauthFlowing={oauthFlowing}
+        outcome={outcome}
         oauthData={oauthData}
         oauthError={oauthError}
         manualCodeInput={manualCodeInput}
@@ -162,6 +214,7 @@ export function OAuthPanel(props: ProviderOAuthPanelProps) {
   const { t } = useTranslation('settings');
   const {
     oauthFlowing,
+    outcome,
     oauthData,
     oauthError,
     manualCodeInput,
@@ -178,7 +231,7 @@ export function OAuthPanel(props: ProviderOAuthPanelProps) {
         <p className="mb-3 block text-sm text-blue-200">
           {pendingOAuth ? pendingOAuth.label : t('aiProviders.oauth.loginPrompt')}
         </p>
-        <Button onClick={onStart} disabled={oauthFlowing} className="w-full bg-blue-600 text-white hover:bg-blue-700">
+        <Button onClick={onStart} disabled={oauthFlowing || outcome !== 'unconfirmed'} className="w-full bg-blue-600 text-white hover:bg-blue-700">
           {oauthFlowing ? (
             <>
               <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -190,23 +243,23 @@ export function OAuthPanel(props: ProviderOAuthPanelProps) {
         </Button>
       </div>
 
-      {oauthFlowing || oauthError ? (
+      {outcome === 'unknown' ? <p role="alert" className="text-sm text-destructive">{t('aiProviders.dialog.saveErrors.unknown')}</p> : oauthFlowing || oauthError ? (
         <div className="relative mt-4 overflow-hidden rounded-xl border bg-card p-4">
           <div className="absolute inset-0 bg-primary/5 animate-pulse" />
           <div className="relative z-10 flex flex-col items-center justify-center space-y-4 text-center">
             {oauthError ? (
               <div className="space-y-2 text-red-400">
                 <XCircle className="mx-auto h-8 w-8" />
-                <p className="font-medium">{t('aiProviders.oauth.authFailed')}</p>
+                <p className="font-medium">{t(outcome === 'confirmed' ? 'aiProviders.dialog.authenticated' : 'aiProviders.oauth.authFailed')}</p>
                 <p className="text-sm opacity-80">{oauthError}</p>
-                <Button variant="outline" size="sm" onClick={onCancel} className="mt-2 text-foreground">
-                  {t('aiProviders.oauth.tryAgain')}
+                <Button variant="outline" size="sm" onClick={onCancel} disabled={oauthFlowing} className="mt-2 text-foreground">
+                  {t(outcome === 'confirmed' ? 'aiProviders.oauth.retryReadback' : 'aiProviders.oauth.tryAgain')}
                 </Button>
               </div>
             ) : !oauthData ? (
               <div className="space-y-3 py-4">
                 <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
-                <p className="animate-pulse text-sm text-muted-foreground">{t('aiProviders.oauth.requestingCode')}</p>
+                <p className="animate-pulse text-sm text-muted-foreground">{t(outcome === 'confirmed' ? 'aiProviders.status.refreshing' : 'aiProviders.oauth.requestingCode')}</p>
               </div>
             ) : oauthData.mode === 'manual' ? (
               <div className="w-full space-y-4">
@@ -225,6 +278,7 @@ export function OAuthPanel(props: ProviderOAuthPanelProps) {
                   {t('aiProviders.oauth.openLoginPage')}
                 </Button>
                 <Input
+                  aria-label={t('aiProviders.oauth.callbackPlaceholder')}
                   placeholder={t('aiProviders.oauth.callbackPlaceholder')}
                   value={manualCodeInput}
                   onChange={(event) => onManualCodeChange(event.target.value)}
@@ -233,7 +287,7 @@ export function OAuthPanel(props: ProviderOAuthPanelProps) {
                   {t('aiProviders.oauth.submitCode')}
                 </Button>
                 <Button variant="ghost" size="sm" className="w-full mt-2" onClick={onCancel}>
-                  Cancel
+                  {t('aiProviders.oauth.cancel')}
                 </Button>
               </div>
             ) : (
@@ -251,6 +305,7 @@ export function OAuthPanel(props: ProviderOAuthPanelProps) {
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label={t('aiProviders.oauth.copyCode')}
                     onClick={() => {
                       navigator.clipboard.writeText(oauthData.userCode);
                       toast.success(t('aiProviders.oauth.codeCopied'));
@@ -272,7 +327,7 @@ export function OAuthPanel(props: ProviderOAuthPanelProps) {
                   <span>{t('aiProviders.oauth.waitingApproval')}</span>
                 </div>
                 <Button variant="ghost" size="sm" className="w-full mt-2" onClick={onCancel}>
-                  Cancel
+                  {t('aiProviders.oauth.cancel')}
                 </Button>
               </div>
             )}

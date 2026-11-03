@@ -44,7 +44,7 @@ async fn run_connection(capability: Option<super::iab::Capability>) -> ExitCode 
         }
         None => None,
     };
-    let Ok(app_plugins) = super::app_plugins::AppPlugins::attach(config.state_dir, &registry)
+    let Ok(app_plugins) = super::app_plugins::AppPlugins::attach(config.state_dir, &registry).await
     else {
         eprintln!("runtime-host mcp: app plugin gateway client is unavailable");
         return ExitCode::FAILURE;

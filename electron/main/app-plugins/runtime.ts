@@ -1,14 +1,15 @@
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { AppPluginContext, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
-import type { HostRequest, PluginLoad, WorkerMessage } from './protocol';
+import { AppConfirmationUnavailableError, type AppPluginContext, type AppRuntimeEvent, type AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import { isModelErrorCode, type HostRequest, type PluginLoad, type WorkerMessage } from './protocol';
 
 export type AppPluginModels = AppPluginContext['models'];
 export interface AppPluginRuntimeCallbacks {
   publish(event: AppRuntimeEvent): void;
   log(level: 'info' | 'error', message: string): void;
   failed?(error: Error): void;
+  requestConfirmation?(request: import('../../../src/types/desktop/app-plugin-sdk').AppConfirmationRequest, signal: AbortSignal): Promise<boolean>;
 }
 export interface AppPluginDevelopmentRuntime {
   call(name: string, args: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<AppToolResult>;
@@ -46,8 +47,9 @@ export class NodePluginWorker {
   private stopped = false;
   private stopping?: Promise<void>;
   private readonly plugins = new Map<string, { load: PluginLoad; callbacks: AppPluginRuntimeCallbacks; retiring?: true }>();
-  private readonly pending = new Map<string, { resolve(value?: AppToolResult): void; reject(error: unknown): void; type: 'activate' | 'deactivate' | 'call' }>();
+  private readonly pending = new Map<string, { resolve(value?: AppToolResult): void; reject(error: unknown): void; type: 'activate' | 'deactivate' | 'call'; pluginId: string }>();
   private readonly models = new Map<string, { pluginId: string; controller: AbortController }>();
+  private readonly confirmations = new Map<string, { pluginId: string; callId: string; controller: AbortController }>();
 
   constructor(private readonly modelApi: AppPluginModels, private readonly log: AppPluginRuntimeCallbacks['log']) {}
 
@@ -71,6 +73,7 @@ export class NodePluginWorker {
     if (!plugin) return;
     plugin.retiring = true;
     for (const model of this.models.values()) if (model.pluginId === pluginId) model.controller.abort();
+    for (const confirmation of this.confirmations.values()) if (confirmation.pluginId === pluginId) confirmation.controller.abort();
     if (this.child) await within(this.request({ type: 'deactivate', requestId: randomUUID(), pluginId }), 3000, 'App plugin cleanup timed out; its shared worker remains owned until application shutdown.');
     this.plugins.delete(pluginId);
   }
@@ -84,6 +87,7 @@ export class NodePluginWorker {
     this.stopped = true;
     this.stopping ??= (async () => {
       for (const model of this.models.values()) model.controller.abort();
+      for (const confirmation of this.confirmations.values()) confirmation.controller.abort();
       if (this.child && !this.child.kill()) throw new Error('App plugin worker termination failed; execution files must be retained.');
       await within(this.exited, 5000, 'App plugin worker exit was not confirmed; execution files must be retained.');
     })().catch((error) => { this.stopping = undefined; throw error; });
@@ -124,13 +128,17 @@ export class NodePluginWorker {
     if (!this.child) return Promise.reject(new Error('App plugin worker is unavailable; the operation was not retried.'));
     if (this.pending.size >= 128) return Promise.reject(new Error('Too many plugin requests.'));
     return new Promise((resolve, reject) => {
-      const finish = () => { signal?.removeEventListener('abort', cancel); this.pending.delete(message.requestId); };
+      const finish = () => {
+        signal?.removeEventListener('abort', cancel);
+        this.pending.delete(message.requestId);
+        for (const confirmation of this.confirmations.values()) if (confirmation.callId === message.requestId) confirmation.controller.abort();
+      };
       const cancel = () => {
         this.child?.postMessage({ type: 'cancel', requestId: message.requestId } satisfies HostRequest);
         finish();
         reject(signal?.reason ?? new Error('Plugin call cancelled; external effects may already have occurred.'));
       };
-      this.pending.set(message.requestId, { type: message.type, resolve: (value) => { finish(); resolve(value); }, reject: (error) => { finish(); reject(error); } });
+      this.pending.set(message.requestId, { type: message.type, pluginId: message.type === 'activate' ? message.plugin.manifest.id : message.pluginId, resolve: (value) => { finish(); resolve(value); }, reject: (error) => { finish(); reject(error); } });
       signal?.addEventListener('abort', cancel, { once: true });
       try { this.child!.postMessage(message); } catch (error) { finish(); reject(error); }
     });
@@ -140,6 +148,25 @@ export class NodePluginWorker {
     if (message.type === 'result') {
       const pending = this.pending.get(message.requestId);
       if (message.error) pending?.reject(new Error(message.error)); else pending?.resolve(message.result);
+      return;
+    }
+    if (message.type === 'confirmation-cancel') { this.confirmations.get(message.requestId)?.controller.abort(); return; }
+    if (message.type === 'confirmation') {
+      const controller = new AbortController();
+      void (async () => {
+        try {
+          const plugin = this.plugins.get(message.pluginId);
+          if (!plugin || plugin.retiring || plugin.load.digest !== message.digest || this.pending.get(message.callId)?.type !== 'call' || this.pending.get(message.callId)?.pluginId !== message.pluginId
+            || !plugin.callbacks.requestConfirmation || this.confirmations.has(message.requestId) || this.confirmations.size >= 128) throw new AppConfirmationUnavailableError('Approval unavailable: no active tool call or foreground confirmation owner.');
+          this.confirmations.set(message.requestId, { pluginId: message.pluginId, callId: message.callId, controller });
+          const result = await plugin.callbacks.requestConfirmation(message.request, controller.signal);
+          controller.signal.throwIfAborted();
+          this.child?.postMessage({ type: 'confirmation-result', requestId: message.requestId, result } satisfies HostRequest);
+        } catch (error) {
+          this.child?.postMessage({ type: 'confirmation-result', requestId: message.requestId, error: error instanceof Error ? error.message : 'Confirmation failed.',
+            ...(error instanceof Error && 'code' in error && error.code === 'approval_unavailable' ? { errorCode: 'approval_unavailable' as const } : {}) } satisfies HostRequest);
+        } finally { if (this.confirmations.get(message.requestId)?.controller === controller) this.confirmations.delete(message.requestId); }
+      })();
       return;
     }
     if (message.type === 'model-cancel') { this.models.get(message.requestId)?.controller.abort(); return; }
@@ -167,6 +194,9 @@ export class NodePluginWorker {
         } else {
           let result;
           switch (message.operation) {
+            case 'generateSpeech': result = await this.modelApi.generateSpeech(message.request, controller.signal); break;
+            case 'transcribe': result = await this.modelApi.transcribe(message.request, controller.signal); break;
+            case 'generateMusic': result = await this.modelApi.generateMusic(message.request, controller.signal); break;
             case 'list': result = await this.modelApi.list(message.request, controller.signal); break;
             case 'submitVideo': result = await this.modelApi.submitVideo(message.request, controller.signal); break;
             case 'queryVideo': result = await this.modelApi.queryVideo(message.request, controller.signal); break;
@@ -175,7 +205,9 @@ export class NodePluginWorker {
           this.child?.postMessage({ type: 'media-model-result', requestId: message.requestId, result } satisfies HostRequest);
         }
       } catch (error) {
-        this.child?.postMessage({ type: responseType, requestId: message.requestId, error: error instanceof Error ? error.message.slice(0, 2000) : 'Model generation failed; external effects may already have occurred.' } satisfies HostRequest);
+        const response: Extract<HostRequest, { type: typeof responseType }> = { type: responseType, requestId: message.requestId, error: error instanceof Error ? error.message.slice(0, 2000) : 'Model generation failed; external effects may already have occurred.' };
+        if (error instanceof Error && 'code' in error && isModelErrorCode(error.code)) response.errorCode = error.code;
+        this.child?.postMessage(response);
       } finally { if (this.models.get(message.requestId)?.controller === controller) this.models.delete(message.requestId); }
     })();
   }

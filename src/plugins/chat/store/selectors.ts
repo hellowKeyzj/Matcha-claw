@@ -67,7 +67,7 @@ function hasSessionPaneActivity(record: ChatSessionRecord): boolean {
 }
 
 export function deriveSessionImageGenerationRuntime(record: ChatSessionRecord | undefined): ChatSessionImageGenerationRuntimeState {
-  return deriveSessionImageGenerationPendingStateFromItems(record?.items ?? [], record?.runtime.imageGeneration);
+  return deriveSessionImageGenerationPendingStateFromItems(record?.items ?? []);
 }
 
 function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneSessionEntry[] {

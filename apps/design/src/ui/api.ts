@@ -19,7 +19,7 @@ export async function connectApp(): Promise<void> {
   const native = (window as Window & { matchaApp?: AppWebviewApi }).matchaApp;
   if (native) { connected = native; return; }
   if (window.parent === window) throw new Error(t('请从 Matcha 或支持 MCP Apps 的客户端打开设计工作台。'));
-  const client = new App({ name: t('Matcha 设计'), version: '1.0.4' }, {}, { autoResize: false, strict: true });
+  const client = new App({ name: t('Matcha 设计'), version: '1.0.11' }, {}, { autoResize: false, strict: true });
   const listeners = new Set<Parameters<AppWebviewApi['subscribe']>[0]>();
   initialToolResults = {};
   client.ontoolresult = (result) => {
@@ -52,13 +52,18 @@ export async function connectApp(): Promise<void> {
     async readSessionMedia() { throw new Error(t('当前客户端不支持读取会话媒体。')); },
     async writeClipboardImage() { throw new Error(t('当前客户端不支持复制图片，请使用下载原图。')); },
     async compose(request) {
-      const content: Parameters<App['sendMessage']>[0]['content'] = [{ type: 'text', text: request.text }];
+      if (request.context) {
+        if (!client.getHostCapabilities()?.updateModelContext?.text) throw new Error(t('当前客户端不支持隐藏操作参数，无法添加到对话。'));
+        await client.updateModelContext({ content: [{ type: 'text', text: JSON.stringify([
+          { name: request.context.name, text: request.context.text, prompt: request.text },
+        ]) }] });
+      }
+      const content: Parameters<App['sendMessage']>[0]['content'] = [{ type: 'text', text: [request.context?.name, request.text].filter(Boolean).join('\n') }];
       for (const attachment of request.attachments ?? []) {
         content.push(attachment.mimeType.startsWith('image/')
           ? { type: 'image', data: attachment.data, mimeType: attachment.mimeType }
           : { type: 'resource', resource: { uri: `attachment:///${encodeURIComponent(attachment.name)}`, mimeType: attachment.mimeType, blob: attachment.data } });
       }
-      if (request.context) content.push({ type: 'text', text: `${request.context.name}\n${request.context.text}` });
       const result = await client.sendMessage({ role: 'user', content });
       if (result.isError) throw new Error(t('客户端未接受添加到对话的请求。'));
     },

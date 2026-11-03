@@ -115,6 +115,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [patch.crates-io]
+lance-linalg = { path = "external/lance-linalg" }
 wit-bindgen-core = { path = "external/wit-bindgen-core" }
 wit-bindgen-rust = { path = "external/wit-bindgen-rust" }
 
@@ -136,6 +137,6 @@ opt-level = 2
 [profile.release]
 opt-level = "s"
 lto = true
-codegen-units = 1
+codegen-units = 16
 strip = true
 panic = "unwind"

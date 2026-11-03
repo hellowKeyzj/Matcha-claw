@@ -673,10 +673,7 @@ export function patchSessionSnapshot(
     modelState: catalog.modelState ?? current.meta.modelState,
     lastActivityAt: typeof catalog.updatedAt === 'number' ? toMs(catalog.updatedAt) : current.meta.lastActivityAt,
   };
-  const nextImageGenerationRuntime = deriveSessionImageGenerationPendingStateFromItems(
-    nextItems,
-    current.runtime.imageGeneration,
-  );
+  const nextImageGenerationRuntime = deriveSessionImageGenerationPendingStateFromItems(nextItems);
   const nextRuntime = {
     ...current.runtime,
     activeRunId: snapshot.runtime.activeRunId,

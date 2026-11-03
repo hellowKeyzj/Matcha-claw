@@ -1,7 +1,7 @@
 /**
  * MediaCapabilitiesPanel
  *
- * 把 OpenClaw 的 6 项能力路由（chat / imageUnderstand / imageGenerate /
+ * 把 Provider 的 6 项共享能力路由（chat / imageUnderstand / imageGenerate /
  * videoGenerate / musicGenerate / tts）以 6 行表单的形式呈现，每一行只让
  * 用户设置"用什么 credential/model"，进阶选项（fallbacks / timeoutMs）放在
  * 每行的折叠区。
@@ -27,6 +27,7 @@ import {
 import { useCapabilityRoutingStore } from '@/plugins/providers/stores/capability-routing';
 import { useProviderModelCatalogStore } from '@/plugins/providers/stores/provider-model-catalog';
 import type { ProviderModel } from '@/plugins/providers/services/provider-model-catalog';
+import type { ProviderCredential } from '@/plugins/providers/domain/providers';
 import { getProviderAccountRuntimeReport, useProviderStore, type ProviderSnapshot } from '@/plugins/providers/stores/providers';
 import { providerDiagnosticError } from '@/plugins/providers/domain/provider-projection-errors';
 import { cn } from '@/lib/utils';
@@ -60,7 +61,7 @@ interface ModelOption {
 function buildModelOptions(
   models: readonly ProviderModel[],
   capability: CapabilityKey,
-  credentialLabels: ReadonlyMap<string, string>,
+  credentials: ReadonlyMap<string, ProviderCredential>,
   snapshot: ProviderSnapshot,
   t: ReturnType<typeof useTranslation>[0],
 ): ModelOption[] {
@@ -68,13 +69,14 @@ function buildModelOptions(
     .filter((model) => model.capabilities.includes(capability))
     .map((model) => {
       const value = `${model.accountId}/${model.modelId}`;
-      const label = `${model.label ?? credentialLabels.get(model.accountId) ?? model.accountId} / ${model.modelId}`;
+      const credential = credentials.get(model.accountId);
+      const label = `${model.label ?? (credential ? credential.label || credential.vendorId : model.accountId)} / ${model.modelId}`;
       const report = getProviderAccountRuntimeReport(snapshot, model.accountId, MEDIA_RUNTIME_ENDPOINT);
       const execution = report?.execution ?? 'unknown';
       const diagnostic = providerDiagnosticError(report?.diagnostic ?? null);
       const detail = execution === 'blocked' || execution === 'unsupported'
         ? `OpenClaw: ${t(`aiProviders.execution.${execution}`)}${diagnostic ? ` — ${diagnostic}` : ''}` : undefined;
-      return { value, label, disabled: execution === 'blocked' || execution === 'unsupported', detail };
+      return { value, label, disabled: !credential?.enabled, detail };
     })
     .sort((left, right) => left.label.localeCompare(right.label));
 }
@@ -423,8 +425,8 @@ export function MediaCapabilitiesPanel() {
   const providerSnapshot = useProviderStore((state) => state.providerSnapshot);
   const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
   const { credentials } = providerSnapshot;
-  const credentialLabels = useMemo(() => new Map(
-    credentials.map((credential) => [credential.id, credential.label || credential.vendorId]),
+  const credentialsById = useMemo(() => new Map(
+    credentials.map((credential) => [credential.id, credential]),
   ), [credentials]);
   const runtimeReport = providerSnapshot.reports.find((report) => (
     report.endpoint.runtimeAdapterId === MEDIA_RUNTIME_ENDPOINT.runtimeAdapterId
@@ -494,7 +496,7 @@ export function MediaCapabilitiesPanel() {
                 capability={capability}
                 title={t(`capabilityRouting.capabilities.${capability}.title`)}
                 initial={routing[capability]}
-                modelOptions={buildModelOptions(models, capability, credentialLabels, providerSnapshot, t)}
+                modelOptions={buildModelOptions(models, capability, credentialsById, providerSnapshot, t)}
                 saving={saving}
                 disabled={false}
                 onSave={(route) => setRoute(capability, route)}
@@ -504,7 +506,7 @@ export function MediaCapabilitiesPanel() {
               capability="tts"
               title={t('capabilityRouting.tts.title')}
               initial={routing.tts}
-              modelOptions={buildModelOptions(models, 'tts', credentialLabels, providerSnapshot, t)}
+              modelOptions={buildModelOptions(models, 'tts', credentialsById, providerSnapshot, t)}
               saving={saving}
               disabled={false}
               onSave={(route) => setRoute('tts', route)}

@@ -213,8 +213,13 @@ async fn execute(
     require_exact_keys(params, &["name", "arguments", "_meta"]).map_err(|_| invalid_params())?;
     let name = required_string(params, "name").map_err(|_| invalid_params())?;
     let arguments = strict_object(params.get("arguments")).map_err(|_| invalid_params())?;
+    let meta = params
+        .get("_meta")
+        .map(|meta| strict_object(Some(meta)))
+        .transpose()
+        .map_err(|_| invalid_params())?;
     let result = registry
-        .call(name, arguments)
+        .call(name, arguments, meta)
         .await
         .map_err(|error| match error {
             ToolCallError::InvalidParams => invalid_params(),

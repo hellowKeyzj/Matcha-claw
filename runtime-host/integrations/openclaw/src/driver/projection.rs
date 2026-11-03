@@ -72,6 +72,12 @@ pub fn openclaw_canonical_changes(changes: &[CanonicalSessionChange]) -> Vec<Ses
                     phase: RunPhase::Started,
                 });
             }
+            CanonicalSessionChange::RunYielded { run_id } => {
+                projected.push(SessionChange::RunPhaseChanged {
+                    run_id: run_id.as_str().to_owned(),
+                    phase: RunPhase::Yielded,
+                });
+            }
             CanonicalSessionChange::AssistantTurnChunk {
                 run_id,
                 message_id,

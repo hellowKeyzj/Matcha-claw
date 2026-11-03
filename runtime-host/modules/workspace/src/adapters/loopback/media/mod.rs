@@ -14,6 +14,7 @@ pub(crate) mod handler;
 const CAPABILITY_ID: &str = "workspace.media";
 const PREPARE_OPERATION_ID: &str = "media.prepare";
 const RESOLVE_OPERATION_ID: &str = "media.resolve";
+const PLAYBACK_OPERATION_ID: &str = "media.playback";
 const THUMBNAIL_OPERATION_ID: &str = "media.thumbnail";
 const THUMBNAILS_OPERATION_ID: &str = "media.thumbnails";
 const STAGE_PATHS_OPERATION_ID: &str = "media.stagePaths";
@@ -64,6 +65,10 @@ impl WorkspaceMediaRequest {
         {
             return Err(());
         }
+        if operation_id == PLAYBACK_OPERATION_ID && !value.get("input").and_then(Value::as_object)
+            .is_some_and(|input| input.len() == 3 && ["endpoint", "sessionKey", "reference"].iter().all(|key| input.contains_key(*key))) {
+            return Err(());
+        }
         let request = serde_json::from_value::<Self>(value).map_err(|_| ())?;
         request.valid().then_some(request).ok_or(())
     }
@@ -74,6 +79,7 @@ impl WorkspaceMediaRequest {
                 self.operation_id.as_str(),
                 PREPARE_OPERATION_ID
                     | RESOLVE_OPERATION_ID
+                    | PLAYBACK_OPERATION_ID
                     | THUMBNAIL_OPERATION_ID
                     | THUMBNAILS_OPERATION_ID
                     | STAGE_PATHS_OPERATION_ID
@@ -93,6 +99,8 @@ impl WorkspaceMediaRequest {
                         || self.input.is_thumbnail_reference()
                 }
                 RESOLVE_OPERATION_ID => self.input.is_reference(),
+                PLAYBACK_OPERATION_ID => self.input.is_reference()
+                    && valid_historical_media_reference(self.reference()),
                 THUMBNAILS_OPERATION_ID => self.input.is_paths() && valid_paths(self.input.paths()),
                 STAGE_PATHS_OPERATION_ID => {
                     self.input.is_paths()
@@ -109,6 +117,9 @@ impl WorkspaceMediaRequest {
     }
     pub(crate) fn is_resolve(&self) -> bool {
         self.operation_id == RESOLVE_OPERATION_ID
+    }
+    pub(crate) fn is_playback(&self) -> bool {
+        self.operation_id == PLAYBACK_OPERATION_ID
     }
     pub(crate) fn is_thumbnail(&self) -> bool {
         self.operation_id == THUMBNAIL_OPERATION_ID
@@ -258,6 +269,14 @@ fn valid_reference(value: &str) -> bool {
         && value[6..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn valid_historical_media_reference(value: &str) -> bool {
+    value.len() <= 512
+        && ["oc-media:1:", "ma-media:1:"].iter().any(|prefix| {
+            value.strip_prefix(prefix).is_some_and(|tail| !tail.is_empty()
+                && tail.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+        })
+}
+
 fn valid_thumbnail_reference(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
@@ -340,7 +359,8 @@ impl Input {
     }
 
     fn is_reference(&self) -> bool {
-        valid_reference(self.reference.as_deref().unwrap_or_default())
+        (valid_reference(self.reference.as_deref().unwrap_or_default())
+            || valid_historical_media_reference(self.reference.as_deref().unwrap_or_default()))
             && self.relative_path.is_none()
             && self.gateway_url.is_none()
             && self.mime_type.is_none()
@@ -471,6 +491,7 @@ impl Endpoint {
 pub(crate) enum WorkspaceMediaDelivery {
     Prepared(PreparedMedia),
     Resolved(ResolvedMedia),
+    Playback(PlaybackMedia),
     Thumbnail(ThumbnailMedia),
     Thumbnails(serde_json::Map<String, Value>),
     StagePaths(Vec<PreparedMedia>),
@@ -487,6 +508,7 @@ impl WorkspaceMediaDelivery {
         match self {
             Self::Prepared(_)
             | Self::Resolved(_)
+            | Self::Playback(_)
             | Self::Thumbnail(_)
             | Self::Thumbnails(_)
             | Self::StagePaths(_)
@@ -500,6 +522,7 @@ impl WorkspaceMediaDelivery {
         match self {
             Self::Prepared(value) => serde_json::to_value(value).expect("media receipt serializes"),
             Self::Resolved(value) => serde_json::to_value(value).expect("media bytes serialize"),
+            Self::Playback(value) => serde_json::to_value(value).expect("media playback serializes"),
             Self::Thumbnail(value) => {
                 serde_json::to_value(value).expect("media thumbnail serializes")
             }
@@ -537,6 +560,13 @@ pub(crate) struct PreparedMedia {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResolvedMedia {
     data: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlaybackMedia {
+    data: String,
+    mime_type: String,
 }
 
 #[derive(Serialize)]
@@ -624,12 +654,23 @@ pub(crate) fn map_resolve(
     result: Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>,
 ) -> WorkspaceMediaDelivery {
     match result {
-        Ok(media) if media.content().len() <= MAX_MEDIA_BYTES => {
-            WorkspaceMediaDelivery::Resolved(ResolvedMedia {
-                data: STANDARD.encode(media.content()),
-            })
-        }
-        Ok(_) | Err(WorkspaceMediaFailure::TooLarge) => WorkspaceMediaDelivery::TooLarge,
+        Ok(media) => WorkspaceMediaDelivery::Resolved(ResolvedMedia {
+            data: STANDARD.encode(media.content()),
+        }),
+        Err(error) => map_error(error),
+    }
+}
+
+pub(crate) fn map_playback(
+    result: Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>,
+) -> WorkspaceMediaDelivery {
+    match result {
+        Ok(media) => match media.mime_type() {
+            Some(mime_type) => WorkspaceMediaDelivery::Playback(PlaybackMedia {
+                data: STANDARD.encode(media.content()), mime_type: mime_type.to_owned(),
+            }),
+            None => WorkspaceMediaDelivery::Unavailable,
+        },
         Err(error) => map_error(error),
     }
 }

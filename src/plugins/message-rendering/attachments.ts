@@ -12,6 +12,7 @@ export interface AttachedFileMeta {
   filePath?: string;
   gatewayUrl?: string;
   mediaReference?: string;
+  resourceId?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref';
 }
 

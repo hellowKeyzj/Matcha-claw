@@ -301,6 +301,13 @@ impl OwnerSpec for WorkspaceOwner {
                     .await;
                 let _ = reply.send(result);
             }
+            WorkspaceOperation::PlaybackMedia { endpoint, session_key, reference, reply } => {
+                let result = shared.execute(
+                    call, endpoint, WorkspaceMediaFailure::Unavailable,
+                    move |ops| Box::pin(async move { ops.playback_media(&session_key, &reference).await }),
+                ).await;
+                let _ = reply.send(result);
+            }
             WorkspaceOperation::ThumbnailMedia {
                 endpoint,
                 relative_path,

@@ -1,5 +1,5 @@
 import { startTransition } from 'react';
-import { MessageSquare } from 'lucide-react';
+import { ChatNavigationIcon } from '@/components/icons/navigation';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
@@ -39,7 +39,7 @@ export default function NewChatAction() {
           : 'text-[hsl(var(--shell-icon))]',
       )}
     >
-      <MessageSquare aria-hidden="true" className="h-[18px] w-[18px]" />
+      <ChatNavigationIcon aria-hidden="true" strokeWidth={1.75} className="h-5 w-5" />
     </button>
   );
 }

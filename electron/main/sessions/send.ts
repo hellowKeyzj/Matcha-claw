@@ -1,4 +1,5 @@
 import { setImmediate } from 'node:timers/promises';
+import { SESSION_ATTACHMENT_TRANSPORT_MAX_BYTES, SESSION_SEND_REQUEST_MAX_BYTES, sessionAttachmentMaxBytes } from '../../../src/types/session/attachments';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger } from '../runtime-host-delivery/transport/client';
 import type { LoopbackJsonResponse as PublicTransportResponse } from '../runtime-host-delivery/transport/client';
 import { consumeStagedAttachments, releaseStagedAttachments } from '../attachments/staging';
@@ -16,10 +17,6 @@ type SessionSendDeps = Readonly<{
 }>;
 
 const MAX_ATTACHMENTS = 16;
-
-const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
-
-const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 export async function dispatchSessionGoal(
   body: Record<string, unknown>,
@@ -152,12 +149,13 @@ async function adaptSessionSendRequest(
       throw new Error('Session send request is invalid');
     }
 
+    const maxAttachmentBytes = sessionAttachmentMaxBytes(body.scope.identity.endpoint.runtimeAdapterId);
     const attachments: { mimeType: string; fileName: string; fileSize: number }[] = [];
     let totalBytes = 0;
     for (const attachment of body.input.attachments ?? []) {
-      if (!isStagedAttachmentMetadata(attachment)) throw new Error('Session send request is invalid');
+      if (!isStagedAttachmentMetadata(attachment, maxAttachmentBytes)) throw new Error('Session send request is invalid');
       totalBytes += attachment.fileSize;
-      if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) throw new Error('Session send request is invalid');
+      if (totalBytes > SESSION_ATTACHMENT_TRANSPORT_MAX_BYTES) throw new Error('Session send request is invalid');
       attachments.push({ mimeType: attachment.mimeType, fileName: attachment.fileName, fileSize: attachment.fileSize });
     }
     // Snapshot validated caller data before consumption or inter-attachment yields.
@@ -185,7 +183,7 @@ async function adaptSessionSendRequest(
       if (index > 0) await setImmediate();
       const attachment = attachments[index];
       const content = contents[index];
-      if (content.length !== attachment.fileSize || content.length > MAX_ATTACHMENT_BYTES) {
+      if (content.length !== attachment.fileSize || content.length > maxAttachmentBytes) {
         throw new Error('Session send attachment is unavailable');
       }
       projected.push({
@@ -194,6 +192,9 @@ async function adaptSessionSendRequest(
         content: content.toString('base64'),
       });
     }
+    if (Buffer.byteLength(JSON.stringify(request), 'utf8') > SESSION_SEND_REQUEST_MAX_BYTES) {
+      throw new Error('Session send request is invalid');
+    }
     return request;
   } finally {
     // Renderer timeouts do not end this materialization task's custody of the batch.
@@ -201,7 +202,7 @@ async function adaptSessionSendRequest(
   }
 }
 
-function isStagedAttachmentMetadata(value: unknown): value is Readonly<{
+function isStagedAttachmentMetadata(value: unknown, maxAttachmentBytes: number): value is Readonly<{
   stagedAttachmentId: string;
   mimeType: string;
   fileName: string;
@@ -213,5 +214,5 @@ function isStagedAttachmentMetadata(value: unknown): value is Readonly<{
     && isIdentifier(value.mimeType)
     && isSafeFileName(value.fileName)
     && isSafeNonNegativeInteger(value.fileSize)
-    && value.fileSize <= MAX_ATTACHMENT_BYTES;
+    && value.fileSize <= maxAttachmentBytes;
 }

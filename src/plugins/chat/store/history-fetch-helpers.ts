@@ -21,8 +21,6 @@ import type {
 } from '@/types/session/render-item';
 import type {
   SessionAssistantTurnSegment,
-  SessionRenderAttachedFile,
-  SessionRenderImage,
   SessionRenderToolCard,
   SessionTimelineContentBlock,
 } from '@/types/session/tool-card';
@@ -101,10 +99,7 @@ function richMessageStatus(message: RichTimelineMessage): SessionTimelineEntrySt
   return undefined;
 }
 
-function richMedia(content: SessionTimelineContentBlock): {
-  images: SessionRenderImage[];
-  attachedFiles: SessionRenderAttachedFile[];
-} {
+function richMedia(content: SessionTimelineContentBlock): ReturnType<typeof projectSessionMedia> {
   return projectSessionMedia(content);
 }
 
@@ -176,6 +171,7 @@ export function richTimelineItems(
         text: sanitizeCanonicalUserText(largeTextBlock ? largeTextBlock.text : message.text),
         images: media.flatMap((entry) => entry.images),
         attachedFiles: media.flatMap((entry) => entry.attachedFiles),
+        contentNotices: media.flatMap((entry) => entry.contentNotices ?? []),
         ...(largeText ? { largeText } : {}),
         ...(message.messageId ? { messageId: message.messageId } : {}),
       });
@@ -217,7 +213,7 @@ export function richTimelineItems(
         segments.push({ kind: 'thinking', key: `${key}:thinking:${thinkingIndex++}`, text: content.text });
       } else if (content.kind === 'media' || content.kind === 'omitted') {
         const media = richMedia(content);
-        if (media.images.length || media.attachedFiles.length) {
+        if (media.images.length || media.attachedFiles.length || media.contentNotices?.length) {
           segments.push({ kind: 'media', key: `${key}:media:${mediaIndex++}`, ...media });
         }
       } else if (content.kind === 'toolUse') {

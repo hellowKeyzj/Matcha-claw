@@ -61,7 +61,7 @@ export function Editor() {
       if (data && typeof data === 'object' && !Array.isArray(data) && typeof data.documentId === 'string' && data.documentId === externalDocumentId.current && typeof data.layerId === 'string') open(data.documentId, data.layerId);
     });
     const request = ++read;
-    void call<{ document: DesignDocument; focusLayerId?: string }>('document_create', { sessionIdentity: app().context.sessionIdentity, name: t('画板') }).then(({ document, focusLayerId }) => {
+    void call<{ document: DesignDocument; focusLayerId?: string }>('document_create', { sessionIdentity: app().context.sessionIdentity, workspaceDraftId: app().context.workspaceDraftId, name: t('画板') }).then(({ document, focusLayerId }) => {
       if (!live || request !== read) return;
       externalDocumentId.current = document.id;
       setActive(document);
@@ -214,7 +214,7 @@ function Workbench({ document: design, focus, onDocument, hostError, onHostRetry
     getCenter: () => view.current.center, isBlocked: () => lock.current || !!annotationEditing || !!cropLayerId || generationClose.isClosing(),
     onSelect: select, onFocus: (ids) => setImportFocus((previous) => ({ ids, token: (previous?.token ?? 0) + 1, externalToken: focus?.token })), onError: setError, onNotice: setNotice });
   const { importFiles, importBusy } = transfers;
-  useSessionMedia({ document: design, current, blocked: busy || importBusy || !!cropLayerId || !!annotationEditing || !!generationClose.state, edit, onError: setError });
+  const retrySessionMedia = useSessionMedia({ document: design, current, blocked: busy || importBusy || !!cropLayerId || !!annotationEditing || !!generationClose.state, edit, onError: setError });
   const duplicate = () => { void transfers.duplicate(); };
   async function insertAsset(asset: Asset) {
     const before = current.current;
@@ -253,11 +253,10 @@ function Workbench({ document: design, focus, onDocument, hostError, onHostRetry
     const layer: Layer = { id: crypto.randomUUID(), type: 'text', name: t('文字'), text: t('双击编辑文字'), x: center.x - 180, y: center.y - 24, width: 360, height: 60, fontFamily: 'sans-serif', fontSize: 36, fontStyle: 'normal', fill: '#222222', align: 'left', lineHeight: 1.2, rotation: 0, opacity: 1, visible: true, locked: false };
     void edit([{ type: 'insert', layer }]).then((saved) => { if (saved) { setSelected([layer.id]); setPanel('properties'); } });
   }
-  async function compose(request: GenerationRequest, operationName: string, annotation?: string): Promise<void> {
+  async function compose(request: GenerationRequest, operationName: string, userPrompt: string, annotation?: string): Promise<void> {
     const document = current.current;
     const attachments: NonNullable<AppComposeRequest['attachments']>[number][] = [];
     let totalBytes = 0;
-    let hasPreview = false;
     async function attachImage(assetId: string, name?: string, crop?: ImageLayer['crop']) {
       const loaded = await assets.load(assetId);
       try {
@@ -304,7 +303,6 @@ function Workbench({ document: design, focus, onDocument, hostError, onHostRetry
             blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error(t('无法生成参考预览，请重试。'))), 'image/jpeg', 0.85));
           }
           name = t(blob.type === 'image/png' ? '{name} · 参考预览.png' : '{name} · 参考预览.jpg', { name: name.slice(0, 140) });
-          hasPreview = true;
         }
         if (blob.size > 5 * 1024 * 1024) throw new Error(t('参考图片仍超过 5 MiB，请减少图片尺寸后重试。'));
         totalBytes += blob.size;
@@ -338,7 +336,6 @@ function Workbench({ document: design, focus, onDocument, hostError, onHostRetry
     const operation: DesignComposeOperation = {
       summary: { name: operationName, imageCountNames: Array.from({ length: attachments.length + 1 }, (_, count) => count ? t('{name} · {count} 张图片', { name: operationName, count }) : operationName) },
       toolName: appToolName(app().pluginId, 'generate'),
-      instructions: t('逐项调用 toolName，保留 requests 中所有结构化参数、文档、图层和资产 ID。本项操作的当前可编辑要求作为 request.prompt，用户独立正文仅作补充；要求清空时保持空值，不回填 requests 中的旧 prompt，也不借用另一项操作的要求。若该操作必须填写要求，先请用户补充，不执行。执行使用 sourceLayerIds 的当前有效裁剪画面、有序 referenceAssetIds 独立参考、modelAssetId 人物图、logoAssetId Logo 和 annotationAssetId 标注图，不改用预览或外部 URL。人物图和 Logo 是独立参考，不是商品。局部修改按原图、紫色标注图的顺序提交，标注只定位区域，不是蒙版。'),
       document: { id: document.id, revision: document.revision, ...(document.sessionIdentity ? { sessionIdentity: document.sessionIdentity } : {}) },
       sources, ...(references.length ? { references } : {}), ...(model ? { model } : {}), ...(logo ? { logo } : {}), ...(annotationReference ? { annotation: annotationReference } : {}), requests,
     };
@@ -346,7 +343,7 @@ function Workbench({ document: design, focus, onDocument, hostError, onHostRetry
     if (new TextEncoder().encode(context.text).byteLength > 32 * 1024) throw new Error(t('设计操作上下文超过 32 KiB，请减少分镜或创作要求后重试。'));
     if (attachments.length > 16) throw new Error(t('附件超过对话限制，请减少参考图片后重试。'));
     if (generationClose.isClosing()) throw new Error(t('正在处理关闭请求，请稍后重试。'));
-    await app().compose({ text: [request.prompt || t('请按设计操作上下文中的要求处理画板图片。'), hasPreview ? t('已附图片参考预览；执行时请使用插件中保存的原图，保持原图不变。') : ''].filter(Boolean).join('\n\n'), attachments, context });
+    await app().compose({ text: userPrompt, attachments, context });
     setNotice(t(isExternalApp() ? '已添加到客户端对话' : '已添加到对话，请在对话中确认并发送'));
   }
   async function defaultImageModel() {
@@ -363,7 +360,7 @@ function Workbench({ document: design, focus, onDocument, hostError, onHostRetry
       if (annotationTool === 'erase') {
         const before = current.current;
         const model = await defaultImageModel();
-        if (model.capabilities.maxImages < 2) throw new Error(t('当前模型最多接收 {count} 张参考图（含人物或 Logo），请移除多余图片。', { count: model.capabilities.maxImages }));
+        if (model.capabilities.maxImages < 1) throw new Error(t('当前模型最多接收 {count} 张参考图（含人物或 Logo），请移除多余图片。', { count: model.capabilities.maxImages }));
         const { asset } = await call<{ asset: Asset }>('asset_import', { name: t('选区标注图.png'), mimeType: 'image/png', data });
         if (!mounted.current || current.current.id !== before.id || current.current.revision !== before.revision) throw new Error(t('源图片已变更，请重新选择后重试。'));
         await generate({ documentId: before.id, action: 'erase', prompt: '', selectionId: model.selectionId, sourceLayerIds: [annotationLayer.id], annotationAssetId: asset.id,
@@ -371,9 +368,9 @@ function Workbench({ document: design, focus, onDocument, hostError, onHostRetry
       } else {
         await compose({
           documentId: design.id, action: 'edit',
-          prompt: t('图1为原图，图2为选区标注图。请根据图2的紫色框选或涂抹定位修改区域，以图1为基础编辑，结果中不要保留标记，并保持其他画面内容不变。请在发送前补充具体修改要求。'),
+          prompt: '',
           sourceLayerIds: [annotationLayer.id],
-        }, t(toolTitles[annotationTool]), data);
+        }, t(toolTitles[annotationTool]), '', data);
       }
       if (mounted.current) { setCreativeTool(null); setTool('select'); }
     } finally { lock.current = false; if (mounted.current) setBusy(false); }
@@ -542,7 +539,7 @@ function Workbench({ document: design, focus, onDocument, hostError, onHostRetry
     {notice && <div className="ic-save-status" role="status">{notice}</div>}
     {importBusy && <div className="canvas-loading" role="status">{t('正在导入图片…')}</div>}
     {generations.some((entry) => entry.state === 'running') && <div className="ic-task-status" role="status"><i />{t(generations.some((entry) => entry.state === 'running' && (entry.action === 'video' || entry.action === 'storyboard')) ? '视频生成中…' : 'AI 生成中…')}</div>}
-    {displayedError && <div className="editor-error" role="alert"><span>{displayedError}</span><button title={t(hostError || error ? '重新读取' : '重试')} aria-label={t(hostError || error ? '重新读取' : '重试')} onClick={() => { if (hostError) onHostRetry(); else if (error) { setError(''); setAssetAttempt((value) => value + 1); void refresh().catch((cause) => setError(errorMessage(cause))); } else transfers.copyOriginal.retry(); }}><RefreshCw size={13} /></button><button className="icon small" aria-label={t('关闭错误提示')} onClick={() => { if (hostError) onHostErrorDismiss(); else if (error) setError(''); else transfers.copyOriginal.dismiss(); }}><X size={14} /></button></div>}
+    {displayedError && <div className="editor-error" role="alert"><span>{displayedError}</span><button title={t(hostError || error ? '重新读取' : '重试')} aria-label={t(hostError || error ? '重新读取' : '重试')} onClick={() => { if (hostError) onHostRetry(); else if (error) { setError(''); setAssetAttempt((value) => value + 1); retrySessionMedia(); void refresh().catch((cause) => setError(errorMessage(cause))); } else transfers.copyOriginal.retry(); }}><RefreshCw size={13} /></button><button className="icon small" aria-label={t('关闭错误提示')} onClick={() => { if (hostError) onHostErrorDismiss(); else if (error) setError(''); else transfers.copyOriginal.dismiss(); }}><X size={14} /></button></div>}
     {creativeTool === 'text' && annotationLayer && <TextEditor documentId={design.id} documentRevision={design.revision} layer={annotationLayer} load={assets.load} onSubmit={generate} onClose={() => setCreativeTool(null)} />}
     {creativeTool && creativeTool !== 'rectangle' && creativeTool !== 'brush' && creativeTool !== 'erase' && creativeTool !== 'text' && creativeTool !== 'white' && creativeTool !== 'upscale' && creativeTool !== 'watermark' && creativeTool !== 'erase-text' && <Generation key={`${creativeTool}:${storyboardRecord?.id ?? ''}`} tool={creativeTool} documentId={design.id} layers={creativeTool === 'storyboard' && storyboardRecord ? design.layers.filter((layer) => layer.type === 'image' && storyboardRecord.sourceLayerIds?.includes(layer.id)) : selectedLayers} initialRecord={storyboardRecord} load={assets.load} onCompose={compose} onGenerate={generate} onClose={() => setCreativeTool(null)} />}
     {panel && <section className={`ic-floating-panel ic-panel-${panel}`} role="dialog" aria-label={t(panel === 'layers' ? '图层' : panel === 'properties' ? '图层属性' : panel === 'adjustments' ? '调整' : panel === 'history' ? '生成记录' : '导出图片')} onKeyDown={(event) => { if (event.key === 'Escape') showPanel(null); }}>{panel !== 'adjustments' && <header><h2>{t(panel === 'layers' ? '图层' : panel === 'properties' ? '图层属性' : panel === 'history' ? '生成记录' : '导出图片')}</h2><button className="icon small" aria-label={t('关闭面板')} onClick={() => showPanel(null)}><X size={16} /></button></header>}

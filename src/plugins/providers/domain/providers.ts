@@ -142,7 +142,9 @@ export type CustomMediaCapability =
 export type CustomMediaApiProtocol =
   | 'openai'
   | 'google'
-  | 'openrouter';
+  | 'openrouter'
+  | 'dashscope'
+  | 'ark';
 
 export interface ProviderVendorInfo extends ProviderTypeInfo {
   category: ProviderVendorCategory;

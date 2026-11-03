@@ -62,6 +62,14 @@ pub trait CapabilityProvider: Send + Sync {
         name: &'a str,
         arguments: &'a Map<String, Value>,
     ) -> ToolResultFuture<'a>;
+    fn call_tool_with_meta<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: &'a Map<String, Value>,
+        _meta: Option<&'a Map<String, Value>>,
+    ) -> ToolResultFuture<'a> {
+        self.call_tool(name, arguments)
+    }
     fn read_resource<'a>(&'a self, uri: &'a str) -> ReadResourceFuture<'a>;
 }
 
@@ -180,6 +188,7 @@ impl Registry {
         &self,
         name: &str,
         arguments: &Map<String, Value>,
+        meta: Option<&Map<String, Value>>,
     ) -> Result<CallToolResult, ToolCallError> {
         let provider = {
             let state = self.state.read().expect("MCP registry lock poisoned");
@@ -189,7 +198,7 @@ impl Registry {
                 .map(|index| Arc::clone(&state.providers[*index].0))
         }
         .ok_or(ToolCallError::InvalidParams)?;
-        provider.call_tool(name, arguments).await
+        provider.call_tool_with_meta(name, arguments, meta).await
     }
 
     pub(super) async fn read(&self, uri: &str) -> Result<ReadResourceResult, ResourceReadError> {

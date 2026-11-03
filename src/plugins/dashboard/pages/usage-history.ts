@@ -1,21 +1,6 @@
-export type UsageHistoryEntry = {
-  timestamp: string;
-  sessionId: string;
-  agentId: string;
-  model?: string;
-  provider?: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  totalTokens: number;
-  costUsd?: number;
-};
+import type { UsageHistoryEntry } from '@/types/desktop/usage';
 
-export type UsageSessionDetailEntry = UsageHistoryEntry & {
-  messageId?: string;
-  eventId?: string;
-};
+export type { UsageHistoryEntry } from '@/types/desktop/usage';
 
 export type UsageWindow = '7d' | '30d' | 'all';
 export type UsageGroupBy = 'model' | 'day';
@@ -50,7 +35,7 @@ export function getUsageDaySortKey(timestamp: string): number {
 }
 
 export function groupUsageHistory(
-  entries: UsageHistoryEntry[],
+  entries: readonly UsageHistoryEntry[],
   groupBy: UsageGroupBy,
 ): UsageGroup[] {
   const grouped = new Map<string, UsageGroup>();
@@ -84,11 +69,11 @@ export function groupUsageHistory(
   return groupBy === 'model' ? sorted.slice(0, 8) : sorted;
 }
 
-export function filterUsageHistoryByWindow(
-  entries: UsageHistoryEntry[],
+export function filterUsageHistoryByWindow<T extends { timestamp: string }>(
+  entries: readonly T[],
   window: UsageWindow,
   nowMs = Date.now(),
-): UsageHistoryEntry[] {
+): readonly T[] {
   if (window === 'all') {
     return entries;
   }

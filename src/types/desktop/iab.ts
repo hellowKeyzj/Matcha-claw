@@ -1,5 +1,3 @@
-import type { SessionIdentity } from './runtime-address';
-
 /** Stable opaque tab namespace; resolved by Main, never a model-supplied owner or visible-chat alias. */
 export type IabOwnerId = string;
 export type IabTabId = string;
@@ -14,9 +12,11 @@ export type IabInternalPage = 'history' | 'downloads';
 export interface IabTab {
   id: IabTabId;
   ownerId: IabOwnerId;
-  /** Canonical verified session keys; page access is independent of resource ownership. */
-  agentSessionIds: string[];
+  /** Session grouping and executor claims are independent of native resource ownership. */
+  sessionGroupId: string | null;
   createdBy: string | null;
+  claimedBy: string | null;
+  retained: boolean;
   url: string;
   title: string;
   faviconUrl?: string;
@@ -127,7 +127,6 @@ export interface IabClearDataConfirmation {
 
 export type IabUiCommand =
   | { action: 'snapshot' | 'list-all' }
-  | { action: 'set-agent-access'; tabId: IabTabId; identity: SessionIdentity; allowed: boolean }
   | { action: 'open'; url: string; background?: boolean }
   | { action: 'switch' | 'close' | 'back' | 'forward' | 'reload'; tabId: IabTabId }
   | { action: 'navigate'; tabId: IabTabId; url: string }

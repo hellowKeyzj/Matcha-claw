@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RecommendationKind, RecommendationRequest, RecommendationResult } from '../analysis';
 import type { DesignTemplate } from '../templates';
 import type { LoadedAsset } from './useAssets';
-import { call, errorMessage } from './api';
+import { call, ToolError } from './api';
 import i18n, { useTranslation } from './i18n';
 import { TemplatePicker } from './TemplatePicker';
 
@@ -18,9 +18,21 @@ interface Props {
 }
 
 type RecommendationState =
-  | { kind: 'idle' | 'loading' }
+  | { kind: 'idle' | 'loading' | 'unavailable' }
   | { kind: 'ready'; candidates: RecommendationResult['candidates']; selectedId: string }
-  | { kind: 'failed'; message: string };
+  | { kind: 'failed'; code: string | undefined };
+
+const failureMessages: Readonly<Record<string, string>> = {
+  'credential-missing': '请检查模型账号凭据。',
+  'credential-unavailable': '请检查模型账号凭据。',
+  authentication: '请检查模型账号凭据。',
+  'permission-denied': '请检查账号权限或更换模型。',
+  'rate-limited': '请求频繁，请稍后重试。',
+  'invalid-response': '推荐内容无效，请重试或更换模型。',
+  invalid_model_output: '推荐内容无效，请重试或更换模型。',
+  busy: '图片分析繁忙，请稍后重试。',
+  deadline: '请求超时，结果未确认。',
+};
 
 export function Recommendations({ documentId, sourceLayerIds, referenceAssetIds = [], kind, disabled, onSelect, load, onTemplateSelect }: Props) {
   const { t } = useTranslation();
@@ -60,7 +72,8 @@ export function Recommendations({ documentId, sourceLayerIds, referenceAssetIds 
       setResult({ request, state: { kind: 'ready', candidates, selectedId: candidates[0]?.id ?? '' } });
       if (!templatesActive.current) selection.current(candidates[0]?.prompt ?? '');
     }).catch((cause) => {
-      if (current) setResult({ request, state: { kind: 'failed', message: errorMessage(cause) } });
+      const code = cause instanceof ToolError ? cause.code : undefined;
+      if (current) setResult({ request, state: code === 'recommendation_unavailable' ? { kind: 'unavailable' } : { kind: 'failed', code } });
     });
     // The tool transport cannot cancel accepted work; obsolete results must not select a new source.
     return () => { current = false; };
@@ -91,7 +104,8 @@ export function Recommendations({ documentId, sourceLayerIds, referenceAssetIds 
     {!validSources ? <p className="empty-hint" role="status">{t(kind === 'product-scene' ? '请先在画布中选择图片，再获取推荐。' : referenceCount === 0 ? '请先选择画布图片或上传独立参考，再获取推荐。' : kind === 'scene-video' ? '场景视频推荐需要且仅分析 1 张参考图片（画布或独立上传）。' : '多镜头推荐需要 1 至 4 张参考图片（含画布和独立上传）。')}</p> : showTemplates ? <TemplatePicker key={inputKey} category="product-scene" selectedId={selectedTemplate?.id} disabled={disabled} load={load} onSelect={selectTemplate} /> : <>
       <div className="section-heading"><h3>{t('推荐候选')}</h3>{state.kind === 'ready' && state.candidates.length > 0 && <button type="button" disabled={disabled} onClick={() => void reloadRecommendations(true)}>{t('换一批')}</button>}</div>
       {state.kind === 'loading' && <p className="empty-hint" role="status">{t('正在根据图片获取推荐…')}</p>}
-      {state.kind === 'failed' && <div className="field"><p className="inline-error" role="alert">{t('获取推荐失败：{error}', { error: state.message })}</p><div className="button-row"><button type="button" disabled={disabled} onClick={() => void reloadRecommendations()}>{t('重试')}</button></div></div>}
+      {state.kind === 'unavailable' && <div className="field"><p className="empty-hint" role="status">{t('请配置图片理解模型。')}</p><div className="button-row"><button type="button" disabled={disabled} onClick={() => void reloadRecommendations()}>{t('重试')}</button></div></div>}
+      {state.kind === 'failed' && <div className="field"><p className="inline-error" role="alert">{t(state.code && Object.hasOwn(failureMessages, state.code) ? failureMessages[state.code] : '获取推荐失败，请重试。')}</p><div className="button-row"><button type="button" disabled={disabled} onClick={() => void reloadRecommendations()}>{t('重试')}</button></div></div>}
       {state.kind === 'ready' && (state.candidates.length ? <div className="property-fields">{state.candidates.map((candidate) => <article className="generation-record" key={candidate.id}>
         <div className="record-heading"><strong>{candidate.title}</strong><button type="button" aria-pressed={state.selectedId === candidate.id} aria-label={t('选择推荐 {title}', { title: candidate.title })} disabled={disabled} onClick={() => {
           setResult({ request, state: { ...state, selectedId: candidate.id } });

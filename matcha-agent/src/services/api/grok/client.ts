@@ -27,11 +27,14 @@ export function getGrokClient(options?: {
   const client = new OpenAI({
     apiKey,
     baseURL,
-    maxRetries: currentInvestigationScope() ? 0 : options?.maxRetries ?? 0,
+    maxRetries: currentInvestigationScope() ? 0 : (options?.maxRetries ?? 0),
     timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
     dangerouslyAllowBrowser: true,
     fetchOptions: getProxyFetchOptions({ forAnthropicAPI: false }),
-    fetch: investigationFetch(options?.fetchOverride ?? globalThis.fetch, 'grok'),
+    fetch: investigationFetch(
+      options?.fetchOverride ?? globalThis.fetch,
+      'grok',
+    ),
   })
 
   if (!options?.fetchOverride && !currentInvestigationScope()) {

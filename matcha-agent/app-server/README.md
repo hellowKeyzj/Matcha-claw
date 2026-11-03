@@ -187,6 +187,7 @@ ready 后由 Session 独立 sleep handoff 关闭实例、等待输出 consumer j
 
 同 Session 内 Server prompt 串行提交；自主输入启动风险取自 CLI 实际投影后本 Session 启用的 Channel，以及实际 launch env/cwd 下原生 cron 的启动快照，不因存在任意渠道定义就判风险；原生 cron 文件是 `workspace/.claude/scheduled_tasks.json`，不是 `Agent.settings` 的同名 key。
 启动快照不能保证后续工具/原生文件变更不产生输入；proactive、foreign user 或多个 result 等事实仍保守判断归属，无法证明 result 唯一属于当前 Run 时以 `outcomeUnknown` / `native_result_ownership_ambiguous` 收口，不冒领结果或自动重发。
+CLI 的公共工具结果与 Agent/Skill progress 出口统一标记实际 `sourceToolUseID`，拆块后保留并以 `source_tool_use_id` 发出；不改变工具原文、消息 UUID 或 `parent_tool_use_id`。Server 仅将来源精确匹配当前已发送且已 ACK Run 中真实观察到的 assistant `tool_use.id` 的 user 视为工具上下文；非空 parent 也须在本轮已观察。调用集合随 Active Run 释放，不因首个 tool_result 提前删除，未知／旧轮来源仍按 foreign input 处理。`isSynthetic` 和提示文案不构成归属证明，原有纯 tool_result、中断及终态门保持。[VERIFY: matcha-agent/src/services/tools/toolExecution.ts] [VERIFY: matcha-agent/src/utils/messages.ts] [VERIFY: matcha-agent/src/utils/queryHelpers.ts] [VERIFY: matcha-agent/app-server/src/session/observation.rs] [VERIFY: matcha-agent/app-server/src/session/run.rs]
 原始事实保留在 Session 事件/原生 transcript；`cancelRequested`/interrupt ACK 不构成 cancelled terminal，须有原生中断事实。
 
 最小调用序列（每步先等上一条响应，UUID 用真实返回值替换）：

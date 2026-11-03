@@ -1,5 +1,6 @@
 import { lazy } from 'react';
 import { Bot } from 'lucide-react';
+import { AgentNavigationIcon } from '@/components/icons/navigation';
 import { applicationNavigation, applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
 import { agentEditorRuntimes, agentWorkbenchPages } from './extensions';
@@ -37,7 +38,7 @@ export const agentsPlugin = definePlugin({
       id: 'agents',
       to: '/subagents',
       label: 'common:sidebar.subagents',
-      icon: Bot,
+      icon: AgentNavigationIcon,
       order: 20,
       activePaths: ['/subagents', '/skills', '/plugins', '/connectors'],
       prefetch: () => import('./services/subagent-template-catalog').then(

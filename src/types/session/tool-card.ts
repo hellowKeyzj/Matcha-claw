@@ -4,6 +4,8 @@ export type SessionRenderAttachmentStatus =
   | 'unknown-omitted'
   | 'thinking-omitted';
 
+export type SessionRenderContentNotice = 'media-unavailable' | 'content-omitted';
+
 export interface SessionRenderAttachedFile {
   fileName: string;
   mimeType: string;
@@ -14,6 +16,7 @@ export interface SessionRenderAttachedFile {
   filePath?: string;
   gatewayUrl?: string;
   mediaReference?: string;
+  resourceId?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref';
 }
 
@@ -108,7 +111,7 @@ export type SessionTimelineContentBlock =
   | { kind: 'largeText'; text: string; contentRef: string; totalBytes: number; loadedBytes: number }
   | { kind: 'toolUse'; name: string; toolCallId?: string }
   | { kind: 'toolResult'; toolName?: string; toolCallId?: string; summary?: string; isError?: boolean }
-  | { kind: 'media'; mediaType?: string; reference?: string }
+  | { kind: 'media'; mediaType?: string; reference?: string; fileName?: string; sizeBytes?: number; resourceId?: string }
   | { kind: 'omitted'; omittedKind: 'thinking' | 'unsafeMedia' | 'unknown' };
 
 export interface SessionAssistantThinkingSegment {
@@ -148,6 +151,7 @@ export interface SessionAssistantMediaSegment {
   key: string;
   images: ReadonlyArray<SessionRenderImage>;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  contentNotices?: ReadonlyArray<SessionRenderContentNotice>;
   parentMessageId?: string;
   firstSeenOrder?: number;
 }

@@ -1,4 +1,4 @@
-import { ListTodo } from 'lucide-react';
+import { TasksNavigationIcon } from '@/components/icons/navigation';
 import { applicationNavigation, applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
 
@@ -60,7 +60,7 @@ export const tasksPlugin = definePlugin({
       id: 'tasks',
       to: '/tasks',
       label: 'common:sidebar.tasks',
-      icon: ListTodo,
+      icon: TasksNavigationIcon,
       order: 10,
       prefetch: prefetchTasks,
     }),

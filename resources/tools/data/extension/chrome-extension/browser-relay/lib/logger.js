@@ -10,19 +10,19 @@ export function isTraceEnabled() {
 }
 
 /**
- * Create a tagged logger. Diagnostic arguments are evaluated only when enabled.
+ * Create a tagged logger with variadic console arguments.
  * @param {string} module — short tag (e.g. 'relay', 'tabs', 'cdp', 'bg')
  */
 export function createLogger(module) {
   const prefix = `[matchaclaw:${module}]`
 
   return {
-    debug(args) {
-      if (traceEnabled) console.debug(prefix, ...args())
+    debug(...args) {
+      if (traceEnabled) console.debug(prefix, ...args)
     },
 
-    info(args) {
-      if (traceEnabled) console.info(prefix, ...args())
+    info(...args) {
+      if (traceEnabled) console.info(prefix, ...args)
     },
 
     warn(...args) {

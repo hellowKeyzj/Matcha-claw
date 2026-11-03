@@ -164,7 +164,11 @@ async function executeBYOCPersistence(
 ): Promise<FilesPersistedEventData> {
   // Find modified files via local filesystem scan
   // Uses same directory structure as downloads: {cwd}/{sessionId}/outputs
-  const modifiedFiles = await findModifiedFiles(turnStartTime, outputsDir, signal)
+  const modifiedFiles = await findModifiedFiles(
+    turnStartTime,
+    outputsDir,
+    signal,
+  )
   if (currentInvestigationScope()) signal?.throwIfAborted()
   requireInvestigationEffects([])
 

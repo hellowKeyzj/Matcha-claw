@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type RefObject } from 'react';
 import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, Download, MoreHorizontal, RotateCw, Search, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Button } from '@/components/ui/button';
-import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
 import type { IabBounds, IabFindResult, IabHistoryEntry, IabTab, IabToolAnchor } from '@/types/desktop/iab';
 import { iabCommand, IabProjectionDiscarded, normalizeIabAddress, onIabEvent, reportIabError, useIabStore } from './store';
 
@@ -86,38 +84,7 @@ function useAddress(tab: IabTab | null, input: RefObject<HTMLInputElement | null
   };
 }
 
-function AgentAccessButton({ tab, sessionIdentity, visible, onHideSuggestions }: { tab: IabTab | null; sessionIdentity?: SessionIdentity; visible: boolean; onHideSuggestions: () => void }) {
-  const { t } = useTranslation('iab');
-  const [accessPending, setAccessPending] = useState(false);
-  const accessRunning = useRef(false);
-  const accessHintId = useId();
-  const sessionKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
-  const agentAllowed = !!sessionKey && !!tab?.agentSessionIds.includes(sessionKey);
-  const accessLabel = t(agentAllowed ? 'revokeAgentAccess' : 'allowAgentAccess');
-  const accessHint = !sessionIdentity ? t('agentAccessRequiresSession') : accessPending ? t('agentAccessUpdating') : accessLabel;
-  const setAgentAccess = async () => {
-    const identity = sessionIdentity;
-    const target = tab;
-    if (!identity || !target || !visible || accessRunning.current) return;
-    const current = useIabStore.getState();
-    const currentTab = current.tabs.find((entry) => entry.ownerId === target.ownerId && entry.id === target.id);
-    if (current.ownerId !== target.ownerId || current.activeTabId !== target.id || !currentTab) return;
-    const allowed = !currentTab.agentSessionIds.includes(buildSessionIdentityKey(identity));
-    accessRunning.current = true; setAccessPending(true);
-    try { await iabCommand({ action: 'set-agent-access', tabId: target.id, identity, allowed }); }
-    catch (error) { reportIabError(error); }
-    finally { accessRunning.current = false; setAccessPending(false); }
-  };
-  return <>
-    <span title={accessHint} className="inline-flex min-w-0 max-w-[42%] shrink">
-      <Button type="button" variant="ghost" size="sm" className="h-8 rounded-lg px-2 text-xs font-normal" disabled={!tab || !sessionIdentity || accessPending || !visible}
-        aria-label={accessLabel} aria-describedby={accessHintId} aria-busy={accessPending || undefined} title={accessHint} onClick={() => { onHideSuggestions(); void setAgentAccess(); }}>{accessLabel}</Button>
-    </span>
-    <span id={accessHintId} className="sr-only">{accessHint}</span>
-  </>;
-}
-
-export function BrowserChrome({ tab, sessionIdentity, surface, visible }: { tab: IabTab | null; sessionIdentity?: SessionIdentity; surface: RefObject<HTMLDivElement | null>; visible: boolean }) {
+export function BrowserChrome({ tab, surface, visible }: { tab: IabTab | null; surface: RefObject<HTMLDivElement | null>; visible: boolean }) {
   const { t } = useTranslation('iab');
   const addressInput = useRef<HTMLInputElement>(null);
   const address = useAddress(tab, addressInput, visible);
@@ -204,7 +171,6 @@ export function BrowserChrome({ tab, sessionIdentity, surface, visible }: { tab:
         className="iab-field h-8 flex-1 rounded-lg border border-border/50 bg-secondary/70 px-3 text-foreground transition-colors focus:bg-card focus-visible:ring-1 focus-visible:ring-ring" />
       {address.expanded && <ul id={address.listId} role="listbox" aria-label={t('history')} className="sr-only">{address.entries.map((entry, index) => <li key={entry.id} id={`${address.listId}-${index}`} role="option" aria-selected={index === address.selected}>{entry.title} {entry.url}</li>)}</ul>}
       <button type="button" className="iab-icon" disabled={!tab} aria-label={t('reload')} title={t('reload')} aria-busy={tab?.loading || undefined} onClick={() => navigateAction('reload')}><RotateCw aria-hidden="true" className={`h-4 w-4 ${tab?.loading ? 'motion-safe:animate-spin' : ''}`} /></button>
-      <AgentAccessButton key={sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null} tab={tab} sessionIdentity={sessionIdentity} visible={visible} onHideSuggestions={address.hide} />
       <button type="button" className="iab-icon" disabled={!tab} aria-label={t('downloads')} title={t('downloads')} aria-haspopup="dialog" aria-expanded={downloadsOpen} onClick={(event) => { address.hide(); if (tab) void iabCommand({ action: 'show-downloads', tabId: tab.id, anchor: readIabToolAnchor(event.currentTarget, event.detail === 0) }).catch(reportIabError); }}><Download aria-hidden="true" className="h-4 w-4" /></button>
       <button ref={more} type="button" className="iab-icon aria-expanded:bg-secondary" disabled={!tab} aria-label={t('more')} title={t('more')} aria-haspopup="dialog" aria-expanded={menuOpen}
         onClick={(event) => { address.hide(); if (tab) void iabCommand({ action: 'show-menu', tabId: tab.id, anchor: readIabToolAnchor(event.currentTarget, event.detail === 0) }).catch(reportIabError); }}><MoreHorizontal aria-hidden="true" className="h-4 w-4" /></button>

@@ -25,7 +25,7 @@ interface Props {
   layers: Layer[];
   initialRecord?: GenerationRecord;
   load(assetId: string): Promise<LoadedAsset>;
-  onCompose(request: GenerationRequest, operationName: string): Promise<void>;
+  onCompose(request: GenerationRequest, operationName: string, userPrompt: string): Promise<void>;
   onGenerate(request: GenerationRequest): Promise<void>;
   onClose(): void;
 }
@@ -159,16 +159,13 @@ export function Generation({ tool, documentId, layers, initialRecord, load, onCo
       setError(t('请选择模型支持的尺寸，或输入宽x高像素。')); return;
     }
     if (!Number.isInteger(count) || count < 1 || count > Math.min(8, caps.maxCount)) { setError(t('生成数量超出当前模型支持范围。')); return; }
-    const businessPrompt = tool === 'recolor' ? t('按所选色卡更换商品颜色，保留原有材质、纹理和光影。')
-      : tool === 'logo' ? t('将独立 Logo 按自定义工艺应用到商品，保持商品与 Logo 细节准确。')
-      : tool === 'model-display' ? [t('让模特自然展示所选商品，保持商品细节准确。'), model.trim()].filter(Boolean).join('\n')
-      : '';
-    const combinedPrompt = [businessPrompt, recommendedPrompt.trim(), prompt.trim()].filter(Boolean).join('\n');
-    if (combinedPrompt.length > 20000) { setError(t('合并后的创作要求超过 20000 字，请缩短模板、推荐、模特描述或补充要求。')); return; }
+    const userPrompt = prompt.trim();
+    const requestPrompt = tool === 'model-display' ? model.trim() : recommendedPrompt.trim();
+    if ([requestPrompt, userPrompt].filter(Boolean).join('\n\n').length > 20000) { setError(t('合并后的创作要求超过 20000 字，请缩短模板、推荐、模特描述或补充要求。')); return; }
     const action = tool === 'scene-video' || tool === 'multi-shot' ? 'video' : tool;
     const request: GenerationRequest = {
       documentId, action, selectionId, sourceLayerIds: sourceIds,
-      prompt: combinedPrompt,
+      prompt: tool === 'storyboard' ? userPrompt : requestPrompt,
       ...(video ? { referenceAssetIds } : {}),
       ...(tool === 'logo' && logoAsset ? { logoAssetId: logoAsset.id, material: material.trim() } : {}),
       ...(tool === 'model-display' && modelAsset ? { modelAssetId: modelAsset.id } : {}),
@@ -182,7 +179,7 @@ export function Generation({ tool, documentId, layers, initialRecord, load, onCo
     setAdding(true);
     try {
       if (tool === 'storyboard') await onGenerate(request);
-      else await onCompose(request, t(toolTitles[tool]));
+      else await onCompose(request, t(toolTitles[tool]), userPrompt);
       if (mounted.current) onClose();
     } catch (cause) { if (mounted.current) setError(errorMessage(cause)); }
     finally { submitting.current = false; if (mounted.current) setAdding(false); }
@@ -214,7 +211,7 @@ export function Generation({ tool, documentId, layers, initialRecord, load, onCo
           {durationError && <p className="inline-error" role="alert">{durationError}</p>}
           {video && <ReferenceImages assetIds={referenceAssetIds} sourceImages={sourceLayers} maxImages={recommendationLimit ?? maxImages} forRecommendations={recommendationLimit !== undefined} load={load} disabled={adding || (recommendationLimit === undefined && !caps)} onChange={setReferenceAssetIds} onBusyChange={setUploading} />}
           {tool === 'resize' && <div className="ic-language-list" role="group" aria-label={t('目标比例')}>{aspectRatios.map((ratio) => <button type="button" key={ratio} disabled={!canSubmit} aria-label={t('按 {ratio} 重新生成图片', { ratio })} onClick={() => void generateDirect('resize', { aspectRatio: ratio })}>{t('{ratio}', { ratio })}</button>)}</div>}
-          {tool === 'translate' && <div className="ic-language-list" role="group" aria-label={t('目标语言')}>{languages.map((language) => <button type="button" key={language.code} disabled={!canSubmit} onClick={() => void generateDirect('translate', { targetLanguage: language.code })}>{t(language.name)}</button>)}</div>}
+          {tool === 'translate' && <div className="ic-language-list" role="group" aria-label={t('目标语言')}>{languages.map((language) => <button type="button" key={language.code} disabled={!canSubmit} onClick={() => void generateDirect('translate', { targetLanguage: t(language.name) })}>{t(language.name)}</button>)}</div>}
           {tool === 'angle' && <AnglePresets selected={anglePreset} disabled={busy} onSelect={setAnglePreset} />}
           {tool === 'remove-background' && <p className="quiet">{t('逐张去除背景并保留主体，结果作为新图层添加到画布。')}</p>}
           {tool === 'recolor' && <RecolorFields colors={colors} onChange={setColors} disabled={busy} />}

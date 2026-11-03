@@ -316,10 +316,12 @@ export interface ChatCurrentSessionConversation {
   sessionRecordKey: string;
   endpointSessionId: string | null;
   sessionIdentity: SessionIdentity;
+  promotedDraft?: { readonly id: string; readonly scopeKey: string };
 }
 
 export interface ChatCurrentDraftConversation {
   kind: 'draft';
+  readonly id: string;
   runtimeScopeKey: string;
   endpoint: RuntimeEndpointRef;
   agentId: string;
@@ -355,6 +357,7 @@ export interface ChatSessionAbortState {
   identityKey: string;
   sendGeneration: number;
   runId: string | null;
+  imageTaskIds?: readonly string[];
   startedAt: number;
   phase: 'stopping' | 'failed';
   issue: GatewayTransportIssue | null;
@@ -404,10 +407,9 @@ export interface ChatStoreBaseState extends ChatViewState {
   dismissedRuntimeErrorBySession: Record<string, ChatRuntimeErrorDismissMarker | undefined>;
 }
 
-export const CHAT_INLINE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
-
 export interface ChatSendAttachment {
   stagedAttachmentId: string;
+  transport?: 'path';
   entryKind?: 'file' | 'directory';
   fileName: string;
   mimeType: string;
@@ -425,6 +427,7 @@ export type ChatSendRejectReason =
   | 'missing-session'
   | 'missing-session-identity'
   | 'goal-attachments'
+  | 'goal-model-context'
   | 'error';
 
 export type ChatSendGate =

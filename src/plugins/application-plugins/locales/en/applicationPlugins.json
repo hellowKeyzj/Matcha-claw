@@ -31,6 +31,7 @@
   "origin": "Source",
   "manual": "Manually imported",
   "agent": "Built by an agent",
+  "bundled": "Included with the app",
   "pluginId": "Plugin ID",
   "capabilities": "Capabilities",
   "mixed": "This plugin provides several types of capabilities. Import the complete plugin package to update it.",

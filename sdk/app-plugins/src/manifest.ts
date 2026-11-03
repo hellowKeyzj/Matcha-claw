@@ -66,6 +66,7 @@ export interface AppPluginManifest {
     readonly readers?: readonly AppReaderManifest[];
     readonly connectors?: readonly AppConnectorManifest[];
     readonly applications?: readonly AppApplicationManifest[];
+    readonly chat?: { readonly contextTag: string };
     readonly tools?: readonly AppToolManifest[];
   };
 }
@@ -74,12 +75,12 @@ export interface InstalledAppPlugin {
   readonly manifest: AppPluginManifest;
   readonly digest: string;
   readonly enabled: boolean;
-  readonly origin: 'manual' | 'agent';
+  readonly origin: 'manual' | 'agent' | 'bundled';
   readonly installedAt: string;
   readonly previous?: {
     readonly manifest: AppPluginManifest;
     readonly digest: string;
-    readonly origin: 'manual' | 'agent';
+    readonly origin: 'manual' | 'agent' | 'bundled';
     readonly installedAt: string;
   };
 }

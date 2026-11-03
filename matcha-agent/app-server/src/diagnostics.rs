@@ -141,7 +141,38 @@ impl Diagnostics {
         result
     }
 
-    /// Opt-in safe thinking evidence uses the existing diagnostic store.
+    pub(crate) fn session_stage(message: &Value) -> Option<&'static str> {
+        match message["type"].as_str()? {
+            "user" => Some("user_message"),
+            "assistant" => Some("sdk_assistant"),
+            "result" => Some("result"),
+            "stream_event" => match message.pointer("/event/type")?.as_str()? {
+                "message_start" => Some("message_start"),
+                "content_block_stop" => Some("content_block_stop"),
+                "message_stop" => Some("message_stop"),
+                _ => None,
+            },
+            "system" if message["subtype"] == "session_state_changed" => {
+                match message["state"].as_str()? {
+                    "idle" => Some("idle"),
+                    "running" => Some("running"),
+                    "requires_action" => Some("requires_action"),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Session timing records share the existing durable diagnostic sink.
+    pub(crate) fn identifier_hash(value: &str) -> String {
+        let hash = value.encode_utf16().fold(2_166_136_261u32, |hash, unit| {
+            (hash ^ u32::from(unit)).wrapping_mul(16_777_619)
+        });
+        format!("{hash:08x}")
+    }
+
+    /// Opt-in safe evidence uses the existing diagnostic store.
     pub(crate) async fn trace(&self, owner: &str, operation: &str, reason: &str, context: Value) {
         if std::env::var("MATCHACLAW_TRACE").as_deref() == Ok("1") {
             // record() reports its own persistence failure without changing the action's result.
@@ -395,10 +426,16 @@ fn project_context(context: Value) -> Value {
                         .map(Value::String)
                 }
             }
-            "sessionHash" | "modelHash" | "requestHash" => value
+            "sessionHash"
+            | "modelHash"
+            | "requestHash"
+            | "instanceHash"
+            | "messageHash"
+            | "providerMessageHash" => value
                 .as_str()
                 .filter(|hash| {
-                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    matches!(hash.len(), 8 | 64)
+                        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })
                 .map(|hash| Value::String(hash.to_owned())),
             "provider" => value
@@ -528,7 +565,9 @@ fn project_context(context: Value) -> Value {
                 matches!(stream, "stdin" | "stdout" | "stderr")
                     .then(|| Value::String(stream.to_owned()))
             }),
-            "elapsedMs" | "bytes" | "count" => value.as_u64().map(Value::from),
+            "elapsedMs" | "bytes" | "count" | "observedAtMs" | "lockWaitMs" => {
+                value.as_u64().map(Value::from)
+            }
             "pid" => value
                 .as_u64()
                 .filter(|pid| *pid <= u64::from(u32::MAX))

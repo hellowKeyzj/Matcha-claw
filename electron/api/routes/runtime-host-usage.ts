@@ -1,9 +1,5 @@
 import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
-import type {
-  UsageHistoryEntry,
-  UsageTransport,
-  UsageTransportResponse,
-} from '../../main/runtime-host-delivery/transport/usage';
+import type { UsageTransport } from '../../main/runtime-host-delivery/transport/usage';
 import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const UNAVAILABLE = {
@@ -33,18 +29,8 @@ export async function handleRuntimeHostUsageRoutes(
         agentId: url.searchParams.get('agentId') ?? '',
         scope: readRuntimeScopeQuery(url.searchParams),
       });
-    if (response.status === 200 && isUsageEntries(response.body)) {
-      return jsonResult(200, response.body.entries);
-    } else {
-      return jsonResult(response.status, response.body);
-    }
+    return jsonResult(response.status, response.body);
   } catch {
     return jsonResult(503, UNAVAILABLE);
   }
-}
-
-function isUsageEntries(
-  body: UsageTransportResponse['body'],
-): body is Readonly<{ entries: readonly UsageHistoryEntry[] }> {
-  return 'entries' in body;
 }

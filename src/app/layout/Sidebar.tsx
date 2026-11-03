@@ -113,7 +113,7 @@ function NavigationItem({ item, pathname, disabled, onPrefetch, onNavigate }: {
     return (
       <NavItem
         to={item.to}
-        icon={<Icon className="h-[17px] w-[17px]" />}
+        icon={<Icon strokeWidth={1.75} className="h-5 w-5" />}
         label={t(item.label)}
         disabled={disabled}
         active={item.activePaths?.includes(pathname) ? true : undefined}
@@ -141,7 +141,7 @@ function NavigationItem({ item, pathname, disabled, onPrefetch, onNavigate }: {
               : 'text-[hsl(var(--shell-text-muted))]',
           )}
         >
-          <Icon aria-hidden="true" className="h-[17px] w-[17px]" />
+          <Icon aria-hidden="true" strokeWidth={1.75} className="h-5 w-5" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="right" align="start" aria-label={t(item.label)}>

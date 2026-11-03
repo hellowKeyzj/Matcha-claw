@@ -202,6 +202,9 @@ pub enum MessageContent {
     Media {
         media_type: Option<String>,
         reference: Option<String>,
+        file_name: Option<String>,
+        size_bytes: Option<u64>,
+        resource_id: Option<String>,
         bytes: Option<usize>,
     },
     Omitted {

@@ -29,6 +29,23 @@
         "hideDetails": "セッション詳細を隠す",
         "detailsLoading": "セッション詳細を読み込み中...",
         "detailsEmpty": "このセッションのトークン詳細はありません",
-        "detailsError": "セッション詳細の読み込みに失敗しました"
+        "detailsError": "セッション詳細の読み込みに失敗しました",
+        "recordedTitle": "記録済み使用量",
+        "recordedDescription": "Matcha が記録した使用量をモデル別・時間別に確認します。総消費量を示すものではありません。",
+        "recordedTokens": "記録済みトークン",
+        "returnedRecords": "取得済みの記録",
+        "partialUsage": "取得範囲内に使用量不明の記録があります。集計には記録済み使用量のみを含みます。",
+        "nativeOutcomeUnknown": "取得範囲内にネイティブ実行の結果が不明なものがあり、未計測の消費がある可能性があります。選択した期間の欠落を特定するものではありません。",
+        "hasMore": "最近の記録を件数上限付きで表示しています。期間フィルターの対象は取得済みの記録であり、全履歴ではありません。",
+        "noKnownUsage": "現在の条件に一致する既知の使用量記録はありません",
+        "noKnownUsageDescription": "ここで集計できる使用量の観測はありません。消費がゼロという意味ではありません。",
+        "unknownUsage": "使用量不明の記録",
+        "unknownReasons": {
+            "native_result_session_mismatch": "ネイティブ結果が要求したセッションと一致しません",
+            "native_result_identity_missing": "ネイティブ結果に識別情報がありません",
+            "native_execution_error_placeholder": "ネイティブ実行はエラーのプレースホルダーのみを返しました",
+            "native_usage_scope_unknown": "ネイティブ使用量の計測範囲を特定できません",
+            "native_usage_missing_or_invalid": "ネイティブ使用量が欠落しているか無効です"
+        }
     }
 }

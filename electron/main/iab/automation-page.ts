@@ -28,6 +28,7 @@ export class IabAutomationPage {
   private frames: Frame[] = [];
   private readonly refs = new Map<string, ElementRef>();
   private nextRef = 0;
+  private nextRequest = 0;
   private documentGeneration = 0;
   private snapshotInput?: BrowserSnapshotAction;
   readonly settings: { pace?: { minIntervalMs: number; jitterMs?: number }; humanize?: boolean; stealth?: { enabled: boolean } } = {};
@@ -38,7 +39,6 @@ export class IabAutomationPage {
   private readonly networkEntries = new Map<string, IabJsonObject>();
   private readonly activeRequests = new Map<string, ActiveRequest>();
   private readonly frameParents = new Map<string, string | undefined>();
-  private networkChangedAt = 0;
   private readonly bodyTasks = new Set<Promise<unknown>>();
   private readonly bodyBudgets = new WeakMap<Operation, number>();
   private readonly retainedBodies = new Map<IabJsonObject, number>();
@@ -105,8 +105,9 @@ export class IabAutomationPage {
     const descriptions = new Map<string, { id: string; parentId?: string; name?: string; url: string; sessionId?: string }>();
     const walk = (tree: any, sessionId?: string) => {
       if (!tree?.frame) return;
-      descriptions.set(tree.frame.id, { ...tree.frame, sessionId });
-      this.frameParents.set(tree.frame.id, tree.frame.parentId ?? (sessionId ? this.frameParents.get(tree.frame.id) : undefined));
+      const parentId = tree.frame.parentId ?? (sessionId ? this.frameParents.get(tree.frame.id) : undefined);
+      descriptions.set(tree.frame.id, { ...tree.frame, parentId, sessionId });
+      this.frameParents.set(tree.frame.id, parentId);
       for (const child of tree.childFrames ?? []) walk(child, sessionId);
     };
     walk((await this.send<any>('Page.getFrameTree', undefined, operation)).frameTree);
@@ -161,6 +162,14 @@ export class IabAutomationPage {
     while (this.eventTasks.size) { operation.signal.throwIfAborted(); await Promise.all([...this.eventTasks]); }
   }
 
+  readRequests(filter?: string): IabJsonObject[] {
+    const keyword = filter?.toLowerCase();
+    return this.requests.slice(-500).filter((entry) => !keyword || String((entry.request as IabJsonObject | undefined)?.url ?? '').toLowerCase().includes(keyword)).map((entry) => {
+      const request = entry.request as IabJsonObject | undefined;
+      return { id: entry.id, timestamp: new Date(Number(entry.startedAt)).toISOString(), method: String(request?.method ?? ''), url: String(request?.url ?? ''), ...(typeof entry.type === 'string' ? { resourceType: entry.type } : {}), ...(typeof entry.status === 'number' ? { status: entry.status } : {}), ...(typeof entry.ok === 'boolean' ? { ok: entry.ok } : {}), ...(typeof entry.failureText === 'string' ? { failureText: entry.failureText } : {}) };
+    });
+  }
+
   async releaseObjects(operation: Operation): Promise<void> {
     const sessions = [...this.objectSessions];
     this.objectSessions.clear();
@@ -194,18 +203,10 @@ export class IabAutomationPage {
     } catch (error) {
       operation.signal.throwIfAborted();
       (operation.assertCurrent ?? this.assertCurrent)?.();
-      if (params.scope || params.frame || params.selector) throw error;
-      this.refs.clear();
+      if (error instanceof Error && 'code' in error && error.code === 'IAB_CDP_OUTCOME_UNKNOWN' || params.scope || params.frame || params.selector) throw error;
       const snapshot = await degradedSnapshot(this, params, error instanceof Error ? error.message : String(error), operation);
-      this.snapshotInput = params;
       return snapshot;
     }
-  }
-
-  registerBackendRef(frame: Frame, backendNodeId: number): string {
-    const ref = `e${++this.nextRef}`;
-    this.refs.set(ref, { frame, backendNodeId, generation: frame.documentGeneration });
-    return ref;
   }
 
   private async snapshotAi(params: BrowserSnapshotAction, operation: Operation): Promise<IabJsonObject> {
@@ -426,14 +427,25 @@ export class IabAutomationPage {
     if (condition.timeMs && condition.timeMs > 0) { await this.pause(condition.timeMs, operation); return; }
     if (condition.loadState && !['load', 'domcontentloaded', 'networkidle'].includes(condition.loadState)) throw iabError('IAB_LOAD_STATE_INVALID', 'Unsupported wait loadState');
     if (condition.loadState === 'networkidle') {
-      const started = Date.now();
-      await this.send('Network.enable', networkBuffers, operation);
-      while (Date.now() < operation.deadline) {
-        operation.signal.throwIfAborted(); operation.assertCurrent?.();
-        if (!this.activeRequests.size && Date.now() - Math.max(started, this.networkChangedAt) >= 500) return;
-        await this.pause(50, operation);
-      }
-      throw iabError('IAB_WAIT_TIMEOUT', 'Browser network did not become idle before the timeout');
+      const pending = new Set<string>();
+      let changedAt: number;
+      const stop = this.executor.onEvent((event) => {
+        if (!['Network.requestWillBeSent', 'Network.loadingFinished', 'Network.loadingFailed'].includes(event.method)) return;
+        const requestId = typeof event.params.requestId === 'string' ? event.params.requestId : '';
+        const key = `${event.sessionId ?? ''}\0${requestId}`;
+        if (requestId) { if (event.method === 'Network.requestWillBeSent') pending.add(key); else pending.delete(key); }
+        changedAt = Date.now();
+      });
+      try {
+        await this.send('Network.enable', networkBuffers, operation);
+        changedAt = Date.now();
+        while (Date.now() < operation.deadline) {
+          operation.signal.throwIfAborted(); operation.assertCurrent?.();
+          if (!pending.size && Date.now() - changedAt >= 500) return;
+          await this.pause(50, operation);
+        }
+        throw iabError('IAB_WAIT_TIMEOUT', 'Browser network did not become idle before the timeout');
+      } finally { stop(); }
     }
     const predicate = condition.loadState ? `${condition.loadState === 'domcontentloaded' ? "['interactive','complete']" : "['complete']"}.includes(document.readyState)`
       : condition.text ? `(document.body?.innerText||'').includes(${JSON.stringify(condition.text)})`
@@ -446,8 +458,8 @@ export class IabAutomationPage {
       let response: RemoteResult | undefined;
       try { response = await this.send<RemoteResult>('Runtime.evaluate', { expression: predicate, returnByValue: true }, operation); }
       catch (error) {
-        operation.signal.throwIfAborted(); operation.assertCurrent?.();
-        if (!(error instanceof Error) || !/Execution context was destroyed|Cannot find context with specified id/u.test(error.message)) throw error;
+        operation.signal.throwIfAborted(); (operation.assertCurrent ?? this.assertCurrent)();
+        if (Date.now() >= operation.deadline || error instanceof Error && 'code' in error && String(error.code).startsWith('IAB_')) throw error;
       }
       if (response?.exceptionDetails) throw iabError('IAB_WAIT_PREDICATE_FAILED', response.exceptionDetails.exception?.description ?? response.exceptionDetails.text ?? 'Browser wait predicate threw');
       if (response?.result.value === true) return;
@@ -459,15 +471,11 @@ export class IabAutomationPage {
   private resetNetwork(): void {
     this.activeRequests.clear();
     this.networkEntries.clear();
-    this.frameParents.clear();
-    this.networkChangedAt = Date.now();
-  }
+    this.frameParents.clear();  }
 
   private forgetNetworkRequests(matches: (request: ActiveRequest) => boolean): void {
     for (const [key, request] of this.activeRequests) if (matches(request)) this.activeRequests.delete(key);
-    for (const [key, entry] of this.networkEntries) if (matches(entry as ActiveRequest)) this.networkEntries.delete(key);
-    this.networkChangedAt = Date.now();
-  }
+    for (const [key, entry] of this.networkEntries) if (matches(entry as ActiveRequest)) this.networkEntries.delete(key);  }
 
   private frameBranch(frameId: string): Set<string> {
     const branch = new Set([frameId]);
@@ -520,8 +528,14 @@ export class IabAutomationPage {
       const context = params.context as any;
       if (context?.auxData?.isDefault && typeof context.auxData.frameId === 'string') this.defaultContexts.set(context.auxData.frameId, { id: context.id, sessionId: event.sessionId });
     }
-    if (event.method === 'Runtime.executionContextDestroyed') for (const [frameId, context] of this.defaultContexts) if (context.id === params.executionContextId && context.sessionId === event.sessionId) this.defaultContexts.delete(frameId);
-    if (event.method === 'Runtime.executionContextsCleared') for (const [frameId, context] of this.defaultContexts) if (context.sessionId === event.sessionId) this.defaultContexts.delete(frameId);
+    if (event.method === 'Runtime.executionContextDestroyed') {
+      for (const [frameId, context] of this.defaultContexts) if (context.id === params.executionContextId && context.sessionId === event.sessionId) this.defaultContexts.delete(frameId);
+      this.frames = this.frames.filter((frame) => frame.contextId !== params.executionContextId || frame.sessionId !== event.sessionId);
+    }
+    if (event.method === 'Runtime.executionContextsCleared') {
+      for (const [frameId, context] of this.defaultContexts) if (context.sessionId === event.sessionId) this.defaultContexts.delete(frameId);
+      this.frames = this.frames.filter((frame) => frame.sessionId !== event.sessionId);
+    }
     if (event.method === 'IAB.epochInvalidated') { this.defaultContexts.clear(); this.scripts.clear(); this.resetNetwork(); }
     if (event.method === 'Inspector.targetCrashed') this.resetNetwork();
     if (event.method === 'Page.frameAttached' && typeof params.frameId === 'string') this.frameParents.set(params.frameId, typeof params.parentFrameId === 'string' ? params.parentFrameId : undefined);
@@ -530,6 +544,9 @@ export class IabAutomationPage {
       if (typeof frame?.id === 'string') {
         const parentId = typeof frame.parentId === 'string' ? frame.parentId : event.sessionId ? this.frameParents.get(frame.id) : undefined;
         const branch = this.frameBranch(frame.id);
+        if (!event.sessionId && !parentId) this.invalidateRefs();
+        else this.frames = this.frames.filter((cached) => !branch.has(cached.id));
+        for (const id of branch) this.defaultContexts.delete(id);
         this.forgetNetworkRequests((request) => !!request.frameId && branch.has(request.frameId) && (request.frameId !== frame.id || request.loaderId !== frame.loaderId));
         for (const id of branch) this.frameParents.delete(id);
         this.frameParents.set(frame.id, parentId);
@@ -537,42 +554,55 @@ export class IabAutomationPage {
     }
     if (event.method === 'Page.frameDetached' && typeof params.frameId === 'string') {
       const branch = this.frameBranch(params.frameId);
+      this.frames = this.frames.filter((frame) => !branch.has(frame.id));
+      for (const id of branch) this.defaultContexts.delete(id);
       this.forgetNetworkRequests((request) => request.sessionId === event.sessionId && !!request.frameId && branch.has(request.frameId));
       if (params.reason !== 'swap') for (const id of branch) this.frameParents.delete(id);
     }
-    if (event.method === 'IAB.childFrameDetached' && typeof params.sessionId === 'string') this.forgetNetworkRequests((request) => request.sessionId === params.sessionId);
-    if (event.method === 'IAB.epochInvalidated' || event.method === 'Page.frameNavigated' || event.method === 'Page.frameDetached' || event.method === 'Page.navigatedWithinDocument' || event.method === 'Runtime.executionContextsCleared') this.invalidateRefs();
-    if (event.method === 'Runtime.consoleAPICalled') pushBounded(this.messages, { level: params.type ?? 'log', text: ((params.args ?? []) as IabJsonObject[]).map((arg) => arg.value === undefined ? arg.description ?? '' : typeof arg.value === 'string' ? arg.value : JSON.stringify(arg.value)).join(' '), timestamp: params.timestamp ?? Date.now(), ...(event.sessionId ? { sessionId: event.sessionId } : {}) });
-    if (event.method === 'Runtime.exceptionThrown') pushBounded(this.errors, params);
+    if (event.method === 'IAB.childFrameDetached' && typeof params.sessionId === 'string') {
+      this.frames = this.frames.filter((frame) => frame.sessionId !== params.sessionId);
+      for (const [frameId, context] of this.defaultContexts) if (context.sessionId === params.sessionId) this.defaultContexts.delete(frameId);
+      this.forgetNetworkRequests((request) => request.sessionId === params.sessionId);
+    }
+    if (event.method === 'IAB.epochInvalidated') this.invalidateRefs();
+    if (event.method === 'Runtime.consoleAPICalled') {
+      const location = ((params.stackTrace as IabJsonObject | undefined)?.callFrames as IabJsonObject[] | undefined)?.[0];
+      pushBounded(this.messages, { type: typeof params.type === 'string' ? params.type : 'log', text: ((params.args ?? []) as IabJsonValue[]).map(consoleArgument).join(' '), timestamp: new Date().toISOString(), ...(location ? { location: { ...(typeof location.url === 'string' ? { url: location.url } : {}), ...(typeof location.lineNumber === 'number' ? { lineNumber: location.lineNumber } : {}), ...(typeof location.columnNumber === 'number' ? { columnNumber: location.columnNumber } : {}) } } : {}) }, 500);
+    }
+    if (event.method === 'Runtime.exceptionThrown') {
+      const details = params.exceptionDetails as IabJsonObject | undefined;
+      const exception = details?.exception as IabJsonObject | undefined;
+      if (details) pushBounded(this.errors, { message: String(exception?.description ?? details.text ?? exception?.className ?? 'Uncaught exception'), ...(exception?.className ? { name: String(exception.className) } : {}), ...(exception?.description ? { stack: String(exception.description) } : {}), timestamp: new Date().toISOString() }, 200);
+    }
     if (event.method === 'Debugger.scriptParsed' && typeof params.scriptId === 'string') {
       this.scripts.set(`${event.sessionId ?? ''}:${params.scriptId}`, { ...params, ...(event.sessionId ? { sessionId: event.sessionId } : {}) });
       if (this.scripts.size > 1000) this.scripts.delete(this.scripts.keys().next().value!);
     }
     const requestKey = `${event.sessionId ?? ''}\0${params.requestId}`;
-    if (event.method === 'Network.requestWillBeSent') {
+    if (event.method === 'Network.requestWillBeSent' && String(params.requestId ?? '')) {
       const previous = this.networkEntries.get(requestKey);
       if (previous && params.redirectResponse) {
         previous.response = params.redirectResponse; previous.finishedAt = Date.now();
       }
-      this.activeRequests.set(requestKey, { sessionId: event.sessionId, frameId: typeof params.frameId === 'string' ? params.frameId : undefined, loaderId: typeof params.loaderId === 'string' ? params.loaderId : undefined });
-      this.networkChangedAt = Date.now();
-      const entry: IabJsonObject = { ...params, ...(event.sessionId ? { sessionId: event.sessionId } : {}), startedAt: Date.now() };
+      this.activeRequests.set(requestKey, { sessionId: event.sessionId, frameId: typeof params.frameId === 'string' ? params.frameId : undefined, loaderId: typeof params.loaderId === 'string' ? params.loaderId : undefined });      const entry: IabJsonObject = { ...params, id: `r${++this.nextRequest}`, ...(event.sessionId ? { sessionId: event.sessionId } : {}), startedAt: Date.now() };
       this.networkEntries.set(requestKey, entry);
       if (this.networkEntries.size > 1000) this.networkEntries.delete(this.networkEntries.keys().next().value!);
       pushBounded(this.requests, entry);
     }
     const entry = this.networkEntries.get(requestKey);
-    if (entry && event.method === 'Network.responseReceived') { entry.response = params.response; entry.resourceType = params.type; }
+    if (entry && event.method === 'Network.responseReceived') {
+      entry.response = params.response; entry.resourceType = params.type;
+      const status = (params.response as IabJsonObject | undefined)?.status;
+      if (typeof status === 'number') { entry.status = status; entry.ok = status < 400; }
+    }
     if (entry && event.method === 'Network.dataReceived') entry.decodedDataLength = Number(entry.decodedDataLength ?? 0) + Number(params.dataLength ?? 0);
     if (entry && event.method === 'Network.requestWillBeSentExtraInfo') entry.requestExtraInfo = params;
     if (entry && event.method === 'Network.responseReceivedExtraInfo') entry.responseExtraInfo = params;
     if (event.method === 'Network.loadingFinished' || event.method === 'Network.loadingFailed') {
-      this.activeRequests.delete(requestKey);
-      this.networkChangedAt = Date.now();
-      if (entry) {
+      this.activeRequests.delete(requestKey);      if (entry) {
         entry.finishedAt = Date.now();
         entry.encodedDataLength = params.encodedDataLength ?? 0;
-        if (event.method === 'Network.loadingFailed') entry.failure = params;
+        if (event.method === 'Network.loadingFailed') { entry.failure = params; entry.ok = false; if (typeof params.errorText === 'string') entry.failureText = params.errorText; }
         else if (['XHR', 'Fetch', 'Script', 'Document'].includes(String(entry.resourceType))) {
           if (canDispatch) this.collectResponseBody(requestKey, entry, String(params.requestId), event.sessionId, operation!);
           else entry.bodyError = 'Response body was not captured outside a live browser operation';
@@ -581,7 +611,7 @@ export class IabAutomationPage {
     }
     if (event.method.startsWith('Network.webSocket')) pushBounded(this.events, { method: event.method, ...params, seq: ++this.eventSequence });
     if (event.method === 'Page.javascriptDialogOpening') {
-      const decision = this.dialog ?? { accept: false };
+      const decision = this.dialog ?? { accept: params.type === 'beforeunload' };
       this.dialog = null;
       if (canDispatch) {
         const task = this.send('Page.handleJavaScriptDialog', { accept: decision.accept, ...(decision.promptText === undefined ? {} : { promptText: decision.promptText }) }, operation!).finally(() => this.eventTasks.delete(task));
@@ -593,9 +623,20 @@ export class IabAutomationPage {
   }
 }
 
-function pushBounded(items: IabJsonObject[], item: IabJsonObject): void {
+function consoleArgument(value: IabJsonValue): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return String(value);
+  if (value.unserializableValue !== undefined) return String(value.unserializableValue);
+  if (value.type === 'string') return String(value.value ?? '');
+  if (value.value !== undefined) {
+    try { return typeof value.value === 'object' ? JSON.stringify(value.value) : String(value.value); }
+    catch { return String(value.value); }
+  }
+  return typeof value.description === 'string' ? value.description : typeof value.type === 'string' ? `[${value.type}]` : '';
+}
+
+function pushBounded(items: IabJsonObject[], item: IabJsonObject, maximum = 1000): void {
   items.push(item);
-  if (items.length > 1000) items.shift();
+  if (items.length > maximum) items.shift();
 }
 
 function mapQuadPoint(quad: number[], x: number, y: number): { x: number; y: number } {

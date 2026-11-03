@@ -8,7 +8,7 @@ import { useState, useEffect } from 'react';
 import { Minus, Square, X, Copy, Settings, PanelLeft } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import logoSvg from '@/assets/logo.svg';
+import logoPng from '@/assets/logo.png';
 import { invokeIpc } from '@/lib/api-client';
 import { preloadApplicationPath } from '@/app/navigation';
 import { usePluginHost } from '@/plugin-host/react';
@@ -119,7 +119,7 @@ function WindowsTitleBar() {
     <div className="drag-region flex h-12 shrink-0 items-center justify-between border-b bg-[hsl(var(--shell-surface))] px-3 [border-color:hsl(var(--shell-border))]">
       <div className="no-drag flex h-full items-center gap-2">
         <SidebarToggleButton />
-        <img src={logoSvg} alt="MatchaClaw" className="h-5 w-auto" />
+        <img src={logoPng} alt="MatchaClaw" className="h-5 w-auto" />
         <span className="select-none text-[11px] font-semibold tracking-[0.12em] text-[hsl(var(--shell-text-muted))]">
           MatchaClaw
         </span>

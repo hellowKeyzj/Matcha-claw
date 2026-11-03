@@ -1,9 +1,9 @@
 import { appToolName } from '@matcha/app-plugins-sdk';
 import { validateSessionIdentity } from '@matcha/app-plugins-sdk';
 import type { DesignComposeOperation } from '../compose-operation';
-import type { GenerationRequest } from '../document';
 import { generationRequest, id, invalid, layerPatch, number, object, revision, text } from './validation';
 
+type ComposeRequest = DesignComposeOperation['requests'][number];
 type Attachment = NonNullable<DesignComposeOperation['references']>[number];
 const attachmentFields = ['assetId', 'attachmentName', 'attachmentIndex', 'isPreview', 'originalMimeType'];
 
@@ -24,15 +24,19 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((entry, index) => entry === right[index]);
 }
 
-function hasRequiredSources(request: GenerationRequest): boolean {
+function hasRequiredSources(request: ComposeRequest): boolean {
   return request.action === 'image' || request.action === 'video' || request.action === 'storyboard'
     || (request.sourceLayerIds?.length ?? 0) > 0;
+}
+
+function composeRequest(value: unknown): ComposeRequest {
+  return generationRequest(value, 'draft');
 }
 
 function parseOperation(value: string): DesignComposeOperation {
   let parsed: unknown;
   try { parsed = JSON.parse(value); } catch { invalid('Invalid compose operation JSON.'); }
-  const raw = object(parsed, ['toolName', 'instructions', 'document', 'summary', 'sources', 'references', 'model', 'logo', 'annotation', 'requests']);
+  const raw = object(parsed, ['toolName', 'document', 'summary', 'sources', 'references', 'model', 'logo', 'annotation', 'requests']);
   if (raw.toolName !== appToolName('matcha.design', 'generate')) invalid('Invalid compose generation tool.');
   const document = object(raw.document, ['id', 'revision', 'sessionIdentity']);
   if (document.sessionIdentity !== undefined) {
@@ -56,7 +60,7 @@ function parseOperation(value: string): DesignComposeOperation {
   }
   if (!Array.isArray(raw.requests) || !raw.requests.length || raw.requests.length > 16) invalid('Provide 1–16 compose requests.');
   const operation: DesignComposeOperation = {
-    toolName: text(raw.toolName, 'toolName', 128), instructions: text(raw.instructions, 'instructions', 32 * 1024),
+    toolName: text(raw.toolName, 'toolName', 128),
     document: { id: id(document.id, 'document id'), revision: revision(document.revision),
       ...(document.sessionIdentity === undefined ? {} : { sessionIdentity: document.sessionIdentity as NonNullable<DesignComposeOperation['document']['sessionIdentity']> }) },
     summary: { name: text(summary.name, 'summary name', 120), imageCountNames }, sources,
@@ -64,7 +68,7 @@ function parseOperation(value: string): DesignComposeOperation {
     ...(raw.model === undefined ? {} : { model: attachment(raw.model) }),
     ...(raw.logo === undefined ? {} : { logo: attachment(raw.logo) }),
     ...(raw.annotation === undefined ? {} : { annotation: attachment(raw.annotation) }),
-    requests: raw.requests.map((value) => generationRequest(value)),
+    requests: raw.requests.map(composeRequest),
   };
   const metadata = [...sources, ...(references ?? []), ...[operation.model, operation.logo, operation.annotation].filter((entry): entry is Attachment => entry !== undefined)];
   if (metadata.length > 16 || new Set(metadata.map((entry) => entry.attachmentIndex)).size !== metadata.length
@@ -118,7 +122,7 @@ export function editComposeOperation(input: unknown): { context: null | { name: 
   const sourceIds = new Set(sources.map((entry) => entry.layerId));
   const referenceIds = new Set(references.map((entry) => entry.assetId));
   const removeModel = operation.model?.attachmentIndex === removed;
-  const requests: GenerationRequest[] = [];
+  const requests: ComposeRequest[] = [];
   for (const request of operation.requests) {
     let updated = request;
     if (removeModel) {
@@ -132,7 +136,7 @@ export function editComposeOperation(input: unknown): { context: null | { name: 
       if (operation.requests.length > 1 && request.action === 'upscale') continue;
       return { context: null };
     }
-    requests.push(generationRequest(updated));
+    requests.push(composeRequest(updated));
   }
   if (!requests.length) return { context: null };
   const { sources: _sources, references: _references, model, ...unchanged } = operation;

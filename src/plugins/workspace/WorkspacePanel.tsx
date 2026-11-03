@@ -222,9 +222,10 @@ export const WorkspacePanel = memo(function WorkspacePanel(props: WorkspacePanel
           {launchers.slice(0, 6).map((launcher) => <LauncherItem key={launcher.id} launcher={launcher} workspace={workspace} />)}
         </div>
       </div>}
-      {pages.map((page) => <PageSlot key={page.lifetime === 'workspace' ? page.id : JSON.stringify([workspace.scopeKey, page.id])} page={page} active={page.id === activePageId}
+      {pages.map((page) => <PageSlot key={page.lifetime === 'workspace' ? page.id : JSON.stringify(page.workspaceDraftId ? [page.workspaceDraftId, page.id] : [workspace.scopeKey, workspace.draftId, page.id])} page={page} active={page.id === activePageId}
         tabId={tabIds.has(page.id) ? `${id}-tab-${encodeURIComponent(page.id)}` : undefined} panelId={`${id}-panel-${encodeURIComponent(page.id)}`}
-        sessionIdentity={workspace.sessionIdentity ?? undefined} visible={props.visible && page.id === activePageId} width={props.width}
+        sessionIdentity={workspace.sessionIdentity ?? undefined} workspaceDraftId={page.workspaceDraftId}
+        visible={props.visible && page.id === activePageId} width={props.width}
         layout={layout} onLayoutChange={setLayout} closePage={closePage} registerCloseHandler={registerCloseHandler}
         onSendMessage={props.onSendMessage} onOpenLink={props.onOpenLink} />)}
     </div>

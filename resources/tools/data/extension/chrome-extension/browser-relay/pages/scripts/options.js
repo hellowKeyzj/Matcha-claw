@@ -1,95 +1,20 @@
-import { RelayState, STATE_TEXT, RELAY_PORT_OFFSET, clampPort, computeRelayPort } from '../../lib/constants.js'
+import { RELAY_PORT_OFFSET, clampPort, computeRelayPort } from '../../lib/constants.js'
+import { relayText } from './relay-i18n.js'
 
 // ── DOM refs ──
 
-const statusCard = document.getElementById('status-card')
-const statusLabel = document.getElementById('status-label')
-const statusMeta = document.getElementById('status-meta')
-const statusDetail = document.getElementById('status-detail')
-const tabStats = document.getElementById('tab-stats')
-const relayToggle = document.getElementById('relay-toggle')
 const portInput = document.getElementById('port')
 const portStatus = document.getElementById('port-status')
 const versionBadge = document.getElementById('version-badge')
 
+document.querySelectorAll('[data-i18n]').forEach((element) => {
+  element.textContent = relayText[element.dataset.i18n]
+})
+portInput.setAttribute('aria-label', relayText.controlPort)
+
 try {
   versionBadge.textContent = 'v' + chrome.runtime.getManifest().version
 } catch (_) {}
-
-// ── Status rendering ──
-
-let _lastStatusJson = ''
-
-function renderStatus(status) {
-  const key = JSON.stringify(status ?? null)
-  if (key === _lastStatusJson) return
-  _lastStatusJson = key
-  const state = status?.state || RelayState.DISABLED
-  const cfg = STATE_TEXT[state] || STATE_TEXT[RelayState.DISABLED]
-
-  statusCard.dataset.state = state
-  statusLabel.textContent = cfg.label
-  statusDetail.textContent = cfg.detail
-
-  if (!toggleBusy) {
-    relayToggle.checked = state !== RelayState.DISABLED
-  }
-
-  statusMeta.textContent = ''
-
-  tabStats.textContent = ''
-  if (status?.attachedTabs > 0) {
-    const chip = document.createElement('span')
-    chip.className = 'tab-chip tab-chip-tabs'
-    chip.textContent = `${status.attachedTabs} ${status.attachedTabs === 1 ? 'tab' : 'tabs'}`
-    tabStats.appendChild(chip)
-  }
-  if (status?.agentTabs > 0) {
-    const nonRetained = status.agentTabs - (status.retainedTabs || 0)
-    if (nonRetained > 0) {
-      const chip = document.createElement('span')
-      chip.className = 'tab-chip tab-chip-agent'
-      chip.textContent = `${nonRetained} agent`
-      tabStats.appendChild(chip)
-    }
-    if (status.retainedTabs > 0) {
-      const chip = document.createElement('span')
-      chip.className = 'tab-chip tab-chip-retained'
-      chip.textContent = `${status.retainedTabs} retained`
-      tabStats.appendChild(chip)
-    }
-  }
-}
-
-async function queryBackgroundStatus() {
-  try {
-    const status = await chrome.runtime.sendMessage({ type: 'getRelayStatus' })
-    if (!status) {
-      renderStatus(null)
-      return
-    }
-    renderStatus(status)
-  } catch {
-    renderStatus(null)
-  }
-}
-
-// ── Toggle handler ──
-
-let toggleBusy = false
-
-relayToggle.addEventListener('change', async () => {
-  if (toggleBusy) return
-  toggleBusy = true
-  try {
-    await chrome.runtime.sendMessage({ type: 'toggleRelay' })
-    await queryBackgroundStatus()
-  } catch (err) {
-    console.warn('[matchaclaw-options] toggle failed:', err)
-  } finally {
-    toggleBusy = false
-  }
-})
 
 // ── Port settings ──
 
@@ -103,9 +28,9 @@ async function checkPort(controlPort) {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/`, { method: 'HEAD', signal: AbortSignal.timeout(900) })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    setPortStatus('ok', `Relay reachable at :${port}`)
+    setPortStatus('ok', relayText.portReachable.replace('{port}', String(port)))
   } catch {
-    setPortStatus('error', `Relay not reachable at :${port}`)
+    setPortStatus('error', relayText.portUnreachable.replace('{port}', String(port)))
   }
 }
 
@@ -128,67 +53,6 @@ async function savePort() {
 
 document.getElementById('save').addEventListener('click', () => void savePort())
 
-// ── Tab list ──
-
-const tabsSection = document.getElementById('tabs-section')
-const tabsList = document.getElementById('tabs-list')
-
-async function refreshTabList() {
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: 'getBrowserInstanceList' })
-    const browser = resp?.browserInstances?.[0]
-    const tabs = (browser?.windows || []).flatMap((window) => window.tabs || [])
-    tabs.sort((a, b) => {
-      const rank = (t) => t.active ? -1 : t.isRetained ? 0 : t.isAgent ? 1 : 2
-      return rank(a) - rank(b)
-    })
-    tabsSection.style.display = tabs.length > 0 ? '' : 'none'
-    tabsList.innerHTML = ''
-    for (const t of tabs) {
-      const row = document.createElement('div')
-      row.className = 'tab-entry'
-      row.style.cursor = 'pointer'
-      row.addEventListener('click', () => {
-        chrome.tabs.update(t.tabId, { active: true })
-        chrome.tabs.get(t.tabId, (tab) => {
-          if (tab?.windowId) chrome.windows.update(tab.windowId, { focused: true })
-        })
-      })
-
-      const dot = document.createElement('span')
-      dot.className = 'tab-entry-state'
-      dot.dataset.state = t.state
-      dot.title = t.state
-
-      const title = document.createElement('span')
-      title.className = 'tab-entry-title'
-      title.textContent = t.title || `Tab ${t.tabId}`
-
-      const url = document.createElement('span')
-      url.className = 'tab-entry-url'
-      url.textContent = t.url || ''
-
-      row.append(dot, title, url)
-
-      if (t.isRetained) {
-        const badge = document.createElement('span')
-        badge.className = 'tab-entry-badge'
-        badge.dataset.type = 'retained'
-        badge.textContent = 'retained'
-        row.appendChild(badge)
-      } else if (t.isAgent) {
-        const badge = document.createElement('span')
-        badge.className = 'tab-entry-badge'
-        badge.dataset.type = 'agent'
-        badge.textContent = 'agent'
-        row.appendChild(badge)
-      }
-
-      tabsList.appendChild(row)
-    }
-  } catch { /* background not ready */ }
-}
-
 // ── Logs viewer ──
 
 const logsContainer = document.getElementById('logs-container')
@@ -204,7 +68,10 @@ async function refreshLogs() {
     const resp = await chrome.runtime.sendMessage({ type: 'getLogs', limit: 100 })
     const logs = resp?.logs || []
     if (logs.length === 0) {
-      logsContainer.innerHTML = '<div class="logs-empty">No log entries yet</div>'
+      const empty = document.createElement('div')
+      empty.className = 'logs-empty'
+      empty.textContent = relayText.noLogs
+      logsContainer.replaceChildren(empty)
       return
     }
     logsContainer.innerHTML = ''
@@ -238,31 +105,7 @@ async function refreshLogs() {
 
 logsRefresh.addEventListener('click', () => void refreshLogs())
 
-// ── Event-driven status updates ──
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && ('relayEnabled' in changes || 'controlPort' in changes || '_relayState' in changes)) {
-    void queryBackgroundStatus()
-  }
-})
-
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    void queryBackgroundStatus()
-    void refreshTabList()
-  }
-})
-
-// Fallback poll for state transitions not reflected in storage (connect/disconnect)
-const FALLBACK_POLL_MS = 2000
-setInterval(() => {
-  void queryBackgroundStatus()
-  void refreshTabList()
-}, FALLBACK_POLL_MS)
-
 // ── Init ──
 
 void loadPort()
-void queryBackgroundStatus()
-void refreshTabList()
 void refreshLogs()

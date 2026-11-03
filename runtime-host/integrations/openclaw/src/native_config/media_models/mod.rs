@@ -1,5 +1,5 @@
 mod catalog;
-mod plugin_config;
+mod provider_config;
 
 pub use catalog::{
     Endpoint, MediaCatalogError, MediaProviderCatalog, Model, ModelId, Protocol, ProviderKey,
@@ -20,7 +20,11 @@ impl MediaProviderCatalog {
     ) -> Result<OpenClawConfigUpdate, MediaCatalogError> {
         store
             .update(|document| {
-                if self.apply_to_document(document, &std::collections::BTreeSet::new()) {
+                if self.apply_to_document(
+                    document,
+                    &std::collections::BTreeSet::new(),
+                    &std::collections::BTreeSet::new(),
+                ) {
                     OpenClawConfigMutation::changed()
                 } else {
                     OpenClawConfigMutation::unchanged()
@@ -32,9 +36,10 @@ impl MediaProviderCatalog {
     pub(crate) fn apply_to_document(
         &self,
         document: &mut OpenClawConfigDocument,
+        owned_provider_keys: &std::collections::BTreeSet<String>,
         preserved_provider_keys: &std::collections::BTreeSet<String>,
     ) -> bool {
-        plugin_config::apply(self, document, preserved_provider_keys)
+        provider_config::apply(self, document, owned_provider_keys, preserved_provider_keys)
     }
 }
 

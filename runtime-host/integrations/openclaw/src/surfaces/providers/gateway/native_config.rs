@@ -377,7 +377,7 @@ impl ProviderNativeConfigurationOperation {
 
         let mut diagnostic = write_outcome.diagnostic(self.config_path(), method);
 
-        let observed = match (changed, write_outcome) {
+        let mut observed = match (changed, write_outcome) {
             (false, WriteOutcome::Confirmed) => ObservedStatus::Matches,
             (true, WriteOutcome::Confirmed) => match self
                 .read_snapshot("readback", "config-readback-unavailable")
@@ -444,6 +444,17 @@ impl ProviderNativeConfigurationOperation {
                 ObservedStatus::Unavailable
             }
         };
+        if observed == ObservedStatus::Matches && has_retired_media_route(&expected_view) {
+            observed = ObservedStatus::Mismatch;
+            diagnostic = Some(ProviderNativeConfigurationDiagnostic::new(
+                "readback",
+                "config-readback-mismatch",
+                self.config_path(),
+                Some(method),
+                Some("agents.defaults.mediaModels"),
+                None,
+            ));
+        }
         drop(_transaction);
         if auth_state_refresh_required {
             self.refresh_auth_status().await;
@@ -919,6 +930,7 @@ fn canonical_provider_configuration(document: &Value, provider_keys: &BTreeSet<S
                 "model",
                 "models",
                 "imageModel",
+                "mediaModels",
                 "imageGenerationModel",
                 "videoGenerationModel",
                 "musicGenerationModel",
@@ -980,6 +992,9 @@ fn canonical_provider_configuration(document: &Value, provider_keys: &BTreeSet<S
                     matches!(
                         id.as_str(),
                         "anthropic"
+                            | "openai"
+                            | "google"
+                            | "openrouter"
                             | "qianfan"
                             | "stepfun"
                             | "tencent"
@@ -1005,6 +1020,30 @@ fn canonical_provider_configuration(document: &Value, provider_keys: &BTreeSet<S
         }
     }
     redact_value(Value::Object(result))
+}
+
+fn has_retired_media_route(configuration: &Value) -> bool {
+    let Some(media_models) = configuration.pointer("/agentDefaults/mediaModels") else {
+        return false;
+    };
+    ["image", "video", "music"]
+        .into_iter()
+        .filter_map(|capability| media_models.get(capability))
+        .any(|route| {
+            route
+                .as_str()
+                .into_iter()
+                .chain(route.get("primary").and_then(Value::as_str))
+                .chain(
+                    route
+                        .get("fallbacks")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str),
+                )
+                .any(|reference| reference.trim().starts_with("matchaclaw-media/"))
+        })
 }
 
 fn canonical_provider_entry(value: &Value) -> Value {

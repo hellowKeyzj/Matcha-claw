@@ -820,7 +820,10 @@ export function executeSelectSessionRuntimeEndpoint(
   }
   if (existingSessionKey) {
     set((stateValue) => ({
-      ...buildSessionSelectionPatch(stateValue, { kind: 'record', sessionKey: existingSessionKey }),
+      ...buildSessionSelectionPatch(stateValue, {
+        kind: 'record', sessionKey: existingSessionKey,
+        conversation: buildCurrentConversationForSessionKey(stateValue.loadedSessions, existingSessionKey, stateValue.currentConversation),
+      }),
       error: null,
     }));
     return;
@@ -856,7 +859,10 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   const requestedRecord = currentState.loadedSessions[key];
   const requestedIdentity = requestedRecord?.meta.sessionIdentity;
   const pendingTurnKey = getSessionRuntime(currentState, key).pendingTurnKey;
-  const selectedConversation = buildCurrentConversationForSessionKey(currentState.loadedSessions, key);
+  const conversation = buildCurrentConversationForSessionKey(currentState.loadedSessions, key,
+    key === currentState.currentSessionKey ? currentState.currentConversation : undefined);
+  // Each explicit refresh owns a new selection, even when its draft promotion is retained.
+  const selectedConversation = conversation ? { ...conversation } : null;
   const isCurrent = () => get().currentSessionKey === key
     && get().currentConversation === selectedConversation
     && get().loadedSessions[key]?.meta.sessionIdentity === requestedIdentity
@@ -1436,7 +1442,7 @@ async function executeNewSessionWithScopeResolver(
     const ownsSelection = ownsCurrentSelection();
     if (composerDraft) useComposerDraftStore.getState().promoteDraft(composerDraft.key, newKey, composerDraft.snapshot, {
       kind: 'pending', operationId: composerDraft.operationId, sessionRecordKey: newKey, sessionIdentity: created.identity,
-    });
+    }, ownsSelection);
     const stateBeforeProjection = get();
     const baseLoadedSessions = { ...stateBeforeProjection.loadedSessions };
     if (ownsSelection && leavingEmpty) delete baseLoadedSessions[currentSessionKey];
@@ -1461,17 +1467,29 @@ async function executeNewSessionWithScopeResolver(
         newKey,
         { historyStatus: projectionError ? 'error' : 'ready' },
       );
+      const stillOwnsSelection = ownsSelection && isLatestNewSessionRequest(requestSequence)
+        && isCurrentConversationSelection(stateValue, state);
+      const conversation = stillOwnsSelection ? buildCurrentConversationForSessionKey(loadedSessions, newKey) : null;
       return {
         ...reconcileSessionDirectory(stateValue, loadedSessions, [newKey]),
-        ...(ownsSelection ? buildSessionSelectionPatch({ ...stateValue, loadedSessions }, { kind: 'record', sessionKey: newKey }) : {}),
+        ...(stillOwnsSelection ? buildSessionSelectionPatch({ ...stateValue, loadedSessions }, {
+          kind: 'record', sessionKey: newKey,
+          conversation: conversation && state.currentConversation?.kind === 'draft' ? {
+            ...conversation,
+            promotedDraft: {
+              id: state.currentConversation.id,
+              scopeKey: `${state.currentConversation.runtimeScopeKey}:agent:${state.currentConversation.agentId}:draft`,
+            },
+          } : conversation,
+        }) : {}),
         loadedSessions,
         sessionCatalogStatus: stateValue.sessionCatalogStatus,
-        pendingApprovalsBySession: ownsSelection && leavingEmpty
+        pendingApprovalsBySession: stillOwnsSelection && leavingEmpty
           ? Object.fromEntries(
               Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
             )
           : stateValue.pendingApprovalsBySession,
-        error: ownsSelection ? projectionError ?? null : stateValue.error,
+        error: stillOwnsSelection ? projectionError ?? null : stateValue.error,
       };
     });
     return { ...createdTarget, ...(projectionError ? { error: projectionError } : {}) };

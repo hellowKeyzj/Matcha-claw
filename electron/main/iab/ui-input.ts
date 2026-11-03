@@ -1,4 +1,3 @@
-import { validateSessionIdentity } from '../../../src/types/desktop/runtime-address';
 import type { IabOverlayCommand, IabUiCommand, IabUiRequest } from '../../../src/types/desktop/iab';
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -43,8 +42,6 @@ function command(value: unknown): value is IabUiCommand {
   switch (value.action) {
     case 'snapshot': case 'list-all': case 'hide-suggestions': case 'downloads-clear':
       return keys(value, ['action']);
-    case 'set-agent-access': return keys(value, ['action', 'tabId', 'identity', 'allowed']) && tab()
-      && validateSessionIdentity(value.identity) === null && typeof value.allowed === 'boolean';
     case 'open': return keys(value, ['action', 'url', 'background']) && text(value.url) && optionalBoolean(value.background);
     case 'switch': case 'close': case 'back': case 'forward': case 'reload': case 'screenshot-save':
       return keys(value, ['action', 'tabId']) && tab();

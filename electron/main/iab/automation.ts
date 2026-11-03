@@ -1,5 +1,6 @@
 import type { AutomationContext, AutomationServices } from './automation-port';
 import type { BrowserActionParams, BrowserActRequest } from '../../../packages/openclaw-browser-relay-plugin/src/browser-action-contract';
+import { canClosePage } from '../../../packages/openclaw-browser-relay-plugin/src/state/page-ownership';
 import type { IabCdpLease } from './contracts';
 import type { IabJsonObject, IabJsonValue } from '../../../src/types/desktop/iab';
 import { iabError } from './error';
@@ -8,15 +9,13 @@ import { performAct, scrollPage } from './automation-input';
 import { IabAutomationUtilities } from './automation-utility';
 import { storageOperation } from './automation-storage';
 import { armDownload } from './automation-download';
-import { clickPoint } from './automation-input';
 import { cleanupEmulation, resetEmulation } from './automation-emulation';
 
-type PageState = { principalId: string; lease: IabCdpLease; page: IabAutomationPage; utilities: IabAutomationUtilities; ready: boolean; epoch: number };
+type PageState = { executorId: string; lease: IabCdpLease; page: IabAutomationPage; utilities: IabAutomationUtilities; ready: boolean; epoch: number };
 
 /** Automation state and computation live exclusively in the IAB worker. */
 export class IabAutomation {
   private readonly pages = new Map<string, Map<string, PageState>>();
-  private readonly retainedTabs = new Set<string>();
   private readonly downloadingTabs = new Set<string>();
   private readonly tails = new Map<string, Promise<void>>();
   private readonly unsubscribe: () => void;
@@ -25,7 +24,6 @@ export class IabAutomation {
   constructor(private readonly services: AutomationServices) {
     this.unsubscribe = services.onTabsChanged((tabs) => {
       const owners = new Map(tabs.map((tab) => [tab.id, tab.ownerId]));
-      for (const tabId of this.retainedTabs) if (!owners.has(tabId)) this.retainedTabs.delete(tabId);
       for (const [tabId, pages] of this.pages) for (const state of pages.values()) {
         if (owners.get(tabId) !== state.lease.ownerId) this.disposePage(state);
       }
@@ -34,7 +32,7 @@ export class IabAutomation {
 
   async handleRequest(params: BrowserActionParams, context: AutomationContext, signal: AbortSignal): Promise<IabJsonValue> {
     if (this.disposed) throw iabError('IAB_AUTOMATION_CLOSED', 'IAB automation is closed');
-    if (!context.principalId || !context.sessionKey) throw iabError('IAB_CONTEXT_INVALID', 'Verified browser invocation context is required');
+    if (!context.principalId || !context.executorId || !context.sessionKey) throw iabError('IAB_CONTEXT_INVALID', 'Verified browser invocation context is required');
     signal.throwIfAborted();
     context.assertCurrent();
     const services = this.services;
@@ -46,41 +44,43 @@ export class IabAutomation {
         const { tabs, activeTabId } = await services.tabs(context);
         return { tabs: tabs.map((tab) => ({ targetId: tab.id, tabId: tab.id, title: tab.title, url: tab.url, active: activeTabId === tab.id })) };
       }
-      case 'open': {
-        const url = validateUrl(params.url ?? 'about:blank');
-        context.assertCurrent();
-        const tabId = await services.open(url, context);
-        if (params.retain) this.retainedTabs.add(tabId);
-        const unlock = await this.lockTab(tabId, signal);
-        try {
-          await this.getPage(tabId, context, signal);
-          signal.throwIfAborted(); context.assertCurrent();
-          await services.checkTarget(tabId, context);
-          return { targetId: tabId, tabId, url };
-        } finally { try { await services.drain(context); } finally { unlock(); } }
-      }
       case 'stop':
       case 'closeagenttabs':
       case 'close_agent_tabs': {
         let closed = 0;
-        for (const tab of (await services.tabs(context)).tabs) if (tab.createdBy === context.principalId && !this.retainedTabs.has(tab.id)) { context.assertCurrent(); await this.closeTab(tab.id, context); closed++; }
+        const failures: unknown[] = [];
+        try {
+          for (const tab of (await services.tabs(context)).tabs) if (canClosePage(tab, context.executorId)) {
+            try { context.assertCurrent(); if (await this.closeTab(tab.id, context)) closed++; }
+            catch (error) { failures.push(error); }
+          }
+          for (const [tabId, pages] of this.pages) {
+            const state = pages.get(context.executorId);
+            if (!state) continue;
+            const unlock = await this.lockTab(tabId, signal);
+            try { if (pages.get(context.executorId) === state) await this.releasePage(state); }
+            catch (error) { failures.push(error); }
+            finally { unlock(); }
+          }
+        } finally { await services.releaseSessionClaims(context); }
+        if (failures.length) throw new AggregateError(failures, 'Agent browser tab cleanup failed');
         return { ok: true, closed };
       }
     }
-    const tabId = ('targetId' in params ? params.targetId : undefined) ?? (params.action === 'act' || params.action === 'utility' ? params.request?.targetId : undefined);
-    if (!tabId) throw iabError('IAB_TARGET_REQUIRED', 'A targetId from browser tabs/open is required');
-    await services.checkTarget(tabId, context);
+    let tabId = ('targetId' in params ? params.targetId : undefined) ?? (params.action === 'act' || params.action === 'utility' ? params.request?.targetId : undefined) ?? '';
+    if (params.action !== 'open' && !tabId) throw iabError('IAB_TARGET_REQUIRED', 'A targetId from browser tabs/open is required');
     if (params.action === 'close' || (params.action === 'act' && params.request?.kind === 'close')) {
       context.assertCurrent();
-      await this.closeTab(tabId, context);
-      return { ok: true, targetId: tabId, closed: true };
+      const closed = await this.closeTab(tabId, context);
+      return { ok: true, targetId: tabId, closed, ...(closed ? {} : { alreadyClosed: true }) };
     }
+    if (params.action !== 'open') await services.checkTarget(tabId, context);
     if (params.action === 'focus') {
       context.assertCurrent();
       await services.show(tabId, context);
       return { ok: true, targetId: tabId };
     }
-    const timeoutMs = ('timeoutMs' in params ? params.timeoutMs : undefined) ?? (params.action === 'act' || params.action === 'utility' ? params.request?.timeoutMs : undefined) ?? (params.action === 'utility' && params.request?.kind === 'download' ? 60_000 : 30_000);
+    const timeoutMs = ('timeoutMs' in params ? params.timeoutMs : undefined) ?? (params.action === 'act' || params.action === 'utility' ? params.request?.timeoutMs : undefined) ?? (params.action === 'utility' && params.request?.kind === 'download' ? 60_000 : params.action === 'utility' && ['goBack', 'goForward', 'reload'].includes(params.request?.kind ?? '') ? 10_000 : 30_000);
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 300_000) throw iabError('IAB_TIMEOUT_INVALID', 'Browser timeout must be between 1 and 300000ms');
     const controller = new AbortController();
     const abort = () => controller.abort(signal.reason ?? iabError('IAB_ABORTED', 'Browser operation was cancelled'));
@@ -103,7 +103,12 @@ export class IabAutomation {
     const cancel = () => { if (acquired && !cancelled) { cancelled = true; state!.lease.cancel(operation.signal); } };
     controller.signal.addEventListener('abort', cancel, { once: true });
     try {
-      const queuedState = this.pages.get(tabId)?.get(context.principalId);
+      if (params.action === 'open') {
+        validateUrl(params.url ?? 'about:blank');
+        operation.signal.throwIfAborted(); context.assertCurrent();
+        tabId = await services.open('about:blank', context, params.retain);
+      }
+      const queuedState = this.pages.get(tabId)?.get(context.executorId);
       const queuedEpoch = queuedState?.epoch;
       unlock = await this.lockTab(tabId, operation.signal);
       if (queuedState && queuedState.epoch !== queuedEpoch) throw iabError('IAB_QUEUED_EPOCH_CHANGED', 'A preceding operation invalidated this browser epoch; queued input was not dispatched');
@@ -127,6 +132,7 @@ export class IabAutomation {
         const captureContext = { ...context, assertCurrent: operation.assertCurrent };
         const capture = await armDownload(state.page, params.request, captureContext, state.lease.id, operation);
         let triggerPerformed = false;
+        let triggerError: string | undefined;
         if (params.request.trigger) {
           try {
             const trigger = params.request.trigger;
@@ -134,11 +140,22 @@ export class IabAutomation {
             if (trigger.kind === 'click' && !trigger.ref?.trim() && !(Number.isSafeInteger(trigger.backendNodeId) && trigger.backendNodeId! > 0)) throw iabError('IAB_DOWNLOAD_TRIGGER_INVALID', 'Download click trigger requires a ref or backendNodeId');
             if (trigger.targetId && trigger.targetId !== tabId) throw iabError('IAB_TARGET_MISMATCH', 'Download trigger must use the captured tab');
             const outcome = await performAct(state.page, trigger, operation);
-            if (outcome.actionPerformed === false || outcome.ok === false) throw iabError('IAB_DOWNLOAD_TRIGGER_NOT_PERFORMED', JSON.stringify(outcome));
+            if (outcome.actionPerformed === false) throw iabError('IAB_DOWNLOAD_TRIGGER_NOT_PERFORMED', JSON.stringify(outcome));
+            if (outcome.ok === false) throw iabError('IAB_DOWNLOAD_TRIGGER_FAILED', JSON.stringify(outcome));
             triggerPerformed = true;
-          } catch (error) { capture.cancel(error); }
+          } catch (error) {
+            const code = error instanceof Error && 'code' in error ? String(error.code) : '';
+            if (operation.signal.aborted || Date.now() >= operation.deadline || error instanceof Error && error.name === 'TimeoutError' || ['IAB_DOWNLOAD_TRIGGER_INVALID', 'IAB_DOWNLOAD_TRIGGER_NOT_PERFORMED', 'IAB_TARGET_MISMATCH', 'IAB_CDP_OUTCOME_UNKNOWN', 'IAB_TIMEOUT', 'IAB_WAIT_TIMEOUT'].includes(code)) capture.cancel(error);
+            else {
+              try {
+                operation.assertCurrent?.();
+                await services.checkTarget(tabId, context);
+                triggerError = error instanceof Error ? error.message : String(error);
+              } catch { capture.cancel(error); }
+            }
+          }
         } else { unlock!(); released = true; }
-        result = { ...await capture.completion, ...(params.request.trigger ? { triggerPerformed } : {}) };
+        result = { ...await capture.completion, ...(params.request.trigger ? { triggerPerformed } : {}), ...(triggerError ? { triggerError } : {}) };
       } else result = await this.execute(params, { ...context, assertCurrent: operation.assertCurrent }, tabId, state, operation);
       operation.signal.throwIfAborted();
       context.assertCurrent();
@@ -202,8 +219,8 @@ export class IabAutomation {
   private disposePage(state: PageState): void {
     state.epoch++; state.ready = false;
     const pages = this.pages.get(state.lease.tabId);
-    if (pages?.get(state.principalId) === state) {
-      pages.delete(state.principalId);
+    if (pages?.get(state.executorId) === state) {
+      pages.delete(state.executorId);
       if (!pages.size) this.pages.delete(state.lease.tabId);
     }
     state.utilities.dispose(); state.page.dispose(); state.lease.release();
@@ -219,28 +236,29 @@ export class IabAutomation {
     catch (error) { void previous.then(unlock); throw error; }
   }
 
-  private async closeTab(tabId: string, context: AutomationContext): Promise<void> {
+  private async closeTab(tabId: string, context: AutomationContext): Promise<boolean> {
     const unlock = await this.lockTab(tabId, new AbortController().signal);
     try {
       context.assertCurrent();
-      await this.services.checkTarget(tabId, context);
-      for (const state of this.pages.get(tabId)?.values() ?? []) await this.releasePage(state);
+      if (!await this.services.checkTarget(tabId, context, 'close')) return false;
+      const state = this.pages.get(tabId)?.get(context.executorId);
+      if (state) await this.releasePage(state);
       await this.services.closeTab(tabId, context);
-      this.retainedTabs.delete(tabId);
+      return true;
     } finally { unlock(); }
   }
 
   private async getPage(tabId: string, context: AutomationContext, signal: AbortSignal): Promise<PageState> {
     signal.throwIfAborted(); context.assertCurrent();
     await this.services.checkTarget(tabId, context);
-    const existing = this.pages.get(tabId)?.get(context.principalId);
+    const existing = this.pages.get(tabId)?.get(context.executorId);
     if (existing) return existing;
     const lease = await this.services.acquire(tabId, context, signal);
     // Broker detaches the acquisition signal once the persistent lease has been created.
     try { signal.throwIfAborted(); context.assertCurrent(); await this.services.checkTarget(tabId, context); }
     catch (error) { lease.release(); throw error; }
     const page = new IabAutomationPage(lease.executor);
-    const state: PageState = { principalId: context.principalId, lease, page, utilities: new IabAutomationUtilities(page, () => { if (page.operation) lease.cancel(page.operation.signal); }), ready: false, epoch: 0 };
+    const state: PageState = { executorId: context.executorId, lease, page, utilities: new IabAutomationUtilities(page, () => { if (page.operation) lease.cancel(page.operation.signal); }), ready: false, epoch: 0 };
     lease.executor.onEvent((event) => {
       if (event.method === 'IAB.leaseRevoked') { this.disposePage(state); return; }
       if (event.method === 'IAB.epochInvalidated') { state.epoch++; state.ready = false; resetEmulation(page); }
@@ -248,7 +266,7 @@ export class IabAutomation {
     if (this.disposed) { this.disposePage(state); throw iabError('IAB_AUTOMATION_CLOSED', 'IAB automation is closed'); }
     let pages = this.pages.get(tabId);
     if (!pages) { pages = new Map(); this.pages.set(tabId, pages); }
-    pages.set(context.principalId, state);
+    pages.set(context.executorId, state);
     return state;
   }
 
@@ -292,6 +310,18 @@ export class IabAutomation {
     const page = state.page;
     await this.services.checkTarget(tabId, context);
     switch (params.action) {
+      case 'open': {
+        const url = validateUrl(params.url ?? 'about:blank');
+        if (url !== 'about:blank') {
+          const navigation = await page.send<IabJsonObject>('Page.navigate', { url }, operation);
+          if (navigation.errorText) throw iabError('IAB_NAVIGATION_FAILED', String(navigation.errorText));
+          await page.wait({ fn: 'location.href !== "about:blank"' }, operation);
+        }
+        await page.wait({ loadState: 'domcontentloaded' }, operation);
+        const observed = await page.evaluate('({url:location.href,title:document.title})', operation);
+        await this.services.show(tabId, context);
+        return { tabId, url: observed.url, title: observed.title };
+      }
       case 'utility': {
         const request = params.request;
         if (!request) throw iabError('IAB_REQUEST_REQUIRED', 'A utility request is required');
@@ -299,7 +329,7 @@ export class IabAutomation {
         switch (request.kind) {
           case 'highlight': case 'upload': case 'dialog': case 'errors': case 'pdf': case 'cookies':
             return this.execute({ ...request, action: request.kind, targetId: tabId } as BrowserActionParams, context, tabId, state, operation);
-          default: return state.utilities.execute(request, context, operation);
+          default: return state.utilities.execute({ ...request, targetId: tabId }, context, operation);
         }
       }
       case 'snapshot': return page.snapshot(params, operation);
@@ -307,10 +337,14 @@ export class IabAutomation {
         const url = validateUrl(params.url);
         context.assertCurrent();
         await this.services.show(tabId, context);
-        page.invalidateRefs();
         const response = await page.send<IabJsonObject>('Page.navigate', { url }, operation);
         if (response.errorText) throw iabError('IAB_NAVIGATION_FAILED', String(response.errorText));
-        await page.wait({ loadState: params.waitUntil ?? 'load' }, operation);
+        const observation = { ...operation, deadline: Math.min(operation.deadline, Date.now() + (params.timeoutMs ?? 10_000)) };
+        try { await page.wait({ loadState: params.waitUntil ?? 'load' }, observation); }
+        catch (error) {
+          operation.signal.throwIfAborted(); operation.assertCurrent?.();
+          if (Date.now() >= operation.deadline || !(error instanceof Error) || !('code' in error) || error.code !== 'IAB_WAIT_TIMEOUT') throw error;
+        }
         return { ok: true, url: await page.evaluate('location.href', operation) };
       }
       case 'act':
@@ -320,9 +354,8 @@ export class IabAutomation {
       case 'scroll': return scrollPage(page, params.scrollDirection, params.scrollAmount, operation);
       case 'console': {
         if (params.expression || params.scriptPath) {
-          if (params.expression && params.scriptPath) throw iabError('IAB_CONSOLE_SOURCE_AMBIGUOUS', 'Use expression or scriptPath, not both');
           let expression = params.expression!;
-          if (params.scriptPath) {
+          if (!expression && params.scriptPath) {
             expression = await context.readScript(params.scriptPath, operation.signal);
           }
           const result = params.ref
@@ -349,7 +382,7 @@ export class IabAutomation {
           }
           return { output: output.join('\n\n') };
         }
-        return { messages: page.messages.filter((message) => !params.level || message.level === params.level) };
+        return { messages: page.messages.filter((message) => !params.level || message.type === params.level.toLowerCase()) };
       }
       case 'errors': {
         const errors = [...page.errors];
@@ -357,7 +390,7 @@ export class IabAutomation {
         return { errors };
       }
       case 'requests': {
-        const requests = page.requests.filter((entry) => !params.filter || JSON.stringify(entry).includes(params.filter));
+        const requests = page.readRequests(params.filter);
         if (params.clear) page.requests.length = 0;
         return { requests };
       }
@@ -410,8 +443,9 @@ export class IabAutomation {
           }
           if (params.omitBackground) await page.send('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } }, operation);
           const imageBase64 = await page.captureScreenshot(capture, operation);
-          const savedTo = params.savePath ? await context.saveFile(params.savePath, Buffer.from(imageBase64, 'base64'), operation.signal) : undefined;
-          return { imageBase64, imageType: type, ...(savedTo ? { savedTo } : {}) };
+          const bytes = Buffer.from(imageBase64, 'base64');
+          const savedTo = params.savePath ? await context.saveFile(params.savePath, bytes, operation.signal) : undefined;
+          return { imageBase64, imageType: bytes[0] === 0xff && bytes[1] === 0xd8 ? 'jpeg' : 'png', ...(savedTo ? { savedTo } : {}) };
         } finally {
           if (state.epoch === screenshotEpoch) {
             for (const { frame } of animations) {
@@ -439,18 +473,40 @@ export class IabAutomation {
         if (updated) return updated;
         if (!params.paths?.length) throw iabError('IAB_UPLOAD_PATHS_REQUIRED', 'At least one workspace file is required');
         const files = await context.resolveFiles(params.paths, operation.signal);
-        if (params.ref && !params.inputRef) {
-          let chooser: { params: IabJsonObject; sessionId?: string } | undefined;
-          const stop = page.executor.onEvent((event) => { if (event.method === 'Page.fileChooserOpened') chooser = event; });
-          try {
-            const point = await page.actionablePoint(params.ref, undefined, operation);
-            await clickPoint(page, point, operation);
-            while (!chooser) await page.pause(25, operation);
-            const event = chooser as { params: IabJsonObject; sessionId?: string };
-            if (event.params.mode !== 'selectMultiple' && files.length > 1) throw iabError('IAB_UPLOAD_INPUT_INVALID', 'File chooser does not support multiple files');
-            await page.send('DOM.setFileInputFiles', { backendNodeId: event.params.backendNodeId, files }, operation, event.sessionId);
-            return { uploaded: files.length };
-          } finally { stop(); }
+        if (params.ref || params.inputRef || params.backendNodeId !== undefined) {
+          const element = await page.resolveElement(params.ref ?? params.inputRef, undefined, operation, params);
+          const input = await page.send<{ result: { objectId?: string }; exceptionDetails?: { text?: string } }>('Runtime.callFunctionOn', { objectId: element.objectId, objectGroup: 'matcha-iab-action', functionDeclaration: `function(){
+            const isFileInput = node => node && node.tagName === 'INPUT' && String(node.getAttribute('type') || '').toLowerCase() === 'file';
+            const findInDescendants = (node, depth) => {
+              if (!node || depth < 0) return null;
+              if (isFileInput(node)) return node;
+              for (const child of node.children || []) {
+                const found = findInDescendants(child, depth - 1);
+                if (found) return found;
+              }
+              return null;
+            };
+            for (let current = this, height = 0; height <= 3 && current; height++, current = current.parentElement) {
+              if (isFileInput(current)) return current;
+              const descendant = findInDescendants(current, 3);
+              if (descendant) return descendant;
+              for (const sibling of current.parentElement?.children || []) {
+                if (sibling === current) continue;
+                if (isFileInput(sibling)) return sibling;
+                const found = findInDescendants(sibling, 3);
+                if (found) return found;
+              }
+            }
+            return null;
+          }`, returnByValue: false }, operation, element.frame.sessionId);
+          if (input.exceptionDetails || !input.result.objectId) throw iabError('IAB_UPLOAD_INPUT_INVALID', input.exceptionDetails?.text ?? 'No file input found near ref');
+          await page.send('DOM.setFileInputFiles', { objectId: input.result.objectId, files }, operation, element.frame.sessionId);
+          try { await page.send('Runtime.callFunctionOn', { objectId: input.result.objectId, functionDeclaration: 'function(){this.dispatchEvent(new Event("input",{bubbles:true}));this.dispatchEvent(new Event("change",{bubbles:true}));}', returnByValue: true }, operation, element.frame.sessionId); }
+          catch (error) {
+            operation.signal.throwIfAborted(); operation.assertCurrent?.();
+            if (error instanceof Error && 'code' in error && String(error.code).startsWith('IAB_')) throw error;
+          }
+          return { uploaded: files.length };
         }
         const element = await page.resolveElement(params.inputRef, params.element ?? (!params.inputRef && params.backendNodeId === undefined ? 'input[type=file]' : undefined), operation, params);
         const metadata = await page.callElement(element, 'return {file:this.nodeName==="INPUT"&&this.type==="file",multiple:this.multiple};', [], operation);

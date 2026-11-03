@@ -5,7 +5,9 @@ use crate::{
         rpc::{self, Failure, FailureKind},
     },
 };
-use serde_json::Value;
+use std::time::Instant;
+
+use serde_json::{Value, json};
 use sessions_module::{
     session_history::{
         SessionHistoryCommand, SessionHistoryFailure, SessionHistoryMessage, SessionHistoryOutcome,
@@ -19,6 +21,39 @@ use sessions_module::{
 };
 
 pub(super) async fn read(
+    client: &Client,
+    command: &timeline::Command,
+    epoch: u64,
+) -> Result<SessionView, Failure> {
+    let context = platform::trace::enabled().then(|| json!({
+        "sessionHash": command.endpoint_session_id().map(platform::trace::identifier_hash),
+        "publicSessionHash": platform::trace::identifier_hash(&command.identity().session_key),
+        "epoch": epoch, "limit": command.limit(), "offset": command.offset(),
+        "direction": match command.direction() {
+            timeline::Direction::Latest => "latest", timeline::Direction::Older => "older", timeline::Direction::Newer => "newer",
+        },
+        "inputIdCount": command.input_ids().len(),
+    }));
+    if let Some(context) = &context {
+        platform::trace::runtime_trace("matcha.session.timeline.read.begin", || context.clone());
+    }
+    let started = context.as_ref().map(|_| Instant::now());
+    let result = read_view(client, command, epoch).await;
+    if let Some(started) = started {
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        platform::trace::runtime_trace("matcha.session.timeline.read.end", || {
+            json!({
+                "read": context, "succeeded": result.is_ok(), "readElapsedMs": elapsed_ms,
+                "itemCount": result.as_ref().ok().map(|view| match &view.items {
+                    SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. } => items.len(), _ => 0,
+                }),
+                "inputReceiptCount": result.as_ref().ok().and_then(|view| view.input_receipts.as_ref()).map(Vec::len),
+            })
+        });
+    }
+    result
+}
+async fn read_view(
     client: &Client,
     command: &timeline::Command,
     epoch: u64,
@@ -59,14 +94,15 @@ pub(super) async fn read(
         for message in normalization::messages(raw, managed_input).inspect_err(|error| {
             error.trace("timeline.normalize", None, record.session_id.as_str());
         })? {
-            if let Some(message) = projection::message(&message.row, ItemStatus::Final)
-                .inspect_err(|error| {
-                    error.trace(
-                        "timeline.message_projection",
-                        None,
-                        record.session_id.as_str(),
-                    );
-                })?
+            if let Some(message) =
+                projection::message(&message.row, ItemStatus::Final, record.session_id.as_str())
+                    .inspect_err(|error| {
+                        error.trace(
+                            "timeline.message_projection",
+                            None,
+                            record.session_id.as_str(),
+                        );
+                    })?
             {
                 group.push(message);
             }

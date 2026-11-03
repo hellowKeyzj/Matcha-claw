@@ -768,10 +768,16 @@ type TranscriptLoadResult = {
   hasPreservedSegment: boolean
 }
 
-export function readTranscriptBufferForLoad(buffer: Buffer): TranscriptLoadResult {
+export function readTranscriptBufferForLoad(
+  buffer: Buffer,
+): TranscriptLoadResult {
   const s = createLoadState(buffer.length)
   const boundaryMarker = compactBoundaryMarker()
-  for (let offset = 0; offset < buffer.length; offset += TRANSCRIPT_READ_CHUNK_SIZE) {
+  for (
+    let offset = 0;
+    offset < buffer.length;
+    offset += TRANSCRIPT_READ_CHUNK_SIZE
+  ) {
     const chunk = buffer.subarray(offset, offset + TRANSCRIPT_READ_CHUNK_SIZE)
     processLoadChunk(s, chunk, chunk.length, boundaryMarker)
   }

@@ -29,6 +29,10 @@ pub use session_catalog::SessionCatalogSubscription;
 pub use subscription::{Event, Subscription};
 
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+const MAX_CONTROL_BYTES: usize = 1024 * 1024;
+// Session history and events carry original inline sources, not opaque media refs.
+// Cover one 50 MiB source after base64, plus 1 MiB of native/JSON metadata.
+const MAX_SESSION_BYTES: usize = ((50 * 1024 * 1024 + 2) / 3) * 4 + MAX_CONTROL_BYTES;
 const MAX_REQUEST_ID: u64 = 9_007_199_254_740_991;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -87,12 +91,35 @@ impl IabConnection {
             )
             .await
     }
+
+    pub(crate) async fn run_wait(&self, params: Value) -> Result<Value, Error> {
+        self.connection
+            .call(
+                next_id()?,
+                "iab.run.wait",
+                params,
+                &CancellationToken::new(),
+            )
+            .await
+    }
+
+    pub(crate) async fn run_release(&self, params: Value) -> Result<Value, Error> {
+        self.connection
+            .call(
+                next_id()?,
+                "iab.run.release",
+                params,
+                &CancellationToken::new(),
+            )
+            .await
+    }
 }
 
 struct Inner {
     address: SocketAddr,
     secret: Arc<Secret>,
     control: Mutex<Option<Arc<Connection>>>,
+    session_content: Mutex<Option<Arc<Connection>>>,
     connected: std::sync::Mutex<Option<std::sync::Weak<Connection>>>,
     stopped: CancellationToken,
     admission: std::sync::Mutex<()>,
@@ -106,6 +133,7 @@ impl Client {
                 address,
                 secret,
                 control: Mutex::new(None),
+                session_content: Mutex::new(None),
                 connected: std::sync::Mutex::new(None),
                 stopped: CancellationToken::new(),
                 admission: std::sync::Mutex::new(()),
@@ -140,6 +168,27 @@ impl Client {
     ) -> Result<Value, Error> {
         if method.trim().is_empty() || !matches!(params, Value::Object(_) | Value::Array(_)) {
             return Err(Error::local("invalid_params", Delivery::NotSent));
+        }
+        if method == "sessions.get" && params.get("history").and_then(Value::as_bool) == Some(true)
+        {
+            let mut content = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(Error::local("cancelled", Delivery::NotSent)),
+                _ = self.inner.stopped.cancelled() => return Err(Error::local("client_shutdown", Delivery::NotSent)),
+                content = self.inner.session_content.lock() => content,
+            };
+            if let Some(connection) = content.as_ref() {
+                if !connection.is_connected() {
+                    let _ = connection.close().await;
+                    content.take();
+                }
+            }
+            if content.is_none() {
+                *content = Some(self.open_session(None, cancellation).await?);
+            }
+            let connection = content.as_ref().expect("session content connection was opened").clone();
+            drop(content);
+            return connection.call(next_id()?, method, params, cancellation).await;
         }
         let connection = self.control(cancellation).await?;
         // A call is never reissued, including cancellation, EOF and response loss.
@@ -192,9 +241,17 @@ impl Client {
             None => Ok(()),
         };
         control.take();
+        drop(control);
+        let mut content = self.inner.session_content.lock().await;
+        let content_result = match content.as_ref() {
+            Some(connection) => connection.close().await,
+            None => Ok(()),
+        };
+        content.take();
+        drop(content);
         self.inner.tasks.close();
         self.inner.tasks.wait().await;
-        result
+        result.and(content_result)
     }
 
     pub async fn probe_ready(&self, cancellation: &CancellationToken) -> Result<(), Error> {
@@ -248,13 +305,36 @@ impl Client {
         >,
         cancellation: &CancellationToken,
     ) -> Result<Arc<Connection>, Error> {
+        self.open_bounded(notifications, cancellation, MAX_CONTROL_BYTES)
+            .await
+    }
+
+    async fn open_session(
+        &self,
+        notifications: Option<
+            tokio::sync::mpsc::Sender<crate::protocol::wire::JsonRpcNotification>,
+        >,
+        cancellation: &CancellationToken,
+    ) -> Result<Arc<Connection>, Error> {
+        self.open_bounded(notifications, cancellation, MAX_SESSION_BYTES)
+            .await
+    }
+
+    async fn open_bounded(
+        &self,
+        notifications: Option<
+            tokio::sync::mpsc::Sender<crate::protocol::wire::JsonRpcNotification>,
+        >,
+        cancellation: &CancellationToken,
+        max_bytes: usize,
+    ) -> Result<Arc<Connection>, Error> {
         // The tracker token covers in-flight handshakes as well as the eventual socket task.
         let _opening = self.operation()?;
         let socket = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(Error::local("cancelled", Delivery::NotSent)),
             _ = self.inner.stopped.cancelled() => return Err(Error::local("client_shutdown", Delivery::NotSent)),
-            socket = websocket::connect(self.inner.address) => socket?,
+            socket = websocket::connect(self.inner.address, max_bytes) => socket?,
         };
         let connection = Arc::new(Connection::new(
             socket,

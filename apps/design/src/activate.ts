@@ -47,10 +47,11 @@ export async function activate(context: AppPluginContext): Promise<() => Promise
     return result(`${entries.length} design documents.`, { documents: entries });
   });
   register('document_create', async (input) => {
-    const raw = object(input, ['name', 'width', 'height', 'sessionIdentity']);
+    const raw = object(input, ['name', 'width', 'height', 'sessionIdentity', 'workspaceDraftId']);
     const document = await documents.create(raw.name === undefined ? undefined : text(raw.name, 'name', 200),
       raw.width === undefined ? undefined : number(raw.width, 'width', 1, 32768),
-      raw.height === undefined ? undefined : number(raw.height, 'height', 1, 32768), parseSessionIdentity(raw.sessionIdentity));
+      raw.height === undefined ? undefined : number(raw.height, 'height', 1, 32768), parseSessionIdentity(raw.sessionIdentity),
+      raw.workspaceDraftId === undefined ? undefined : id(raw.workspaceDraftId, 'workspaceDraftId'));
     return result(`Created ${document.name}.`, { document, ...(focus?.documentId === document.id ? { focusLayerId: focus.layerId } : {}) });
   });
   register('image_open', async (input, tool) => {

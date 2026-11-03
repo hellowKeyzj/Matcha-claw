@@ -14,14 +14,27 @@ pub(super) struct AppPlugins {
 }
 
 impl AppPlugins {
-    pub(super) fn attach(state_dir: PathBuf, registry: &Registry) -> Result<Self, ()> {
+    pub(super) async fn attach(state_dir: PathBuf, registry: &Registry) -> Result<Self, ()> {
         let gateway = Arc::new(Gateway::new(state_dir)?);
+        let (catalog, current) = match gateway.discovery().map_err(|_| ())? {
+            Some(discovery) => {
+                let catalog = gateway.catalog(&discovery, None).await?.ok_or(())?;
+                (
+                    CapabilityCatalog {
+                        tools: catalog.tools,
+                        resources: catalog.resources,
+                    },
+                    Some((discovery.identity, catalog.revision)),
+                )
+            }
+            None => (CapabilityCatalog::default(), None),
+        };
         let registration = registry
-            .register(gateway.clone(), CapabilityCatalog::default())
+            .register(gateway.clone(), catalog)
             .map_err(|error| {
                 eprintln!("runtime-host mcp: {error}");
             })?;
-        let watch = tokio::spawn(observe(gateway, registration));
+        let watch = tokio::spawn(observe(gateway, registration, current));
         Ok(Self { watch })
     }
 }
@@ -51,30 +64,34 @@ impl CapabilityProvider for Gateway {
     }
 }
 
-async fn observe(gateway: Arc<Gateway>, registration: ProviderRegistration) {
-    let mut current: Option<(String, String)> = None;
+async fn observe(
+    gateway: Arc<Gateway>,
+    registration: ProviderRegistration,
+    mut current: Option<(String, String)>,
+) {
     let mut reported_unavailable = false;
     loop {
         let discovery = gateway.discovery();
         let response = match &discovery {
-            Ok(discovery) => {
+            Ok(Some(discovery)) => {
                 let revision = current
                     .as_ref()
                     .filter(|(identity, _)| identity == &discovery.identity)
                     .map(|(_, revision)| revision.as_str());
                 gateway.catalog(discovery, revision).await
             }
-            Err(_) => Err(()),
+            Ok(None) | Err(_) => Err(()),
         };
         match (discovery, response) {
-            (Ok(discovery), Ok(Some(catalog))) => {
+            (Ok(Some(discovery)), Ok(Some(catalog))) => {
                 current = publish(&registration, discovery.identity, catalog);
                 reported_unavailable = false;
             }
-            (Ok(_), Ok(None)) => {
+            (Ok(Some(_)), Ok(None)) => {
                 reported_unavailable = false;
                 continue;
             }
+            (Ok(None), _) if current.is_none() => {}
             (Err(error), _)
                 if error.kind() == std::io::ErrorKind::NotFound && current.is_none() => {}
             _ => {

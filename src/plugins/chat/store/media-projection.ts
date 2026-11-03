@@ -1,19 +1,26 @@
 import type {
   SessionRenderAttachedFile,
+  SessionRenderContentNotice,
   SessionRenderImage,
 } from '@/types/session/tool-card';
+import { builtinFileFormats } from '@/plugins/files/file-types';
 
 const OPENCLAW_GATEWAY_MEDIA_MARKER = '/api/chat/media/outgoing/';
+const MEDIA_MIME_EXTENSIONS = builtinFileFormats.flatMap((format) => Object.entries(format.mimeTypes ?? {}));
 
 export interface ProjectedSessionMedia {
   images: SessionRenderImage[];
   attachedFiles: SessionRenderAttachedFile[];
+  contentNotices?: SessionRenderContentNotice[];
 }
 
 interface SessionMediaContent {
   kind: string;
   mediaType?: string | null;
   reference?: string;
+  fileName?: string;
+  sizeBytes?: number;
+  resourceId?: string;
   reason?: string;
   omittedKind?: string;
 }
@@ -60,18 +67,12 @@ export function fileNameFromMediaReference(reference: string): string {
 export function projectSessionMedia(content: SessionMediaContent): ProjectedSessionMedia {
   if (content.kind === 'omitted') {
     const reason = content.reason ?? content.omittedKind;
-    const attachmentStatus = reason === 'thinking'
-      ? 'thinking-omitted'
-      : reason === 'unsafe_media' || reason === 'unsafeMedia' ? 'unsafe-media-omitted' : 'unknown-omitted';
     return {
       images: [],
-      attachedFiles: [{
-        fileName: 'Attachment omitted',
-        mimeType: 'application/octet-stream',
-        fileSize: 0,
-        preview: null,
-        attachmentStatus,
-      }],
+      attachedFiles: [],
+      ...(reason === 'thinking' ? {} : {
+        contentNotices: [reason === 'unsafe_media' || reason === 'unsafeMedia' ? 'media-unavailable' : 'content-omitted'],
+      }),
     };
   }
   if (content.kind !== 'media') {
@@ -79,16 +80,17 @@ export function projectSessionMedia(content: SessionMediaContent): ProjectedSess
   }
   if (typeof content.reference === 'string'
     && content.reference.length <= 512
-    && /^oc-media:1:[A-Za-z0-9_-]+$/.test(content.reference)) {
+    && /^(?:oc|ma)-media:1:[A-Za-z0-9_-]+$/.test(content.reference)) {
     const mimeType = content.mediaType || 'application/octet-stream';
     return {
       images: [],
       attachedFiles: [{
-        fileName: mimeType.toLowerCase().startsWith('image/') ? 'image' : 'media',
+        fileName: content.fileName ?? `media${MEDIA_MIME_EXTENSIONS.find(([, mime]) => mime === mimeType.toLowerCase())?.[0] ?? ''}`,
         mimeType,
-        fileSize: 0,
+        fileSize: content.sizeBytes ?? 0,
         preview: null,
         mediaReference: content.reference,
+        ...(content.resourceId ? { resourceId: content.resourceId } : {}),
         source: 'message-ref',
       }],
     };
@@ -97,13 +99,8 @@ export function projectSessionMedia(content: SessionMediaContent): ProjectedSess
   if (!reference) {
     return {
       images: [],
-      attachedFiles: [{
-        fileName: 'Attachment',
-        mimeType: content.mediaType || 'application/octet-stream',
-        fileSize: 0,
-        preview: null,
-        attachmentStatus: 'unsafe-media-omitted',
-      }],
+      attachedFiles: [],
+      contentNotices: ['media-unavailable'],
     };
   }
   const mimeType = content.mediaType || 'application/octet-stream';
@@ -114,11 +111,12 @@ export function projectSessionMedia(content: SessionMediaContent): ProjectedSess
   return {
     images: [],
     attachedFiles: [{
-      fileName: fileNameFromMediaReference(reference),
+      fileName: content.fileName ?? fileNameFromMediaReference(reference),
       mimeType,
-      fileSize: 0,
+      fileSize: content.sizeBytes ?? 0,
       preview: null,
       gatewayUrl: reference,
+      ...(content.resourceId ? { resourceId: content.resourceId } : {}),
       source: 'message-ref',
     }],
   };

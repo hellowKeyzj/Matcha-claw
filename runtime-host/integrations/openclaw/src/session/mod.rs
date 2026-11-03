@@ -5,6 +5,7 @@ pub mod events;
 pub mod facts;
 pub(crate) mod goal;
 pub(crate) mod ingest;
+pub(crate) mod image_tasks;
 pub mod operation;
 pub mod projection;
 pub mod protocol;

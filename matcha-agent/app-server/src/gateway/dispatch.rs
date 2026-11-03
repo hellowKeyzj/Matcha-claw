@@ -139,6 +139,8 @@ const METHODS: &[&str] = &[
     "iab.lease.acquire",
     "iab.lease.wait",
     "iab.lease.release",
+    "iab.run.wait",
+    "iab.run.release",
     "runs.submit",
     "runs.releaseInvestigation",
     "runs.settleInvestigation",

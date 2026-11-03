@@ -35,6 +35,7 @@ function buildAttachedFilesSignature(attachedFiles: ReadonlyArray<SessionRenderA
     file.filePath ?? '',
     file.gatewayUrl ?? '',
     file.mediaReference ?? '',
+    file.resourceId ?? '',
     purpose === 'display' ? file.mimeType ?? '' : file.mimeType,
     purpose === 'display' ? String(file.fileSize ?? '') : String(file.fileSize),
     file.preview ?? '',
@@ -141,6 +142,7 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem, purpose: Si
         segment.key,
         buildImageSignature(segment.images),
         buildAttachedFilesSignature(segment.attachedFiles, purpose),
+        (segment.contentNotices ?? []).join(','),
       ].join(':');
     }
     if (purpose === 'reconciliation' || controlled) {
@@ -257,6 +259,7 @@ function computeItemSignature(item: SessionRenderItem, purpose: SignaturePurpose
       'largeText' in item ? largeTextSignature(item.largeText) : '',
       'images' in item ? buildImageSignature(item.images ?? []) : '',
       'attachedFiles' in item ? buildAttachedFilesSignature(item.attachedFiles ?? [], purpose) : '',
+      'contentNotices' in item ? (item.contentNotices ?? []).join(',') : '',
     ].join('|'));
   }
   if (item.kind === 'user-message') {
@@ -273,6 +276,7 @@ function computeItemSignature(item: SessionRenderItem, purpose: SignaturePurpose
       largeTextSignature(item.largeText),
       buildImageSignature(item.images),
       buildAttachedFilesSignature(item.attachedFiles, purpose),
+      (item.contentNotices ?? []).join(','),
     ].join('|'));
   }
   const systemItem: SessionRenderSystemItem = item;

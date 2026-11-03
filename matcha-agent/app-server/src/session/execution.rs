@@ -145,6 +145,7 @@ impl Sessions {
             acknowledged: false,
             input_started: false,
             native_cycle_observed: false,
+            tool_use_ids: Default::default(),
             idle_observed: false,
             interrupt_observed: false,
             ownership_ambiguous: execution
@@ -241,6 +242,37 @@ impl Sessions {
         {
             execution.sending = false;
             session.changed.notify_waiters();
+            return Ok(());
+        }
+        let message_id = execution
+            .active
+            .as_ref()
+            .expect("active run checked")
+            .record
+            .run
+            .message_id
+            .clone();
+        drop(execution);
+        // Main cleanup may need the consumer and cancellation paths; never hold the execution lock here.
+        let browser_admission = cli.begin_iab_run(&run_id, &message_id).await;
+        let mut execution = session.data.lock().await;
+        if execution.closing
+            || self.0.shutdown.load(Ordering::Acquire)
+            || execution.cli.as_ref().is_none_or(|current| current.instance_id() != cli.instance_id())
+            || execution.active.as_ref().is_none_or(|active| active.record.run.run_id != run_id)
+        {
+            if execution.active.as_ref().is_none_or(|active| active.record.run.run_id != run_id) {
+                // Active is cleared only after its terminal commit; replay it if begin raced that commit.
+                self.0.iab.finish_run(&execution.record.session_id, &run_id);
+            }
+            execution.sending = false;
+            session.changed.notify_waiters();
+            return Ok(());
+        }
+        if let Err(error) = browser_admission {
+            drop(execution);
+            self.fail_before_send(&session, "native_browser_run_admission_failed", &error)
+                .await?;
             return Ok(());
         }
         let active = execution.active.as_mut().expect("active run checked");
@@ -525,6 +557,9 @@ impl Sessions {
             }
             execution.fault(error.clone());
             return Err(error);
+        }
+        if record.run.status.terminal() {
+            self.0.iab.finish_run(&record.run.session_id, &record.run.run_id);
         }
         Ok(())
     }

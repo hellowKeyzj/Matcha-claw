@@ -1,4 +1,5 @@
 import type { BrowserWindow } from 'electron';
+import { parseProviderDraftDiscoveryInput, type ProviderDraftDiscoveryResult, type ProviderModelsTransport } from '../runtime-host-delivery/transport/providers/models';
 import { isId, isRevision, isSecret, parseAccount } from './account-intent';
 import { admitPrivateAccount, admitPrivateDelete, preparePrivateAccount, type PrivateAccountAdmissionFailure, type ProviderPrivateAccountDependencies } from './accounts';
 import { ownsCredentialReference } from './account-transactions';
@@ -14,7 +15,9 @@ export { migrateLegacyProviderPrivateAuth } from './migration';
 export { createProviderPrivateCredentialAdapter } from './resolver';
 
 export type ProviderPrivateAuthActions = Pick<ReturnType<typeof createProviderPrivateAuth>,
-  'storeAccount' | 'deleteAccount' | 'startOAuth' | 'submitOAuthCode' | 'cancelOAuth'>;
+  'discoverModels' | 'storeAccount' | 'deleteAccount' | 'startOAuth' | 'submitOAuthCode' | 'cancelOAuth'>;
+
+export type ProviderPrivateAuthDependencies = ProviderPrivateAccountDependencies & Readonly<{ modelsTransport: ProviderModelsTransport }>;
 
 export type ProviderCredentialStatusResponse = Readonly<{ hasKey: boolean }>;
 
@@ -34,7 +37,7 @@ export function createProviderCredentialStatusTransport(): ProviderCredentialSta
 
 export function createProviderPrivateAuth(
   getMainWindow: () => BrowserWindow | null,
-  runtime: Promise<ProviderPrivateAccountDependencies>,
+  runtime: Promise<ProviderPrivateAuthDependencies>,
   signal: AbortSignal,
 ) {
   const mutations = new Set<Promise<unknown>>();
@@ -90,8 +93,19 @@ export function createProviderPrivateAuth(
     }
   };
 
+  const discoverModels = async (input: unknown): Promise<ProviderDraftDiscoveryResult> => {
+    const parsed = parseProviderDraftDiscoveryInput(input);
+    if (!parsed) return { reason: 'invalid-request' };
+    try {
+      const { modelsTransport } = await runtime;
+      return await trackMutation(() => modelsTransport.discoverDraft(parsed, signal));
+    } catch {
+      return { reason: 'outcome-unknown' };
+    }
+  };
+
   const oauth = createProviderOAuthActions(getMainWindow, runtime, signal, trackMutation);
-  return { storeAccount, deleteAccount, ...oauth, drain: async () => {
+  return { discoverModels, storeAccount, deleteAccount, ...oauth, drain: async () => {
     await oauth.drain();
     await Promise.allSettled(mutations);
   } };

@@ -92,6 +92,13 @@ impl OpenClawDriver {
             "runId": session_trace::id_shape(command.run_id.as_deref()),
         }));
         if !valid_command_identity(&command.identity) { return SessionAbortOutcome::Rejected; }
+        let image_tasks = match command.run_id.as_deref() {
+            Some(run_id) => self.session_gateway.cancel_image_tasks(&command.identity, run_id).await,
+            None => Ok(None),
+        };
+        if let Ok(Some(result)) = &image_tasks && result.standalone {
+            return if result.cancelled { SessionAbortOutcome::Succeeded } else { SessionAbortOutcome::Rejected };
+        }
         let session_key = match protocol::SessionKey::try_new(command.identity.session_key) {
             Ok(session_key) => session_key,
             Err(_) => {
@@ -154,6 +161,13 @@ impl OpenClawDriver {
                     Err(_) => (SessionAbortOutcome::Unknown, "error", Value::Null),
                 }
             }
+        };
+        let outcome = match image_tasks {
+            Ok(Some(result)) if !result.cancelled => SessionAbortOutcome::Rejected,
+            Ok(Some(_)) if outcome != SessionAbortOutcome::Rejected => SessionAbortOutcome::Succeeded,
+            Err(sessions_module::ports::RuntimeOperationFailure::TargetRejected) => SessionAbortOutcome::Rejected,
+            Err(_) => SessionAbortOutcome::Unknown,
+            Ok(None) | Ok(Some(_)) => outcome,
         };
         trace::log_unscoped("openclaw.sessions.abort.receipt", || serde_json::json!({
             "traceId": trace_id,

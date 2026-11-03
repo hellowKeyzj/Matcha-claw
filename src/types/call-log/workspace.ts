@@ -10,6 +10,7 @@ export interface WorkspaceCallDetail {
     | 'files.writeBinary'
     | 'media.prepare'
     | 'media.resolve'
+    | 'media.playback'
     | 'media.thumbnail'
     | 'media.thumbnails'
     | 'media.stagePaths'
@@ -42,7 +43,7 @@ export type WorkspaceCallSummary = CallDetailByModule['workspace'];
 
 const operations: readonly WorkspaceCallDetail['operation'][] = [
   'files.readText', 'files.readBinary', 'files.stat', 'files.listDir', 'files.writeText', 'files.writeBinary',
-  'media.prepare', 'media.resolve', 'media.thumbnail', 'media.thumbnails',
+  'media.prepare', 'media.resolve', 'media.playback', 'media.thumbnail', 'media.thumbnails',
   'media.stagePaths', 'media.stageBuffer', 'media.listSessionImages', 'media.readSessionImage',
 ];
 const outcomes: readonly WorkspaceCallDetail['outcome'][] = [

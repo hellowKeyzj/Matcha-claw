@@ -18,4 +18,68 @@ export async function storageOperation(page: IabAutomationPage, params: BrowserS
 }
 
 // Runs in the page's origin. Every transaction/open/delete path closes the database.
-const indexedDbOperation = "async function(input) {\n  const request = (value) => new Promise((resolve, reject) => { value.onsuccess = () => resolve(value.result); value.onerror = () => reject(value.error); value.onblocked = () => reject(new Error('database blocked by open connections')); });\n  const databases = await indexedDB.databases();\n  if (!input.key) {\n    if (input.operation === 'get') return databases;\n    throw new Error('IndexedDB database name is required');\n  }\n  const value = input.operation === 'get' || input.operation === 'clear' ? undefined : typeof input.value === 'string' && input.value.trim() ? JSON.parse(input.value) : input.value;\n  if (input.operation === 'clear' || input.operation === 'remove' && !(value && typeof value === 'object' && typeof value.store === 'string')) { await request(indexedDB.deleteDatabase(input.key)); return { removed: true }; }\n  if (!databases.some((database) => database.name === input.key)) throw new Error('IndexedDB database does not exist');\n  const database = await request(indexedDB.open(input.key));\n  try {\n    if (input.operation === 'get') {\n      const stores = {};\n      for (const name of database.objectStoreNames) {\n        const transaction = database.transaction(name, 'readonly');\n        const store = transaction.objectStore(name);\n        const [count, records] = await Promise.all([request(store.count()), request(store.getAll(undefined, 20))]);\n        stores[name] = { keyPath: store.keyPath, autoIncrement: store.autoIncrement, count, records };\n      }\n      return { name: database.name, version: database.version, stores };\n    }\n    if (!value || typeof value !== 'object' || typeof value.store !== 'string' || !database.objectStoreNames.contains(value.store)) throw new Error('IndexedDB value requires an existing store');\n    const transaction = database.transaction(value.store, 'readwrite');\n    const completion = new Promise((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onabort = () => reject(transaction.error); });\n    try {\n      const store = transaction.objectStore(value.store);\n      if (input.operation === 'set') {\n        if (!('data' in value)) throw new Error('IndexedDB set requires data');\n        for (const record of Array.isArray(value.data) ? value.data : [value.data]) {\n          if (record && typeof record === 'object' && !store.keyPath && 'key' in record && 'value' in record) store.put(record.value, record.key);\n          else store.put(record);\n        }\n      } else if (input.operation === 'remove') {\n        if (value.key !== undefined) store.delete(value.key);\n        else store.clear();\n      } else throw new Error('Unsupported IndexedDB operation');\n    } catch (error) {\n      try { transaction.abort(); } catch {}\n      try { await completion; } catch {}\n      throw error;\n    }\n    await completion;\n    return { updated: true };\n  } finally { database.close(); }\n}";
+const indexedDbOperation = `async function(input) {
+  const request = (value, failure) => new Promise((resolve, reject) => { value.onsuccess = () => resolve(value.result); value.onerror = () => reject(value.error || new Error(failure)); value.onblocked = () => reject(new Error('database blocked by open connections')); });
+  let value = null;
+  if (typeof input.value === 'string' && input.value.trim()) {
+    try { value = JSON.parse(input.value); }
+    catch { throw new Error('indexedDB ' + input.operation + ': value must be a JSON object'); }
+  }
+  if (!input.key) {
+    if (input.operation === 'get') return await (indexedDB.databases ? indexedDB.databases() : Promise.resolve([]));
+    throw new Error('indexedDB ' + input.operation + ': key (database name) is required');
+  }
+  if (input.operation === 'set' && (!value || typeof value !== 'object' || typeof value.store !== 'string')) {
+    throw new Error('indexedDB set: value must be {"store": "<name>", "data": <record|records[]>}');
+  }
+  if (input.operation === 'clear' || input.operation === 'remove' && !(value && typeof value === 'object' && typeof value.store === 'string')) { await request(indexedDB.deleteDatabase(input.key), 'delete failed'); return { removed: true }; }
+  const database = input.operation === 'get' ? await new Promise((resolve, reject) => {
+    let missing = false;
+    const open = indexedDB.open(input.key);
+    open.onupgradeneeded = () => { missing = true; open.transaction.abort(); };
+    open.onsuccess = () => {
+      if (!missing) return resolve(open.result);
+      open.result.close();
+      reject(new Error('database not found: ' + input.key));
+    };
+    open.onerror = () => reject(missing ? new Error('database not found: ' + input.key) : open.error || new Error('open failed'));
+    open.onblocked = () => reject(new Error('database blocked by open connections'));
+  }) : await request(indexedDB.open(input.key), 'open failed');
+  try {
+    if (input.operation === 'get') {
+      const stores = {};
+      for (const name of database.objectStoreNames) {
+        const transaction = database.transaction(name, 'readonly');
+        const store = transaction.objectStore(name);
+        const [count, records] = await Promise.all([request(store.count()), request(store.getAll(undefined, 20))]);
+        stores[name] = { keyPath: store.keyPath, autoIncrement: store.autoIncrement, count, records: records || [] };
+      }
+      return { name: database.name, version: database.version, stores };
+    }
+    if (!database.objectStoreNames.contains(value.store)) {
+      throw new Error('object store not found: ' + value.store + (input.operation === 'set' ? ' (stores: ' + Array.from(database.objectStoreNames).join(', ') + ')' : ''));
+    }
+    const items = input.operation === 'set' ? (Array.isArray(value.data) ? value.data : [value.data]) : [];
+    if (input.operation === 'set' && items.length === 0) return { written: 0 };
+    const transaction = database.transaction(value.store, 'readwrite');
+    const completion = new Promise((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onabort = () => reject(transaction.error || new Error('transaction aborted')); });
+    try {
+      const store = transaction.objectStore(value.store);
+      if (input.operation === 'set') {
+        for (const record of items) {
+          if (record && typeof record === 'object' && !store.keyPath && 'key' in record && 'value' in record) store.put(record.value, record.key);
+          else store.put(record);
+        }
+      } else if (input.operation === 'remove') {
+        if (value.key !== undefined) store.delete(value.key);
+        else store.clear();
+      } else throw new Error('Unsupported IndexedDB operation');
+    } catch (error) {
+      try { transaction.abort(); } catch {}
+      try { await completion; } catch {}
+      throw error;
+    }
+    await completion;
+    return input.operation === 'set' ? { written: items.length } : { removed: value.key !== undefined ? String(value.key) : 'store:' + value.store };
+  } finally { database.close(); }
+}`;

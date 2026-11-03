@@ -1,6 +1,6 @@
 import { rm } from 'node:fs/promises';
 import type { AppPluginCatalog, InstalledAppPlugin } from '../../../src/types/desktop/app-plugin';
-import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginCall, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginCall, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
 import { logger } from '../../utils/logger';
 import { materializePlugin } from './loader';
 import type { ApplicationPluginOwner } from './owner';
@@ -10,6 +10,7 @@ import type { PluginLoad } from './protocol';
 import { AppPluginRuntimeStartupError, NodePluginWorker, type AppPluginDevelopmentRuntime, type AppPluginModels, type AppPluginRuntimeCallbacks } from './runtime';
 import { StdioPluginRuntime } from './stdio-runtime';
 import { AppPluginStorage } from './storage';
+import { AppPluginConfirmations, type AppPluginConfirmationEvent } from './confirmation';
 
 export type { AppPluginDevelopmentRuntime } from './runtime';
 export { AppPluginRuntimeStartupError } from './runtime';
@@ -28,12 +29,16 @@ export interface AppPluginHostOptions {
   owner: ApplicationPluginOwner;
   packageWorker: AppPluginPackageWorker;
   publish(event: AppRuntimeEvent): void;
+  publishConfirmation?(event: AppPluginConfirmationEvent): void;
   list(request: AppMediaModelListRequest, signal: AbortSignal): Promise<AppMediaModelList>;
   generate(request: AppModelRequest, signal: AbortSignal): Promise<AppModelResult>;
   submitVideo(request: AppModelRequest & { readonly kind: 'video' }, signal: AbortSignal): Promise<AppVideoTaskResult>;
   queryVideo(request: AppVideoTaskRequest, signal: AbortSignal): Promise<AppVideoTaskResult>;
   collectVideo(request: AppVideoTaskRequest, signal: AbortSignal): Promise<AppModelResult>;
   generateText(request: AppTextModelRequest, signal: AbortSignal): Promise<AppTextModelResult>;
+  generateSpeech(request: AppSpeechModelRequest, signal: AbortSignal): Promise<AppModelResult>;
+  transcribe(request: AppTranscriptionModelRequest, signal: AbortSignal): Promise<AppModelResult>;
+  generateMusic(request: AppMusicModelRequest, signal: AbortSignal): Promise<AppModelResult>;
 }
 
 export class AppPluginHost {
@@ -47,13 +52,18 @@ export class AppPluginHost {
   private readonly storage: AppPluginStorage;
   private readonly models: AppPluginModels;
   private readonly worker: NodePluginWorker;
+  readonly confirmations: AppPluginConfirmations;
 
   constructor(private readonly options: AppPluginHostOptions) {
+    this.confirmations = new AppPluginConfirmations((event) => options.publishConfirmation?.(event));
     this.storage = new AppPluginStorage(options.rootDir, options.packageWorker);
     this.models = {
       list: (request, signal) => options.list(request, signal ?? new AbortController().signal),
       generate: (request, signal) => options.generate(request, signal ?? new AbortController().signal),
       generateText: (request, signal) => options.generateText(request, signal ?? new AbortController().signal),
+      generateSpeech: (request, signal) => options.generateSpeech(request, signal ?? new AbortController().signal),
+      transcribe: (request, signal) => options.transcribe(request, signal ?? new AbortController().signal),
+      generateMusic: (request, signal) => options.generateMusic(request, signal ?? new AbortController().signal),
       submitVideo: (request, signal) => options.submitVideo(request, signal ?? new AbortController().signal),
       queryVideo: (request, signal) => options.queryVideo(request, signal ?? new AbortController().signal),
       collectVideo: (request, signal) => options.collectVideo(request, signal ?? new AbortController().signal),
@@ -130,6 +140,7 @@ export class AppPluginHost {
       if (entry.retiring?.state === 'failed') continue;
       if (!entry.retiring && catalog.plugins.some((plugin) => plugin.manifest.id === id && plugin.enabled && plugin.digest === entry.digest)) continue;
       if (!entry.retiring) {
+        this.confirmations.invalidate(id, entry.digest);
         const done = this.serialize(async () => {
           try {
             await entry.ready.catch(() => undefined);
@@ -154,6 +165,7 @@ export class AppPluginHost {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.confirmations.clear();
     const failures: unknown[] = [];
     try { await Promise.all([this.changed({ revision: 0, plugins: [] }), ...[...this.development].map((runtime) => runtime.close())]); }
     catch (error) { failures.push(error); }
@@ -164,6 +176,7 @@ export class AppPluginHost {
 
   forceClose(): Promise<void> {
     this.closed = true;
+    this.confirmations.clear();
     this.stopping ??= (async () => {
       const stopOwned = () => Promise.allSettled([this.worker.forceClose(), ...[...this.active.values()].map((entry) => entry.runtime?.forceClose()), ...[...this.development].map((runtime) => runtime.forceClose())]);
       await stopOwned();
@@ -204,6 +217,14 @@ export class AppPluginHost {
         await this.requireEnabled(plugin.manifest.id, plugin.digest);
         const callbacks: AppPluginRuntimeCallbacks = {
           publish: (event) => { if (!entry.retiring && !this.closed) this.options.publish(event); },
+          requestConfirmation: async (request, signal) => {
+            await this.requireEnabled(plugin.manifest.id, plugin.digest);
+            if (entry.retiring) throw new Error('Approval unavailable: the application is retiring.');
+            const allowed = await this.confirmations.request(plugin.manifest.id, plugin.digest, plugin.manifest.name, request, signal);
+            await this.requireEnabled(plugin.manifest.id, plugin.digest);
+            signal.throwIfAborted();
+            return allowed;
+          },
           log: (level, message) => logger[level](`[AppPlugins:${plugin.manifest.id}] ${message.slice(0, 2000)}`),
         };
         if (load.manifest.backend) {

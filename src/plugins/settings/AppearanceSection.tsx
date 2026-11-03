@@ -11,6 +11,7 @@ import { Separator } from '@/components/ui/separator';
 import { toUserMessage } from '@/lib/api-client';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { useSettingsStore } from './store';
+import GraphicsAccelerationSetting from './GraphicsAccelerationSetting';
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -225,6 +226,7 @@ export default function AppearanceSection({ active }: SettingsSectionProps) {
                 </div>
               </div>
             </div>
+          <GraphicsAccelerationSetting active={active} />
         </CardContent>
       </Card>
   );

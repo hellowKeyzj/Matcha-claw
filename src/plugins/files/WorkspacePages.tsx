@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
 import { useChatArtifactContext } from '@/plugins/chat/artifact-context';
 import type { ChatArtifactGroup } from '@/plugins/chat/artifacts';
 import { resolveArtifactGroupFocusFile } from '@/plugins/chat/artifact-workbench';
@@ -14,19 +15,30 @@ import { useFilePreviewSupport, type FilePreviewMode } from './extensions';
 import { FilePreviewBody } from './FilePreviewBody';
 import { WorkspaceBrowserBody } from './WorkspaceBrowserBody';
 import { buildArtifactPreviewTargetFromGeneratedFile, type ArtifactPreviewTarget } from './types';
-import { revealArtifactPathInFileManager } from './open-file-utils';
-import { openFileWorkspacePage, type FileWorkspacePageProps } from './workspace';
+import { artifactFileErrorMessage, revealArtifactPathInFileManager } from './open-file-utils';
+import { resolveArtifactLocalPath } from './types';
+import { useOpenFileWorkspacePage, type FileWorkspacePageProps } from './workspace';
 
 const EMPTY_FILES: GeneratedFile[] = [];
 
-export function FileBrowserPage({ width }: WorkspacePageProps) {
+export function FileBrowserPage(props: WorkspacePageProps) {
+  const { artifactWorkspaceRoot, artifactWorkspaceContext } = useChatArtifactContext();
+  const workspaceKey = JSON.stringify([
+    artifactWorkspaceRoot,
+    artifactWorkspaceContext.agentScope ? buildCapabilityScopeKey(artifactWorkspaceContext.agentScope) : null,
+  ]);
+  return <FileBrowser key={workspaceKey} {...props} />;
+}
+
+function FileBrowser({ width }: WorkspacePageProps) {
   const workspace = useWorkspace();
+  const openFilePage = useOpenFileWorkspacePage(workspace);
   const { artifactWorkspaceRoot, artifactWorkspaceContext, workspaceRecoveryAction } = useChatArtifactContext();
   const [selectedFile, setSelectedFile] = useState<ArtifactPreviewTarget | null>(null);
   const selectFile = useCallback((file: ArtifactPreviewTarget) => {
     setSelectedFile(file);
-    openFileWorkspacePage(workspace, { file, workspaceContext: artifactWorkspaceContext });
-  }, [artifactWorkspaceContext, workspace]);
+    openFilePage({ file, workspaceContext: artifactWorkspaceContext });
+  }, [artifactWorkspaceContext, openFilePage]);
   return <WorkspaceBrowserBody
     browseOnly
     rootPath={artifactWorkspaceRoot}
@@ -42,6 +54,7 @@ export function FileBrowserPage({ width }: WorkspacePageProps) {
 export function FileWorkspacePage({ file: inputFile, group: inputGroup, mode: inputMode, workspaceContext, width }: FileWorkspacePageProps) {
   const { t } = useTranslation('chat');
   const workspace = useWorkspace();
+  const openFilePage = useOpenFileWorkspacePage(workspace);
   const { artifactGroups, workspaceRecoveryAction } = useChatArtifactContext();
   const supportsDiff = useFilePreviewSupport('diff');
   const [selection, setSelection] = useState({ file: inputFile, mode: inputMode });
@@ -55,16 +68,16 @@ export function FileWorkspacePage({ file: inputFile, group: inputGroup, mode: in
   const canShowDiff = supportsDiff(file);
   const mode = selection.file === inputFile ? selection.mode : inputMode;
   const openFile = useCallback((target: GeneratedFile) => {
-    openFileWorkspacePage(workspace, {
+    openFilePage({
       file: buildArtifactPreviewTargetFromGeneratedFile(target),
       group,
       workspaceContext,
       mode: supportsDiff(target) ? mode : 'preview',
     });
-  }, [group, mode, supportsDiff, workspace, workspaceContext]);
+  }, [group, mode, openFilePage, supportsDiff, workspaceContext]);
   const selectWorkspaceFile = useCallback((target: ArtifactPreviewTarget) => {
-    openFileWorkspacePage(workspace, { file: target, workspaceContext });
-  }, [workspace, workspaceContext]);
+    openFilePage({ file: target, workspaceContext });
+  }, [openFilePage, workspaceContext]);
   const previous = useCallback(() => { if (index > 0) openFile(files[index - 1]); }, [files, index, openFile]);
   const next = useCallback(() => { if (index >= 0 && index < files.length - 1) openFile(files[index + 1]); }, [files, index, openFile]);
   const toggleMode = useCallback(() => setSelection((current) => ({ ...current, mode: current.mode === 'diff' ? 'preview' : 'diff' })), []);
@@ -106,18 +119,19 @@ export function FileWorkspacePage({ file: inputFile, group: inputGroup, mode: in
 function GeneratedFileGroup({ group, mode }: { group: ChatArtifactGroup; mode: FilePreviewMode }) {
   const { t } = useTranslation('chat');
   const workspace = useWorkspace();
+  const openFilePage = useOpenFileWorkspacePage(workspace);
   const { artifactWorkspaceContext } = useChatArtifactContext();
   const supportsDiff = useFilePreviewSupport('diff');
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const openFile = useCallback((file: GeneratedFile) => {
     setFocusedPath(file.filePath);
-    openFileWorkspacePage(workspace, {
+    openFilePage({
       file: buildArtifactPreviewTargetFromGeneratedFile(file),
       workspaceContext: artifactWorkspaceContext,
       group,
       mode: (mode === 'diff' || file.sourceTool === 'edit') && supportsDiff(file) ? 'diff' : 'preview',
     });
-  }, [artifactWorkspaceContext, group, mode, supportsDiff, workspace]);
+  }, [artifactWorkspaceContext, group, mode, openFilePage, supportsDiff]);
   const openGroup = useCallback(() => {
     const file = resolveArtifactGroupFocusFile(group, focusedPath);
     if (file) openFile(file);
@@ -133,12 +147,17 @@ function GeneratedFileGroup({ group, mode }: { group: ChatArtifactGroup; mode: F
   const revealGroup = useCallback(async () => {
     const file = group.files.at(-1);
     if (!file) return;
-    try {
-      if (!await revealArtifactPathInFileManager(file.filePath)) toast.error(t('artifacts.revealFailed'));
-    } catch {
-      toast.error(t('artifacts.revealFailed'));
+    const localPath = resolveArtifactLocalPath(file.filePath, artifactWorkspaceContext.workspaceRoot);
+    if (!localPath) {
+      toast.error(t('artifacts.localPathUnavailable'));
+      return;
     }
-  }, [group, t]);
+    try {
+      await revealArtifactPathInFileManager(localPath);
+    } catch (error) {
+      toast.error(t('artifacts.revealFailed'), { description: artifactFileErrorMessage(error, t) });
+    }
+  }, [artifactWorkspaceContext.workspaceRoot, group, t]);
   return <div className="rounded-xl border border-border/60 bg-background px-3 py-3">
     <div className="mb-2 flex items-center justify-between gap-2">
       <p className="text-xs font-medium text-muted-foreground">{t('artifacts.groupLabel', { count: group.files.length })}</p>

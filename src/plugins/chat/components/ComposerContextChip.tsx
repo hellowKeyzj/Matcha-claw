@@ -11,7 +11,7 @@ export function ComposerContextChip({ context, onRemove, onPromptChange, busy = 
   const [expanded, setExpanded] = useState(false);
 
   return <div className="inline-flex max-w-full items-center rounded-full border border-border/50 bg-background pr-1 text-xs">
-    <button
+    {context.prompt !== undefined ? <button
       type="button"
       popoverTarget={popoverId}
       style={{ anchorName } as CSSProperties}
@@ -24,7 +24,10 @@ export function ComposerContextChip({ context, onRemove, onPromptChange, busy = 
       <FileText aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
       <span className="max-w-64 truncate font-medium">{context.name}</span>
       <ChevronDown aria-hidden="true" className="h-3 w-3 shrink-0 text-muted-foreground" />
-    </button>
+    </button> : <span className="inline-flex h-8 min-w-0 items-center gap-1.5 px-2.5 text-foreground">
+      <FileText aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+      <span className="max-w-64 truncate font-medium" title={context.name}>{context.name}</span>
+    </span>}
     <button
       type="button"
       onClick={onRemove}
@@ -33,7 +36,7 @@ export function ComposerContextChip({ context, onRemove, onPromptChange, busy = 
     >
       <X aria-hidden="true" className="h-3 w-3" />
     </button>
-    <div
+    {context.prompt !== undefined && <div
       id={popoverId}
       popover="auto"
       role="dialog"
@@ -49,14 +52,11 @@ export function ComposerContextChip({ context, onRemove, onPromptChange, busy = 
           <X aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
       </div>
-      {expanded && <>
-        {context.group && <label className="block space-y-2 border-b border-border/50 p-4">
-          <span className="text-xs font-medium">{t('input.editContextPrompt')}</span>
-          <textarea value={context.group.prompt} onChange={(event) => onPromptChange?.(event.target.value)} disabled={busy} maxLength={32 * 1024}
-            className="min-h-20 w-full resize-y rounded-md border border-input bg-background p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-        </label>}
-        <pre tabIndex={0} className="max-h-[min(20rem,50dvh)] overflow-auto overscroll-contain whitespace-pre-wrap break-words p-4 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">{context.text}</pre>
-      </>}
-    </div>
+      {expanded && <label className="block space-y-2 p-4">
+        <span className="text-xs font-medium">{t('input.editContextPrompt')}</span>
+        <textarea value={context.prompt} onChange={(event) => onPromptChange?.(event.target.value)} disabled={busy} maxLength={32 * 1024}
+          className="min-h-20 max-h-[50dvh] w-full resize-y rounded-md border border-input bg-background p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+      </label>}
+    </div>}
   </div>;
 }

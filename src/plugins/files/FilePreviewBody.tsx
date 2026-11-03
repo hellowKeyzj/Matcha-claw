@@ -4,13 +4,13 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
-import { hostFileReadBinary, hostFileReadText, type WorkspaceFileContext } from '@/lib/host-api';
+import { hostFileReadBinary, hostFileReadText, hostWorkspaceMediaResolve, type WorkspaceFileContext } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
 import { useContributions } from '@/plugin-host/react';
 import { AppPluginManager } from '@/plugins/application-plugins/AppPluginManager';
 import { fileFormats, fileReaders, findFileReader, resolveFilePreviewTarget, type FilePreviewMode, type FileReaderContribution } from './extensions';
-import { resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
-import { confirmAndOpenArtifactPath, openArtifactPathExternally, revealArtifactPathInFileManager, shouldOfferDirectOpenFallback } from './open-file-utils';
+import { resolveArtifactLocalPath, resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
+import { artifactFileErrorMessage, confirmAndOpenArtifactPath, openArtifactPathExternally, revealArtifactPathInFileManager, shouldOfferDirectOpenFallback } from './open-file-utils';
 
 export type { FilePreviewMode } from './extensions';
 const INLINE_BINARY_PREVIEW_MAX_BYTES = 50 * 1024 * 1024;
@@ -49,12 +49,26 @@ function WorkspaceFileReader({ file, reader, relativePath, workspaceContext, too
   const endpoint = workspaceContext?.agentScope?.endpoint;
   const agentId = workspaceContext?.agentScope?.agentId;
   const source = reader.source;
+  const mediaSource = file.mediaSource;
 
   useEffect(() => {
     let cancelled = false;
     setState({ status: 'loading' });
     void (async () => {
       try {
+        if (mediaSource) {
+          const blob = await hostWorkspaceMediaResolve(mediaSource);
+          if (cancelled) return;
+          if (blob.size > INLINE_BINARY_PREVIEW_MAX_BYTES) {
+            setState({ status: 'tooLarge' });
+            return;
+          }
+          const result: FileReadState = source === 'text'
+            ? { status: 'text', content: await blob.text() }
+            : { status: 'binary', data: await blob.arrayBuffer() };
+          if (!cancelled) setState(result);
+          return;
+        }
         if (!endpoint || !agentId) throw new Error('AgentScope is required');
         if (!relativePath) throw new Error('Workspace relative path is unavailable');
         const payload = { endpoint, agentId, relativePath };
@@ -89,14 +103,14 @@ function WorkspaceFileReader({ file, reader, relativePath, workspaceContext, too
       }
     })();
     return () => { cancelled = true; };
-  }, [endpoint, agentId, relativePath, source]);
+  }, [endpoint, agentId, mediaSource, relativePath, source]);
 
   if (state.status === 'tooLarge') return tooLargeFallback;
   if (state.status === 'unsupportedBinary') {
     return <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">{t('artifacts.previewBinary')}</div>;
   }
   if (state.status === 'error') {
-    return <div className="flex h-full items-center justify-center px-6 text-center text-sm text-destructive">{t('artifacts.previewLoadFailed', { error: state.message })}</div>;
+    return <div role="status" className="flex h-full items-center justify-center px-6 text-center text-sm text-destructive">{t('artifacts.previewLoadFailed', { error: artifactFileErrorMessage(state.message, t) })}</div>;
   }
   if (reader.source === 'text' && state.status === 'text') {
     const Reader = reader.component;
@@ -164,38 +178,42 @@ export function FilePreviewBody({
   const file = resolveFilePreviewTarget(inputFile, formats);
   const reader = findFileReader(readers, file, mode);
   const [pathCopied, setPathCopied] = useState(false);
-  const shouldUseInlineSnapshot = file.sourceTool !== 'write' && !!file.content;
-  const transportRelativePath = resolveWorkspaceRelativePath(
+  const shouldUseInlineSnapshot = !file.mediaSource && file.sourceTool !== 'write' && !!file.content;
+  const transportRelativePath = file.mediaSource ? null : resolveWorkspaceRelativePath(
     file.relativePath ?? file.filePath,
     workspaceContext?.workspaceRoot,
   );
-  const canDirectOpen = /^(?:[A-Za-z]:[\\/]|\/|\\\\)/u.test(file.filePath);
+  const localPath = file.mediaSource ? null : resolveArtifactLocalPath(file.filePath, workspaceContext?.workspaceRoot);
+  const canDirectOpen = localPath !== null;
   const fileTooLargeForPreview = typeof file.fileSize === 'number' && file.fileSize > INLINE_BINARY_PREVIEW_MAX_BYTES;
   const shouldConfirmDirectOpen = shouldOfferDirectOpenFallback(file.ext, file.fileSize);
   const openInSystemApp = useCallback(async () => {
-    if (!canDirectOpen) return;
+    if (!localPath) return;
     try {
       if (shouldConfirmDirectOpen) {
-        await confirmAndOpenArtifactPath({ filePath: file.filePath, fileName: file.fileName, size: file.fileSize, t });
+        await confirmAndOpenArtifactPath({ filePath: localPath, fileName: file.fileName, size: file.fileSize, t });
         return;
       }
-      const error = await openArtifactPathExternally(file.filePath);
+      const error = await openArtifactPathExternally(localPath);
       if (error) throw new Error(error);
     } catch (error) {
       toast.error(t('artifacts.openFailed', {
-        error: error instanceof Error ? error.message : String(error),
-      }));
+        error: artifactFileErrorMessage(error, t),
+      }), { description: t('artifacts.fileOpenRecovery') });
     }
-  }, [canDirectOpen, file.fileName, file.filePath, file.fileSize, shouldConfirmDirectOpen, t]);
+  }, [localPath, file.fileName, file.fileSize, shouldConfirmDirectOpen, t]);
   const revealInFileManager = useCallback(async () => {
-    if (!canDirectOpen) return;
-    const success = await revealArtifactPathInFileManager(file.filePath);
-    if (!success) toast.error(t('artifacts.revealFailed'));
-  }, [canDirectOpen, file.filePath, t]);
+    if (!localPath) return;
+    try {
+      await revealArtifactPathInFileManager(localPath);
+    } catch (error) {
+      toast.error(t('artifacts.revealFailed'), { description: artifactFileErrorMessage(error, t) });
+    }
+  }, [localPath, t]);
 
   useEffect(() => { setPathCopied(false); }, [file.filePath]);
   const copyFilePath = useCallback(async () => {
-    if (!file.filePath) return;
+    if (file.mediaSource || !file.filePath) return;
     try {
       await navigator.clipboard.writeText(file.filePath);
       setPathCopied(true);
@@ -206,7 +224,7 @@ export function FilePreviewBody({
         error: error instanceof Error ? error.message : String(error),
       }));
     }
-  }, [file.filePath, t]);
+  }, [file.filePath, file.mediaSource, t]);
 
   const renderFallback = (label: string, description: string) => (
     <PreviewFallbackAction
@@ -224,7 +242,7 @@ export function FilePreviewBody({
     : <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">{t('artifacts.previewTooLarge')}</div>;
   const content = (() => {
     if (file.isDirectory) return renderFallback(t('artifacts.directoryPreviewTitle'), t('artifacts.directoryPreviewDescription'));
-    if (mode === 'preview' && fileTooLargeForPreview && canDirectOpen) return tooLargeFallback;
+    if (mode === 'preview' && fileTooLargeForPreview && (canDirectOpen || file.mediaSource)) return tooLargeFallback;
     if (!reader) {
       if (mode === 'diff') return <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">{t('artifacts.diffUnsupported')}</div>;
       return canDirectOpen
@@ -239,9 +257,14 @@ export function FilePreviewBody({
       const Reader = reader.component;
       return <Reader file={file} text={file.content!} />;
     }
+    if (!file.mediaSource && (!transportRelativePath || !workspaceContext?.agentScope)) {
+      return canDirectOpen
+        ? renderFallback(t('artifacts.previewOutsideWorkspace'), t('artifacts.previewOpenExternalDescription'))
+        : <div role="status" className="flex h-full items-center justify-center px-6 text-center text-sm text-destructive">{t('artifacts.localPathUnavailable')}</div>;
+    }
     return <WorkspaceFileReader file={file} reader={reader} relativePath={transportRelativePath} workspaceContext={workspaceContext} tooLargeFallback={tooLargeFallback} />;
   })();
-  const previewInstanceKey = JSON.stringify([workspaceContext?.agentScope, transportRelativePath, file.filePath, mode, reader?.id]);
+  const previewInstanceKey = JSON.stringify([file.mediaSource ?? workspaceContext?.agentScope, transportRelativePath, file.filePath, mode, reader?.id]);
 
   return (
     <div className={cn('flex h-full min-h-0 flex-col overflow-hidden', className)}>
@@ -254,7 +277,7 @@ export function FilePreviewBody({
           <div className="flex shrink-0 items-center gap-1">
             {headerAccessory}
             <AppPluginManager category="reader" compact />
-            <Button
+            {!file.mediaSource ? <><Button
               type="button"
               variant="ghost"
               size="icon"
@@ -288,7 +311,7 @@ export function FilePreviewBody({
               disabled={!canDirectOpen}
             >
               <ExternalLink className="h-3.5 w-3.5" />
-            </Button>
+            </Button></> : null}
             {headerTrailingAccessory}
           </div>
         </div>

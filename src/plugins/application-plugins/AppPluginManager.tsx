@@ -368,7 +368,7 @@ function AppPluginManagerContent({ category, page = false, onClose }: { category
           {hasOtherKinds(selected.manifest, category) && <p className="text-xs leading-5 text-muted-foreground">{t('mixed')}</p>}
           <dl className="grid grid-cols-2 gap-x-6 gap-y-5 text-sm">
             <div className="min-w-0"><dt className="text-xs text-muted-foreground">{t('version')}</dt><dd className="mt-1.5 [overflow-wrap:anywhere]">v{selected.manifest.version}</dd></div>
-            <div className="min-w-0"><dt className="text-xs text-muted-foreground">{t('origin')}</dt><dd className="mt-1.5">{t(selected.origin === 'manual' ? 'manual' : 'agent')}</dd></div>
+            <div className="min-w-0"><dt className="text-xs text-muted-foreground">{t('origin')}</dt><dd className="mt-1.5">{t(selected.origin)}</dd></div>
             <div className="col-span-2 min-w-0"><dt className="text-xs text-muted-foreground">{t('pluginId')}</dt><dd className="mt-1.5 font-mono text-xs leading-5 [overflow-wrap:anywhere]">{selected.manifest.id}</dd></div>
           </dl>
           <section className="space-y-3 border-t border-border/70 pt-6"><h3 className="text-sm font-medium">{t('capabilities')}</h3><PluginCapabilities manifest={selected.manifest} /></section>

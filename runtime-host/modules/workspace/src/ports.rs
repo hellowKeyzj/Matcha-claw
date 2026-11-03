@@ -46,6 +46,12 @@ pub trait WorkspaceOps: Send + Sync {
         reference: &'a str,
     ) -> WorkspaceFuture<'a, ResolvedWorkspaceMedia, WorkspaceMediaFailure>;
 
+    fn playback_media<'a>(
+        &'a self,
+        session_key: &'a str,
+        reference: &'a str,
+    ) -> WorkspaceFuture<'a, ResolvedWorkspaceMedia, WorkspaceMediaFailure>;
+
     fn thumbnail_media_reference<'a>(
         &'a self,
         session_key: &'a str,

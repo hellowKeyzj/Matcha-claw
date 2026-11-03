@@ -230,6 +230,7 @@ impl SessionIdentity {
 pub enum RunPhase {
     Queued,
     Started,
+    Yielded,
     WaitingForApproval,
     CancellationRequested,
     Cancelled,
@@ -297,6 +298,12 @@ pub enum SessionContent {
     Media {
         media_type: Option<String>,
         reference: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource_id: Option<String>,
     },
     Omitted {
         reason: OmissionReason,
@@ -1077,6 +1084,9 @@ fn public_delta_content(content: &SessionContent) -> SessionContent {
         SessionContent::Media {
             media_type,
             reference,
+            file_name,
+            size_bytes,
+            resource_id,
         } => public_media_reference(reference).map_or(
             SessionContent::Omitted {
                 reason: OmissionReason::UnsafeMedia,
@@ -1084,6 +1094,9 @@ fn public_delta_content(content: &SessionContent) -> SessionContent {
             |reference| SessionContent::Media {
                 media_type: media_type.clone(),
                 reference,
+                file_name: file_name.clone(),
+                size_bytes: *size_bytes,
+                resource_id: resource_id.clone(),
             },
         ),
         _ => content.clone(),
@@ -2502,7 +2515,7 @@ impl SessionState {
                     return false;
                 }
                 update_runtime_phase(&mut self.runtime, run_id, *phase);
-                if terminal_run_phase(*phase) {
+                if terminal_run_phase(*phase) || *phase == RunPhase::Yielded {
                     if !update_assistant_turn_status_for_run(
                         &mut self.items,
                         run_id,
@@ -2510,7 +2523,9 @@ impl SessionState {
                     ) {
                         return false;
                     }
-                    self.terminal_run_ids.insert(run_id.clone());
+                    if terminal_run_phase(*phase) {
+                        self.terminal_run_ids.insert(run_id.clone());
+                    }
                 }
                 true
             }
@@ -2582,6 +2597,11 @@ impl SessionState {
                     .run_id
                     .as_deref()
                     .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+                    && !tools_fact_slice(&self.tools).is_some_and(|tools| tools.iter().any(|existing| {
+                        let mut updated = existing.clone();
+                        updated.details = tool.details.clone();
+                        updated == tool && matches!(tool.phase, ToolPhase::Completed | ToolPhase::Failed)
+                    }))
                 {
                     return false;
                 }
@@ -2717,7 +2737,7 @@ fn update_assistant_turn_status_for_run(
 fn item_status_for_terminal_run_phase(phase: RunPhase) -> ItemStatus {
     match phase {
         RunPhase::Cancelled | RunPhase::Interrupted => ItemStatus::Aborted,
-        RunPhase::Completed => ItemStatus::Final,
+        RunPhase::Completed | RunPhase::Yielded => ItemStatus::Final,
         RunPhase::Failed => ItemStatus::Error,
         RunPhase::Queued
         | RunPhase::Started
@@ -3470,7 +3490,7 @@ fn project_delta_changes(
             }
             SessionChange::RunPhaseChanged { run_id, phase } => {
                 projected.push(change.clone());
-                if terminal_run_phase(*phase)
+                if (terminal_run_phase(*phase) || *phase == RunPhase::Yielded)
                     && let Some(item) = assistant_turn_for_run_id(&state.items, run_id)
                 {
                     push_message_updated_change(&mut projected, item.clone());
@@ -3962,9 +3982,16 @@ fn valid_content(content: &SessionContent) -> bool {
         SessionContent::Media {
             media_type,
             reference,
+            file_name,
+            size_bytes,
+            resource_id,
         } => {
             media_type.as_deref().is_none_or(valid_id)
                 && valid_id_with_limit(reference, MAX_CONTENT_REF_BYTES)
+                && file_name.as_deref().is_none_or(valid_media_file_name)
+                && size_bytes.is_none_or(|size| size <= MAX_SAFE_INTEGER)
+                && resource_id.as_deref().is_none_or(|id| id.strip_prefix("sha256:").is_some_and(|hash|
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))))
         },
         SessionContent::Omitted { .. } => true,
     }
@@ -4055,6 +4082,11 @@ fn valid_window(window: &SessionWindow) -> bool {
         && window.window_start_offset <= window.window_end_offset
         && window.window_end_offset <= window.total_item_count
         && window.window_end_offset - window.window_start_offset <= MAX_ITEMS as u64
+}
+
+pub fn valid_media_file_name(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value && value.len() <= 4096 && !matches!(value, "." | "..")
+        && !value.contains(['/', '\\']) && !value.chars().any(char::is_control)
 }
 
 pub fn public_media_reference(reference: &str) -> Option<String> {
@@ -4410,6 +4442,7 @@ mod tests {
             items: SessionFact::Complete(vec![SessionItem::UserMessage {
                 item_id: "item-1".to_owned(),
                 message_id: Some("message-1".to_owned()),
+                input_ids: Vec::new(),
                 text: "hello".to_owned(),
                 content: vec![
                     SessionContent::ToolUse {
@@ -4427,10 +4460,12 @@ mod tests {
                     SessionContent::Media {
                         media_type: Some("image/png".to_owned()),
                         reference: "C:private.png".to_owned(),
+                        file_name: None, size_bytes: None, resource_id: None,
                     },
                     SessionContent::Media {
                         media_type: Some("image".to_owned()),
                         reference: "media-1".to_owned(),
+                        file_name: None, size_bytes: None, resource_id: None,
                     },
                 ],
                 status: ItemStatus::Final,

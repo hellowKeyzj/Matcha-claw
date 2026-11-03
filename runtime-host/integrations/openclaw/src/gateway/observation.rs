@@ -32,6 +32,8 @@ pub(crate) enum OrderedContext {
     Describe { identity: SessionIdentity, generation: u64, supported: bool, reply: oneshot::Sender<Result<Option<sessions_module::state::SessionModelState>, RuntimeOperationFailure>> },
     History { identity: SessionIdentity, generation: u64, page: PageRequest, host_epoch: u64, input_ids: Vec<String>,
         reply: oneshot::Sender<Result<HistoryRead, RuntimeOperationFailure>> },
+    ImageTask { identity: SessionIdentity, generation: u64, task_id: String,
+        reply: oneshot::Sender<Result<Vec<sessions_module::state::ToolView>, RuntimeOperationFailure>> },
 }
 
 pub(crate) struct Observations {

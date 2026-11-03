@@ -271,6 +271,20 @@ impl ProviderHandle {
         rx.await.map_err(|_| ())
     }
 
+    pub(crate) async fn discover_provider_model_draft(
+        &self,
+        request: crate::owner::model_discovery::DraftRequest,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<ProviderModelDiscoveryView>, crate::owner::model_discovery::Failure> {
+        use crate::owner::model_discovery::Failure;
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        let (reply, rx) = oneshot::channel();
+        self.send_query(ProviderQuery::DiscoverModelDraft { request, cancellation, reply })
+            .await.map_err(|_| Failure::Unavailable)?;
+        rx.await.map_err(|_| Failure::Unavailable)?
+    }
+
     pub async fn admit_discover_provider_models(
         &self,
         account_id: String,
@@ -927,6 +941,11 @@ impl LlmStreamSink for ProviderStreamSink {
 }
 
 pub(crate) enum ProviderQuery {
+    DiscoverModelDraft {
+        request: crate::owner::model_discovery::DraftRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<ProviderModelDiscoveryView>, crate::owner::model_discovery::Failure>>,
+    },
     ListMediaModels {
         request: crate::media::ListRequest,
         reply: oneshot::Sender<Result<crate::media::ListOutput, crate::media::Failure>>,
@@ -1069,7 +1088,8 @@ impl ProviderQuery {
             | Self::SelectSessionModel { call, .. }
             | Self::SelectMatchaSessionModelRuntime { call, .. }
             | Self::GenerateBound { call, .. } => call.clone(),
-            Self::PrepareGenerationBinding { .. }
+            Self::DiscoverModelDraft { .. }
+            | Self::PrepareGenerationBinding { .. }
             | Self::RestoreGenerationBinding { .. }
             | Self::CountBoundInput { .. }
             | Self::GenerateMedia { .. }
@@ -1092,7 +1112,8 @@ impl ProviderQuery {
             | Self::SelectSessionModel { call, .. }
             | Self::SelectMatchaSessionModelRuntime { call, .. }
             | Self::GenerateBound { call, .. } => call.take(),
-            Self::PrepareGenerationBinding { .. }
+            Self::DiscoverModelDraft { .. }
+            | Self::PrepareGenerationBinding { .. }
             | Self::RestoreGenerationBinding { .. }
             | Self::CountBoundInput { .. }
             | Self::GenerateMedia { .. }
@@ -1112,6 +1133,7 @@ impl ProviderQuery {
             | Self::ListRouting { .. }
             | Self::TextGenerationModelLimits { .. }
             | Self::GenerateText { .. }
+            | Self::DiscoverModelDraft { .. }
             | Self::PrepareGenerationBinding { .. }
             | Self::RestoreGenerationBinding { .. }
             | Self::CountBoundInput { .. }

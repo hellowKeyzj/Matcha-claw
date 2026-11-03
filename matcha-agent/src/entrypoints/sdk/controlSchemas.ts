@@ -8,7 +8,10 @@
  */
 
 import { z } from 'zod/v4'
-import { AcceptedCorrelationSchema, InvestigationUsageSchema } from '../../world/investigation.js'
+import {
+  AcceptedCorrelationSchema,
+  InvestigationUsageSchema,
+} from '../../world/investigation.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { TodoListSchema } from '../../utils/todo/types.js'
 import { SettingsSchema } from '../../utils/settings/types.js'
@@ -100,19 +103,27 @@ export const SDKControlInitializeResponseSchema = lazySchema(() =>
 export const SDKControlPrepareToSleepRequestSchema = lazySchema(() =>
   z.strictObject({
     subtype: z.literal('prepare_to_sleep'),
-    replayState: z.strictObject({
-      model: z.string().nullable(),
-      permissionMode: PermissionModeSchema(),
-      effort: SDKControlSetEffortRequestSchema().shape.effort,
-      initialization: z.strictObject({
-        systemPrompt: z.string().nullable(),
-        appendSystemPrompt: z.string().nullable(),
-      }).optional(),
-      search: z.strictObject({
-        webSearchAdapter: SettingsSchema().shape.webSearchAdapter.unwrap().nullable(),
-        searxng: SettingsSchema().shape.searxng.unwrap().nullable(),
-      }).optional(),
-    }).optional(),
+    replayState: z
+      .strictObject({
+        model: z.string().nullable(),
+        permissionMode: PermissionModeSchema(),
+        effort: SDKControlSetEffortRequestSchema().shape.effort,
+        initialization: z
+          .strictObject({
+            systemPrompt: z.string().nullable(),
+            appendSystemPrompt: z.string().nullable(),
+          })
+          .optional(),
+        search: z
+          .strictObject({
+            webSearchAdapter: SettingsSchema()
+              .shape.webSearchAdapter.unwrap()
+              .nullable(),
+            searxng: SettingsSchema().shape.searxng.unwrap().nullable(),
+          })
+          .optional(),
+      })
+      .optional(),
   }),
 )
 
@@ -181,7 +192,9 @@ export const SDKControlSetEffortResponseSchema = lazySchema(() =>
     appliedEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
     model: z.string(),
     supportsEffort: z.boolean(),
-    supportedEffortLevels: z.array(z.enum(['low', 'medium', 'high', 'xhigh', 'max'])),
+    supportedEffortLevels: z.array(
+      z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
+    ),
   }),
 )
 
@@ -609,7 +622,9 @@ export const SDKControlGetSettingsResponseSchema = lazySchema(() =>
           // Zod→proto generator can't emit enum∪number unions.
           effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
           supportsEffort: z.boolean(),
-          supportedEffortLevels: z.array(z.enum(['low', 'medium', 'high', 'xhigh', 'max'])),
+          supportedEffortLevels: z.array(
+            z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
+          ),
           webSearchAdapter: z
             .enum(['api', 'bing', 'brave', 'exa', 'tavily', 'searxng'])
             .optional(),
@@ -656,16 +671,23 @@ export const SDKControlElicitationResponseSchema = lazySchema(() =>
 export const SDKControlRequestInnerSchema = lazySchema(() =>
   z.union([
     z.strictObject({
-      subtype: z.literal('native_io_admit'), correlation: AcceptedCorrelationSchema,
-      ioId: z.uuid(), kind: z.enum(['model', 'loop', 'tool', 'source']),
-      preparedRequestDigest: z.string(), reservation: InvestigationUsageSchema,
+      subtype: z.literal('native_io_admit'),
+      correlation: AcceptedCorrelationSchema,
+      ioId: z.uuid(),
+      kind: z.enum(['model', 'loop', 'tool', 'source']),
+      preparedRequestDigest: z.string(),
+      reservation: InvestigationUsageSchema,
       proof: z.record(z.string(), z.unknown()),
     }),
     z.strictObject({
-      subtype: z.literal('native_io_observe'), correlation: AcceptedCorrelationSchema,
-      ioId: z.uuid(), observation: z.strictObject({
-        status: z.enum(['complete', 'unknown', 'not_sent']), usage: InvestigationUsageSchema.optional(),
-        rawUsage: z.record(z.string(), z.unknown()).optional(), reason: z.string().optional(),
+      subtype: z.literal('native_io_observe'),
+      correlation: AcceptedCorrelationSchema,
+      ioId: z.uuid(),
+      observation: z.strictObject({
+        status: z.enum(['complete', 'unknown', 'not_sent']),
+        usage: InvestigationUsageSchema.optional(),
+        rawUsage: z.record(z.string(), z.unknown()).optional(),
+        reason: z.string().optional(),
       }),
     }),
     SDKControlPrepareToSleepRequestSchema(),

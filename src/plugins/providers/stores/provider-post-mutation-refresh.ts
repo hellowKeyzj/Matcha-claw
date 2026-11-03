@@ -26,7 +26,7 @@ async function refreshProviderSnapshot(reason: string): Promise<void> {
 
 async function refreshProviderModelCatalog(): Promise<void> {
   const { useProviderModelCatalogStore } = await import('@/plugins/providers/stores/provider-model-catalog');
-  await useProviderModelCatalogStore.getState().refresh();
+  await useProviderModelCatalogStore.getState().refresh({ force: true });
 }
 
 async function refreshCapabilityRouting(): Promise<void> {

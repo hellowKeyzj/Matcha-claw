@@ -6,6 +6,7 @@ import { decodeCallReceipt } from '@/types/call-log/receipt';
 import { waitForCall } from '@/lib/call-log-await';
 import { summarizeIdentifier } from '@/lib/session-trace';
 import type { ModelCapability } from '@/plugins/providers/domain/providers';
+import { ProviderMutationError } from '../domain/provider-projection-errors';
 import { MODEL_CAPABILITIES } from '@/plugins/providers/domain/provider-model-capabilities';
 
 export type { ModelCapability } from '@/plugins/providers/domain/providers';
@@ -84,12 +85,12 @@ function normalizeCapabilities(value: unknown): ModelCapability[] {
   return out;
 }
 
-function normalizeProviderModelDraft(value: unknown, options: { strictFields?: boolean } = {}): ProviderModelDraft | null {
+function normalizeProviderModelDraft(value: unknown, options: { strictFields?: boolean; allowUnknownCapabilities?: boolean } = {}): ProviderModelDraft | null {
   if (!isRecord(value) || hasLegacyModelFields(value)) return null;
   if (options.strictFields && !hasOnlyDiscoveryModelFields(value)) return null;
   const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
   const capabilities = normalizeCapabilities(value.capabilities);
-  if (!modelId || capabilities.length === 0) return null;
+  if (!modelId || (!options.allowUnknownCapabilities && capabilities.length === 0)) return null;
   const contextWindow = normalizePositiveInteger(value.contextWindow);
   const maxTokens = normalizePositiveInteger(value.maxTokens);
   const timeoutMs = normalizePositiveInteger(value.timeoutMs);
@@ -146,6 +147,33 @@ function decodeModelList(value: unknown): ProviderModel[] {
     throw new Error('Provider models are unavailable');
   }
   return models;
+}
+
+export const PROVIDER_DISCOVERY_REASONS = [
+  'invalid-request', 'unsupported', 'credential-missing', 'credential-unavailable',
+  'authentication', 'permission-denied', 'rate-limited', 'deadline',
+  'invalid-response', 'unavailable', 'outcome-unknown',
+] as const;
+
+export class ProviderDiscoveryError extends Error {
+  constructor(readonly reason: typeof PROVIDER_DISCOVERY_REASONS[number]) {
+    super(reason);
+    this.name = 'ProviderDiscoveryError';
+  }
+}
+
+export function decodeDiscoveredModels(value: unknown): ProviderModelDraft[] {
+  if (!Array.isArray(value)) throw new ProviderDiscoveryError('invalid-response');
+  const seen = new Set<string>();
+  return value.map((raw) => {
+    const model = normalizeProviderModelDraft(raw, { strictFields: true, allowUnknownCapabilities: true });
+    if (!model || !isRecord(raw) || !Array.isArray(raw.capabilities)
+      || raw.capabilities.length !== model.capabilities.length || seen.has(model.modelId)) {
+      throw new ProviderDiscoveryError('invalid-response');
+    }
+    seen.add(model.modelId);
+    return model;
+  });
 }
 
 function decodeDiscoverResult(value: unknown, callId: string, accountId: string, count: number | null): ProviderModelsDiscoverResult {
@@ -235,19 +263,19 @@ export async function persistProviderModels(
     if (isTraceEnabled()) logProviderConfigTrace('request-finished', providerProjectionTrace(receipt));
     if (!isProviderMutationCommitted(receipt, 'stored')) {
       if (receipt.outcome === 'rejected' || receipt.outcome === 'missing') {
-        throw new Error('Provider model request was rejected');
+        throw new ProviderMutationError('rejected');
       }
       if (receipt.phase !== 'terminal' || receipt.outcome === 'unknown'
         || receipt.commit === 'unknown' || receipt.persisted === 'unknown') {
-        throw new Error('Provider model commit outcome is unknown; reopen before retrying');
+        throw new ProviderMutationError('unknown');
       }
-      throw new Error('Provider models are unavailable');
+      throw new ProviderMutationError('unknown');
     }
     return { receipt };
   } catch (error) {
     if (isTraceEnabled()) logProviderConfigTrace('request-failed', {
       errorName: error instanceof Error ? error.name : typeof error,
     });
-    throw error;
+    throw error instanceof ProviderMutationError ? error : new ProviderMutationError('unknown');
   }
 }

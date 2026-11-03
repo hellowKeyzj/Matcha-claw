@@ -1,4 +1,6 @@
 import type { ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
+import type { MessageContextTag } from '@/plugins/message-rendering/extensions';
+import { readTaggedMessage } from '@/plugins/message-rendering/tagged-context';
 import type {
   SessionRenderAttachedFile,
   SessionRenderImage,
@@ -10,6 +12,7 @@ export interface ChatSessionMarkdownExportInput {
   sessionKey: string;
   agentName?: string | null;
   items: ReadonlyArray<ChatRenderItem>;
+  contextTags?: readonly MessageContextTag[];
   exportedAt: Date;
 }
 
@@ -192,9 +195,16 @@ function renderToolCardMarkdown(tool: SessionRenderToolCard): string[] {
   return lines;
 }
 
-function renderUserItemMarkdown(item: Extract<ChatRenderItem, { kind: 'user-message' }>): string[] {
+function renderUserItemMarkdown(item: Extract<ChatRenderItem, { kind: 'user-message' }>, contextTags: readonly MessageContextTag[]): string[] {
+  const message = readTaggedMessage(item.text, contextTags, !item.largeText || item.largeText.loadedBytes === item.largeText.totalBytes);
   const contentLines: string[] = [];
-  const hasText = appendText(contentLines, item.text);
+  appendText(contentLines, message.text);
+  for (const context of message.contexts) {
+    if (contentLines.length > 0) contentLines.push('');
+    contentLines.push(context.name);
+    if (context.prompt !== undefined) contentLines.push(context.prompt);
+  }
+  const hasText = contentLines.length > 0;
   const mediaLines: string[] = [];
   const hasImages = appendImages(mediaLines, item.images);
   const hasAttachedFiles = appendAttachedFiles(mediaLines, item.attachedFiles);
@@ -204,7 +214,8 @@ function renderUserItemMarkdown(item: Extract<ChatRenderItem, { kind: 'user-mess
     ...(hasText ? contentLines : []),
     ...(hasText && (hasImages || hasAttachedFiles) ? [''] : []),
     ...(hasImages || hasAttachedFiles ? mediaLines : []),
-    ...(!hasText && !hasImages && !hasAttachedFiles ? ['(empty)'] : []),
+    ...(item.contentNotices?.length ? ['Some message content is unavailable.'] : []),
+    ...(!hasText && !hasImages && !hasAttachedFiles && !item.contentNotices?.length ? ['(empty)'] : []),
   ];
 }
 
@@ -220,7 +231,8 @@ function renderAssistantItemMarkdown(item: Extract<ChatRenderItem, { kind: 'assi
       const mediaLines: string[] = [];
       const hasImages = appendImages(mediaLines, segment.images);
       const hasAttachedFiles = appendAttachedFiles(mediaLines, segment.attachedFiles);
-      if (hasImages || hasAttachedFiles) {
+      if (segment.contentNotices?.length) mediaLines.push('Some message content is unavailable.');
+      if (hasImages || hasAttachedFiles || segment.contentNotices?.length) {
         if (contentLines.length > 0) {
           contentLines.push('');
         }
@@ -253,9 +265,9 @@ function renderSystemItemMarkdown(item: Extract<ChatRenderItem, { kind: 'system'
   ];
 }
 
-function renderChatItemMarkdown(item: ChatRenderItem): string[] | null {
+function renderChatItemMarkdown(item: ChatRenderItem, contextTags: readonly MessageContextTag[]): string[] | null {
   if (item.kind === 'user-message') {
-    return renderUserItemMarkdown(item);
+    return renderUserItemMarkdown(item, contextTags);
   }
   if (item.kind === 'assistant-turn') {
     return renderAssistantItemMarkdown(item);
@@ -272,7 +284,7 @@ export function buildChatSessionMarkdownExport(input: ChatSessionMarkdownExportI
   const fileTimestamp = formatTimestampForFile(input.exportedAt);
   const fileName = sanitizeMarkdownDownloadFileName(fileTimestamp ? `${title}-${fileTimestamp}` : title);
   const itemSections = input.items.flatMap((item) => {
-    const section = renderChatItemMarkdown(item);
+    const section = renderChatItemMarkdown(item, input.contextTags ?? []);
     return section ? [section] : [];
   });
   const lines = [

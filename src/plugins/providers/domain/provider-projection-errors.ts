@@ -43,6 +43,13 @@ const PROJECTION_ERROR_REASON_KEYS: Record<string, string> = {
   'config-readback-unavailable': 'readbackUnavailable',
 };
 
+export class ProviderMutationError extends Error {
+  constructor(readonly reason: 'rejected' | 'unknown') {
+    super(i18n.t(`settings:aiProviders.dialog.saveErrors.${reason}`));
+    this.name = 'ProviderMutationError';
+  }
+}
+
 export function providerDiagnosticError(diagnostic: ProviderDiagnostic | null): string | undefined {
   if (diagnostic?.privateResolverCode) {
     const key = PRIVATE_RESOLVER_ERROR_KEYS[diagnostic.privateResolverCode];

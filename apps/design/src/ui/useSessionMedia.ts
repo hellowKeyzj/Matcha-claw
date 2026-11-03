@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import Konva from 'konva';
 import type { AppSessionMediaItem } from '@matcha/app-plugins-sdk';
 import type { Asset, DesignDocument, Edit, Layer } from '../document';
@@ -37,14 +37,16 @@ function failureCode(cause: unknown): string {
   return typeof code === 'string' && /^[a-z][a-zA-Z0-9_]{0,63}$/.test(code) ? code : '';
 }
 
-export function useSessionMedia(options: Options): void {
+export function useSessionMedia(options: Options): () => void {
   const latest = useRef(options);
   latest.current = options;
   const signal = useRef<(() => void) | undefined>(undefined);
+  const retry = useRef<(() => void) | undefined>(undefined);
 
   useLayoutEffect(() => { signal.current?.(); }, [options.blocked]);
 
   useEffect(() => {
+    if (!app().context.sessionIdentity) return;
     const documentId = latest.current.document.id;
     const failed = new Set<string>();
     let items: readonly AppSessionMediaItem[] = [];
@@ -160,6 +162,7 @@ export function useSessionMedia(options: Options): void {
     }
     const onBlocked = () => schedule();
     signal.current = onBlocked;
+    retry.current = request;
     const unsubscribe = app().subscribe((event) => { if (event.topic === 'media.changed') request(); });
     schedule();
     return () => {
@@ -167,6 +170,8 @@ export function useSessionMedia(options: Options): void {
       unsubscribe();
       if (timer !== undefined) clearTimeout(timer);
       if (signal.current === onBlocked) signal.current = undefined;
+      if (retry.current === request) retry.current = undefined;
     };
   }, [options.document.id]);
+  return useCallback(() => { retry.current?.(); }, []);
 }

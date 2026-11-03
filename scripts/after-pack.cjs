@@ -392,6 +392,7 @@ function cleanupMatchaAgentVendor(vendorDir, platform, arch) {
 // FileMatcher exclusions run before AsarPackager, including asarUnpack selection.
 // Keep the same hook owner; do not prune shared source node_modules for one target.
 const nativePackageExclusions = new WeakMap();
+const nativePackageFileSets = new WeakMap();
 exports.beforePack = async function beforePack(context) {
   const platform = context.electronPlatformName;
   const arch = resolveArch(context.arch);
@@ -422,6 +423,21 @@ exports.beforePack = async function beforePack(context) {
   const previousExclusions = nativePackageExclusions.get(files) || new Set();
   files.filter = files.filter.filter(pattern => !previousExclusions.has(pattern)).concat([...exclusions]);
   nativePackageExclusions.set(files, exclusions);
+  // pnpm's collector can omit Koffi's optional native package in isolated layouts.
+  const koffiRequire = require('module').createRequire(realpathSafe(join(info.appDir, 'node_modules', 'koffi', 'package.json')));
+  const previousFileSets = nativePackageFileSets.get(files) || [];
+  const fileSets = targetArchitectures(arch).map(targetArch => {
+    const name = `@koromix/koffi-${platform}-${targetArch}`;
+    return {
+      from: dirname(koffiRequire.resolve(`${name}/package.json`)),
+      to: `node_modules/${name}`,
+      filter: ['**/*'],
+    };
+  });
+  context.packager.config.files = context.packager.config.files.filter(fileSet => !previousFileSets.includes(fileSet)).concat(fileSets);
+  nativePackageFileSets.set(files, fileSets);
+  const { bundleAppPlugins } = await import('./bundle-app-plugins.mjs');
+  await bundleAppPlugins({ platform, arch, packager: context.packager });
 };
 
 // ── Main hook ────────────────────────────────────────────────────────────────
@@ -443,6 +459,12 @@ exports.default = async function afterPack(context) {
     resourcesDir = join(appOutDir, 'resources');
   }
 
+  const { validateBundledAppPlugins } = await import('./bundle-app-plugins.mjs');
+  const bundled = await validateBundledAppPlugins(join(resourcesDir, 'app-plugins', 'bundled'), platform, arch);
+  for (const receipt of bundled) {
+    console.log(`[after-pack] Bundled app plugin ${receipt.id} ${receipt.version} verified for ${platform}-${arch}.`);
+  }
+
   const { checkWikiAssets } = await import('./download-wiki-assets.mjs');
   const wikiDir = join(resourcesDir, 'resources', 'wiki');
   checkWikiAssets(wikiDir, platform, arch);
@@ -454,6 +476,20 @@ exports.default = async function afterPack(context) {
   const dest = join(openclawRoot, 'node_modules');
   const nodeModulesRoot = join(__dirname, '..', 'node_modules');
   const pluginsDestRoot = join(resourcesDir, 'openclaw-plugins');
+
+  // Rust resolves this entry with the OS filesystem, outside app.asar.
+  const clawhubDir = join(resourcesDir, 'node_modules', 'clawhub');
+  if (!bundlePlugin(nodeModulesRoot, 'clawhub', clawhubDir)) {
+    throw new Error('Required ClawHub CLI was not bundled into packaged resources');
+  }
+  cleanupUnnecessaryFiles(clawhubDir);
+  const clawhubCheck = require('child_process').spawnSync(process.execPath, [
+    join(clawhubDir, 'bin', 'clawdhub.js'), '--cli-version',
+  ], { cwd: resourcesDir, encoding: 'utf8', timeout: 30_000, windowsHide: true });
+  if (clawhubCheck.status !== 0) {
+    throw new Error(`Packaged ClawHub CLI failed to load: ${clawhubCheck.error?.message || clawhubCheck.stderr}`);
+  }
+  console.log(`[after-pack] ClawHub CLI ${clawhubCheck.stdout.trim()} verified outside app.asar.`);
 
   const { isNativeExecutable } = await import('../electron/main/runtime-host-delivery/native-artifact.mjs');
   const matchaAgentDist = join(__dirname, '..', 'matcha-agent', 'dist');
@@ -537,12 +573,6 @@ exports.default = async function afterPack(context) {
       pluginId: 'browser-relay',
       localSourceCandidates: [
         join(__dirname, '..', 'build', 'openclaw-plugins', 'browser-relay'),
-      ],
-    },
-    {
-      pluginId: 'matchaclaw-media',
-      localSourceCandidates: [
-        join(__dirname, '..', 'build', 'openclaw-plugins', 'matchaclaw-media'),
       ],
     },
     {

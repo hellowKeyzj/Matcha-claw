@@ -563,9 +563,17 @@ export class StructuredIO {
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     try {
-      return await this.sendRequest(request, z.record(z.string(), z.unknown()), signal)
+      return await this.sendRequest(
+        request,
+        z.record(z.string(), z.unknown()),
+        signal,
+      )
     } catch (error) {
-      throw new InvestigationAdmissionError(error instanceof Error ? error.message : 'investigation_io_outcome_unknown')
+      throw new InvestigationAdmissionError(
+        error instanceof Error
+          ? error.message
+          : 'investigation_io_outcome_unknown',
+      )
     }
   }
 

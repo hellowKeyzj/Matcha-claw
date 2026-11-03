@@ -103,11 +103,14 @@ async function request<T>(
             return records(parsed)
           } catch (error) {
             rethrowInvestigationAdmission(error)
-            const failure = error instanceof SealedSkillError
-              ? error
-              : new SealedSkillError(path === 'catalog'
-                  ? 'sealed_catalog_invalid'
-                  : 'sealed_read_invalid')
+            const failure =
+              error instanceof SealedSkillError
+                ? error
+                : new SealedSkillError(
+                    path === 'catalog'
+                      ? 'sealed_catalog_invalid'
+                      : 'sealed_read_invalid',
+                  )
             throw Object.assign(new InvestigationAdmissionError(failure.kind), {
               cause: failure,
             })
@@ -219,7 +222,12 @@ export async function readSealedCatalog(
   signal?: AbortSignal,
 ): Promise<SealedSkill[]> {
   if (!source()) return []
-  return request('catalog', parseCatalog, skills => BigInt(skills.length), signal)
+  return request(
+    'catalog',
+    parseCatalog,
+    skills => BigInt(skills.length),
+    signal,
+  )
 }
 
 function parseContent(

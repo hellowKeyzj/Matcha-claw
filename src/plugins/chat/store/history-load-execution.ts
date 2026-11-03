@@ -1,11 +1,6 @@
 import { hostSessionWindowFetch } from '@/lib/host-api';
 import { normalizeAppError } from '@/lib/error-model';
-import {
-  buildHydratedAttachmentItemsPatch,
-  hasPendingItemPreviewLoads,
-  hydrateAttachedFilesFromItems,
-  loadMissingItemPreviews,
-} from '@/plugins/chat/store/attachment-helpers';
+import { hydrateAttachedFilesFromItems } from '@/plugins/chat/store/attachment-helpers';
 import {
   CHAT_HISTORY_FULL_LIMIT,
 } from '@/plugins/chat/store/history-constants';
@@ -378,12 +373,6 @@ export async function executeViewportWindowLoad(
       ...('reason' in projectionResult ? { reason: summarizeIdentifier(projectionResult.reason) } : {}),
     }));
     if (projectionResult.status !== 'applied') return;
-    readbackStage = 'hydrate';
-    deps.set((state) => isCurrent(state) ? buildHydratedAttachmentItemsPatch(
-      state,
-      sessionKey,
-      hydrateAttachedFilesFromItems(getSessionItems(state, sessionKey)),
-    ) : state);
   } catch (error) {
     if (traceId) logSessionTrace('session.window.readback.error', traceId, () => ({
       ...traceContext,
@@ -509,8 +498,6 @@ export function createApplyLoadedMessagesPipeline(
     const sourceItems = projectSessionViewItems(view);
     const hydratedItems = hydrateAttachedFilesFromItems(sourceItems);
     const renderFingerprint = buildItemRenderFingerprint(hydratedItems);
-    const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
-    const didMessageListChange = previousRenderFingerprint !== renderFingerprint;
     historyRuntime.historyFingerprintBySession.set(
       requestedSessionKey,
       buildItemHistoryFingerprint(sourceItems, window.thinkingLevel),
@@ -526,20 +513,6 @@ export function createApplyLoadedMessagesPipeline(
       clearHistoryPoll();
     }
 
-    if ((didMessageListChange || scope === 'background') && hasPendingItemPreviewLoads(hydratedItems)) {
-      void loadMissingItemPreviews(hydratedItems, {
-        sessionIdentity: requestedIdentity,
-      }, abortSignal).then((updatedItems) => {
-        if (!updatedItems || !isCurrent(get())) {
-          return;
-        }
-        set((state) => isCurrent(state) ? buildHydratedAttachmentItemsPatch(
-          state,
-          requestedSessionKey,
-          updatedItems,
-        ) : state);
-      });
-    }
     return 'applied';
   };
 }

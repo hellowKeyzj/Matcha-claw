@@ -59,28 +59,51 @@ impl WorkspaceOps for MatchaRuntimeDriver {
         reference: &'a str,
     ) -> WorkspaceFuture<'a, ResolvedWorkspaceMedia, WorkspaceMediaFailure> {
         Box::pin(async move {
-            if reference.len() != 38
-                || !reference.starts_with("media_")
-                || !reference.as_bytes()[6..].iter().all(u8::is_ascii_hexdigit)
+            let historical = crate::session::media::is_reference(reference);
+            if !historical
+                && (reference.len() != 38
+                    || !reference.starts_with("media_")
+                    || !reference.as_bytes()[6..].iter().all(u8::is_ascii_hexdigit))
             {
                 return Err(WorkspaceMediaFailure::InvalidReference);
             }
             let client = self.native_client();
             let (agent_id, session_id) = selection(&client, session_key).await?;
-            let bytes = client
-                .take_media(&agent_id, &session_id, reference)
-                .await
-                .map_err(media::failure)?;
+            let bytes = if historical {
+                media::historical(&client, &agent_id, &session_id, reference, 50 * 1024 * 1024)
+                    .await?
+                    .0
+            } else {
+                client
+                    .take_media(&agent_id, &session_id, reference)
+                    .await
+                    .map_err(media::failure)?
+            };
             Ok(ResolvedWorkspaceMedia::new(bytes))
         })
     }
 
-    fn thumbnail_media_reference<'a>(
+    fn playback_media<'a>(
         &'a self,
         _session_key: &'a str,
         _reference: &'a str,
+    ) -> WorkspaceFuture<'a, ResolvedWorkspaceMedia, WorkspaceMediaFailure> {
+        Box::pin(async { Err(WorkspaceMediaFailure::Unavailable) })
+    }
+
+    fn thumbnail_media_reference<'a>(
+        &'a self,
+        session_key: &'a str,
+        reference: &'a str,
     ) -> WorkspaceFuture<'a, WorkspaceMediaThumbnail, WorkspaceMediaFailure> {
-        Box::pin(async { Err(WorkspaceMediaFailure::InvalidReference) })
+        Box::pin(async move {
+            if !crate::session::media::is_reference(reference) {
+                return Err(WorkspaceMediaFailure::InvalidReference);
+            }
+            let client = self.native_client();
+            let (agent_id, session_id) = selection(&client, session_key).await?;
+            media::historical_thumbnail(&client, &agent_id, &session_id, reference).await
+        })
     }
 
     fn thumbnail_media_gateway<'a>(

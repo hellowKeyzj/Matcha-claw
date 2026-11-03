@@ -8,7 +8,7 @@ export type AuthMode = 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'local' | 'to
 export type CredentialAuthMode = Exclude<AuthMode, 'local' | 'cliReuse'>;
 type AccountKind = 'chat' | 'media';
 type ApiProtocol = 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
-type MediaProtocol = 'google' | 'openAi' | 'openRouter';
+type MediaProtocol = 'google' | 'openAi' | 'openRouter' | 'dashScope' | 'ark';
 export type ProviderAccountIntent = Readonly<{
   id: string;
   provider: string;
@@ -78,7 +78,7 @@ function isApiProtocol(value: unknown): value is ApiProtocol {
 }
 
 function isMediaProtocol(value: unknown): value is MediaProtocol {
-  return value === 'google' || value === 'openAi' || value === 'openRouter';
+  return value === 'google' || value === 'openAi' || value === 'openRouter' || value === 'dashScope' || value === 'ark';
 }
 
 function optionalAccountText(value: unknown, maxLength: number): value is string | undefined {

@@ -199,6 +199,11 @@ impl Body {
             } else if chat.is_yielded() {
                 if let Some(message) = final_message { self.finish_message(run, message, super::events::TerminalOutcome::Completed, cache)?; }
                 self.rollover(run, None, false)?;
+                for item in &mut self.items {
+                    if let SessionItem::AssistantTurn { run_id: Some(owner), status, .. } = item
+                        && owner == run
+                    { *status = ItemStatus::Final; }
+                }
                 if self.live_run() == Some(run) { self.live_run = None; }
             }
         }

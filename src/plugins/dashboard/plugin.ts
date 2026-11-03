@@ -1,4 +1,4 @@
-import { Home } from 'lucide-react';
+import { DashboardNavigationIcon } from '@/components/icons/navigation';
 import { applicationNavigation, applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
 
@@ -19,7 +19,7 @@ export const dashboardPlugin = definePlugin({
       id: 'dashboard',
       to: '/dashboard',
       label: 'common:sidebar.dashboard',
-      icon: Home,
+      icon: DashboardNavigationIcon,
       order: 80,
       prefetch: DashboardPage.preload,
     }),

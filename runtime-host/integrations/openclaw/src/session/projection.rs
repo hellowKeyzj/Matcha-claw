@@ -321,6 +321,9 @@ pub enum CanonicalSessionChange {
     RunStarted {
         run_id: RunId,
     },
+    RunYielded {
+        run_id: RunId,
+    },
     AssistantTurnChunk {
         run_id: RunId,
         message_id: Option<MessageId>,
@@ -415,6 +418,7 @@ impl fmt::Debug for CanonicalSessionChange {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RunStarted { .. } => formatter.debug_struct("RunStarted").finish(),
+            Self::RunYielded { .. } => formatter.debug_struct("RunYielded").finish(),
             Self::AssistantTurnChunk {
                 kind,
                 text,

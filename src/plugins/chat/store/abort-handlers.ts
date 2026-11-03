@@ -7,6 +7,7 @@ import {
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
 import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
+import { sessionImageGenerationTask } from '@/types/session/render-item';
 import type { StoreSessionRunCache } from '@/plugins/chat/store/session-run-cache';
 import { resolveSessionOperationTarget } from '@/plugins/chat/store/session-identity';
 import { failSessionAbort, resolveSessionAbortRunId, startSessionAbort } from '@/plugins/chat/store/session-presentation';
@@ -43,9 +44,17 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
   const sessionKey = stateAtClick.currentSessionKey;
   const record = stateAtClick.loadedSessions[sessionKey];
   const runtimeAtClick = getSessionRuntime(stateAtClick, sessionKey);
-  if (!record?.meta.sessionIdentity || runtimeAtClick.runPhase === 'stopping' || !isRunActive(runtimeAtClick)) return;
+  if (!record?.meta.sessionIdentity || runtimeAtClick.runPhase === 'stopping'
+    || !isRunActive(runtimeAtClick) && !runtimeAtClick.imageGeneration?.active) return;
 
   const runId = resolveSessionAbortRunId(record);
+  if (runtimeAtClick.imageGeneration?.active && !runId) return;
+  const imageTaskIds = record.items.flatMap((item) => item.kind === 'assistant-turn'
+    ? item.tools.flatMap((tool) => {
+      const task = sessionImageGenerationTask(tool);
+      return task && (task.status === 'queued' || task.status === 'running')
+        && (tool.runId === runId || task.runId === runId) ? [task.taskId] : [];
+    }) : []);
   const identityKey = buildSessionIdentityKey(record.meta.sessionIdentity);
   const sendGeneration = sessionRunCache.getSendGeneration(sessionKey);
   const approvalIds = (stateAtClick.pendingApprovalsBySession[sessionKey] ?? []).map((approval) => approval.id);
@@ -53,6 +62,7 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
   const startedAtMs = Date.now();
   const abort: ChatSessionAbortState = {
     identityKey, sendGeneration, runId: runId ?? null,
+    ...(imageTaskIds.length ? { imageTaskIds } : {}),
     startedAt: Math.max(startedAtMs, (runtimeAtClick.updatedAt ?? 0) + 1), phase: 'stopping', issue: null,
   };
   const reportFailure = (message: string) => {

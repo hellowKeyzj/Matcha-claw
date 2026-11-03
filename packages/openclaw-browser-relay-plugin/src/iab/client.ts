@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { BrowserActionInvocation, BrowserActionParams } from '../browser-action-contract.js'
+import type { BrowserActionContext, BrowserActionInvocation, BrowserActionParams, BrowserSessionCleanup } from '../browser-action-contract.js'
 import { resolveRelayPluginStatePath } from '../relay/paths.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -33,13 +33,26 @@ async function readDiscovery(stateDir: string, signal: AbortSignal) {
   }
 }
 
+type Discovery = Awaited<ReturnType<typeof readDiscovery>>
+
+function runKey(context: BrowserActionContext): string {
+  return JSON.stringify([context.agentId, context.sessionKey, context.sessionId, context.runId])
+}
+
+function requestContext(context: BrowserActionContext): BrowserActionContext {
+  const { sessionKey, agentId, workspaceDir, sessionId, runId } = context
+  return { sessionKey, agentId, sessionId, ...(workspaceDir ? { workspaceDir } : {}), ...(runId ? { runId } : {}) }
+}
+
 export class IabBrowserClient {
   private readonly stopped = new AbortController()
+  private readonly runs = new Map<string, { groupId: string; discovery: Promise<Discovery> }>()
 
   constructor(private readonly stateDir: string) {}
 
   stop(): void {
     this.stopped.abort(new Error('In-app browser backend stopped. The request was not replayed.'))
+    this.runs.clear()
   }
 
   async handleRequest(params: BrowserActionParams, invocation: BrowserActionInvocation = {}): Promise<Record<string, unknown>> {
@@ -53,8 +66,6 @@ export class IabBrowserClient {
     if (!isNonEmptyString(context.sessionId)) {
       throw new Error('In-app browser requires a trusted OpenClaw sessionId to verify the current session generation.')
     }
-    const { sessionKey, agentId, workspaceDir, sessionId } = context
-    const requestContext = { sessionKey, agentId, sessionId, ...(workspaceDir ? { workspaceDir } : {}) }
     const request = (params.action === 'act' || params.action === 'utility') ? params.request : undefined
     const timeoutMs = ('timeoutMs' in params ? params.timeoutMs : undefined)
       ?? request?.timeoutMs
@@ -71,29 +82,66 @@ export class IabBrowserClient {
     ])
     try {
       signal.throwIfAborted()
-      const discovery = await readDiscovery(this.stateDir, signal)
-      const body = JSON.stringify({ params, context: requestContext })
+      let discovery: Promise<Discovery>
+      if (context.runId) {
+        const key = runKey(context)
+        let run = this.runs.get(key)
+        if (!run) {
+          // Pin discovery independently of a tool cancellation; cleanup must reach the original Main.
+          run = { groupId: context.sessionGroupId!, discovery: readDiscovery(this.stateDir, this.stopped.signal) }
+          this.runs.set(key, run)
+        }
+        discovery = run.discovery
+      } else {
+        discovery = readDiscovery(this.stateDir, signal)
+      }
+      let target: Discovery
+      try { target = await discovery }
+      catch (error) {
+        if (context.runId) this.runs.delete(runKey(context))
+        throw error
+      }
       signal.throwIfAborted()
       invocation.assertInvocationCurrent?.()
-      const response = await fetch(`http://127.0.0.1:${discovery.port}/browser`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${discovery.token}` },
-        body,
-        signal,
-        redirect: 'error',
-      })
-      const envelope: unknown = await response.json()
-      signal.throwIfAborted()
-      if (isRecord(envelope) && !('result' in envelope) && isRecord(envelope.error)
-        && isNonEmptyString(envelope.error.code) && typeof envelope.error.message === 'string') {
-        return { ok: false, errorCode: envelope.error.code, error: envelope.error.message }
-      }
-      if (!response.ok || !isRecord(envelope) || 'error' in envelope || !isRecord(envelope.result)) {
-        throw new Error('In-app browser returned an invalid response. The request was not replayed.')
-      }
-      return envelope.result
+      return await this.post(target, '/browser', { params, context: requestContext(context) }, signal)
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  async cleanupSession(request: BrowserSessionCleanup): Promise<void> {
+    const run = this.runs.get(runKey(request.context))
+    if (!run) return
+    const signal = AbortSignal.any([this.stopped.signal, AbortSignal.timeout(30_000)])
+    const result = await this.post(await run.discovery, '/browser/session-end', {
+      context: requestContext(request.context), scope: request.scope,
+    }, signal)
+    if (result.released !== true) throw new Error('In-app browser session cleanup could not be confirmed.')
+    if (request.scope === 'group') {
+      for (const [key, candidate] of this.runs) {
+        if (candidate.groupId === run.groupId) this.runs.delete(key)
+      }
+    }
+  }
+
+  private async post(discovery: Discovery, route: string, payload: unknown, signal: AbortSignal): Promise<Record<string, unknown>> {
+    signal.throwIfAborted()
+    const response = await fetch(`http://127.0.0.1:${discovery.port}${route}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${discovery.token}` },
+      body: JSON.stringify(payload),
+      signal,
+      redirect: 'error',
+    })
+    const envelope: unknown = await response.json()
+    signal.throwIfAborted()
+    if (isRecord(envelope) && !('result' in envelope) && isRecord(envelope.error)
+      && isNonEmptyString(envelope.error.code) && typeof envelope.error.message === 'string') {
+      return { ok: false, errorCode: envelope.error.code, error: envelope.error.message }
+    }
+    if (!response.ok || !isRecord(envelope) || 'error' in envelope || !isRecord(envelope.result)) {
+      throw new Error('In-app browser returned an invalid response. The request was not replayed.')
+    }
+    return envelope.result
   }
 }

@@ -1,6 +1,6 @@
 import { isJsonValue } from '../runtime-host-delivery/transport/client';
 import type { AppPluginManifest } from '../../../src/types/desktop/app-plugin';
-import type { AppJson, AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppJson, AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
 
 export interface PluginLoad {
   readonly manifest: AppPluginManifest;
@@ -14,9 +14,10 @@ export type HostRequest =
   | { type: 'deactivate'; requestId: string; pluginId: string }
   | { type: 'call'; requestId: string; pluginId: string; digest: string; name: string; arguments: Readonly<Record<string, unknown>> }
   | { type: 'cancel'; requestId: string }
-  | { type: 'model-result'; requestId: string; result?: AppModelResult; error?: string }
-  | { type: 'text-model-result'; requestId: string; result?: AppTextModelResult; error?: string }
-  | { type: 'media-model-result'; requestId: string; result?: AppMediaModelList | AppVideoTaskResult | AppModelResult; error?: string };
+  | { type: 'confirmation-result'; requestId: string; result?: boolean; error?: string; errorCode?: 'approval_unavailable' }
+  | { type: 'model-result'; requestId: string; result?: AppModelResult; error?: string; errorCode?: string }
+  | { type: 'text-model-result'; requestId: string; result?: AppTextModelResult; error?: string; errorCode?: string }
+  | { type: 'media-model-result'; requestId: string; result?: AppMediaModelList | AppVideoTaskResult | AppModelResult; error?: string; errorCode?: string };
 
 export type WorkerMessage =
   | { type: 'ready' }
@@ -24,11 +25,23 @@ export type WorkerMessage =
   | { type: 'event'; event: AppRuntimeEvent }
   | { type: 'model'; requestId: string; pluginId: string; digest: string; request: AppModelRequest }
   | { type: 'text-model'; requestId: string; pluginId: string; digest: string; request: AppTextModelRequest }
+  | { type: 'media-model'; requestId: string; pluginId: string; digest: string; operation: 'generateSpeech'; request: AppSpeechModelRequest }
+  | { type: 'media-model'; requestId: string; pluginId: string; digest: string; operation: 'transcribe'; request: AppTranscriptionModelRequest }
+  | { type: 'media-model'; requestId: string; pluginId: string; digest: string; operation: 'generateMusic'; request: AppMusicModelRequest }
   | { type: 'media-model'; requestId: string; pluginId: string; digest: string; operation: 'list'; request: AppMediaModelListRequest }
   | { type: 'media-model'; requestId: string; pluginId: string; digest: string; operation: 'submitVideo'; request: AppModelRequest & { readonly kind: 'video' } }
   | { type: 'media-model'; requestId: string; pluginId: string; digest: string; operation: 'queryVideo' | 'collectVideo'; request: AppVideoTaskRequest }
   | { type: 'model-cancel'; requestId: string }
+  | { type: 'confirmation'; requestId: string; callId: string; pluginId: string; digest: string; request: import('../../../src/types/desktop/app-plugin-sdk').AppConfirmationRequest }
+  | { type: 'confirmation-cancel'; requestId: string }
   | { type: 'log'; pluginId: string; level: 'info' | 'error'; message: string };
+
+export function isModelErrorCode(value: unknown): value is string {
+  return typeof value === 'string' && ['invalid-request', 'selection-unavailable', 'unsupported', 'credential-missing',
+    'credential-unavailable', 'authentication', 'permission-denied', 'rate-limited', 'deadline', 'cancelled',
+    'response-too-large', 'invalid-response', 'generation-failed', 'provider-unavailable', 'owner-unavailable',
+    'task-binding-changed', 'unauthorized'].includes(value);
+}
 
 export function toolError(message: string): AppToolResult {
   return { content: [{ type: 'text', text: message }], isError: true };

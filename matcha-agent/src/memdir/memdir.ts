@@ -140,7 +140,12 @@ export async function ensureMemoryDirExists(memoryDir: string): Promise<void> {
     requireInvestigationEffects([])
   } catch (e) {
     rethrowInvestigationAdmission(e)
-    if (currentInvestigationScope() && e instanceof Error && e.cause !== undefined) throw e
+    if (
+      currentInvestigationScope() &&
+      e instanceof Error &&
+      e.cause !== undefined
+    )
+      throw e
     // fs.mkdir already handles EEXIST internally. Anything reaching here is
     // a real problem (EACCES/EPERM/EROFS) — log so --debug shows why. Prompt
     // building continues either way; the model's Write will surface the
@@ -170,31 +175,38 @@ function logMemoryDirCounts(
   >,
 ): Promise<void> {
   const fs = getFsImplementation()
-  return trackInvestigationOperation(fs.readdir(memoryDir).then(
-    dirents => {
-      requireInvestigationEffects([])
-      let fileCount = 0
-      let subdirCount = 0
-      for (const d of dirents) {
-        if (d.isFile()) {
-          fileCount++
-        } else if (d.isDirectory()) {
-          subdirCount++
+  return trackInvestigationOperation(
+    fs.readdir(memoryDir).then(
+      dirents => {
+        requireInvestigationEffects([])
+        let fileCount = 0
+        let subdirCount = 0
+        for (const d of dirents) {
+          if (d.isFile()) {
+            fileCount++
+          } else if (d.isDirectory()) {
+            subdirCount++
+          }
         }
-      }
-      logEvent('tengu_memdir_loaded', {
-        ...baseMetadata,
-        total_file_count: fileCount,
-        total_subdir_count: subdirCount,
-      })
-    },
-    error => {
-      rethrowInvestigationAdmission(error)
-      if (currentInvestigationScope() && error instanceof Error && error.cause !== undefined) throw error
-      // Directory unreadable — log without counts
-      logEvent('tengu_memdir_loaded', baseMetadata)
-    },
-  ))
+        logEvent('tengu_memdir_loaded', {
+          ...baseMetadata,
+          total_file_count: fileCount,
+          total_subdir_count: subdirCount,
+        })
+      },
+      error => {
+        rethrowInvestigationAdmission(error)
+        if (
+          currentInvestigationScope() &&
+          error instanceof Error &&
+          error.cause !== undefined
+        )
+          throw error
+        // Directory unreadable — log without counts
+        logEvent('tengu_memdir_loaded', baseMetadata)
+      },
+    ),
+  )
 }
 
 /**

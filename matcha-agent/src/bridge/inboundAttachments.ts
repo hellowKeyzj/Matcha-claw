@@ -21,7 +21,10 @@ import { logForDebugging } from '../utils/debug.js'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import { lazySchema } from '../utils/lazySchema.js'
 import { getBridgeAccessToken, getBridgeBaseUrl } from './bridgeConfig.js'
-import { requestInvestigationFile, stageInvestigationFile } from '../services/api/fileInvestigation.js'
+import {
+  requestInvestigationFile,
+  stageInvestigationFile,
+} from '../services/api/fileInvestigation.js'
 import { rethrowInvestigationAdmission } from '../services/api/investigation.js'
 import { currentInvestigationScope } from '../world/investigation.js'
 
@@ -83,9 +86,15 @@ async function resolveOne(att: InboundAttachment): Promise<string | undefined> {
     // reader loop (which has no catch around the await).
     const url = `${getBridgeBaseUrl()}/api/oauth/files/${encodeURIComponent(att.file_uuid)}/content`
     const response = currentInvestigationScope()
-      ? await requestInvestigationFile({ producer: 'matcha_inbound_attachment', operation: 'attachment_download',
-          url, method: 'GET', headers: { Authorization: `Bearer ${token}` }, timeoutMs: DOWNLOAD_TIMEOUT_MS,
-          records: (_body, status) => status === 200 ? 1n : 0n })
+      ? await requestInvestigationFile({
+          producer: 'matcha_inbound_attachment',
+          operation: 'attachment_download',
+          url,
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+          timeoutMs: DOWNLOAD_TIMEOUT_MS,
+          records: (_body, status) => (status === 200 ? 1n : 0n),
+        })
       : await axios.get(url, {
           headers: { Authorization: `Bearer ${token}` },
           responseType: 'arraybuffer',
@@ -114,8 +123,13 @@ async function resolveOne(att: InboundAttachment): Promise<string | undefined> {
 
   try {
     if (currentInvestigationScope()) {
-      await stageInvestigationFile({ producer: 'matcha_inbound_attachment', operation: 'attachment_stage',
-        root: dir, target: outPath, data })
+      await stageInvestigationFile({
+        producer: 'matcha_inbound_attachment',
+        operation: 'attachment_stage',
+        root: dir,
+        target: outPath,
+        data,
+      })
     } else {
       await mkdir(dir, { recursive: true })
       await writeFile(outPath, data)
@@ -141,9 +155,10 @@ export async function resolveInboundAttachments(
   debug(`resolving ${attachments.length} attachment(s)`)
   const paths: Array<string | undefined> = []
   if (currentInvestigationScope()) {
-    for (const attachment of attachments) paths.push(await resolveOne(attachment))
+    for (const attachment of attachments)
+      paths.push(await resolveOne(attachment))
   } else {
-    paths.push(...await Promise.all(attachments.map(resolveOne)))
+    paths.push(...(await Promise.all(attachments.map(resolveOne))))
   }
   const ok = paths.filter((p): p is string => p !== undefined)
   if (ok.length === 0) return ''

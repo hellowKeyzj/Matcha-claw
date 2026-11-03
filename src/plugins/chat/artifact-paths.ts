@@ -2,13 +2,13 @@ import { useMemo } from 'react';
 import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import { buildArtifactPreviewTargetFromPath, DIRECTORY_MIME_TYPE } from '@/plugins/files/types';
 import { builtinFileFormats, type FileFormatContribution } from '@/plugins/files/file-types';
-import { builtinFileReaders } from '@/plugins/files/plugin';
-import { fileFormats, fileReaders, findFileReader, type FileReaderContribution } from '@/plugins/files/extensions';
+import { fileFormats } from '@/plugins/files/extensions';
 import { useContributions } from '@/plugin-host/react';
 import { fileNameFromMediaReference, isOpenClawGatewayMediaReference } from '@/plugins/chat/store/media-projection';
+import { localPathFromMarkdownHref, mapMarkdownLinks, mapMediaDirectives } from '@/plugins/message-rendering/md-link';
 
 function fileNameFromPath(filePath: string): string {
-  return filePath.split(/[\\/]/).pop() || 'file';
+  return filePath.replace(/[\\/]+$/u, '').split(/[\\/]/).pop() || filePath;
 }
 
 function trimPathTerminators(filePath: string): string {
@@ -16,13 +16,12 @@ function trimPathTerminators(filePath: string): string {
 }
 
 function buildAttachedPathRef(filePath: string, mimeType: string): AttachedFileMeta {
-  const normalizedPath = trimPathTerminators(filePath);
   return {
-    fileName: fileNameFromPath(normalizedPath),
+    fileName: fileNameFromPath(filePath),
     mimeType,
     fileSize: 0,
     preview: null,
-    filePath: normalizedPath,
+    filePath,
     source: 'message-ref',
   };
 }
@@ -38,114 +37,72 @@ function buildAttachedGatewayRef(gatewayUrl: string, mimeType: string): Attached
   };
 }
 
-function createArtifactRefExtractor(formats: readonly FileFormatContribution[], readers: readonly FileReaderContribution[]) {
-  const exts = [...new Set(formats.flatMap((format) => format.extensions))]
-    .sort((left, right) => right.length - left.length)
-    .map((ext) => ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('|') || '(?!)';
-  const taggedGatewayRegex = /(?<![A-Za-z0-9/\\])(?:MEDIA|media):((?:https?:\/\/|\/api\/chat\/media\/outgoing\/)[^\s\n"'()[\],<>]+)/g;
-  const taggedRegex = new RegExp(`(?<![A-Za-z0-9/\\\\])(?:MEDIA|media):((?:\\/|~\\/|[A-Za-z]:\\\\)[^\\n"'()\\[\\],<>]*?(?:${exts}))(?=$|[\\s\\n"'()\\[\\],<>]|[，。；;,.!?])`, 'gi');
-  const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\`\\[\\],<>]*?(?:${exts}))`, 'gi');
-  const windowsRegex = new RegExp(`(?<![\\w/])([A-Za-z]:\\\\[^\\s\\n"'()\`\\[\\],<>]*?(?:${exts}))`, 'gi');
-  const skillPathBoundary = '(?=$|\\s|[\\x5b\\x5d"\'`()<>，。；;,.!?])';
-  const skillPathPart = '[^\\\\/\\s\\n"\'`()\\x5b\\x5d,<>]+';
-  const skillPathTail = '[^\\s\\n"\'`()\\x5b\\x5d,<>]*?';
-  const skillDirRegex = new RegExp(
-    `(?<![\\w./:])((?:~[\\\\/]\\.openclaw[\\\\/]skills[\\\\/]${skillPathPart})|(?:(?:\\/|[A-Za-z]:\\\\)${skillPathTail}[\\\\/]\\.openclaw[\\\\/]skills[\\\\/]${skillPathPart}))${skillPathBoundary}`,
-    'gi',
-  );
-  const skillMarkdownRegex = new RegExp(
-    `(?<![\\w./:])((?:~[\\\\/]\\.openclaw[\\\\/]skills[\\\\/]${skillPathTail}\\.md)|(?:(?:\\/|[A-Za-z]:\\\\)${skillPathTail}[\\\\/]\\.openclaw[\\\\/]skills[\\\\/]${skillPathTail}\\.md))${skillPathBoundary}`,
-    'gi',
-  );
-  const markdownImageRegex = /!\[[^\]\n]*\]\(([^)\s]+)\)/g;
-  const pathRegexes = [unixRegex, windowsRegex, skillMarkdownRegex, skillDirRegex];
-  const regexes = [markdownImageRegex, taggedGatewayRegex, taggedRegex, ...pathRegexes];
-  const previewMimeFromPath = (filePath: string): string | null => {
+function createArtifactRefExtractor(formats: readonly FileFormatContribution[]) {
+  const unixRegex = /(?<![\p{L}\p{N}\p{M}_./:\\~])((?:\/(?!\/)|~[\\/])[^\s\n"'()`[\],<>，。；！？：、（）]+)/gu;
+  const windowsRegex = /(?<![\p{L}\p{N}\p{M}_/\\])((?:[A-Za-z]:[\\/]|\\\\)[^\s\n"'()`[\],<>，。；！？：、（）]+)/gu;
+  const pathRegexes = [unixRegex, windowsRegex];
+  const mimeFromPath = (filePath: string, fallback = 'application/octet-stream'): string => {
+    if (/[\\/]$/u.test(filePath)) return DIRECTORY_MIME_TYPE;
     const path = filePath.split(/[?#]/, 1)[0] || filePath;
-    const target = buildArtifactPreviewTargetFromPath(path, formats);
-    return findFileReader(readers, target, 'preview') ? target.mimeType : null;
+    const { mimeType } = buildArtifactPreviewTargetFromPath(path, formats);
+    return mimeType === 'application/octet-stream' ? fallback : mimeType;
   };
 
   return (text: string): AttachedFileMeta[] => {
     if (!text) return [];
-    for (const regex of regexes) regex.lastIndex = 0;
+    for (const regex of pathRegexes) regex.lastIndex = 0;
     const refs: AttachedFileMeta[] = [];
     const seen = new Set<string>();
-    const pushRef = (filePath: string, mimeType: string) => {
-      const normalizedPath = trimPathTerminators(filePath);
-      if (!normalizedPath || seen.has(normalizedPath)) return;
-      seen.add(normalizedPath);
-      refs.push(buildAttachedPathRef(normalizedPath, mimeType));
+    const pushRef = (filePath: string) => {
+      if (!filePath || seen.has(filePath)) return;
+      seen.add(filePath);
+      refs.push(buildAttachedPathRef(filePath, mimeFromPath(filePath)));
     };
-    const pushGatewayRef = (gatewayUrl: string, mimeType: string) => {
+    const pushGatewayRef = (gatewayUrl: string) => {
       if (!gatewayUrl || seen.has(gatewayUrl)) return;
       seen.add(gatewayUrl);
-      refs.push(buildAttachedGatewayRef(gatewayUrl, mimeType));
+      refs.push(buildAttachedGatewayRef(gatewayUrl, mimeFromPath(gatewayUrl, 'image/png')));
     };
 
-    let workingText = text;
-    let markdownMatch: RegExpExecArray | null;
-    while ((markdownMatch = markdownImageRegex.exec(text)) !== null) {
-      const reference = markdownMatch[1];
-      if (isOpenClawGatewayMediaReference(reference)) {
-        pushGatewayRef(reference, previewMimeFromPath(reference) ?? 'image/png');
-      } else if (reference.startsWith('/') || reference.startsWith('~/') || /^[A-Za-z]:\\/.test(reference)) {
-        const mimeType = previewMimeFromPath(reference);
-        if (mimeType) pushRef(reference, mimeType);
+    const workingText = mapMarkdownLinks(text, (full, label, reference) => {
+      const localPath = localPathFromMarkdownHref(reference);
+      if (label.startsWith('!') && reference.startsWith('/api/') && isOpenClawGatewayMediaReference(reference)) {
+        pushGatewayRef(reference);
+      } else if (localPath !== undefined) {
+        pushRef(localPath);
       }
-      const start = markdownMatch.index;
-      const end = start + markdownMatch[0].length;
-      workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
-    }
-
-    let taggedGatewayMatch: RegExpExecArray | null;
-    while ((taggedGatewayMatch = taggedGatewayRegex.exec(text)) !== null) {
-      const reference = trimPathTerminators(taggedGatewayMatch[1]);
-      if (isOpenClawGatewayMediaReference(reference)) {
-        pushGatewayRef(reference, previewMimeFromPath(reference) ?? 'image/png');
-      }
-      const start = taggedGatewayMatch.index;
-      const end = start + taggedGatewayMatch[0].length;
-      workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
-    }
-
-    let taggedMatch: RegExpExecArray | null;
-    while ((taggedMatch = taggedRegex.exec(workingText)) !== null) {
-      const filePath = taggedMatch[1];
-      const mimeType = previewMimeFromPath(filePath);
-      if (mimeType) pushRef(filePath, mimeType);
-      const start = taggedMatch.index;
-      const end = start + taggedMatch[0].length;
-      workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
-    }
+      return ' '.repeat(full.length);
+    }, (code, kind) => {
+      const inlinePath = kind === 'code_inline' ? /^(`+)([^`\n]+)\1$/u.exec(code)?.[2] : undefined;
+      if (inlinePath && /^(?:\/(?!\/)|~[\\/]|[A-Za-z]:[\\/]|\\\\)[^\s]+$/u.test(inlinePath)
+        && /[^\\/]/u.test(inlinePath.replace(/^(?:[A-Za-z]:|~)/u, ''))) pushRef(inlinePath);
+      return ' '.repeat(code.length);
+    }, (chunk) => mapMediaDirectives(chunk, (reference) => {
+      if (isOpenClawGatewayMediaReference(reference)) pushGatewayRef(reference);
+      else if (!/^https?:\/\//i.test(reference)) pushRef(reference);
+      return ' '.repeat(reference.length);
+    }));
 
     for (const regex of pathRegexes) {
       let match: RegExpExecArray | null;
-      while ((match = regex.exec(workingText)) !== null) {
-        const filePath = match[1];
-        const mimeType = regex === skillDirRegex ? DIRECTORY_MIME_TYPE : previewMimeFromPath(filePath);
-        if (mimeType) pushRef(filePath, mimeType);
-      }
+      while ((match = regex.exec(workingText)) !== null) pushRef(trimPathTerminators(match[1]));
     }
     return refs;
   };
 }
 
-const extractBuiltinArtifactRefs = createArtifactRefExtractor(builtinFileFormats, builtinFileReaders);
+const extractBuiltinArtifactRefs = createArtifactRefExtractor(builtinFileFormats);
 
 export function extractArtifactRefsFromAssistantText(
   text: string,
   formats: readonly FileFormatContribution[] = builtinFileFormats,
-  readers: readonly FileReaderContribution[] = builtinFileReaders,
 ): AttachedFileMeta[] {
-  return (formats === builtinFileFormats && readers === builtinFileReaders
+  return (formats === builtinFileFormats
     ? extractBuiltinArtifactRefs
-    : createArtifactRefExtractor(formats, readers))(text);
+    : createArtifactRefExtractor(formats))(text);
 }
 
 export function useArtifactRefExtractor(): (text: string) => AttachedFileMeta[] {
   const formats = useContributions(fileFormats);
-  const readers = useContributions(fileReaders);
-  return useMemo(() => createArtifactRefExtractor(formats, readers), [formats, readers]);
+  return useMemo(() => createArtifactRefExtractor(formats), [formats]);
 }

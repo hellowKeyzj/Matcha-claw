@@ -713,7 +713,9 @@ export async function pathInAllowedWorkingPathAsync(
   const pathsToCheck = await getSourcePathsForPermissionCheck(filePath, signal)
   const workingPaths: string[] = []
   for (const workingPath of allWorkingDirectories(toolPermissionContext)) {
-    workingPaths.push(...await getSourcePathsForPermissionCheck(workingPath, signal))
+    workingPaths.push(
+      ...(await getSourcePathsForPermissionCheck(workingPath, signal)),
+    )
   }
   return pathsInAllowedWorkingPaths(pathsToCheck, workingPaths)
 }

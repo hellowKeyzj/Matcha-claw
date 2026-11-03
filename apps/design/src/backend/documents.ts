@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir } from 'node:fs/promises';
+import { access, mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildSessionIdentityKey, validateSessionIdentity, type SessionIdentity } from '@matcha/app-plugins-sdk';
 import type { Asset, DesignDocument, DocumentChange, DocumentSummary, Edit, ImageLayer, Layer, VideoLayer } from '../document';
@@ -72,6 +72,13 @@ export function createDocuments(storagePath: string, assets: Assets, changed: (d
     const redo = history.redo.map(parseDocument);
     if (document.id !== documentId || [...undo, ...redo].some((entry) => entry.id !== documentId)) throw new Error('Document history identity mismatch.');
     return { formatVersion: 1, document, history: { undo, redo } };
+  }
+
+  async function loadExisting(documentId: string): Promise<DocumentSnapshot | undefined> {
+    try { return await load(documentId); } catch (error) {
+      if (error instanceof DesignError && error.code === 'not_found') return undefined;
+      throw error;
+    }
   }
 
   async function save(snapshot: DocumentSnapshot): Promise<DesignDocument> {
@@ -150,24 +157,64 @@ export function createDocuments(storagePath: string, assets: Assets, changed: (d
       : snapshot.history });
   }
 
-  async function create(name = 'Untitled', width = 1024, height = 1024, sessionIdentity?: SessionIdentity): Promise<DesignDocument> {
+  async function findSessionDocument(sessionHash: string, key: string): Promise<string | undefined> {
+    try { await access(join(root, `${sessionHash}.json`)); return sessionHash; } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    // Only an absent index/default requires recovery; stop at the first authoritative binding.
+    await mkdir(root, { recursive: true });
+    for (const entry of await readdir(root)) {
+      if (!entry.endsWith('.json')) continue;
+      const { document } = await serial(entry.slice(0, -5), () => load(entry.slice(0, -5)));
+      if (document.sessionIdentity && buildSessionIdentityKey(document.sessionIdentity) === key) return document.id;
+    }
+    return undefined;
+  }
+
+  async function create(name = 'Untitled', width = 1024, height = 1024, sessionIdentity?: SessionIdentity, workspaceDraftId?: string): Promise<DesignDocument> {
     text(name, 'name', 200); dimensions(width, height);
     const key = sessionIdentity && buildSessionIdentityKey(sessionIdentity);
-    const documentId = key ? createHash('sha256').update(key).digest('hex') : randomUUID();
-    return serial(documentId, async () => {
-      if (key) {
-        try {
-          const { document } = await load(documentId);
-          if (!document.sessionIdentity || buildSessionIdentityKey(document.sessionIdentity) !== key) throw new Error('Document session identity mismatch.');
-          return document;
-        } catch (error) {
-          if (!(error instanceof DesignError) || error.code !== 'not_found') throw error;
+    const sessionHash = key && createHash('sha256').update(key).digest('hex');
+    const draftDocumentId = workspaceDraftId === undefined ? undefined
+      : createHash('sha256').update('workspace-draft\0').update(id(workspaceDraftId, 'workspaceDraftId')).digest('hex');
+    async function open(documentId: string, mustExist = false, indexSession = false): Promise<DesignDocument> {
+      return serial(documentId, async () => {
+        const existing = key || draftDocumentId ? await loadExisting(documentId) : undefined;
+        if (!existing && mustExist) throw new DesignError('not_found', `The session document ${documentId} is missing. Restore it before opening this workspace.`);
+        if (key && existing?.document.sessionIdentity && buildSessionIdentityKey(existing.document.sessionIdentity) !== key) {
+          throw new DesignError('session_conflict', `Document ${documentId} already belongs to another session. Open its original session or use a new draft.`, { documentId });
         }
+        if (key && existing && !existing.document.sessionIdentity && mustExist) {
+          throw new DesignError('session_conflict', `The session lookup points to unbound document ${documentId}. No document was replaced.`, { documentId });
+        }
+        const snapshot: DocumentSnapshot = existing ?? { formatVersion: 1,
+          document: { schemaVersion: 1, id: documentId, revision: 0, name, width, height,
+            background: null, layers: [], updatedAt: new Date().toISOString() }, history: { undo: [], redo: [] } };
+        const binding = sessionIdentity !== undefined && snapshot.document.sessionIdentity === undefined;
+        if (binding) snapshot.document = { ...snapshot.document, sessionIdentity: structuredClone(sessionIdentity) };
+        const document = !existing || binding ? await save(snapshot) : snapshot.document;
+        // The document binding is authoritative. A failed index write must fail this call, not undo it.
+        if (indexSession) await writeAtomic(join(storagePath, 'sessions', `${sessionHash}.json`), { documentId });
+        return document;
+      });
+    }
+    if (!sessionHash) return open(draftDocumentId ?? randomUUID());
+    // Always acquire the session lane before a document lane; content edits only acquire the latter.
+    return serial(`session-${sessionHash}`, async () => {
+      let indexedDocumentId: string | undefined;
+      try {
+        const association = object(await readJson(join(storagePath, 'sessions', `${sessionHash}.json`)), ['documentId']);
+        indexedDocumentId = id(association.documentId, 'documentId');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
-      const document: DesignDocument = { schemaVersion: 1, id: documentId, revision: 0, name,
-        ...(sessionIdentity ? { sessionIdentity: structuredClone(sessionIdentity) } : {}),
-        width, height, background: null, layers: [], updatedAt: new Date().toISOString() };
-      return save({ formatVersion: 1, document, history: { undo: [], redo: [] } });
+      const existingDocumentId = indexedDocumentId ?? await findSessionDocument(sessionHash, key!);
+      if (draftDocumentId && existingDocumentId && existingDocumentId !== draftDocumentId) {
+        throw new DesignError('session_conflict', `This session already has document ${existingDocumentId}; draft ${draftDocumentId} was not merged or replaced. Open the existing session workspace or use a new session.`,
+          { documentId: draftDocumentId, existingDocumentId });
+      }
+      const documentId = draftDocumentId ?? existingDocumentId ?? sessionHash;
+      return open(documentId, existingDocumentId !== undefined, documentId !== sessionHash && indexedDocumentId === undefined);
     });
   }
 
@@ -229,7 +276,7 @@ export function createDocuments(storagePath: string, assets: Assets, changed: (d
       const source = snapshot.history[direction];
       if (!source.length) throw new DesignError('history_empty', `There is nothing to ${direction}.`);
       const opposite = direction === 'undo' ? 'redo' : 'undo';
-      const document = { ...source[source.length - 1],
+      const document = { ...source[source.length - 1], sessionIdentity: snapshot.document.sessionIdentity,
         ...(snapshot.document.sessionMediaAssetIds === undefined ? {} : { sessionMediaAssetIds: snapshot.document.sessionMediaAssetIds }),
         revision: snapshot.document.revision + 1, updatedAt: new Date().toISOString() };
       await validateAssets(document.layers);

@@ -9,6 +9,7 @@ import { classifyFileContentType, extnameOf, getMimeTypeForPath } from './file-t
 import { useFilePreviewSupport } from './extensions';
 import { cn } from '@/lib/utils';
 import { FilePreviewBody, type FilePreviewMode } from './FilePreviewBody';
+import { artifactFileErrorMessage } from './open-file-utils';
 import { formatWorkspacePathForDisplay, resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
 
 interface WorkspaceBrowserBodyProps {
@@ -305,6 +306,7 @@ export function WorkspaceBrowserBody({
   const supportsInlineDiff = useFilePreviewSupport('diff');
   const [treeState, setTreeState] = useState<TreeState>({ status: 'idle' });
   const [reloadToken, setReloadToken] = useState(0);
+  const [directoryError, setDirectoryError] = useState<{ path: string; message: string } | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const [treeCollapsed, setTreeCollapsed] = useState(false);
@@ -389,11 +391,16 @@ export function WorkspaceBrowserBody({
         return;
       }
       if (!result.ok || !result.entries) {
-        return;
+        throw new Error(result.error ?? 'unavailable');
       }
+      setDirectoryError(null);
       startTransition(() => {
         applyReadyTree((tree) => mergeDirectoryChildren(tree, relativePath, workspaceRoot, result.entries ?? []));
       });
+    } catch (error) {
+      if (treeVersionRef.current === version) {
+        setDirectoryError({ path: joinWorkspaceDisplayPath(workspaceRoot, relativePath), message: artifactFileErrorMessage(error, t) });
+      }
     } finally {
       if (treeVersionRef.current === version) {
         updateLoadingPaths((current) => {
@@ -409,6 +416,7 @@ export function WorkspaceBrowserBody({
   };
 
   useEffect(() => {
+    setDirectoryError(null);
     if (!workspaceAgentScope) {
       treeVersionRef.current += 1;
       treeRef.current = null;
@@ -653,10 +661,16 @@ export function WorkspaceBrowserBody({
             ) : null}
             {treeState.status === 'error' ? (
               <div role="status" className="space-y-2 px-2 py-3 text-sm text-muted-foreground">
-                <p>{t('artifacts.workspaceLoadError')}</p>
+                <p>{t('artifacts.workspaceLoadFailed', { error: artifactFileErrorMessage(treeState.message, t) })}</p>
+                <Button type="button" variant="link" size="sm" className="h-auto p-0" onClick={() => setReloadToken((current) => current + 1)}>{t('common:actions.refresh')}</Button>
                 {recoveryAction}
               </div>
             ) : null}
+            {directoryError ? <div role="status" className="space-y-1 px-2 py-3 text-sm text-destructive">
+              <p className="break-all">{directoryError.path}</p>
+              <p>{t('artifacts.workspaceLoadFailed', { error: directoryError.message })}</p>
+              <Button type="button" variant="link" size="sm" className="h-auto p-0" onClick={() => setReloadToken((current) => current + 1)}>{t('common:actions.refresh')}</Button>
+            </div> : null}
             {treeState.status === 'ready' ? treeBody : null}
           </div>
         </div>

@@ -200,7 +200,8 @@ impl Cli {
             &spec.session_id,
             &instance_id,
             &spec.paths.workspace(&spec.agent_id)?,
-        )?;
+        )
+        .await?;
         let mut launch = projection::launch_instance(
             &execution_config,
             &spec.paths,
@@ -344,6 +345,10 @@ impl Cli {
 
     pub(crate) fn revoke_iab(&self) {
         self.0.instance.iab.revoke(crate::session::iab::Reason::Closing);
+    }
+
+    pub(crate) async fn begin_iab_run(&self, run_id: &str, message_id: &str) -> rpc::Result<()> {
+        self.0.instance.iab.begin_run(run_id, message_id).await
     }
 
     pub(crate) fn has_autonomous_inputs(&self) -> bool {
@@ -711,7 +716,9 @@ async fn read_output(
     let mut stderr_observed = false;
     let mut orphan_responses = 0_u64;
     let mut consumer_closed = false;
+    let tracing = std::env::var("MATCHACLAW_TRACE").as_deref() == Ok("1");
     while let Some(output) = output.recv().await {
+        let observed_at_ms = tracing.then(rpc::now_ms);
         let mut emitted = Vec::new();
         match output {
             Output::Stdout(bytes) if fault.is_none() => {
@@ -774,11 +781,42 @@ async fn read_output(
             emitted.push(CliEvent::Fault(error.clone()));
             instance.begin_close();
         }
+        let mut timings = Vec::new();
         for event in emitted {
+            let timing = observed_at_ms.and_then(|at| match &event {
+                CliEvent::Message(message) | CliEvent::Result(message) => {
+                    Diagnostics::session_stage(message).map(|stage| {
+                        let mut context = json!({
+                            "stage": stage, "observedAtMs": at,
+                            "sessionHash": Diagnostics::identifier_hash(&instance.session_id),
+                            "instanceHash": Diagnostics::identifier_hash(&instance.instance_id),
+                        });
+                        for (field, value) in [
+                            ("messageHash", message["uuid"].as_str()),
+                            ("providerMessageHash", message.pointer("/event/message/id").and_then(Value::as_str)),
+                            ("requestHash", message["input_message_id"].as_str()),
+                        ] {
+                            if let Some(value) = value {
+                                context[field] = Diagnostics::identifier_hash(value).into();
+                            }
+                        }
+                        (std::time::Instant::now(), context)
+                    })
+                }
+                _ => None,
+            });
             if !consumer_closed && events.send(event).await.is_err() {
                 consumer_closed = true;
                 instance.begin_close();
             }
+            if let Some((started, mut context)) = timing {
+                context["elapsedMs"] = json!(started.elapsed().as_millis() as u64);
+                context["delivery"] = json!(if consumer_closed { "unknown" } else { "sent" });
+                timings.push(context);
+            }
+        }
+        for context in timings {
+            diagnostics.trace("session", "timing", "stdout_dispatched", context).await;
         }
         if exit.is_some() {
             break;

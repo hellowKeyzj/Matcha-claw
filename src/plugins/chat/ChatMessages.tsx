@@ -2,10 +2,12 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type Component
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatSessionRuntimeState } from '@/plugins/chat/store';
-import { createSessionPending } from '@/plugins/chat/store/session-presentation';
+import { buildPendingUserMessageItem, createSessionPending } from '@/plugins/chat/store/session-presentation';
+import { useContributions } from '@/plugin-host/react';
+import { messageContextTags } from '@/plugins/message-rendering/extensions';
 import { ABORT_STOPPING_TIMEOUT_ERROR, ABORT_UNKNOWN_ERROR, ABORT_REJECTED_ERROR, ABORT_REQUEST_FAILED_ERROR } from '@/plugins/chat/store/abort-handlers';
 import { isRunActive } from '@/plugins/chat/store/types';
-import { getPendingApprovals, getSessionApprovalStatus, projectSessionViewItems } from '@/plugins/chat/store/store-state-helpers';
+import { getPendingApprovals, getSessionApprovalStatus, getSessionProjectionWatermark, projectSessionViewItems } from '@/plugins/chat/store/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/plugins/chat/store/runtime-error-view';
 import { resolveSessionOperationTarget } from '@/plugins/chat/store/session-identity';
 import { useGatewayStore } from '@/plugins/runtime/store';
@@ -13,7 +15,7 @@ import { useSettingsStore } from '@/plugins/settings/store';
 import { useComposerDraftStore } from '@/plugins/chat/composer-drafts';
 import type { GatewayTransportIssue } from '@/types/session/runtime-state';
 import { runtimeEndpointsEqual, sessionIdentitiesEqual, type SessionIdentity } from '@/types/desktop/runtime-address';
-import type { SessionRenderItem } from '@/types/session/render-item';
+import type { SessionRenderItem, SessionRenderUserMessageItem } from '@/types/session/render-item';
 import type { SessionWindowStateSnapshot } from '@/types/session/snapshot';
 import { isGatewayOperational } from '@/plugins/runtime/gateway-status';
 import { hostSessionWindowFetch } from '@/lib/host-api';
@@ -285,7 +287,8 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
   children: (slots: ChatMessageSlots) => ReactNode;
 }) {
   const { t } = useTranslation('chat');
-  const { currentConversation, currentSessionRecordKey, currentComposerDraftKey, currentWorkspaceIdentity, connectorSessionIdentity, currentAgentId } = useChatStore(useShallow(selectChatSelection));
+  const contextTags = useContributions(messageContextTags);
+  const { currentConversation, currentSessionRecordKey, currentComposerDraftKey, currentWorkspaceIdentity, currentWorkspaceDraftId, connectorSessionIdentity, currentAgentId } = useChatStore(useShallow(selectChatSelection));
   const currentSession = useChatStore(selectChatSession);
   const currentSessionConversation = currentConversation?.kind === 'session' ? currentConversation : null;
   const currentConversationEndpoint = currentConversation?.endpoint ?? null;
@@ -306,6 +309,7 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
   })));
   const userAvatarDataUrl = useSettingsStore((state) => state.userAvatarDataUrl);
   const composerInitialization = useComposerDraftStore((state) => currentComposerDraftKey ? state.initializations[currentComposerDraftKey] : undefined);
+  const composerSubmission = useComposerDraftStore((state) => currentComposerDraftKey ? state.submissions[currentComposerDraftKey] : undefined);
   const [dismissedComposerInitialization, setDismissedComposerInitialization] = useState<typeof composerInitialization>();
   const composerConfigurationError = composerInitialization === dismissedComposerInitialization ? null
     : composerInitialization?.kind === 'createRejected' ? t('input.configurationCreateRejected')
@@ -330,10 +334,31 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
     directoryRevision,
   );
   const viewportItems = currentSession.items;
+  const submissionItem = useMemo<SessionRenderUserMessageItem | null>(() => {
+    if (!composerSubmission || !currentSession.window.isAtLatest
+      || currentConversation?.kind === 'draft' && composerSubmission.draftId !== currentConversation.id
+      || composerSubmission.status !== 'submitting' && !(currentWorkspaceDraftId && composerSubmission.draftId === currentWorkspaceDraftId
+        && (composerSubmission.status === 'failed' || composerSubmission.status === 'unknown'))
+      || viewportItems.some((item) => item.key === `renderer-user:${composerSubmission.operationId}`)) return null;
+    const item = buildPendingUserMessageItem({
+      clientId: composerSubmission.operationId,
+      sessionKey: currentSessionRecordKey,
+      text: composerSubmission.message,
+      createdAt: composerSubmission.createdAt,
+      attachments: composerSubmission.attachments,
+    });
+    return composerSubmission.status === 'submitting' ? item : { ...item, status: undefined };
+  }, [composerSubmission, currentConversation, currentSession.window.isAtLatest, currentSessionRecordKey, currentWorkspaceDraftId, viewportItems]);
+  const submissionPendingLabel = submissionItem && composerSubmission?.status === 'submitting'
+    && composerInitialization?.operationId === composerSubmission.operationId
+    ? composerInitialization?.kind === 'creating' ? t('pending.creatingSession')
+      : composerInitialization?.kind === 'pending' && !composerInitialization.outcome ? t('pending.configuringSession') : null
+    : null;
+  const scrollScopeKey = currentWorkspaceDraftId ? `composer-draft:${currentWorkspaceDraftId}` : currentSessionRecordKey;
   const liveView = useChatView({
     currentSessionKey: currentSessionRecordKey,
     currentSessionStatus: currentSession.meta.historyStatus,
-    itemCount: viewportItems.length,
+    itemCount: viewportItems.length + (submissionItem ? 1 : 0),
     runActive: isRunActive(currentSession.runtime),
   });
   const assistantCatalogAgents = useMemo<ChatAssistantCatalogAgent[]>(
@@ -352,33 +377,33 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
     avatarSeed: currentAgent?.avatarSeed,
     avatarStyle: currentAgent?.avatarStyle,
   }), [currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId]);
-  const imageGenerationActive = currentSession.runtime.imageGeneration?.active === true;
-  const imageGenerationLabel = t('input.imageGenerationActive');
   const pendingRunProgressLabel = buildRunProgressPendingLabel(currentSession.runtime.runProgress, t);
   const sessionPending = useMemo(() => createSessionPending(currentSession, currentSessionRecordKey), [currentSession, currentSessionRecordKey]);
   const renderItems = useMemo(() => {
     const runtimePlaceholder = sessionPending?.kind === 'assistant' ? {
       ...sessionPending.item,
       pendingLabel: pendingRunProgressLabel,
-      ...(imageGenerationActive ? {
-        text: imageGenerationLabel,
-        segments: [{ kind: 'message' as const, key: `${sessionPending.item.key}:image-generation`, text: imageGenerationLabel }],
-      } : {}),
     } : null;
-    const protocolItems = runtimePlaceholder ? [...viewportItems, runtimePlaceholder] : viewportItems;
+    const protocolItems = [...viewportItems];
+    if (submissionItem) protocolItems.push(submissionItem);
+    if (runtimePlaceholder) protocolItems.push(runtimePlaceholder);
     const nextItems = applyAssistantPresentationToItems({
-      items: [...protocolItems],
+      items: protocolItems,
       agents: assistantCatalogAgents,
       defaultAssistant: assistantPresentation,
       previousItems: previousRenderedItemsRef.current ?? undefined,
     });
     previousRenderedItemsRef.current = nextItems;
     return nextItems;
-  }, [assistantCatalogAgents, assistantPresentation, imageGenerationActive, imageGenerationLabel, pendingRunProgressLabel, sessionPending, viewportItems]);
+  }, [assistantCatalogAgents, assistantPresentation, pendingRunProgressLabel, sessionPending, submissionItem, viewportItems]);
+  const presentationWatermark = isSessionTraceEnabled() && currentSession.meta.sessionIdentity
+    ? getSessionProjectionWatermark(useChatStore.getState, currentSession.meta.sessionIdentity) : null;
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
     logSessionTrace('session.presentation.committed', 'session-presentation-boundary', () => ({
       identity: summarizeSessionIdentity(connectorSessionIdentity), recordKey: summarizeIdentifier(currentSessionRecordKey),
+      projectionWatermark: presentationWatermark, // epoch:public seq:public cursor captured by this render, not a later store read.
+      boundary: 'react-passive-effect-after-commit', // Not a compositor/physical presentation acknowledgement.
       runtimePhase: currentSession.runtime.runPhase, activeRunHash: summarizeIdentifier(currentSession.runtime.activeRunId).hash,
       pendingTurnHash: summarizeIdentifier(currentSession.runtime.pendingTurnKey).hash,
       viewport: summarizeRenderItems(viewportItems), presentation: summarizeRenderItems(renderItems),
@@ -386,7 +411,7 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
         .map((item) => summarizeIdentifier(item.key).hash),
       placeholderCount: renderItems.length - viewportItems.length,
     }));
-  }, [connectorSessionIdentity, currentSession.runtime, currentSessionRecordKey, renderItems, viewportItems]);
+  }, [connectorSessionIdentity, currentSession.runtime, currentSessionRecordKey, presentationWatermark, renderItems, viewportItems]);
   const localizedRuntimeError = useMemo(() => {
     const hasRuntimeError = hasVisibleRuntimeError({
       runtime: currentSession.runtime,
@@ -516,6 +541,7 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
           sessionKey: currentSessionConversation.sessionIdentity.sessionKey || currentSessionRecordKey,
           agentName: currentAgent?.name || currentAgentId,
           items,
+          contextTags,
           exportedAt: new Date(),
         });
         downloadMarkdownFile(exportedSession.fileName, exportedSession.markdown);
@@ -525,7 +551,7 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
         setExportingMarkdown(false);
       }
     })();
-  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.meta.displayName, currentSession.meta.label, currentSession.window, currentSessionConversation, currentSessionRecordKey, exportingMarkdown, t, viewportItems]);
+  }, [assistantCatalogAgents, contextTags, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.meta.displayName, currentSession.meta.label, currentSession.window, currentSessionConversation, currentSessionRecordKey, exportingMarkdown, t, viewportItems]);
   const handleReuseMessage = useCallback((text: string) => { composerRef.current?.replaceText(text); }, [composerRef]);
   const runtimeActionsMatchRenderedSession = !!currentWorkspaceIdentity && !!currentSession.meta.sessionIdentity
     && sessionIdentitiesEqual(currentWorkspaceIdentity, currentSession.meta.sessionIdentity);
@@ -540,6 +566,8 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
     ref={viewportPaneRef}
     isActive={workspaceActive}
     currentSessionKey={currentSessionRecordKey}
+    scrollScopeKey={scrollScopeKey}
+    submissionPending={submissionItem && submissionPendingLabel ? { itemKey: submissionItem.key, label: submissionPendingLabel } : undefined}
     runtime={currentSession.runtime}
     viewport={currentSession.window}
     items={renderItems}
@@ -565,7 +593,7 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
   />, [assistantPresentation, currentSession.meta.endpointSessionId, currentSession.meta.sessionIdentity,
     currentSession.runtime, currentSession.window, currentSessionRecordKey, handleReuseMessage, jumpViewportToLatest,
     liveView, loadOlderViewportItems, localizedRuntimeError, onRuntimeOpenLink, onRuntimeSendMessage, renderItems,
-    runtimeActionsMatchRenderedSession, sessionPending, showThinking, t, userAvatarDataUrl, viewportPaneRef, workspaceActive]);
+    runtimeActionsMatchRenderedSession, scrollScopeKey, sessionPending, showThinking, submissionPendingLabel, submissionItem, t, userAvatarDataUrl, viewportPaneRef, workspaceActive]);
   return (
     <AssistantPendingLabelProvider label={pendingRunProgressLabel}>
       <ChatArtifacts renderItems={renderItems} renderViewport={renderViewport}>

@@ -41,10 +41,11 @@ pub(crate) async fn page(
     if let Some(input_ids) = input_ids {
         params["inputIds"] = json!(input_ids);
     }
-    let value = rpc::call(client, "sessions.get", params)
+    let mut value = rpc::call(client, "sessions.get", params)
         .await
         .inspect_err(|error| error.trace("history.rpc", Some("sessions.get"), id))?;
-    let record: SessionRecord = rpc::decode(value.clone())
+    let record = SessionRecord::deserialize(&value)
+        .map_err(|_| Failure::InvalidReadback)
         .inspect_err(|error| error.trace("history.record_decode", Some("sessions.get"), id))?;
     if !record.validate(id, Some(agent)) {
         Failure::InvalidReadback.trace("history.record_identity", Some("sessions.get"), id);
@@ -52,8 +53,8 @@ pub(crate) async fn page(
     }
     let page: Page = rpc::decode(
         value
-            .get("history")
-            .cloned()
+            .get_mut("history")
+            .map(Value::take)
             .ok_or(Failure::InvalidReadback)
             .inspect_err(|error| error.trace("history.page_missing", Some("sessions.get"), id))?,
     )

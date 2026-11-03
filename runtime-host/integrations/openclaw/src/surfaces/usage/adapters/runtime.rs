@@ -4,13 +4,16 @@ impl ::usage::UsageOps for OpenClawDriver {
     fn usage_recent<'a>(
         &'a self,
         limit: usize,
-    ) -> ::usage::ports::UsageFuture<'a, Result<Vec<::usage::UsageEntry>, ::usage::UsageReadError>>
+    ) -> ::usage::ports::UsageFuture<'a, Result<::usage::UsageHistory, ::usage::UsageReadError>>
     {
         Box::pin(async move {
             self.usage
                 .recent(limit)
                 .await
-                .map(|entries| entries.into_iter().map(project_usage_entry).collect())
+                .map(|entries| ::usage::UsageHistory {
+                    entries: entries.into_iter().map(project_usage_entry).collect(),
+                    coverage: ::usage::UsageCoverage::Reported,
+                })
                 .map_err(|_| ::usage::UsageReadError::Unavailable)
         })
     }
@@ -19,13 +22,16 @@ impl ::usage::UsageOps for OpenClawDriver {
         &'a self,
         agent_id: &'a str,
         session_id: &'a str,
-    ) -> ::usage::ports::UsageFuture<'a, Result<Vec<::usage::UsageEntry>, ::usage::UsageReadError>>
+    ) -> ::usage::ports::UsageFuture<'a, Result<::usage::UsageHistory, ::usage::UsageReadError>>
     {
         Box::pin(async move {
             self.usage
                 .session_timeseries(agent_id, session_id)
                 .await
-                .map(|entries| entries.into_iter().map(project_usage_entry).collect())
+                .map(|entries| ::usage::UsageHistory {
+                    entries: entries.into_iter().map(project_usage_entry).collect(),
+                    coverage: ::usage::UsageCoverage::Reported,
+                })
                 .map_err(|_| ::usage::UsageReadError::Unavailable)
         })
     }

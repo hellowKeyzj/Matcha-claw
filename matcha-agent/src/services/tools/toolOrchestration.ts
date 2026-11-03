@@ -1,6 +1,9 @@
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
-import { assertInvestigationToolEffects, InvestigationAdmissionError } from '../../world/investigation.js'
+import {
+  assertInvestigationToolEffects,
+  InvestigationAdmissionError,
+} from '../../world/investigation.js'
 import { findToolByName, type ToolUseContext } from '../../Tool.js'
 import type { AssistantMessage, Message } from '../../types/message.js'
 import { all } from '../../utils/generators.js'

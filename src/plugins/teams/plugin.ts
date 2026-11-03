@@ -1,4 +1,4 @@
-import { Users } from 'lucide-react';
+import { TeamNavigationIcon } from '@/components/icons/navigation';
 import { applicationNavigation, applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
 import { chatComposerContent, chatWorkspaceContent } from '@/plugins/chat/extensions';
@@ -24,7 +24,7 @@ export const teamsPlugin = definePlugin({
       id: 'teams',
       to: '/teams',
       label: 'common:sidebar.teams',
-      icon: Users,
+      icon: TeamNavigationIcon,
       order: 30,
     })] : []),
   ],

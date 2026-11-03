@@ -80,7 +80,7 @@ export default defineConfig({
   build: {
     emptyOutDir: true,
     outDir: 'dist',
-    target: 'es2020',
+    target: 'es2022',
     copyPublicDir: false,
     sourcemap: false,
     minify: true,

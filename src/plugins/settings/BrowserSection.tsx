@@ -116,7 +116,7 @@ export default function BrowserSection({ active }: SettingsSectionProps) {
                   <div className="space-y-1">
                     <Label>{t('gateway.browser.modeLabel')}</Label>
                   </div>
-                  <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
+                  <div className="grid grid-cols-2 gap-3">
                     {([
                       {
                         value: 'iab',

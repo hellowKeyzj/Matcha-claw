@@ -292,8 +292,12 @@ export function getMcpOAuthCredentialState(
   serverConfig: McpSSEServerConfig | McpHTTPServerConfig,
 ): 'authorized' | 'unauthenticated' {
   clearKeychainCache()
-  const entry = getSecureStorage().read()?.mcpOAuth?.[getServerKey(serverName, serverConfig)]
-  return entry?.refreshToken || (entry?.accessToken && entry.expiresAt > Date.now())
+  const entry =
+    getSecureStorage().read()?.mcpOAuth?.[
+      getServerKey(serverName, serverConfig)
+    ]
+  return entry?.refreshToken ||
+    (entry?.accessToken && entry.expiresAt > Date.now())
     ? 'authorized'
     : 'unauthenticated'
 }
@@ -428,7 +432,10 @@ async function revokeToken({
 export async function revokeServerTokens(
   serverName: string,
   serverConfig: McpSSEServerConfig | McpHTTPServerConfig,
-  { preserveStepUpState = false, signal }: { preserveStepUpState?: boolean; signal?: AbortSignal } = {},
+  {
+    preserveStepUpState = false,
+    signal,
+  }: { preserveStepUpState?: boolean; signal?: AbortSignal } = {},
 ): Promise<void> {
   const storage = getSecureStorage()
   const existingData = storage.read()
@@ -1165,7 +1172,9 @@ export async function performMCPOAuthFlow(
         rejectOnce,
       )
       timeoutId.unref()
-    }).finally(async () => { await initialAuth })
+    }).finally(async () => {
+      await initialAuth
+    })
 
     if (abortSignal?.aborted) throw new AuthenticationCancelledError()
     authorizationCodeObtained = true

@@ -24,7 +24,9 @@ const ROUTES: &[&str] = &["usage.loopback"];
 const EVENTS: &[&str] = &[];
 const EFFECTS: &[EffectKind] = &[EffectKind::OwnerTask, EffectKind::Route];
 
-pub use domain::model::{UsageEntry, UsageReadError};
+pub use domain::model::{
+    UsageCoverage, UsageEntry, UsageHistory, UsageReadError, UsageUnknownEntry, UsageUnknownReason,
+};
 pub use owner::UsageOwnerInput;
 pub use ports::{
     UsageOps, UsageRequestAdmission, UsageRequestAdmissionClosed, UsageRuntimeDirectory,

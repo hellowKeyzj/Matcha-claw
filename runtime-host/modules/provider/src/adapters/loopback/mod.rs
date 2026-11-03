@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use crate::{ProviderHandle, ProviderRecoveryStore};
 
 mod accounts;
+mod draft_discovery;
 mod media;
 mod models;
 mod recovery;
@@ -32,6 +33,7 @@ const PATHS: &[RoutePath] = &[
     RoutePath::ExactWithQuery(models::ENDPOINT),
     RoutePath::ExactWithQuery(models::SELECTABLE_ENDPOINT),
     RoutePath::ExactWithQuery(models::DISCOVERY_RESULT_ENDPOINT),
+    RoutePath::ExactWithQuery(draft_discovery::ENDPOINT),
     RoutePath::ExactWithQuery(routing::ENDPOINT),
     RoutePath::ExactWithQuery(recovery::ENDPOINT),
     RoutePath::ExactWithQuery(recovery::ACKNOWLEDGE_ENDPOINT),
@@ -92,6 +94,9 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
         if is_media_route(pathname(request.path())) {
             return media::handle(request, dependencies.verifier, dependencies.provider).await;
         }
+        if pathname(request.path()) == draft_discovery::ENDPOINT {
+            return draft_discovery::handle(request, dependencies.verifier, dependencies.provider).await;
+        }
         if pathname(request.path()) == text::ENDPOINT {
             return text::handle(request, dependencies.verifier, dependencies.provider).await;
         }
@@ -140,7 +145,7 @@ fn post_body_required(path: &str) -> bool {
     is_media_route(path)
         || matches!(
             path,
-            accounts::ENDPOINT | text::ENDPOINT | models::ENDPOINT | routing::ENDPOINT
+            accounts::ENDPOINT | text::ENDPOINT | models::ENDPOINT | draft_discovery::ENDPOINT | routing::ENDPOINT
         )
 }
 
@@ -170,6 +175,7 @@ fn is_route(path: &str) -> bool {
         || path == models::ENDPOINT
         || path == models::SELECTABLE_ENDPOINT
         || path == models::DISCOVERY_RESULT_ENDPOINT
+        || path == draft_discovery::ENDPOINT
         || path == routing::ENDPOINT
         || path == recovery::ENDPOINT
         || path == recovery::ACKNOWLEDGE_ENDPOINT

@@ -74,8 +74,12 @@ impl Gateway {
         })
     }
 
-    pub(super) fn discovery(&self) -> io::Result<Discovery> {
-        let bytes = read_metadata(&self.state_dir.join("app-plugin-agent.json"))?;
+    pub(super) fn discovery(&self) -> io::Result<Option<Discovery>> {
+        let bytes = match read_metadata(&self.state_dir.join("app-plugin-agent.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let descriptor: Descriptor = serde_json::from_slice(&bytes).map_err(invalid_metadata)?;
         if !descriptor.discovery.is_absolute()
             || descriptor
@@ -98,7 +102,7 @@ impl Gateway {
         {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        Ok(discovery)
+        Ok(Some(discovery))
     }
 
     pub(super) async fn catalog(
@@ -179,7 +183,7 @@ impl Gateway {
         if body.len() > MAX_REQUEST_BYTES {
             return Err(());
         }
-        let discovery = self.discovery().map_err(|_| ())?;
+        let discovery = self.discovery().map_err(|_| ())?.ok_or(())?;
         let authorization = discovery.authorization();
         // A dropped MCP call drops this request/body wait; Main propagates disconnect to its handler.
         self.call_client

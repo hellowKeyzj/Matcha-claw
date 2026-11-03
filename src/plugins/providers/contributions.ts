@@ -64,9 +64,9 @@ export const providerContributions = [
     id: 'host-discovery',
     kind: 'discovery',
     label: 'providerModels.actions.discover',
-    async discover(accountId, signal) {
-      const { discoverProviderModels } = await import('@/plugins/providers/services/provider-model-catalog');
-      return (await discoverProviderModels(accountId, signal)).models;
+    async discover(account, secret) {
+      const { hostProviderDiscoverModels } = await import('@/plugins/providers/services/provider-projection');
+      return hostProviderDiscoverModels(account, secret);
     },
   }),
   contribute(providerModelSources, {

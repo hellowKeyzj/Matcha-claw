@@ -23,9 +23,10 @@ export const browserToolActions = [
   'highlight',
   'closeagenttabs',
   'close_agent_tabs',
+  'utility',
 ] as const
 
-export const browserIabToolActions = [...browserToolActions, 'utility'] as const
+export const browserIabToolActions = browserToolActions
 export type BrowserToolAction = typeof browserIabToolActions[number]
 export type NormalizedBrowserToolAction = Lowercase<BrowserToolAction>
 
@@ -540,12 +541,31 @@ export type BrowserActionContext = {
   agentId: string
   workspaceDir?: string
   sessionId: string
+  runId?: string
+  rootSessionKey?: string
+  sessionGroupId?: string
+}
+
+export type BrowserSessionCleanup = {
+  context: BrowserActionContext
+  scope: 'executor' | 'group'
 }
 
 export type BrowserActionInvocation = {
   context?: BrowserActionContext
   signal?: AbortSignal
   assertInvocationCurrent?: () => void
+}
+
+const browserActionReceipt = Symbol('browserActionReceipt')
+
+// In-process only: native facts already observed must survive a late cancellation.
+export function preserveBrowserActionReceipt<T extends object>(result: T): T {
+  return Object.defineProperty(result, browserActionReceipt, { value: true })
+}
+
+export function hasBrowserActionReceipt(result: object): boolean {
+  return (result as { [browserActionReceipt]?: true })[browserActionReceipt] === true
 }
 
 export type BrowserActionParams =

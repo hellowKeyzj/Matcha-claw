@@ -22,7 +22,7 @@ import {
 type AccountKind = 'chat' | 'media';
 type AuthMode = 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'token' | 'cliReuse' | 'local';
 type ApiProtocol = 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
-type MediaProtocol = 'google' | 'openAi' | 'openRouter';
+type MediaProtocol = 'google' | 'openAi' | 'openRouter' | 'dashScope' | 'ark';
 
 type PublicProviderAccount = Readonly<{
   id: string;
@@ -81,7 +81,7 @@ function isAccount(value: unknown): value is PublicProviderAccount {
     && (value.endpoint === undefined || (typeof value.endpoint === 'string' && value.endpoint.trim().length > 0))
     && (kind === 'media'
       ? value.protocol === undefined
-        && (value.mediaProtocol === 'google' || value.mediaProtocol === 'openAi' || value.mediaProtocol === 'openRouter')
+        && (value.mediaProtocol === 'google' || value.mediaProtocol === 'openAi' || value.mediaProtocol === 'openRouter' || value.mediaProtocol === 'dashScope' || value.mediaProtocol === 'ark')
       : value.mediaProtocol === undefined
         && (value.protocol === undefined
           || value.protocol === 'anthropicMessages'
@@ -120,6 +120,8 @@ function mediaProtocol(value: MediaProtocol | undefined): ProviderCredential['me
     case 'google': return 'google';
     case 'openAi': return 'openai';
     case 'openRouter': return 'openrouter';
+    case 'dashScope': return 'dashscope';
+    case 'ark': return 'ark';
     default: return undefined;
   }
 }

@@ -1,10 +1,12 @@
 import Ajv, { type ValidateFunction } from 'ajv';
 import { createRequire } from 'node:module';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { AppConfirmationUnavailableError, isAppConfirmationRequest, type AppConfirmationRequest } from '../../../src/types/desktop/app-plugin-sdk';
 import { isAbsolute, join, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginModule, AppToolHandler, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginModule, AppToolHandler, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
 import type { HostRequest, PluginLoad, WorkerMessage } from './protocol';
-import { isJson, isToolResult, toolError } from './protocol';
+import { isJson, isModelErrorCode, isToolResult, toolError } from './protocol';
 
 const port = process.parentPort;
 if (!port) throw new Error('App plugin worker requires its Electron parent port.');
@@ -22,6 +24,30 @@ interface ActivePlugin {
 const plugins = new Map<string, ActivePlugin>();
 const calls = new Map<string, { pluginId: string; controller: AbortController; done: Promise<void> }>();
 const models = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
+const toolScope = new AsyncLocalStorage<{ callId: string; pluginId: string }>();
+const confirmations = new Map<string, { resolve: (result: boolean) => void; reject: (error: Error) => void }>();
+
+function requestConfirmation(plugin: ActivePlugin, request: AppConfirmationRequest, signal?: AbortSignal): Promise<boolean> {
+  const scope = toolScope.getStore();
+  const call = scope && scope.pluginId === plugin.load.manifest.id ? calls.get(scope.callId) : undefined;
+  if (!scope || !call || plugin.retiring) return Promise.reject(new AppConfirmationUnavailableError('Approval unavailable: confirmation requires an active tool call.'));
+  if (!isAppConfirmationRequest(request)) return Promise.reject(new Error('Invalid confirmation request.'));
+  if (confirmations.size >= 128) return Promise.reject(new Error('Too many confirmation requests.'));
+  const combined = AbortSignal.any([call.controller.signal, plugin.controller.signal, ...(signal ? [signal] : [])]);
+  combined.throwIfAborted();
+  const requestId = randomUUID();
+  return new Promise<boolean>((resolve, reject) => {
+    const finish = () => { combined.removeEventListener('abort', cancel); confirmations.delete(requestId); };
+    const cancel = () => {
+      send({ type: 'confirmation-cancel', requestId });
+      confirmations.get(requestId)?.reject(new Error('Confirmation cancelled.'));
+    };
+    confirmations.set(requestId, { resolve: (result) => { finish(); resolve(result); }, reject: (error) => { finish(); reject(error); } });
+    combined.addEventListener('abort', cancel, { once: true });
+    try { send({ type: 'confirmation', requestId, callId: scope.callId, pluginId: plugin.load.manifest.id, digest: plugin.load.digest, request }); }
+    catch (error) { finish(); reject(error); }
+  });
+}
 
 function requestModel<T>(plugin: ActivePlugin, sendRequest: (requestId: string) => void, signal?: AbortSignal): Promise<T> {
   const combined = signal ? AbortSignal.any([signal, plugin.controller.signal]) : plugin.controller.signal;
@@ -111,6 +137,7 @@ async function activate(load: PluginLoad): Promise<void> {
         if (typeof topic !== 'string' || !topic.length || topic.length > 200 || !isJson(data)) throw new Error('Invalid plugin event.');
         send({ type: 'event', event: { pluginId: manifest.id, digest, topic, data } });
       },
+      requestConfirmation: (request: AppConfirmationRequest, signal?: AbortSignal) => requestConfirmation(plugin, request, signal),
       models: Object.freeze({
         list(request: AppMediaModelListRequest, signal?: AbortSignal) {
           return requestModel<AppMediaModelList>(plugin, (requestId) => send({ type: 'media-model', operation: 'list', requestId, pluginId: manifest.id, digest, request }), signal);
@@ -129,6 +156,15 @@ async function activate(load: PluginLoad): Promise<void> {
         },
         generateText(request: AppTextModelRequest, signal?: AbortSignal) {
           return requestModel<AppTextModelResult>(plugin, (requestId) => send({ type: 'text-model', requestId, pluginId: manifest.id, digest, request }), signal);
+        },
+        generateSpeech(request: AppSpeechModelRequest, signal?: AbortSignal) {
+          return requestModel<AppModelResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'generateSpeech', requestId, pluginId: manifest.id, digest, request }), signal);
+        },
+        transcribe(request: AppTranscriptionModelRequest, signal?: AbortSignal) {
+          return requestModel<AppModelResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'transcribe', requestId, pluginId: manifest.id, digest, request }), signal);
+        },
+        generateMusic(request: AppMusicModelRequest, signal?: AbortSignal) {
+          return requestModel<AppModelResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'generateMusic', requestId, pluginId: manifest.id, digest, request }), signal);
         },
       }),
       log: Object.freeze({
@@ -154,10 +190,20 @@ async function activate(load: PluginLoad): Promise<void> {
 
 async function dispatch(message: HostRequest): Promise<void> {
   if (message.type === 'cancel') { calls.get(message.requestId)?.controller.abort(new Error('Tool caller disconnected; external effects may already have occurred.')); return; }
+  if (message.type === 'confirmation-result') {
+    const pending = confirmations.get(message.requestId);
+    if (message.error) pending?.reject(message.errorCode === 'approval_unavailable' ? new AppConfirmationUnavailableError(message.error) : new Error(message.error));
+    else if (typeof message.result === 'boolean') pending?.resolve(message.result);
+    else pending?.reject(new Error('Invalid confirmation response.'));
+    return;
+  }
   if (message.type === 'model-result' || message.type === 'text-model-result' || message.type === 'media-model-result') {
     const pending = models.get(message.requestId);
-    if (message.error) pending?.reject(new Error(message.error));
-    else if (message.result) pending?.resolve(message.result);
+    if (message.error) {
+      const error = new Error(message.error);
+      if (isModelErrorCode(message.errorCode)) Object.assign(error, { code: message.errorCode });
+      pending?.reject(error);
+    } else if (message.result) pending?.resolve(message.result);
     return;
   }
   let result: AppToolResult | undefined;
@@ -176,19 +222,19 @@ async function dispatch(message: HostRequest): Promise<void> {
       const done = new Promise<void>((resolve) => { finish = resolve; });
       calls.set(message.requestId, { pluginId: message.pluginId, controller, done });
       try {
-        result = await handler(message.arguments, {
+        result = await toolScope.run({ callId: message.requestId, pluginId: message.pluginId }, () => handler(message.arguments, {
           signal: controller.signal,
           reportProgress(progress, total, text) {
             if (!Number.isFinite(progress) || progress < 0 || (total !== undefined && (!Number.isFinite(total) || total < progress))) return;
             send({ type: 'event', event: { pluginId: message.pluginId, digest: message.digest, topic: 'tool-progress',
               data: { name: message.name, progress, ...(total === undefined ? {} : { total }), ...(text === undefined ? {} : { message: String(text).slice(0, 1000) }) } } });
           },
-        });
+        }));
         if (!isToolResult(result)) {
           throw new Error('Plugin handler must return a JSON AppToolResult with typed content blocks and valid optional fields.');
         }
         if (!result.isError && schema.output && !schema.output(result.structuredContent)) throw new Error('Plugin structuredContent does not match its declared outputSchema.');
-      } finally { calls.delete(message.requestId); finish(); }
+      } finally { calls.delete(message.requestId); controller.abort(new Error('Tool call completed.')); finish(); }
     }
     send({ type: 'result', requestId: message.requestId, result });
   } catch (error) {

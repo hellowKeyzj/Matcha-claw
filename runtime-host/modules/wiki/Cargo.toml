@@ -10,12 +10,15 @@ path = "src/lib.rs"
 
 [dependencies]
 document-parser = { version = "0.1.0", path = "../../external/document-parser" }
+arrow-array.workspace = true
+arrow-schema.workspace = true
 base64.workspace = true
 chrono.workspace = true
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 foundation = { version = "0.1.0", path = "../../foundation" }
 futures-util.workspace = true
 image = { workspace = true, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+lancedb.workspace = true
 notify.workspace = true
 ort = { workspace = true, default-features = false, features = ["std", "load-dynamic", "api-24"] }
 platform = { version = "0.1.0", path = "../../platform" }
@@ -34,14 +37,3 @@ zip.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
-
-# Newer LanceDB releases dropped Intel macOS support: lancedb/lancedb#2836.
-[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-arrow-array = "56.2"
-arrow-schema = "56.2"
-lancedb = { version = "=0.22.3", default-features = false }
-
-[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
-arrow-array.workspace = true
-arrow-schema.workspace = true
-lancedb.workspace = true

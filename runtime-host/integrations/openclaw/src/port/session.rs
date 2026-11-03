@@ -383,6 +383,10 @@ impl sessions_module::ports::SessionObservation for OpenClawObservation {
 }
 
 impl OpenClawSessionGateway {
+    pub(crate) async fn cancel_image_tasks(&self, identity: &sessions_module::state::SessionIdentity, run_id: &str) -> Result<Option<crate::session::image_tasks::ImageTaskCancellation>, sessions_module::ports::RuntimeOperationFailure> {
+        self.client.cancel_image_tasks(identity, run_id).await
+    }
+
     pub(crate) async fn load_content(&self, command: sessions_module::timeline::ContentCommand) -> sessions_module::timeline::ContentOutcome {
         SessionOperation::new(Arc::clone(&self.client)).load_content(command).await
     }

@@ -29,6 +29,23 @@
         "hideDetails": "Hide session details",
         "detailsLoading": "Loading session details...",
         "detailsEmpty": "No token entries found for this session",
-        "detailsError": "Failed to load session details"
+        "detailsError": "Failed to load session details",
+        "recordedTitle": "Recorded usage",
+        "recordedDescription": "Review Matcha's recorded usage by model and time, not complete consumption.",
+        "recordedTokens": "Recorded tokens",
+        "returnedRecords": "Returned records",
+        "partialUsage": "Some records in the returned scope have unknown usage. Totals include recorded usage only.",
+        "nativeOutcomeUnknown": "The returned scope contains executions with unknown native outcomes and potentially unmetered usage. This does not identify gaps in the selected time range.",
+        "hasMore": "Only a bounded set of recent records is shown. Time filters apply to returned records, not all history.",
+        "noKnownUsage": "No known usage records match this filter",
+        "noKnownUsageDescription": "No usage observations can be totaled here. This does not mean zero consumption.",
+        "unknownUsage": "Records with unknown usage",
+        "unknownReasons": {
+            "native_result_session_mismatch": "The native result does not match the requested session",
+            "native_result_identity_missing": "The native result is missing identity information",
+            "native_execution_error_placeholder": "The native execution returned only an error placeholder",
+            "native_usage_scope_unknown": "The native usage accounting scope is unknown",
+            "native_usage_missing_or_invalid": "Native usage is missing or invalid"
+        }
     }
 }

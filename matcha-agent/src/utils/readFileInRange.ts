@@ -37,13 +37,26 @@
 //     that fits; sets truncatedByBytes in the result.  Never throws.
 // ---------------------------------------------------------------------------
 
-import { constants, createReadStream, fstat, type BigIntStats, type Stats } from 'fs'
+import {
+  constants,
+  createReadStream,
+  fstat,
+  type BigIntStats,
+  type Stats,
+} from 'fs'
 import { open, stat as fsStat, readFile } from 'fs/promises'
 import { formatFileSize } from './format.js'
 import {
-  InvestigationAdmissionError, admitInvestigationIo, currentInvestigationScope,
-  investigationDigest, investigationRemaining, investigationSignal, investigationUsage,
-  observeInvestigationIo, requireInvestigationEffects, trackInvestigationOperation,
+  InvestigationAdmissionError,
+  admitInvestigationIo,
+  currentInvestigationScope,
+  investigationDigest,
+  investigationRemaining,
+  investigationSignal,
+  investigationUsage,
+  observeInvestigationIo,
+  requireInvestigationEffects,
+  trackInvestigationOperation,
   type InvestigationPermit,
 } from '../world/investigation.js'
 
@@ -86,7 +99,16 @@ export async function readFileInRange(
 ): Promise<ReadFileRangeResult> {
   signal?.throwIfAborted()
   if (currentInvestigationScope()) {
-    return trackInvestigationOperation(readInvestigationFile(filePath, offset, maxLines, maxBytes, signal, options?.truncateOnByteLimit ?? false))
+    return trackInvestigationOperation(
+      readInvestigationFile(
+        filePath,
+        offset,
+        maxLines,
+        maxBytes,
+        signal,
+        options?.truncateOnByteLimit ?? false,
+      ),
+    )
   }
   const truncateOnByteLimit = options?.truncateOnByteLimit ?? false
 
@@ -144,14 +166,25 @@ export async function readFileInRange(
   )
 }
 
-export function sourceCleanupFailure(primary: unknown, related: unknown): unknown {
+export function sourceCleanupFailure(
+  primary: unknown,
+  related: unknown,
+): unknown {
   if (primary === undefined) return related
   if (primary instanceof Error) {
-    Object.defineProperty(primary, 'cause', { configurable: true,
-      value: new AggregateError([...(primary.cause === undefined ? [] : [primary.cause]), related], 'Source cleanup failed') })
+    Object.defineProperty(primary, 'cause', {
+      configurable: true,
+      value: new AggregateError(
+        [...(primary.cause === undefined ? [] : [primary.cause]), related],
+        'Source cleanup failed',
+      ),
+    })
     return primary
   }
-  return new AggregateError([primary, related], 'Source operation and cleanup failed')
+  return new AggregateError(
+    [primary, related],
+    'Source operation and cleanup failed',
+  )
 }
 
 // fs_stat_v1 encodes the actual public numeric fields as decimal strings.
@@ -159,15 +192,34 @@ export function sourceCleanupFailure(primary: unknown, related: unknown): unknow
 // 4096 bytes also bounds the number-valued Stats representation and JSON keys.
 export const SOURCE_STAT_MAX_BYTES = 4096
 export function sourceStatBytes(stats: Stats | BigIntStats): number {
-  return Buffer.byteLength(JSON.stringify({ type: 'fs_stat_v1',
-    dev: String(stats.dev), ino: String(stats.ino), mode: String(stats.mode),
-    nlink: String(stats.nlink), uid: String(stats.uid), gid: String(stats.gid),
-    rdev: String(stats.rdev), size: String(stats.size), blksize: String(stats.blksize),
-    blocks: String(stats.blocks), atimeMs: String(stats.atimeMs), mtimeMs: String(stats.mtimeMs),
-    ctimeMs: String(stats.ctimeMs), birthtimeMs: String(stats.birthtimeMs),
-    ...('atimeNs' in stats ? { atimeNs: String(stats.atimeNs), mtimeNs: String(stats.mtimeNs),
-      ctimeNs: String(stats.ctimeNs), birthtimeNs: String(stats.birthtimeNs) } : {}),
-  }), 'utf8')
+  return Buffer.byteLength(
+    JSON.stringify({
+      type: 'fs_stat_v1',
+      dev: String(stats.dev),
+      ino: String(stats.ino),
+      mode: String(stats.mode),
+      nlink: String(stats.nlink),
+      uid: String(stats.uid),
+      gid: String(stats.gid),
+      rdev: String(stats.rdev),
+      size: String(stats.size),
+      blksize: String(stats.blksize),
+      blocks: String(stats.blocks),
+      atimeMs: String(stats.atimeMs),
+      mtimeMs: String(stats.mtimeMs),
+      ctimeMs: String(stats.ctimeMs),
+      birthtimeMs: String(stats.birthtimeMs),
+      ...('atimeNs' in stats
+        ? {
+            atimeNs: String(stats.atimeNs),
+            mtimeNs: String(stats.mtimeNs),
+            ctimeNs: String(stats.ctimeNs),
+            birthtimeNs: String(stats.birthtimeNs),
+          }
+        : {}),
+    }),
+    'utf8',
+  )
 }
 
 export async function readSourceBytes(
@@ -176,9 +228,12 @@ export async function readSourceBytes(
 ): Promise<Buffer> {
   options?.signal?.throwIfAborted()
   if (currentInvestigationScope()) {
-    return trackInvestigationOperation(readBoundedSource(filePath, options?.maxBytes, options?.signal)).then(result => result.buffer)
+    return trackInvestigationOperation(
+      readBoundedSource(filePath, options?.maxBytes, options?.signal),
+    ).then(result => result.buffer)
   }
-  if (options?.maxBytes === undefined) return readFile(filePath, { signal: options?.signal })
+  if (options?.maxBytes === undefined)
+    return readFile(filePath, { signal: options?.signal })
   const file = await open(filePath, 'r')
   try {
     const { size } = await file.stat()
@@ -197,27 +252,59 @@ export async function readSourceBytes(
 }
 
 async function readInvestigationFile(
-  filePath: string, offset: number, maxLines: number | undefined, maxBytes: number | undefined,
-  signal: AbortSignal | undefined, truncate: boolean,
+  filePath: string,
+  offset: number,
+  maxLines: number | undefined,
+  maxBytes: number | undefined,
+  signal: AbortSignal | undefined,
+  truncate: boolean,
 ): Promise<ReadFileRangeResult> {
-  const { buffer, mtimeMs } = await readBoundedSource(filePath, undefined, signal,
-    !truncate ? maxBytes : undefined)
-  return readFileInRangeFast(buffer.toString('utf8'), mtimeMs, offset, maxLines, truncate ? maxBytes : undefined)
+  const { buffer, mtimeMs } = await readBoundedSource(
+    filePath,
+    undefined,
+    signal,
+    !truncate ? maxBytes : undefined,
+  )
+  return readFileInRangeFast(
+    buffer.toString('utf8'),
+    mtimeMs,
+    offset,
+    maxLines,
+    truncate ? maxBytes : undefined,
+  )
 }
 
 async function readBoundedSource(
-  filePath: string, prefixBytes: number | undefined, signal: AbortSignal | undefined,
+  filePath: string,
+  prefixBytes: number | undefined,
+  signal: AbortSignal | undefined,
   maxFileBytes?: number,
 ): Promise<{ buffer: Buffer; mtimeMs: number }> {
   requireInvestigationEffects(['source_read'])
   const scope = currentInvestigationScope()!
   const metadataCap = SOURCE_STAT_MAX_BYTES * 2
-  const permit = await admitInvestigationIo({ kind: 'source',
-    preparedRequestDigest: investigationDigest({ filePath, prefixBytes, maxFileBytes, part: 'metadata' }),
-    reservation: investigationUsage({ sourceReads: '1', rows: '2', bytes: String(metadataCap) }),
-    proof: { producer: 'bounded_regular_file', operation: 'file_read', effect: 'source_read',
-      byteCap: String(metadataCap), rowCap: '2', record: 'fs_stat_v1',
-      statRecordMaxBytes: String(SOURCE_STAT_MAX_BYTES) },
+  const permit = await admitInvestigationIo({
+    kind: 'source',
+    preparedRequestDigest: investigationDigest({
+      filePath,
+      prefixBytes,
+      maxFileBytes,
+      part: 'metadata',
+    }),
+    reservation: investigationUsage({
+      sourceReads: '1',
+      rows: '2',
+      bytes: String(metadataCap),
+    }),
+    proof: {
+      producer: 'bounded_regular_file',
+      operation: 'file_read',
+      effect: 'source_read',
+      byteCap: String(metadataCap),
+      rowCap: '2',
+      record: 'fs_stat_v1',
+      statRecordMaxBytes: String(SOURCE_STAT_MAX_BYTES),
+    },
   })
   let dataPermit: InvestigationPermit | undefined
   let attempted = false
@@ -231,7 +318,8 @@ async function readBoundedSource(
   const checkLive = () => {
     signal?.throwIfAborted()
     investigationSignal()?.throwIfAborted()
-    if (Date.now() >= scope.deadlineMs) throw new InvestigationAdmissionError('investigation_deadline_exceeded')
+    if (Date.now() >= scope.deadlineMs)
+      throw new InvestigationAdmissionError('investigation_deadline_exceeded')
   }
   try {
     checkLive()
@@ -242,19 +330,52 @@ async function readBoundedSource(
     metadataBytes += sourceStatBytes(before)
     metadataRows++
     checkLive()
-    if (before.isDirectory()) throw Object.assign(new Error(`EISDIR: illegal operation on a directory, read '${filePath}'`), { code: 'EISDIR' })
-    if (!before.isFile()) throw new InvestigationAdmissionError('investigation_source_requires_regular_file')
-    const size = prefixBytes === undefined ? before.size : Math.min(before.size, prefixBytes)
+    if (before.isDirectory())
+      throw Object.assign(
+        new Error(
+          `EISDIR: illegal operation on a directory, read '${filePath}'`,
+        ),
+        { code: 'EISDIR' },
+      )
+    if (!before.isFile())
+      throw new InvestigationAdmissionError(
+        'investigation_source_requires_regular_file',
+      )
+    const size =
+      prefixBytes === undefined
+        ? before.size
+        : Math.min(before.size, prefixBytes)
     const remaining = investigationRemaining()!
-    if (BigInt(size) > BigInt(remaining.bytes) || (maxFileBytes !== undefined && before.size > maxFileBytes)) {
+    if (
+      BigInt(size) > BigInt(remaining.bytes) ||
+      (maxFileBytes !== undefined && before.size > maxFileBytes)
+    ) {
       throw new InvestigationAdmissionError('investigation_source_byte_limit')
     }
-    const rowCap = BigInt(size) < BigInt(remaining.rows) ? BigInt(size) : BigInt(remaining.rows)
-    dataPermit = await admitInvestigationIo({ kind: 'source',
-      preparedRequestDigest: investigationDigest({ filePath, size, prefixBytes, part: 'content' }),
-      reservation: investigationUsage({ rows: rowCap.toString(), bytes: String(size) }),
-      proof: { producer: 'bounded_regular_file', operation: 'file_read', effect: 'source_read',
-        byteCap: String(size), rowCap: rowCap.toString(), record: 'file_lf_rows_v1' },
+    const rowCap =
+      BigInt(size) < BigInt(remaining.rows)
+        ? BigInt(size)
+        : BigInt(remaining.rows)
+    dataPermit = await admitInvestigationIo({
+      kind: 'source',
+      preparedRequestDigest: investigationDigest({
+        filePath,
+        size,
+        prefixBytes,
+        part: 'content',
+      }),
+      reservation: investigationUsage({
+        rows: rowCap.toString(),
+        bytes: String(size),
+      }),
+      proof: {
+        producer: 'bounded_regular_file',
+        operation: 'file_read',
+        effect: 'source_read',
+        byteCap: String(size),
+        rowCap: rowCap.toString(),
+        record: 'file_lf_rows_v1',
+      },
     })
     const chunks: Buffer[] = []
     const buffer = Buffer.allocUnsafe(4096)
@@ -263,9 +384,11 @@ async function readBoundedSource(
       const length = Math.min(buffer.length, size - bytes)
       // At most one new LF-delimited row per input byte. Reserve before read;
       // never shrink a native read to one byte to work around a row limit.
-      if (BigInt(length) > rowCap - rows) throw new InvestigationAdmissionError('investigation_source_row_limit')
+      if (BigInt(length) > rowCap - rows)
+        throw new InvestigationAdmissionError('investigation_source_row_limit')
       const read = await file.read(buffer, 0, length, bytes)
-      if (read.bytesRead === 0) throw new InvestigationAdmissionError('investigation_source_changed')
+      if (read.bytesRead === 0)
+        throw new InvestigationAdmissionError('investigation_source_changed')
       for (let index = 0; index < read.bytesRead; index++) {
         if (atLineStart) rows++
         atLineStart = buffer[index] === 10
@@ -278,7 +401,11 @@ async function readBoundedSource(
     metadataBytes += sourceStatBytes(after)
     metadataRows++
     checkLive()
-    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+    if (
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs
+    ) {
       throw new InvestigationAdmissionError('investigation_source_changed')
     }
     return { buffer: Buffer.concat(chunks, bytes), mtimeMs: after.mtimeMs }
@@ -293,20 +420,40 @@ async function readBoundedSource(
     } catch (error) {
       failure = sourceCleanupFailure(failure, error)
     }
-    const reason = failure === undefined ? {} : { reason: failure instanceof Error ? failure.message : 'investigation_source_unknown' }
+    const reason =
+      failure === undefined
+        ? {}
+        : {
+            reason:
+              failure instanceof Error
+                ? failure.message
+                : 'investigation_source_unknown',
+          }
     const status = closed ? 'complete' : 'unknown'
     try {
-      await observeInvestigationIo(dataPermit, { status,
-        usage: investigationUsage({ rows: rows.toString(), bytes: String(bytes) }),
-        rawUsage: { bytesRead: String(bytes), rowsScanned: rows.toString() }, ...reason })
+      await observeInvestigationIo(dataPermit, {
+        status,
+        usage: investigationUsage({
+          rows: rows.toString(),
+          bytes: String(bytes),
+        }),
+        rawUsage: { bytesRead: String(bytes), rowsScanned: rows.toString() },
+        ...reason,
+      })
     } catch (error) {
       failure = sourceCleanupFailure(failure, error)
     }
     try {
-      await observeInvestigationIo(permit, { status,
-        usage: investigationUsage({ sourceReads: attempted ? '1' : '0',
-          rows: metadataRows.toString(), bytes: String(metadataBytes) }),
-        rawUsage: { metadataBytes: String(metadataBytes) }, ...reason })
+      await observeInvestigationIo(permit, {
+        status,
+        usage: investigationUsage({
+          sourceReads: attempted ? '1' : '0',
+          rows: metadataRows.toString(),
+          bytes: String(metadataBytes),
+        }),
+        rawUsage: { metadataBytes: String(metadataBytes) },
+        ...reason,
+      })
     } catch (error) {
       failure = sourceCleanupFailure(failure, error)
     }

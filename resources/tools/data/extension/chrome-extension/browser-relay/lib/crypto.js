@@ -42,6 +42,7 @@ let _sessionKey = null
 
 /** Whether encryption has been negotiated for the current connection. */
 let _encryptionActive = false
+let _sessionGeneration = 0
 
 /**
  * Import the embedded RSA public key for RSA-OAEP encryption.
@@ -68,6 +69,7 @@ async function getPublicKey() {
  * Returns { sessionKey, encryptedSessionKey } where encryptedSessionKey is base64-encoded.
  */
 export async function prepareSessionKey() {
+  const generation = ++_sessionGeneration
   const pubKey = await getPublicKey()
   const aesKey = await crypto.subtle.generateKey(
     { name: 'AES-GCM', length: 256 },
@@ -77,6 +79,7 @@ export async function prepareSessionKey() {
   const rawKey = await crypto.subtle.exportKey('raw', aesKey)
   const encryptedRaw = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pubKey, rawKey)
   const encryptedBase64 = uint8ToBase64(new Uint8Array(encryptedRaw))
+  if (generation !== _sessionGeneration) throw new Error('Relay encryption session changed')
   _sessionKey = aesKey
   return { sessionKey: aesKey, encryptedSessionKey: encryptedBase64 }
 }
@@ -89,6 +92,7 @@ export function activateEncryption() {
 
 /** Reset encryption state (call on disconnect). */
 export function resetEncryption() {
+  _sessionGeneration++
   _sessionKey = null
   _encryptionActive = false
 }

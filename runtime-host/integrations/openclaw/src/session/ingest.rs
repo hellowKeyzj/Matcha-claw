@@ -209,6 +209,7 @@ pub(crate) enum IngestFrame {
     HistoryContent { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: GatewayEpoch, window: super::window::SessionWindow, page: super::window::PageRequest, host_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Option<sessions_module::ports::SessionSync>, sessions_module::ports::RuntimeOperationFailure>> },
     HistoryStarted { identity: sessions_module::state::SessionIdentity, generation: u64, page: super::window::PageRequest, reply: tokio::sync::oneshot::Sender<u64> },
     HistoryFinished { identity: sessions_module::state::SessionIdentity, generation: u64, read: u64, reply: tokio::sync::oneshot::Sender<bool> },
+    ImageTaskTools { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Vec<sessions_module::state::ToolView>, sessions_module::ports::RuntimeOperationFailure>> },
     Close { identity: sessions_module::state::SessionIdentity, generation: u64, reply: tokio::sync::oneshot::Sender<()> },
     Restart { identity: sessions_module::state::SessionIdentity, generation: u64, next_generation: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<(), sessions_module::ports::RuntimeOperationFailure>> },
 }
@@ -297,6 +298,13 @@ impl SessionEventIngest {
         receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
     }
 
+    pub(crate) async fn image_task_tools(&self, identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<Vec<sessions_module::state::ToolView>, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.sender.send(IngestFrame::ImageTaskTools { identity, generation, source_epoch, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
+    }
+
     pub(crate) async fn history_content(&self, identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: GatewayEpoch, window: super::window::SessionWindow, page: super::window::PageRequest, host_epoch: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<Option<sessions_module::ports::SessionSync>, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         let (reply, receiver) = tokio::sync::oneshot::channel();
@@ -378,6 +386,13 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 let _ = reply.send(result);
                 continue;
             }
+            IngestFrame::ImageTaskTools { identity, generation, source_epoch, observations, reply } => {
+                let result = if source_epoch == active_epoch && observations.is_active(&identity, generation, source_epoch) {
+                    Ok(router.image_task_tools(&identity, generation))
+                } else { Err(RuntimeOperationFailure::Unavailable) };
+                let _ = reply.send(result);
+                continue;
+            }
             IngestFrame::Close { identity, generation, reply } => {
                 wire_messages.retire(&identity.session_key, Some(&identity.agent_id));
                 router.close(&identity, generation);
@@ -450,6 +465,34 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                             Ok(Some(event)) => { let _ = sink.publish(event); },
                             Ok(None) | Err(_) => sink.invalidate(),
                         }
+                    }
+                    continue;
+                }
+                if event.name == "task" {
+                    if !observations.is_source_active(epoch.as_u64()) || failure.borrow().is_some() { continue; }
+                    let payload = event.payload.as_ref();
+                    match payload.and_then(|payload| payload.get("action")).and_then(serde_json::Value::as_str) {
+                        Some("upserted") => {
+                            if let Some(task) = payload.and_then(|payload| payload.get("task")).and_then(super::image_tasks::ImageTask::decode) {
+                                for (identity, generation) in observation_targets(&observations, active_epoch, Some(&task.session_key)) {
+                                    if task.matches(&identity) { let _ = router.image_task(&identity, generation, &task, epoch, event.sequence, &observations).await; }
+                                }
+                            }
+                        }
+                        Some("deleted") => {
+                            if let Some(task_id) = payload.and_then(|payload| payload.get("taskId")).and_then(serde_json::Value::as_str) {
+                                for (identity, generation) in observation_targets(&observations, active_epoch, None) {
+                                    let task = super::image_tasks::ImageTask::deleted(task_id, &identity);
+                                    let _ = router.image_task(&identity, generation, &task, epoch, event.sequence, &observations).await;
+                                }
+                            }
+                        }
+                        Some("restored") => {
+                            for (identity, generation) in observation_targets(&observations, active_epoch, None) {
+                                router.task_refresh(&identity, generation, epoch, &observations).await;
+                            }
+                        }
+                        _ => {}
                     }
                     continue;
                 }
@@ -604,6 +647,23 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                         }.await;
                         let status = result.as_ref().map(|_| ()).map_err(|failure| *failure);
                         let _ = describe_reply.send(result);
+                        status
+                    }
+                    Some(OrderedContext::ImageTask { identity, generation, task_id, reply: task_reply }) => {
+                        let result = if epoch.as_u64() == active_epoch && observations.is_active(&identity, generation, active_epoch) {
+                            match &response {
+                                crate::gateway::wire::GatewayResponse::Success { payload: Some(payload), .. } => {
+                                    match payload.get("task").and_then(super::image_tasks::ImageTask::decode) {
+                                        Some(task) if task.task_id == task_id && task.matches(&identity) => router.image_task(&identity, generation, &task, epoch, None, &observations).await,
+                                        _ => Err(RuntimeOperationFailure::Unknown),
+                                    }
+                                }
+                                crate::gateway::wire::GatewayResponse::Failure { error, .. } => Err(observation_failure(error)),
+                                _ => Err(RuntimeOperationFailure::Unknown),
+                            }
+                        } else { Err(RuntimeOperationFailure::Unavailable) };
+                        let status = result.as_ref().map(|_| ()).map_err(|error| *error);
+                        let _ = task_reply.send(result);
                         status
                     }
                     Some(OrderedContext::History { identity, generation, page, host_epoch, input_ids, reply: history_reply }) => {

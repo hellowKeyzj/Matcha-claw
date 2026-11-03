@@ -5,7 +5,7 @@
 export const RUNTIME_ENABLE_DELAY = 10
 export const TARGET_CREATE_DELAY = 100
 export const CDP_COMMAND_TIMEOUT = 30_050
-export const DEFAULT_MAX_RETAINED_TABS = 10
+export const TAB_REMOVE_TIMEOUT = 3_000
 
 export function withTimeout(promise, ms, label) {
   let timer

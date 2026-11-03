@@ -4,9 +4,9 @@ import type { IabFetchResolution } from './contracts';
 
 /** Admitted static rules run synchronously on their live Main-owned lease. */
 export function resolveIntercept(rules: readonly BrowserInterceptRule[], params: IabJsonObject): IabFetchResolution {
-  const request = params.request as IabJsonObject;
+  const request = params.request as IabJsonObject | undefined;
   const budget = { remaining: 1_000_000 };
-  const rule = rules.find((candidate) => matchUrl(String(request.url), candidate, budget));
+  const rule = rules.find((candidate) => matchUrl(String(request?.url ?? ''), candidate, budget));
   if (!rule || rule.action === 'continue') return { method: 'Fetch.continueRequest', params: {} };
   if (rule.action === 'block') return { method: 'Fetch.failRequest', params: { errorReason: 'BlockedByClient' } };
   const headers = { ...(rule.headers ?? {}), ...(rule.contentType ? { 'Content-Type': rule.contentType } : {}) };

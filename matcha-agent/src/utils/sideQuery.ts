@@ -15,7 +15,10 @@ import { logEvent } from '../services/analytics/index.js'
 import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../services/analytics/metadata.js'
 import { getAPIMetadata } from '../services/api/claude.js'
 import { getAnthropicClient } from '../services/api/client.js'
-import { investigationFetch, rethrowInvestigationAdmission } from '../services/api/investigation.js'
+import {
+  investigationFetch,
+  rethrowInvestigationAdmission,
+} from '../services/api/investigation.js'
 import {
   createTrace,
   createChildSpan,

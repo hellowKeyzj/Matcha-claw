@@ -1,5 +1,6 @@
 import type { BrowserWindow, Session, WebContents, WebContentsView } from 'electron';
 import type { BrowserActionParams, BrowserInterceptRule } from '../../../packages/openclaw-browser-relay-plugin/src/browser-action-contract';
+import type { PageOwnership } from '../../../packages/openclaw-browser-relay-plugin/src/state/page-ownership';
 import type { SessionIdentity } from '../../../src/types/desktop/runtime-address';
 import type {
   IabBounds, IabDownload, IabDownloadCommand, IabEvent, IabFindResult, IabHistoryEntry,
@@ -141,7 +142,7 @@ export interface IabManagerOptions {
   /** Initial loads wait for the session guard and the cookie-restore attempt. */
   ready: Promise<void>;
   prepareCdp(tabId: IabTabId, ownerId: IabOwnerId, contents: WebContents): Promise<void>;
-  revokeAgentAccess(tabId: IabTabId, principalId: string): Promise<void>;
+  releaseClaim(tabId: IabTabId, executorId: string): Promise<void>;
   log?: IabLog;
   emit?(event: IabEvent): void;
 }
@@ -151,16 +152,19 @@ export interface IabManager {
   readonly data: IabData;
   readonly pageTools: IabPageTools;
   readonly ownerId: IabOwnerId;
-  agentAccess(tabId: IabTabId, principalId: string): AbortSignal;
+  agentAccess(tabId: IabTabId, context: IabTrustedContext, claim?: boolean): AbortSignal;
+  getPageOwnership(tabId: IabTabId): Readonly<PageOwnership> | null;
+  releaseSessionClaims(executorId: string): Promise<void>;
+  cleanupSession(executorId: string, sessionGroupId: string, scope: 'executor' | 'group'): Promise<void>;
   getOwner(tabId: IabTabId): IabOwnerId | null;
   getActiveOwner(): IabOwnerId | null;
   getActiveTabId(ownerId: IabOwnerId): IabTabId | null;
   getWebContents(tabId: IabTabId): WebContents | null;
   getView(tabId: IabTabId): WebContentsView | null;
   resolveBrokerTarget(tabId: IabTabId, expectedOwnerId: IabOwnerId): WebContents;
-  open(url: string, options?: { background?: boolean; creator?: IabTrustedContext }): IabTabId;
+  open(url: string, options?: { background?: boolean; creator?: IabTrustedContext; retain?: boolean }): IabTabId;
   switch(tabId: IabTabId): void;
-  close(tabId: IabTabId, expectedOwnerId?: IabOwnerId): void;
+  close(tabId: IabTabId, expectedOwnerId?: IabOwnerId, agent?: IabTrustedContext): void;
   navigate(tabId: IabTabId, url: string): void;
   goBack(tabId: IabTabId): void;
   goForward(tabId: IabTabId): void;
@@ -219,7 +223,9 @@ export interface IabOverlay {
  * The principal is not the browser resource owner; page access is separately checked in Main.
  */
 export interface IabTrustedContext {
+  /** Verified root group; never used as the executor's exclusive claim. */
   readonly principalId: string;
+  readonly executorId: string;
   readonly sessionKey: string;
   readonly identity?: SessionIdentity;
   readonly generation?: number;
@@ -273,7 +279,7 @@ export interface IabBroker {
 export interface IabAutomationOptions { manager: IabManager; broker: IabBroker; log?: IabLog }
 export interface IabAutomation {
   handleRequest(params: BrowserActionParams, trustedContext: IabTrustedContext, signal: AbortSignal): Promise<IabJsonValue>;
-  revokeAccess(tabId: IabTabId, principalId: string): Promise<void>;
+  releaseClaim(tabId: IabTabId, executorId: string): Promise<void>;
   dispose(): Promise<void>;
 }
 export interface IabAutomationScreenshot { imageBase64: string; imageType: 'png' | 'jpeg'; savedTo?: string }

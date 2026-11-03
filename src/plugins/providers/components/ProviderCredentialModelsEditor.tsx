@@ -1,16 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Plus, Sparkles, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { StableScrollArea } from '@/components/scroll';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select } from '@/components/ui/select';
 import type { ProviderCredential } from '@/plugins/providers/stores/providers';
 import type { ProviderVendorInfo } from '@/plugins/providers/domain/providers';
 import {
   type ModelCapability,
-  type ProviderModel,
   type ProviderModelDraft,
+  ProviderDiscoveryError,
 } from '@/plugins/providers/services/provider-model-catalog';
 import {
   filterAllowedModelCapabilities,
@@ -19,23 +18,14 @@ import {
 } from '@/plugins/providers/domain/provider-model-capabilities';
 import { cn } from '@/lib/utils';
 import { useContributions } from '@/plugin-host/react';
-import { providerModelSources, type ProviderModelSourceContribution } from '../extensions';
+import { providerModelSources, type ProviderModelSourceContribution, type ProviderSecretInput } from '../extensions';
 import styles from '@/plugins/providers/components/ProviderCredentialModelsEditor.module.css';
 
-interface ModelDraftRow {
-  modelId: string;
-  capabilities: ModelCapability[];
-  contextWindow: string;
-  maxTokens: string;
-  timeoutMs: string;
-  aspectRatio: string;
-  resolution: string;
-  quality: string;
-}
+import { modelToDraftRow, type ModelDraftRow } from '../forms/provider-model-draft';
 
 const EMPTY_MODEL_DRAFT: ModelDraftRow = {
   modelId: '',
-  capabilities: ['chat'],
+  capabilities: [],
   contextWindow: '',
   maxTokens: '',
   timeoutMs: '',
@@ -46,30 +36,7 @@ const EMPTY_MODEL_DRAFT: ModelDraftRow = {
 
 const OPENCLAW_DEFAULT_CONTEXT_WINDOW = '128000';
 const OPENCLAW_DEFAULT_MAX_TOKENS = '8192';
-const IMAGE_ASPECT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '4:5', '5:4', '21:9'] as const;
-const IMAGE_RESOLUTIONS = ['1K', '2K', '4K'] as const;
-const IMAGE_QUALITIES = ['low', 'medium', 'high', 'auto'] as const;
 const TEXT_TUNING_CAPABILITIES = ['chat', 'imageUnderstand'] as const satisfies readonly ModelCapability[];
-
-function modelToDraftRow(model: ProviderModelDraft): ModelDraftRow {
-  return {
-    modelId: model.modelId,
-    capabilities: [...model.capabilities],
-    contextWindow: model.contextWindow ? String(model.contextWindow) : '',
-    maxTokens: model.maxTokens ? String(model.maxTokens) : '',
-    timeoutMs: model.timeoutMs ? String(model.timeoutMs) : '',
-    aspectRatio: model.aspectRatio ?? '',
-    resolution: model.resolution ?? '',
-    quality: model.quality ?? '',
-  };
-}
-
-function parsePositiveInteger(raw: string): number | undefined {
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
 
 function hasTextTuningFields(credential: ProviderCredential, row: Pick<ModelDraftRow, 'capabilities'>): boolean {
   if (credential.providerKind === 'media') return false;
@@ -77,428 +44,113 @@ function hasTextTuningFields(credential: ProviderCredential, row: Pick<ModelDraf
 }
 
 function hasImageGenerationFields(row: Pick<ModelDraftRow, 'capabilities'>): boolean {
-  return row.capabilities.includes('imageGenerate');
+  return row.capabilities.includes('imageGenerate') || row.capabilities.includes('videoGenerate');
 }
 
-function draftRowToModel(credential: ProviderCredential, row: ModelDraftRow): Omit<ProviderModel, 'accountId'> | null {
-  const modelId = row.modelId.trim();
-  if (!modelId || row.capabilities.length === 0) return null;
-  const includeTextTuning = hasTextTuningFields(credential, row);
-  const includeImageGeneration = hasImageGenerationFields(row);
-  const contextWindow = includeTextTuning ? parsePositiveInteger(row.contextWindow) : undefined;
-  const maxTokens = includeTextTuning ? parsePositiveInteger(row.maxTokens) : undefined;
-  const timeoutMs = includeImageGeneration ? parsePositiveInteger(row.timeoutMs) : undefined;
-  const aspectRatio = includeImageGeneration ? row.aspectRatio.trim() : '';
-  const resolution = includeImageGeneration ? row.resolution.trim() : '';
-  const quality = includeImageGeneration ? row.quality.trim() : '';
-  return {
-    modelId,
-    capabilities: row.capabilities,
-    ...(contextWindow !== undefined ? { contextWindow } : {}),
-    ...(maxTokens !== undefined ? { maxTokens } : {}),
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-    ...(aspectRatio ? { aspectRatio } : {}),
-    ...(resolution ? { resolution } : {}),
-    ...(quality ? { quality } : {}),
-  };
-}
-
-function collectDraftModels(credential: ProviderCredential, rows: readonly ModelDraftRow[]):
-  | { models: Omit<ProviderModel, 'accountId'>[] }
-  | { error: 'invalidEntry' | 'duplicate'; modelId: string } {
-  const models: Omit<ProviderModel, 'accountId'>[] = [];
-  const seen = new Set<string>();
-  for (const row of rows) {
-    if (!row.modelId.trim()) continue;
-    const model = draftRowToModel(credential, row);
-    if (!model) return { error: 'invalidEntry', modelId: row.modelId };
-    if (seen.has(model.modelId)) return { error: 'duplicate', modelId: model.modelId };
-    seen.add(model.modelId);
-    models.push(model);
-  }
-  return { models };
-}
-
-function draftRowSignature(row: ModelDraftRow): string {
-  return JSON.stringify({
-    modelId: row.modelId.trim(),
-    capabilities: row.capabilities,
-    contextWindow: row.contextWindow.trim(),
-    maxTokens: row.maxTokens.trim(),
-    timeoutMs: row.timeoutMs.trim(),
-    aspectRatio: row.aspectRatio.trim(),
-    resolution: row.resolution.trim(),
-    quality: row.quality.trim(),
-  });
-}
-
-function countPendingChanges(rows: readonly ModelDraftRow[], baseline: readonly ModelDraftRow[]): number {
-  const baselineById = new Map<string, string>();
-  for (const row of baseline) {
-    const modelId = row.modelId.trim();
-    if (modelId) baselineById.set(modelId, draftRowSignature(row));
-  }
-
-  let count = 0;
-  const seen = new Set<string>();
-  rows.forEach((row, index) => {
-    const modelId = row.modelId.trim();
-    const signature = draftRowSignature(row);
-    if (modelId) {
-      if (seen.has(modelId) || baselineById.get(modelId) !== signature) count += 1;
-      seen.add(modelId);
-      return;
-    }
-    if (draftRowSignature(baseline[index] ?? EMPTY_MODEL_DRAFT) !== signature) count += 1;
-  });
-  for (const modelId of baselineById.keys()) {
-    if (!seen.has(modelId)) count += 1;
-  }
-  return count;
-}
-
-export function ProviderCredentialModelsEditor(props: {
+export function ProviderCredentialModelsEditor({ credential, vendor, secret, rows, onChange, disabled, discoveryDisabled }: {
   credential: ProviderCredential;
   vendor?: ProviderVendorInfo;
-  models: ProviderModel[];
-  ready: boolean;
-  loading: boolean;
-  saving: boolean;
-  error: string | null;
-  onReplace: (next: Omit<ProviderModel, 'accountId'>[]) => Promise<void>;
+  secret: ProviderSecretInput;
+  rows: ModelDraftRow[];
+  onChange: (rows: ModelDraftRow[]) => void;
+  disabled: boolean;
+  discoveryDisabled: boolean;
 }) {
   const { t } = useTranslation('settings');
-  const { credential, vendor, models, ready, loading, saving, error, onReplace } = props;
-  const allowedCapabilities = useMemo(() => resolveProviderModelCapabilities(credential, vendor), [credential, vendor]);
-  const baseline = useMemo(() => models.map((model) => ({
-    ...modelToDraftRow(model),
-    capabilities: filterAllowedModelCapabilities(credential, model.capabilities, vendor),
-  })).filter((model) => model.capabilities.length > 0), [credential, models, vendor]);
-  const baselineKey = JSON.stringify(baseline);
+  const allowedCapabilities = resolveProviderModelCapabilities(credential, vendor);
+  const modelSources = useContributions(providerModelSources);
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(() => new Set());
   const [discoveredModels, setDiscoveredModels] = useState<ProviderModelDraft[]>([]);
-  const [selectedDiscoveredModelIds, setSelectedDiscoveredModelIds] = useState<string[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [discoveryAttempted, setDiscoveryAttempted] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [discoveryCollapsed, setDiscoveryCollapsed] = useState(false);
-  const discoveryObservation = useRef<AbortController | null>(null);
-  useEffect(() => () => discoveryObservation.current?.abort(), []);
+  const generation = useRef(0);
+  useEffect(() => {
+    generation.current += 1;
+    setDiscoveredModels([]);
+    setSelectedIds([]);
+    setDiscoveryAttempted(false);
+    setDiscoveryError(null);
+    setDiscovering(false);
+    return () => { generation.current += 1; };
+  }, [credential.id, credential.baseUrl, credential.apiProtocol, credential.mediaApiProtocol, credential.providerKind, credential.authMode, secret.apiKey, secret.token]);
+  const currentModelIds = new Set(rows.map((row) => row.modelId.trim()).filter(Boolean));
+  const selected = new Set(selectedIds);
+  const importable = discoveredModels.filter((model) => selected.has(model.modelId) && !currentModelIds.has(model.modelId));
 
-  const handleDiscover = async (source: Extract<ProviderModelSourceContribution, { kind: 'discovery' }>) => {
-    if (discoveryObservation.current) return;
-    const observation = new AbortController();
-    discoveryObservation.current = observation;
-    setDiscoveryCollapsed(false);
+  const discover = async (source: Extract<ProviderModelSourceContribution, { kind: 'discovery' }>) => {
+    if (discovering) return;
+    const request = ++generation.current;
     setDiscovering(true);
+    setDiscoveryCollapsed(false);
     setDiscoveryError(null);
     try {
-      const models = await source.discover(credential.id, observation.signal);
-      if (observation.signal.aborted) return;
+      const models = await source.discover(credential, secret);
+      if (request !== generation.current) return;
       setDiscoveredModels(models);
-      setSelectedDiscoveredModelIds(models.map((model) => model.modelId));
+      setSelectedIds(models.map((model) => model.modelId));
       setDiscoveryAttempted(true);
-    } catch (discoverError) {
-      if (observation.signal.aborted) return;
+    } catch (error) {
+      if (request !== generation.current) return;
       setDiscoveredModels([]);
-      setSelectedDiscoveredModelIds([]);
-      setDiscoveryError(discoverError instanceof Error ? discoverError.message : String(discoverError));
+      setSelectedIds([]);
+      setDiscoveryError(error instanceof ProviderDiscoveryError ? error.reason : 'unavailable');
       setDiscoveryAttempted(true);
     } finally {
-      discoveryObservation.current = null;
-      if (!observation.signal.aborted) setDiscovering(false);
+      if (request === generation.current) setDiscovering(false);
     }
   };
-
-  const handleToggleDiscoveredModel = (modelId: string, checked: boolean) => {
-    setSelectedDiscoveredModelIds((prev) => {
-      if (checked) return prev.includes(modelId) ? prev : [...prev, modelId];
-      return prev.filter((item) => item !== modelId);
-    });
+  const add = (model?: ProviderModelDraft) => {
+    if (model && currentModelIds.has(model.modelId)) return;
+    setExpandedRows((current) => new Set([...current, rows.length]));
+    onChange([...rows, model ? modelToDraftRow(model) : { ...EMPTY_MODEL_DRAFT, capabilities: [] }]);
   };
-
-  const handleImportedDiscoveredModels = (modelIds: readonly string[]) => {
-    setSelectedDiscoveredModelIds((prev) => prev.filter((modelId) => !modelIds.includes(modelId)));
-    if (modelIds.length > 0) setDiscoveryCollapsed(true);
-  };
+  const change = (index: number, patch: Partial<ModelDraftRow>) => onChange(rows.map((row, i) => i === index ? { ...row, ...patch } : row));
 
   return (
-    <ProviderCredentialModelsEditorInner
-      key={baselineKey}
-      credential={credential}
-      vendor={vendor}
-      allowedCapabilities={allowedCapabilities}
-      baseline={baseline}
-      ready={ready}
-      loading={loading}
-      saving={saving}
-      error={error}
-      discoveredModels={discoveredModels}
-      selectedDiscoveredModelIds={selectedDiscoveredModelIds}
-      discoveryAttempted={discoveryAttempted}
-      discovering={discovering}
-      discoveryError={discoveryError}
-      discoveryCollapsed={discoveryCollapsed}
-      onDiscoveryCollapsedChange={setDiscoveryCollapsed}
-      onDiscover={(source) => void handleDiscover(source)}
-      onToggleDiscoveredModel={handleToggleDiscoveredModel}
-      onImportedDiscoveredModels={handleImportedDiscoveredModels}
-      onReplace={onReplace}
-      t={t}
-    />
-  );
-}
-
-function ProviderCredentialModelsEditorInner(props: {
-  credential: ProviderCredential;
-  vendor?: ProviderVendorInfo;
-  allowedCapabilities: readonly ModelCapability[];
-  baseline: ModelDraftRow[];
-  ready: boolean;
-  loading: boolean;
-  saving: boolean;
-  error: string | null;
-  discoveredModels: ProviderModelDraft[];
-  selectedDiscoveredModelIds: readonly string[];
-  discoveryAttempted: boolean;
-  discovering: boolean;
-  discoveryError: string | null;
-  discoveryCollapsed: boolean;
-  onDiscoveryCollapsedChange: (collapsed: boolean) => void;
-  onDiscover: (source: Extract<ProviderModelSourceContribution, { kind: 'discovery' }>) => void;
-  onToggleDiscoveredModel: (modelId: string, checked: boolean) => void;
-  onImportedDiscoveredModels: (modelIds: readonly string[]) => void;
-  onReplace: (next: Omit<ProviderModel, 'accountId'>[]) => Promise<void>;
-  t: ReturnType<typeof useTranslation>[0];
-}) {
-  const {
-    credential,
-    vendor,
-    allowedCapabilities,
-    baseline,
-    ready,
-    loading,
-    saving,
-    error,
-    discoveredModels,
-    selectedDiscoveredModelIds,
-    discoveryAttempted,
-    discovering,
-    discoveryError,
-    discoveryCollapsed,
-    onDiscoveryCollapsedChange,
-    onDiscover,
-    onToggleDiscoveredModel,
-    onImportedDiscoveredModels,
-    onReplace,
-    t,
-  } = props;
-  const [rows, setRows] = useState<ModelDraftRow[]>(baseline);
-  const [localError, setLocalError] = useState<string | null>(null);
-  const [open, setOpen] = useState(true);
-  const [expandedRows, setExpandedRows] = useState<Set<number>>(() => new Set());
-  const pendingChangeCount = useMemo(() => countPendingChanges(rows, baseline), [baseline, rows]);
-  const dirty = pendingChangeCount > 0;
-  const currentModelIds = useMemo(() => new Set(rows.map((row) => row.modelId.trim()).filter(Boolean)), [rows]);
-  const selectedDiscoveredModelIdSet = useMemo(() => new Set(selectedDiscoveredModelIds), [selectedDiscoveredModelIds]);
-  const importableDiscoveredModels = useMemo(() => discoveredModels.filter((model) => (
-    selectedDiscoveredModelIdSet.has(model.modelId)
-    && !currentModelIds.has(model.modelId)
-    && filterAllowedModelCapabilities(credential, model.capabilities, vendor).length > 0
-  )), [credential, currentModelIds, discoveredModels, selectedDiscoveredModelIdSet, vendor]);
-  const modelSources = useContributions(providerModelSources);
-
-  const handleAdd = () => {
-    const defaultCapabilities = allowedCapabilities.includes('chat') ? ['chat' as const] : allowedCapabilities.slice(0, 1);
-    setRows((prev) => {
-      setExpandedRows((expanded) => new Set([...expanded, prev.length]));
-      return [...prev, { ...EMPTY_MODEL_DRAFT, capabilities: [...defaultCapabilities] }];
-    });
-  };
-
-  const replaceDraftModels = async (nextRows: readonly ModelDraftRow[]) => {
-    setLocalError(null);
-    const result = collectDraftModels(credential, nextRows);
-    if ('error' in result) {
-      setLocalError(t(`providerModels.errors.${result.error}`, { id: result.modelId }));
-      return;
-    }
-    await onReplace(result.models);
-  };
-
-  const handleQuickAddModel = async (model: ProviderModelDraft) => {
-    if (currentModelIds.has(model.modelId)) return;
-    await replaceDraftModels([...rows, modelToDraftRow(model)]);
-  };
-
-  const handleImportDiscoveredModels = () => {
-    if (importableDiscoveredModels.length === 0) return;
-    setLocalError(null);
-    setRows((prev) => {
-      const existingModelIds = new Set(prev.map((row) => row.modelId.trim()).filter(Boolean));
-      const importedRows: ModelDraftRow[] = [];
-      for (const model of importableDiscoveredModels) {
-        if (existingModelIds.has(model.modelId)) continue;
-        existingModelIds.add(model.modelId);
-        importedRows.push({
-          ...modelToDraftRow(model),
-          capabilities: filterAllowedModelCapabilities(credential, model.capabilities, vendor),
-        });
-      }
-      return importedRows.length > 0 ? [...prev, ...importedRows] : prev;
-    });
-    onImportedDiscoveredModels(importableDiscoveredModels.map((model) => model.modelId));
-  };
-
-  const handleReset = () => {
-    setLocalError(null);
-    setRows(baseline);
-    setExpandedRows(new Set());
-  };
-
-  const handleToggleAdvanced = (index: number) => {
-    setExpandedRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(index)) next.delete(index);
-      else next.add(index);
-      return next;
-    });
-  };
-
-  const handleChange = (index: number, patch: Partial<ModelDraftRow>) => {
-    setRows((prev) => prev.map((row, idx) => (idx === index ? { ...row, ...patch } : row)));
-  };
-
-  const handleToggleCapability = (index: number, capability: ModelCapability) => {
-    setRows((prev) => prev.map((row, idx) => {
-      if (idx !== index) return row;
-      const capabilities = row.capabilities.includes(capability)
-        ? row.capabilities.filter((item) => item !== capability)
-        : [...row.capabilities, capability];
-      return { ...row, capabilities };
-    }));
-  };
-
-  const handleRemove = (index: number) => {
-    setRows((prev) => prev.filter((_, idx) => idx !== index));
-    setExpandedRows((prev) => new Set([...prev]
-      .filter((idx) => idx !== index)
-      .map((idx) => (idx > index ? idx - 1 : idx))));
-  };
-
-  const handleSave = () => replaceDraftModels(rows);
-
-  return (
-    <section className="overflow-hidden rounded-[1rem] border bg-[hsl(var(--shell-surface))] [border-color:hsl(var(--shell-border))]">
-      <div className={cn('flex flex-wrap items-center justify-between gap-2 bg-[hsl(var(--shell-surface-muted))] px-3 py-2.5', open && 'border-b [border-color:hsl(var(--shell-border))]')}>
-        <button
-          type="button"
-          className="flex items-center gap-2 text-left"
-          onClick={() => setOpen((value) => !value)}
-          aria-expanded={open}
-        >
-          {open ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
-          <p className="text-sm font-medium">{t('providerModels.title')}</p>
-        </button>
+    <section className="space-y-3 border-t pt-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">{t('providerModels.title')}</h3>
         <div className="flex flex-wrap items-center gap-2">
           {modelSources.map((source) => {
-            if (source.kind === 'discovery') {
-              return (
-                <Button key={source.id} variant="outline" size="sm" onClick={() => onDiscover(source)} disabled={saving || discovering} className="h-8">
-                  {discovering ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-2 h-3.5 w-3.5" />}
-                  {t(source.label)}
-                </Button>
-              );
-            }
-            const model = source.model(vendor);
-            if (!model) return null;
-            const registered = currentModelIds.has(model.modelId);
-            return (
-              <Button
-                key={source.id}
-                variant="outline"
-                size="sm"
-                onClick={() => void handleQuickAddModel(model)}
-                disabled={saving || registered}
-                className="h-8"
-              >
-                <Sparkles className="mr-2 h-3.5 w-3.5" />
-                {t(registered ? source.addedLabel : source.label, { model: model.modelId })}
+            if (source.kind === 'discovery') return (
+              <Button key={source.id} type="button" variant="outline" size="sm" disabled={disabled || discoveryDisabled || discovering} onClick={() => void discover(source)}>
+                {discovering ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-2 h-3.5 w-3.5" />}
+                {t(source.label)}
               </Button>
             );
+            const model = credential.providerKind === 'media' ? undefined : source.model(vendor);
+            if (!model) return null;
+            return <Button key={source.id} type="button" variant="outline" size="sm" disabled={disabled || currentModelIds.has(model.modelId)} onClick={() => add(model)}>{t(currentModelIds.has(model.modelId) ? source.addedLabel : source.label, { model: model.modelId })}</Button>;
           })}
-          <Button variant="outline" size="sm" onClick={handleAdd} disabled={saving} className="h-8">
-            <Plus className="mr-2 h-3.5 w-3.5" />
-            {t('providerModels.actions.add')}
+          <Button type="button" variant="outline" size="sm" onClick={() => add()} disabled={disabled}>
+            <Plus className="mr-2 h-3.5 w-3.5" />{t('providerModels.actions.add')}
           </Button>
         </div>
       </div>
-
-      {open ? (
-        <>
-          <ProviderDiscoveredModelsPanel
-            credential={credential}
-            vendor={vendor}
-            models={discoveredModels}
-            selectedModelIds={selectedDiscoveredModelIdSet}
-            existingModelIds={currentModelIds}
-            discoveryAttempted={discoveryAttempted}
-            discovering={discovering}
-            collapsed={discoveryCollapsed}
-            error={discoveryError}
-            importableCount={importableDiscoveredModels.length}
-            disabled={saving}
-            onToggle={onToggleDiscoveredModel}
-            onImport={handleImportDiscoveredModels}
-            onCollapsedChange={onDiscoveryCollapsedChange}
-            t={t}
-          />
-          {loading && !ready ? (
-            <div className="flex items-center justify-center py-6">
-              <Loader2 className="h-5 w-5 animate-spin" />
-            </div>
-          ) : rows.length === 0 ? (
-            <p className="px-3 py-4 text-xs text-muted-foreground">{t('providerModels.group.empty')}</p>
-          ) : (
-            <StableScrollArea className={cn(styles.list, 'max-h-[360px] overflow-y-auto overscroll-contain bg-[hsl(var(--shell-surface))] [scrollbar-gutter:stable]')}>
-              {rows.map((row, index) => (
-                <ProviderModelDraftRow
-                  key={`${credential.id}-${index}`}
-                  credential={credential}
-                  row={row}
-                  allowedCapabilities={allowedCapabilities}
-                  disabled={saving}
-                  advancedOpen={expandedRows.has(index)}
-                  onAdvancedToggle={() => handleToggleAdvanced(index)}
-                  onChange={(patch) => handleChange(index, patch)}
-                  onToggleCapability={(capability) => handleToggleCapability(index, capability)}
-                  onRemove={() => handleRemove(index)}
-                  t={t}
-                />
-              ))}
-            </StableScrollArea>
-          )}
-
-          {(localError || error) ? (
-            <p className="border-t border-border/70 px-3 py-2 text-xs text-destructive">{localError || error}</p>
-          ) : null}
-          {dirty ? (
-            <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t bg-[hsl(var(--shell-surface))] px-3 py-2 [border-color:hsl(var(--shell-border))]">
-              <span className="text-xs font-medium text-muted-foreground">
-                {t('providerModels.pending.summary', { count: pendingChangeCount })}
-              </span>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={handleReset} disabled={saving} className="h-8">
-                  {t('providerModels.actions.reset')}
-                </Button>
-                <Button size="sm" onClick={handleSave} disabled={saving} className="h-8">
-                  {saving ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
-                  {t('providerModels.actions.save')}
-                </Button>
-              </div>
-            </div>
-          ) : null}
-        </>
-      ) : null}
+      <p className="text-xs text-muted-foreground">{t('providerModels.draftHelp')}</p>
+      <ProviderDiscoveredModelsPanel
+        credential={credential} vendor={vendor} models={discoveredModels} selectedModelIds={selected} existingModelIds={currentModelIds}
+        discoveryAttempted={discoveryAttempted} discovering={discovering} collapsed={discoveryCollapsed} error={discoveryError}
+        importableCount={importable.length} disabled={disabled}
+        onToggle={(id, checked) => setSelectedIds((current) => checked ? [...current, id] : current.filter((item) => item !== id))}
+        onImport={() => { onChange([...rows, ...importable.map((model) => ({ ...modelToDraftRow(model), capabilities: filterAllowedModelCapabilities(credential, model.capabilities, vendor) }))]); setSelectedIds([]); setDiscoveryCollapsed(true); }}
+        onCollapsedChange={setDiscoveryCollapsed} t={t}
+      />
+      {rows.length === 0 ? <p className="py-4 text-sm text-muted-foreground">{t('providerModels.group.empty')}</p> : (
+        <div className={cn(styles.list, 'rounded-lg border')}>
+          {rows.map((row, index) => (
+            <ProviderModelDraftRow key={index} credential={credential} row={row} allowedCapabilities={allowedCapabilities} disabled={disabled}
+              advancedOpen={expandedRows.has(index)} onAdvancedToggle={() => setExpandedRows((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })}
+              onChange={(patch) => change(index, patch)}
+              onToggleCapability={(capability) => change(index, { capabilities: row.capabilities.includes(capability) ? row.capabilities.filter((item) => item !== capability) : [...row.capabilities, capability] })}
+              onRemove={() => { onChange(rows.filter((_, i) => i !== index)); setExpandedRows((current) => new Set([...current].filter((i) => i !== index).map((i) => i > index ? i - 1 : i))); }} t={t}
+            />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -566,7 +218,7 @@ function ProviderDiscoveredModelsPanel(props: {
         </div>
       ) : error ? (
         <p className="text-xs text-destructive">
-          {t(error === 'Provider model request was rejected' ? 'providerModels.discovery.rejected' : 'providerModels.discovery.error', { error })}
+          {t(`providerModels.discovery.reasons.${error}`)}
         </p>
       ) : models.length === 0 ? (
         <p className="text-xs text-muted-foreground">{t('providerModels.discovery.empty')}</p>
@@ -575,7 +227,7 @@ function ProviderDiscoveredModelsPanel(props: {
           {models.map((model) => {
             const capabilities = filterAllowedModelCapabilities(credential, model.capabilities, vendor);
             const duplicate = existingModelIds.has(model.modelId);
-            const selectable = !duplicate && capabilities.length > 0;
+            const selectable = !duplicate;
             return (
               <label
                 key={model.modelId}
@@ -594,6 +246,7 @@ function ProviderDiscoveredModelsPanel(props: {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-mono text-foreground">{model.modelId}</span>
                   <span className="mt-1 flex flex-wrap gap-1">
+                    {capabilities.length === 0 ? <span>{t('providerModels.discovery.chooseCapabilities')}</span> : null}
                     {capabilities.map((capability) => (
                       <span key={capability} className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
                         {t(`providerModels.capabilities.${capability}`, capability)}
@@ -630,7 +283,7 @@ function ProviderModelDraftRow(props: {
   const { credential, row, allowedCapabilities, disabled, advancedOpen, onAdvancedToggle, onChange, onToggleCapability, onRemove, t } = props;
   const showTextTuning = hasTextTuningFields(credential, row);
   const showImageGeneration = hasImageGenerationFields(row);
-  const hasTuningFields = showTextTuning || showImageGeneration;
+  const hasTuningFields = row.capabilities.length > 0;
   return (
     <div className={cn(styles.row, 'gap-2 border-b border-border/60 px-3 py-2.5 last:border-b-0')}>
       <div className={cn(styles.model, 'min-w-0')}>
@@ -643,21 +296,22 @@ function ProviderModelDraftRow(props: {
           onChange={(event) => onChange({ modelId: event.target.value })}
           disabled={disabled}
           spellCheck={false}
-          placeholder="gpt-5.5"
+          placeholder={t('providerModels.row.modelIdPlaceholder')}
           className="h-9 rounded-md bg-background px-3 text-sm"
         />
       </div>
       <div className="min-w-0">
         <label className={cn(styles.label, 'mb-1 text-[11px] font-medium text-muted-foreground')}>
-          {t('providerModels.row.capabilitiesLabel', 'Capabilities')}
+          {t('providerModels.row.capabilitiesLabel')}
         </label>
         <div className="flex flex-wrap gap-1">
-          {MODEL_CAPABILITIES.filter((capability) => allowedCapabilities.includes(capability)).map((capability) => (
+          {MODEL_CAPABILITIES.filter((capability) => allowedCapabilities.includes(capability) || row.capabilities.includes(capability)).map((capability) => (
             <button
               key={capability}
               type="button"
               disabled={disabled}
               onClick={() => onToggleCapability(capability)}
+              aria-pressed={row.capabilities.includes(capability)}
               className={cn(
                 'rounded-md border px-1.5 py-0.5 text-xs transition-colors',
                 row.capabilities.includes(capability)
@@ -722,8 +376,6 @@ function ProviderModelDraftRow(props: {
               </LabeledModelField>
             </>
           ) : null}
-          {showImageGeneration ? (
-            <>
               <LabeledModelField label={t('providerModels.row.timeoutMsLabel')}>
                 <Input
                   aria-label={t('providerModels.row.timeoutMsLabel')}
@@ -735,48 +387,15 @@ function ProviderModelDraftRow(props: {
                   className="h-9 rounded-md bg-background px-2 text-sm"
                 />
               </LabeledModelField>
-              <LabeledModelField label={t('providerModels.row.aspectRatioLabel')}>
-                <Select
-                  aria-label={t('providerModels.row.aspectRatioLabel')}
-                  value={row.aspectRatio}
-                  onChange={(event) => onChange({ aspectRatio: event.target.value })}
-                  disabled={disabled}
-                  className="h-9 rounded-md bg-background px-2 pr-7 text-sm"
-                >
-                  <option value="">{t('providerModels.row.defaultOption')}</option>
-                  {IMAGE_ASPECT_RATIOS.map((value) => (
-                    <option key={value} value={value}>{value}</option>
-                  ))}
-                </Select>
-              </LabeledModelField>
-              <LabeledModelField label={t('providerModels.row.resolutionLabel')}>
-                <Select
-                  aria-label={t('providerModels.row.resolutionLabel')}
-                  value={row.resolution}
-                  onChange={(event) => onChange({ resolution: event.target.value })}
-                  disabled={disabled}
-                  className="h-9 rounded-md bg-background px-2 pr-7 text-sm"
-                >
-                  <option value="">{t('providerModels.row.defaultOption')}</option>
-                  {IMAGE_RESOLUTIONS.map((value) => (
-                    <option key={value} value={value}>{value}</option>
-                  ))}
-                </Select>
-              </LabeledModelField>
-              <LabeledModelField label={t('providerModels.row.qualityLabel')}>
-                <Select
-                  aria-label={t('providerModels.row.qualityLabel')}
-                  value={row.quality}
-                  onChange={(event) => onChange({ quality: event.target.value })}
-                  disabled={disabled}
-                  className="h-9 rounded-md bg-background px-2 pr-7 text-sm"
-                >
-                  <option value="">{t('providerModels.row.defaultOption')}</option>
-                  {IMAGE_QUALITIES.map((value) => (
-                    <option key={value} value={value}>{t(`providerModels.qualities.${value}`, value)}</option>
-                  ))}
-                </Select>
-              </LabeledModelField>
+          {showImageGeneration ? (
+            <>
+              {(['aspectRatio', 'resolution', 'quality'] as const).map((field) => (
+                <LabeledModelField key={field} label={t(`providerModels.row.${field}Label`)}>
+                  <Input aria-label={t(`providerModels.row.${field}Label`)} value={row[field]}
+                    onChange={(event) => onChange({ [field]: event.target.value })} disabled={disabled}
+                    spellCheck={false} placeholder={t('providerModels.row.defaultOption')} className="h-9 rounded-md bg-background px-2 text-sm" />
+                </LabeledModelField>
+              ))}
             </>
           ) : null}
         </div>

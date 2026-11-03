@@ -130,6 +130,7 @@ struct BrowserCall<'a> {
     params: &'a Map<String, Value>,
     capability: &'a Capability,
     invocation_id: &'a str,
+    input_message_id: &'a str,
 }
 
 fn secret<'de, D: Deserializer<'de>>(decoder: D) -> Result<Zeroizing<String>, D::Error> {
@@ -202,13 +203,18 @@ impl Gateway {
         })
     }
 
-    async fn call(&self, arguments: &Map<String, Value>) -> Result<CallToolResult, ()> {
+    async fn call(
+        &self,
+        arguments: &Map<String, Value>,
+        input_message_id: &str,
+    ) -> Result<CallToolResult, ()> {
         let invocation_id = uuid::Uuid::new_v4().to_string();
         let body = Zeroizing::new(
             serde_json::to_vec(&BrowserCall {
                 params: arguments,
                 capability: &self.capability,
                 invocation_id: &invocation_id,
+                input_message_id,
             })
             .map_err(|_| ())?,
         );
@@ -271,11 +277,31 @@ impl CapabilityProvider for Gateway {
         name: &'a str,
         arguments: &'a Map<String, Value>,
     ) -> ToolResultFuture<'a> {
+        self.call_tool_with_meta(name, arguments, None)
+    }
+
+    fn call_tool_with_meta<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: &'a Map<String, Value>,
+        meta: Option<&'a Map<String, Value>>,
+    ) -> ToolResultFuture<'a> {
         Box::pin(async move {
             if name != "browser" {
                 return Err(ToolCallError::InvalidParams);
             }
-            Ok(self.call(arguments).await.unwrap_or_else(|()| CallToolResult::error(
+            let Some(input_message_id) = meta
+                .and_then(|meta| meta.get("matcha/iabInputMessageId"))
+                .and_then(Value::as_str)
+                .filter(|value| {
+                    uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == *value)
+                })
+            else {
+                return Ok(CallToolResult::error(
+                    "Browser calls require trusted _meta['matcha/iabInputMessageId'] containing a canonical UUID; no action was attempted.".into(),
+                ));
+            };
+            Ok(self.call(arguments, input_message_id).await.unwrap_or_else(|()| CallToolResult::error(
                 "Browser gateway is unavailable, timed out or returned invalid data; the action was not retried and completion is unknown.".into(),
             )))
         })

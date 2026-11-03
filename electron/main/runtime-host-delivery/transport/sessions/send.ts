@@ -1,4 +1,5 @@
 import type { SessionGoalReceipt, SessionSendIntent } from '../../../../../src/types/session-goal';
+import { SESSION_ATTACHMENT_TRANSPORT_MAX_BYTES, sessionAttachmentMaxBytes } from '../../../../../src/types/session/attachments';
 import { decodeSessionGoalReceipt, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from './goal';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJsonDelivery } from '../client';
@@ -6,8 +7,6 @@ import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeade
 
 const ROUTE_PATH = '/api/sessions/send';
 const MAX_ATTACHMENTS = 16;
-const MAX_ATTACHMENT_DECODED_BYTES = 5 * 1024 * 1024;
-const MAX_TOTAL_ATTACHMENT_DECODED_BYTES = 20 * 1024 * 1024;
 const UNAVAILABLE = {
   success: false,
   error: 'Session send is unavailable',
@@ -274,6 +273,7 @@ function isSessionSendRequest(value: unknown): value is SessionSendRequest {
     || value.input.attachments.length > MAX_ATTACHMENTS) {
     return false;
   }
+  const maxAttachmentBytes = sessionAttachmentMaxBytes(value.scope.identity.endpoint.runtimeAdapterId);
   let totalBytes = 0;
   return value.input.attachments.every((attachment: unknown) => {
     if (!isRecord(attachment)
@@ -292,9 +292,9 @@ function isSessionSendRequest(value: unknown): value is SessionSendRequest {
       return false;
     }
     const bytes = canonicalBase64DecodedBytes(attachment.content);
-    if (bytes === null || bytes > MAX_ATTACHMENT_DECODED_BYTES) return false;
+    if (bytes === null || bytes > maxAttachmentBytes) return false;
     totalBytes += bytes;
-    return totalBytes <= MAX_TOTAL_ATTACHMENT_DECODED_BYTES;
+    return totalBytes <= SESSION_ATTACHMENT_TRANSPORT_MAX_BYTES;
   });
 }
 

@@ -85,7 +85,10 @@ export function clearAllPlanSlugs(): void {
   getPlanSlugCache().clear()
 }
 
-function resolvePlansDirectory(settingsDir: string | undefined): { plansPath: string; error?: Error } {
+function resolvePlansDirectory(settingsDir: string | undefined): {
+  plansPath: string
+  error?: Error
+} {
   let plansPath: string
   let error: Error | undefined
 
@@ -96,7 +99,9 @@ function resolvePlansDirectory(settingsDir: string | undefined): { plansPath: st
 
     // Validate path stays within project root to prevent path traversal
     if (!resolved.startsWith(cwd + sep) && resolved !== cwd) {
-      error = new Error(`plansDirectory must be within project root: ${settingsDir}`)
+      error = new Error(
+        `plansDirectory must be within project root: ${settingsDir}`,
+      )
       plansPath = join(getClaudeConfigHomeDir(), 'plans')
     } else {
       plansPath = resolved
@@ -114,7 +119,9 @@ function resolvePlansDirectory(settingsDir: string | undefined): { plansPath: st
 // mkdirSync result is stable for the session. Without memoization, each rendered tool
 // message triggers a mkdirSync syscall (regressed in #20005).
 export const getPlansDirectory = memoize(function getPlansDirectory(): string {
-  const { plansPath, error } = resolvePlansDirectory(getInitialSettings().plansDirectory)
+  const { plansPath, error } = resolvePlansDirectory(
+    getInitialSettings().plansDirectory,
+  )
   if (error) logError(error)
 
   // Ensure directory exists (mkdirSync with recursive: true is a no-op if it exists)
@@ -160,9 +167,17 @@ export function getPlan(agentId?: AgentId): string | null {
   }
 }
 
-function rethrowPlanPreparationError(error: unknown, signal?: AbortSignal): void {
-  if (error instanceof Error &&
-    (error.cause !== undefined || error instanceof AggregateError || isAbortError(error))) throw error
+function rethrowPlanPreparationError(
+  error: unknown,
+  signal?: AbortSignal,
+): void {
+  if (
+    error instanceof Error &&
+    (error.cause !== undefined ||
+      error instanceof AggregateError ||
+      isAbortError(error))
+  )
+    throw error
   rethrowInvestigationAdmission(error)
   signal?.throwIfAborted()
   investigationSignal()?.throwIfAborted()
@@ -179,9 +194,13 @@ export async function preparePlanAttachment(
   if (plansPath === undefined) {
     const settings = getSessionSettingsCache()
     if (settings === null) {
-      throw new InvestigationAdmissionError('investigation_plan_preparation_unavailable')
+      throw new InvestigationAdmissionError(
+        'investigation_plan_preparation_unavailable',
+      )
     }
-    plansPath = resolvePlansDirectory(settings.settings.plansDirectory).plansPath
+    plansPath = resolvePlansDirectory(
+      settings.settings.plansDirectory,
+    ).plansPath
   }
   const sessionId = getSessionId()
   const cache = getPlanSlugCache()
@@ -201,16 +220,20 @@ export async function preparePlanAttachment(
     if (cachedSlug) slug = cachedSlug
     else setPlanSlugCacheEntry(sessionId, slug!)
   }
-  const planFilePath = join(plansPath,
-    agentId ? `${slug}-agent-${agentId}.md` : `${slug}.md`)
+  const planFilePath = join(
+    plansPath,
+    agentId ? `${slug}-agent-${agentId}.md` : `${slug}.md`,
+  )
   try {
     await readSourceBytes(planFilePath, { maxBytes: 0, signal })
     return { planFilePath, planExists: true }
   } catch (error) {
     rethrowPlanPreparationError(error, signal)
     // Only native read failures mean no readable plan; close/settlement failures do not.
-    const readFailure = error instanceof Error &&
-      (('syscall' in error && (error.syscall === 'open' || error.syscall === 'fstat')) ||
+    const readFailure =
+      error instanceof Error &&
+      (('syscall' in error &&
+        (error.syscall === 'open' || error.syscall === 'fstat')) ||
         (isENOENT(error) && !('syscall' in error)) ||
         ('code' in error && error.code === 'EISDIR' && !('syscall' in error)))
     if (!readFailure) throw error

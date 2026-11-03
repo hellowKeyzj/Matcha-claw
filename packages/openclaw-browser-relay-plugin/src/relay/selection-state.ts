@@ -25,6 +25,9 @@ export async function readRelaySelection(stateDir?: string): Promise<RelaySelect
     if (parsed.kind === 'none') {
       return { kind: 'none' }
     }
+    if (parsed.kind !== 'manual' && parsed.kind !== 'auto') {
+      return null
+    }
 
     const browserInstanceId =
       typeof parsed.browserInstanceId === 'string' && parsed.browserInstanceId.trim()
@@ -32,8 +35,7 @@ export async function readRelaySelection(stateDir?: string): Promise<RelaySelect
         : ''
     const windowId = parsed.windowId ?? null
     if (
-      (parsed.kind !== 'manual' && parsed.kind !== 'auto')
-      || !browserInstanceId
+      !browserInstanceId
       || (windowId !== null && !Number.isInteger(windowId))
     ) {
       return null

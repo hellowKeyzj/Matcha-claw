@@ -1,4 +1,4 @@
-import type { SessionAssistantTurnItem, SessionRenderItem } from '@/types/session/render-item';
+import { sessionImageGenerationTask, type SessionAssistantTurnItem, type SessionRenderItem } from '@/types/session/render-item';
 import type { SessionInputReceipt, SessionWireItem } from '@/types/session/snapshot';
 import { bindSessionInputReceipts, isPendingUserItem, reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
 import { sanitizeAssistantDisplayText, sanitizeCanonicalUserText } from '@/plugins/chat/store/message-display';
@@ -214,6 +214,18 @@ function reconcileRuntimeProjection(
   };
 }
 
+function imageTaskCancellationSettled(abort: ChatSessionAbortState, items: SessionRenderItem[]): boolean {
+  const remaining = new Set(abort.imageTaskIds);
+  for (const item of items) {
+    if (item.kind !== 'assistant-turn') continue;
+    for (const tool of item.tools) {
+      const task = sessionImageGenerationTask(tool);
+      if (task && task.status !== 'queued' && task.status !== 'running') remaining.delete(task.taskId);
+    }
+  }
+  return remaining.size === 0;
+}
+
 export function projectMessages(
   record: ChatSessionRecord,
   items: SessionRenderItem[],
@@ -222,18 +234,27 @@ export function projectMessages(
   const current = record.runtime;
   const incoming = projection.runtime;
   // Admission owns this wait until native output or an associated terminal takes over.
-  const preservePending = incoming !== null && !isRunActive(incoming) && isRunActive(current)
+  const yielded = incoming?.runPhase === 'idle' && incoming.activeRunId !== null
+    && incoming.activeRunId === current.activeRunId;
+  const preservePending = incoming !== null && !yielded && !isRunActive(incoming) && isRunActive(current)
     && current.pendingTurnKey !== null && !pendingTurnTerminated(current, projection.terminalRunIds);
   let runtime = incoming === null ? current : preservePending ? {
     ...current,
     runtimeNotice: incoming.runtimeNotice,
     imageGeneration: incoming.imageGeneration,
   } : reconcileRuntimeProjection(current, incoming);
+  if (record.abort?.phase === 'stopping' && record.abort.imageTaskIds?.length
+    && current.runPhase === 'stopping' && incoming !== null
+    && (incoming.activeRunId === current.activeRunId || incoming.activeRunId === null)
+    && !pendingTurnTerminated(current, projection.terminalRunIds)
+    && !imageTaskCancellationSettled(record.abort, items)) {
+    runtime = { ...incoming, runPhase: 'stopping', updatedAt: current.updatedAt };
+  }
   const pendingAssistant = record.items.find((item): item is SessionAssistantTurnItem => (
     item.kind === 'assistant-turn' && item.key === current.pendingTurnKey
   ));
-  let nextItems = items;
-  if (pendingAssistant && isRunActive(runtime)
+  let nextItems = yielded ? items.filter((item) => item.key !== current.pendingTurnKey) : items;
+  if (!yielded && pendingAssistant && isRunActive(runtime)
     && (pendingAssistant.status === 'streaming' || pendingAssistant.status === 'waiting_tool')
     && !projection.retiredItemIds.has(pendingAssistant.key)
     && (!pendingAssistant.runId || pendingAssistant.runId === runtime.activeRunId)
@@ -267,7 +288,7 @@ export function failAbort(
 ): ChatSessionRuntimeState | null {
   const runtime = record.runtime;
   if (runtime.runPhase !== 'stopping' || runtime.updatedAt !== abort.startedAt
-    || (abort.runId !== null && runtime.activeRunId !== abort.runId) || abort.issue === null) return null;
+    || (abort.runId !== null && runtime.activeRunId !== abort.runId && !abort.imageTaskIds?.length) || abort.issue === null) return null;
   return {
     ...runtime,
     runPhase: runtimeAtClick.runPhase,
@@ -293,14 +314,24 @@ export function terminalRunIds(
 }
 
 export function resolveAbortRunId(record: ChatSessionRecord): string | undefined {
-  return record.runtime.activeRunId ?? undefined;
+  const activeRunId = record.runtime.activeRunId;
+  if (activeRunId && isRunActive(record.runtime)) return activeRunId;
+  const activeTasks = record.items.flatMap((item) => item.kind === 'assistant-turn'
+    ? item.tools.flatMap((tool) => {
+      const task = sessionImageGenerationTask(tool);
+      return task && (task.status === 'queued' || task.status === 'running') ? [{ tool, task }] : [];
+    }) : []);
+  if (activeRunId && activeTasks.some(({ tool, task }) => tool.runId === activeRunId || task.runId === activeRunId)) return activeRunId;
+  const taskRunIds = new Set(activeTasks.map(({ task }) => task.runId));
+  if (taskRunIds.size === 1 && !taskRunIds.has(null)) return taskRunIds.values().next().value ?? undefined;
+  const parentRunIds = new Set(activeTasks.map(({ tool }) => tool.runId));
+  return parentRunIds.size === 1 && !parentRunIds.has(undefined) ? parentRunIds.values().next().value : undefined;
 }
 
 export function createPending(record: ChatSessionRecord, sessionKey: string): ChatSessionPending | null {
   const runtime = record.runtime;
-  const imageGenerationActive = runtime.imageGeneration?.active === true;
-  const placeholderRunId = runtime.activeRunId || (imageGenerationActive ? 'image-generation' : '');
-  if (!placeholderRunId || (!isRunActive(runtime) && !imageGenerationActive)) return null;
+  const placeholderRunId = runtime.activeRunId;
+  if (!placeholderRunId || !isRunActive(runtime) || runtime.runPhase === 'stopping' && runtime.imageGeneration?.active) return null;
   if (record.items.some((item) => item.kind === 'assistant-turn'
     && (item.runId === placeholderRunId || item.key === runtime.pendingTurnKey))) return null;
   const isWaitingForTool = runtime.runPhase === 'waiting_tool';

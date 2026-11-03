@@ -35,7 +35,7 @@ function physicalKey(value: string, shifted = false): Key {
   const aliases: Record<string, string> = { esc: 'Escape', escape: 'Escape', ctrl: 'Control', control: 'Control', cmd: 'Meta', command: 'Meta', meta: 'Meta', win: 'Meta', option: 'Alt', alt: 'Alt', shift: 'Shift', enter: 'Enter', return: 'Enter', del: 'Delete', delete: 'Delete', tab: 'Tab', backspace: 'Backspace', space: 'Space', ' ': 'Space', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', arrowup: 'ArrowUp', arrowdown: 'ArrowDown', arrowleft: 'ArrowLeft', arrowright: 'ArrowRight', home: 'Home', end: 'End', pageup: 'PageUp', pagedown: 'PageDown' };
   const name = aliases[normalized.toLowerCase()] ?? normalized;
   const entry = layout[name] ? [name, layout[name]] as const : Object.entries(layout).find(([, key]) => key.key === name || key.shiftKey === name);
-  if (!entry) throw iabError('IAB_KEY_INVALID', `Unsupported keyboard key: ${value}`);
+  if (!entry) return { key: name, keyCode: name.length === 1 ? name.toUpperCase().charCodeAt(0) : 0, code: '', text: name.length === 1 ? name : '', location: 0 };
   const [code, definition] = entry;
   const key = shifted && definition.shiftKey ? definition.shiftKey : name.length === 1 ? name : definition.key;
   const keyCode = shifted && definition.shiftKeyCode ? definition.shiftKeyCode : definition.keyCode;
@@ -127,16 +127,18 @@ export async function clickPoint(page: IabAutomationPage, point: { x: number; y:
     modifiers |= modifierBits[modifier.key];
     await page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: modifier.key, code: modifier.code, windowsVirtualKeyCode: modifier.keyCode, modifiers }, operation);
   }
-  await movePointer(page, point, operation, modifiers, humanize);
-  if ('element' in point && 'localPoint' in point) await page.verifyPoint(point as Awaited<ReturnType<IabAutomationPage['actionablePoint']>>, operation);
-  for (let clickCount = 1; clickCount <= (options.doubleClick ? 2 : 1); clickCount++) {
+  try {
+    await movePointer(page, point, operation, modifiers, humanize);
+    if ('element' in point && 'localPoint' in point) await page.verifyPoint(point as Awaited<ReturnType<IabAutomationPage['actionablePoint']>>, operation);
+    const clickCount = options.doubleClick ? 2 : 1;
     await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button, buttons: button === 'left' ? 1 : button === 'right' ? 2 : 4, clickCount, modifiers }, operation);
     if (options.delayMs || humanize) await page.pause(options.delayMs ?? (30 + Math.random() * 60), operation);
     await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button, buttons: 0, clickCount, modifiers }, operation);
-  }
-  for (const modifier of held.reverse()) {
-    modifiers &= ~modifierBits[modifier.key];
-    await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: modifier.key, code: modifier.code, windowsVirtualKeyCode: modifier.keyCode, modifiers }, operation);
+  } finally {
+    for (const modifier of held.reverse()) {
+      modifiers &= ~modifierBits[modifier.key];
+      await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: modifier.key, code: modifier.code, windowsVirtualKeyCode: modifier.keyCode, modifiers }, operation);
+    }
   }
 }
 
@@ -328,19 +330,26 @@ async function actInput(page: IabAutomationPage, request: BrowserActRequest, ope
       await validatePoint(page, start, operation);
       await validatePoint(page, end, operation);
       const fromHit = await pointHit(page, start, operation);
-      await movePointer(page, start, operation);
+      await movePointer(page, start, operation, 0, false);
       if (source) await page.verifyPoint(source, operation);
-      await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: start.x, y: start.y, button: 'left', buttons: 1, clickCount: 1 }, operation);
-      for (let step = 1; step <= steps; step++) {
-        await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x + (end.x - start.x) * step / steps, y: start.y + (end.y - start.y) * step / steps, button: 'left', buttons: 1 }, operation);
-        if (durationMs) await page.pause(durationMs / steps, operation);
+      let x = start.x, y = start.y, pressed = false;
+      try {
+        await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 }, operation);
+        pressed = true;
+        for (let step = 1; step <= steps; step++) {
+          if (durationMs) await page.pause(durationMs / steps, operation);
+          x = start.x + (end.x - start.x) * step / steps;
+          y = start.y + (end.y - start.y) * step / steps;
+          await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1 }, operation);
+          pointers.set(page, { x, y });
+        }
+      } finally {
+        if (pressed) await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 }, operation);
       }
-      await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: end.x, y: end.y, button: 'left', buttons: 0, clickCount: 1 }, operation);
-      pointers.set(page, { x: end.x, y: end.y });
       return { dragged: true, from: { x: start.x, y: start.y, hit: fromHit }, to: { x: end.x, y: end.y, hit: await pointHit(page, end, operation) }, steps, gestureDurationMs: durationMs };
     }
     case 'select': {
-      if (!request.values) throw iabError('IAB_VALUES_REQUIRED', 'Select values are required');
+      if (!request.values?.length) throw iabError('IAB_VALUES_REQUIRED', 'A non-empty select values array is required');
       const point = await page.actionablePoint(request.ref, undefined, operation, undefined, request);
       const values = await page.callElement(point.element, 'return h.selectOptions(this,args[0].map(value=>({valueOrLabel:value})));', [request.values], operation);
       if (!Array.isArray(values)) throw iabError('IAB_SELECT_FAILED', String(values));
@@ -374,7 +383,7 @@ async function actInput(page: IabAutomationPage, request: BrowserActRequest, ope
       return { appliedCount: applied.length };
     }
     case 'resize': {
-      if (!Number.isInteger(request.width) || !Number.isInteger(request.height) || request.width! < 1 || request.height! < 1 || request.width! > 8192 || request.height! > 8192) throw iabError('IAB_VIEWPORT_INVALID', 'Viewport dimensions must be integers between 1 and 8192');
+      if (!Number.isFinite(request.width) || !Number.isFinite(request.height) || request.width! <= 0 || request.height! <= 0) throw iabError('IAB_VIEWPORT_INVALID', 'Viewport dimensions must be positive finite numbers');
       await page.send('Emulation.setDeviceMetricsOverride', { width: request.width!, height: request.height!, deviceScaleFactor: 0, mobile: false }, operation);
       return { width: request.width!, height: request.height! };
     }

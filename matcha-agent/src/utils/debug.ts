@@ -218,7 +218,10 @@ export async function flushDebugLogs(): Promise<void> {
 
 export function logForDebugging(
   message: string,
-  { level = 'debug', matchaTrace = false }: {
+  {
+    level = 'debug',
+    matchaTrace = false,
+  }: {
     level?: DebugLogLevel
     matchaTrace?: boolean
   } = {},
@@ -243,6 +246,33 @@ export function logForDebugging(
   }
 
   getDebugWriter().write(output)
+}
+
+// Same UTF-16 FNV-1a fingerprint as Renderer and runtime-host session traces.
+export function debugIdentifierHash(value: string): string {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index++) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+export function traceSessionTiming(
+  stage: string,
+  fields: () => Record<string, unknown>,
+): void {
+  if (process.env.MATCHACLAW_TRACE !== '1') return
+  logForDebugging(
+    JSON.stringify({
+      prefix: 'session-trace',
+      source: 'matcha-cli',
+      stage,
+      at: Date.now(),
+      sessionHash: debugIdentifierHash(getSessionId()),
+      ...fields(),
+    }),
+    { matchaTrace: true },
+  )
 }
 
 export function getDebugLogPath(): string {

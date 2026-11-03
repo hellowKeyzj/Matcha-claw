@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import type { AppVideoTask, AppVideoTaskResult } from '@matcha/app-plugins-sdk';
+import { isAppVideoTask, type AppVideoTask, type AppVideoTaskResult } from '@matcha/app-plugins-sdk';
 import type { Asset, GenerationEditing, GenerationRecord, GenerationRequest } from '../document';
 import { readJson } from './files';
 import { dimensions, generationActions, generationRequest, id, ids, invalid, number, object, text } from './validation';
@@ -80,7 +80,7 @@ export function validateGenerationPlacements(value: unknown): void {
 export async function loadGenerationSnapshot(path: string): Promise<GenerationSnapshot> {
   const raw = object(await readJson(path), ['formatVersion', 'request', 'sourceRevision', 'inputAssetIds', 'record', 'videoTasks', 'outputAssetIds', 'outputLayerIds']);
   if (raw.formatVersion !== 1) invalid('Invalid generation snapshot version.');
-  const request = generationRequest(raw.request, true);
+  const request = generationRequest(raw.request, 'snapshot');
   const record = object(raw.record, ['id', 'documentId', 'action', 'prompt', 'state', 'sourceLayerIds', 'editing', 'placements', 'assets', 'startedAt', 'finishedAt', 'error']);
   id(record.id); id(record.documentId, 'documentId');
   if (record.id !== basename(path, '.json') || record.documentId !== request.documentId || record.action !== request.action || record.prompt !== request.prompt
@@ -104,8 +104,7 @@ export async function loadGenerationSnapshot(path: string): Promise<GenerationSn
     videoTasks = raw.videoTasks.map((value) => {
       const entry = object(value, ['sceneIndex', 'task', 'status', 'assetIds']);
       const task = object(entry.task, ['kind', 'selectionId', 'accountId', 'modelId', 'endpointId', 'remoteId']);
-      if (task.kind !== 'openai-video' || !['queued', 'in-progress', 'completed', 'failed', 'unknown'].includes(String(entry.status))) invalid('Invalid video task receipt.');
-      for (const field of ['selectionId', 'accountId', 'modelId', 'endpointId', 'remoteId']) text(task[field], `task ${field}`, 500);
+      if (!isAppVideoTask(task) || !['queued', 'in-progress', 'completed', 'failed', 'unknown'].includes(String(entry.status))) invalid('Invalid video task receipt.');
       const assetIds = ids(entry.assetIds, 'video task assetIds', 8);
       if (assetIds.some((assetId) => !assets.some((asset) => asset.id === assetId))) invalid('Video task references an unsaved output asset.');
       return { sceneIndex: number(entry.sceneIndex, 'sceneIndex', 0, sceneCount - 1, true), task: task as unknown as AppVideoTask,

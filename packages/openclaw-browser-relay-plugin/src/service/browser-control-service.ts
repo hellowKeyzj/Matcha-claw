@@ -3,10 +3,15 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import {
   type BrowserActionParams,
+  type BrowserActionInvocation,
+  type BrowserSessionCleanup,
+  type BrowserUtilityAction,
   type BrowserActAction,
   type BrowserConnectionMode,
   type BrowserCookieInput,
   browserDataOperations,
+  browserUtilityKinds,
+  preserveBrowserActionReceipt,
   closeAgentTabsActions,
   type MouseButton,
   type RelayDirectAction,
@@ -24,9 +29,14 @@ import {
   resolveCdpEndpoint,
 } from '../direct-cdp/discovery.js'
 import { BrowserTabState } from '../state/browser-tab-state.js'
-import { PlaywrightSession } from '../playwright/session.js'
+import { browserPrincipalId, canAccessPage, canClosePage, claimPage, releasePage } from '../state/page-ownership.js'
+import { PlaywrightSession, type PlaywrightInvocation } from '../playwright/session.js'
+import { readRelayError } from '../relay/errors.js'
 import { PlaywrightActions } from '../playwright/actions.js'
+import { NativePageUpdatedError } from '../playwright/native-snapshot.js'
 import { InstalledProfileAutoLauncher } from '../browser-launch/installed-profile-auto-launcher.js'
+import { resolveLocalDownloadDirectory } from '../browser-launch/local-downloads.js'
+import { prepareWorkspaceDownload, resolvePathWithinWorkspace, saveWorkspaceDownload, writeWorkspaceFile } from './workspace-files.js'
 import { relayDebugWarn } from '../debug-logging.js'
 
 export type BrowserControlServiceOptions = {
@@ -84,6 +94,7 @@ type PlaywrightBrowserActionParams = Extract<
       | 'dialog'
       | 'pdf'
       | 'act'
+      | 'utility'
   }
 >
 type PlaywrightBrowserActionName = PlaywrightBrowserActionParams['action']
@@ -102,6 +113,7 @@ const playwrightActionNames = [
   'dialog',
   'pdf',
   'act',
+  'utility',
 ] as const satisfies readonly PlaywrightBrowserActionName[]
 
 type PlaywrightPageLike = {
@@ -179,7 +191,7 @@ function asCookieArray(value: unknown): BrowserCookieInput[] | undefined {
     const record = asRecord(entry)
     if (!record) continue
     const name = asString(record?.name)
-    const cookieValue = asString(record?.value)
+    const cookieValue = typeof record.value === 'string' ? record.value : undefined
     if (!name || cookieValue === undefined) continue
     cookies.push({
       name,
@@ -230,10 +242,10 @@ function sanitizeFileName(input: string): string {
   }).join('')
 }
 
-async function normalizeScreenshot(buffer: Buffer): Promise<Buffer> {
+async function normalizeScreenshot(buffer: Buffer, imageType: 'png' | 'jpeg'): Promise<{ buffer: Buffer; imageType: 'png' | 'jpeg' }> {
   const MAX_BYTES = 5 * 1024 * 1024
   const MAX_SIDE = 2_000
-  if (buffer.byteLength <= MAX_BYTES) return buffer
+  if (buffer.byteLength <= MAX_BYTES) return { buffer, imageType }
 
   try {
     const sharp = (await import('sharp')).default
@@ -252,25 +264,10 @@ async function normalizeScreenshot(buffer: Buffer): Promise<Buffer> {
       compressionLevel += 1
       output = await sharp(buffer).resize(resize).png({ compressionLevel }).toBuffer()
     }
-    return output
+    return { buffer: output, imageType: 'png' }
   } catch {
-    return buffer
+    return { buffer, imageType }
   }
-}
-
-function resolvePathWithinWorkspace(filePath: string | undefined, workspaceDir?: string): string | null {
-  if (!filePath) return null
-  const trimmed = filePath.trim()
-  if (!trimmed) return null
-  if (!workspaceDir) return path.resolve(trimmed)
-
-  const resolvedWorkspace = path.resolve(workspaceDir)
-  const candidate = path.isAbsolute(trimmed)
-    ? path.resolve(trimmed)
-    : path.resolve(resolvedWorkspace, trimmed)
-  return candidate === resolvedWorkspace || candidate.startsWith(`${resolvedWorkspace}${path.sep}`)
-    ? candidate
-    : null
 }
 
 function createErrorResult(
@@ -313,47 +310,120 @@ export class BrowserControlService {
   }
 
   async stop(): Promise<void> {
-    this.autoLauncher.stop()
-    await this.session.closeConnections()
+    const errors: unknown[] = []
+    try { this.autoLauncher.stop() } catch (error) { errors.push(error) }
+    try { await this.session.closeConnections() } catch (error) { errors.push(error) }
+    try { await this.options.relay.releaseServiceResources() } catch (error) { errors.push(error) }
+    this.session.clearCachedState()
     this.tabState.reset()
+    if (errors.length) {
+      throw new AggregateError(errors, `Browser control cleanup failed: ${errors.map((error) => error instanceof Error ? error.message : String(error)).join('; ')}`)
+    }
   }
 
-  async handleRequest(params: BrowserActionParams): Promise<BrowserActionResult> {
+  async cleanupSession(cleanup: BrowserSessionCleanup): Promise<void> {
+    const { context, scope } = cleanup
+    const principalId = browserPrincipalId(context)
+    const sessionGroupId = context.sessionGroupId ?? principalId
+    await this.session.drainSession(cleanup)
+    await this.session.cleanupSessionUtilities(cleanup)
+    const relayTabs = this.options.relay.listTabs().filter((tab) => scope === 'group'
+      ? tab.sessionGroupId === sessionGroupId
+      : tab.claimedBy === principalId || !tab.claimedBy && tab.createdBy === principalId)
+    const directTabs = this.tabState.allTargetIds.flatMap((targetId) => {
+      const tab = this.tabState.getTab(targetId)!
+      return (scope === 'group' ? tab.sessionGroupId === sessionGroupId : tab.claimedBy === principalId || !tab.claimedBy && tab.createdBy === principalId) ? [tab] : []
+    })
+    const errors: unknown[] = []
+    let relayReleased = false
+    try {
+      await this.options.relay.releaseSessionClaims(principalId, sessionGroupId, scope)
+      relayReleased = true
+    } catch (error) { errors.push(error) }
+    for (const tab of directTabs) {
+      if (tab.claimedBy && (scope === 'group' || tab.claimedBy === principalId)) {
+        this.tabState.registerTab(tab.targetId, releasePage(tab, tab.claimedBy))
+      }
+      this.session.clearCachedState(tab.targetId)
+    }
+    for (const tab of [...relayTabs, ...this.options.relay.listTabs().filter((tab) => scope === 'group'
+      ? tab.sessionGroupId === sessionGroupId
+      : tab.claimedBy === principalId || !tab.claimedBy && tab.createdBy === principalId)]) {
+      this.session.clearCachedState(tab.targetId || tab.targetKey)
+    }
+    if (scope === 'group') {
+      const targetIds = this.options.relay.listTabs()
+        .filter((tab) => tab.sessionGroupId === sessionGroupId && tab.createdBy && !tab.isRetained)
+        .map((tab) => tab.targetKey)
+      if (relayReleased) try {
+        const receipt = await this.options.relay.closeAgentTabs(targetIds, principalId, sessionGroupId)
+        for (const targetId of [...receipt.closedIds, ...receipt.alreadyClosedIds]) this.session.clearCachedState(targetId)
+        if (!receipt.success) throw new Error(`Browser session group cleanup failed: ${JSON.stringify(receipt)}`)
+      } catch (error) { errors.push(error) }
+      const toClose = directTabs.filter((tab) => tab.createdBy && !tab.retained)
+      if (toClose.length) {
+        const cdpUrl = this.session.getConnection('direct-cdp')?.cdpUrl
+        if (!cdpUrl) errors.push(new Error('Direct CDP session cleanup could not be confirmed: original browser disconnected.'))
+        else for (const tab of toClose) {
+          try {
+            await this.actions.closePage({ cdpUrl, targetId: tab.targetId, mode: 'direct-cdp' })
+            this.tabState.closeTab(tab.targetId)
+          } catch (error) { errors.push(error) }
+        }
+      }
+      if (!errors.length) this.options.relay.completeSessionGroupCleanup(sessionGroupId)
+    }
+    if (errors.length) throw new AggregateError(errors, 'Browser session cleanup could not be confirmed')
+  }
+
+  async handleRequest(params: BrowserActionParams, invocation: BrowserActionInvocation = {}): Promise<BrowserActionResult> {
     const action = asString((params as { action?: unknown } | null | undefined)?.action)?.toLowerCase()
     if (!action) {
       return createErrorResult('invalid_request', 'action is required')
     }
 
     try {
+      this.session.assertInvocationCurrent(invocation)
+      if (action === 'utility' && params.action === 'utility' && params.request?.kind === 'download') {
+        const result = await this.handleDownloadRequest(params, invocation)
+        return result.downloadState === 'completed' ? preserveBrowserActionReceipt(result) : result
+      }
       if (action === 'stop') {
-        await this.stop()
-        return { ok: true, stopped: true }
+        return await this.stopSession(invocation)
       }
 
       if (this.isRelayDirectActionName(action)) {
-        return await this.handleRelayOrDirectAction(params as RelayDirectBrowserActionParams)
+        return await this.handleRelayOrDirectAction(params as RelayDirectBrowserActionParams, invocation)
       }
       if (this.isPlaywrightActionName(action)) {
         return await this.handlePlaywrightAction(
           params as PlaywrightBrowserActionParams,
           this.resolveConnectionMode(params),
+          invocation,
         )
       }
       return createErrorResult('unsupported_action', `Unsupported browser action: ${action}`)
     } catch (error) {
-      return this.classifyActionError(error, { action, connectionMode: this.resolveConnectionMode(params) })
+      const receipt = asRecord(error)
+      return {
+        ...this.classifyActionError(error, { action, connectionMode: this.resolveConnectionMode(params) }),
+        ...(receipt?.actionPerformed === true ? { actionPerformed: true } : {}),
+        ...(receipt?.observationComplete === false ? { observationComplete: false } : {}),
+        ...(receipt?.partial ? { partial: receipt.partial } : {}),
+      }
     }
   }
 
   getStatus(): BrowserActionResult {
     this.syncRelayCurrentTarget()
+    const relayTabs = this.options.relay.listTabs()
     return {
       running: true,
       relayPort: this.options.relay.relayPort,
       extensionConnected: this.options.relay.hasExtensionConnection,
       attachedTabs: this.options.relay.listAttachments().length,
-      trackedTabs: this.tabState.agentTabCount,
-      retainedTabs: this.tabState.retainedTabCount,
+      trackedTabs: relayTabs.filter((entry) => entry.isAgent).length + this.tabState.agentTabCount,
+      retainedTabs: relayTabs.filter((entry) => entry.isRetained).length + this.tabState.retainedTabCount,
       playwrightConnected: this.session.isPlaywrightConnected(),
     }
   }
@@ -366,10 +436,10 @@ export class BrowserControlService {
     return playwrightActionNames.includes(action as PlaywrightBrowserActionName)
   }
 
-  private async handleRelayOrDirectAction(params: RelayDirectBrowserActionParams): Promise<BrowserActionResult> {
+  private async handleRelayOrDirectAction(params: RelayDirectBrowserActionParams, invocation: BrowserActionInvocation): Promise<BrowserActionResult> {
     const action = params.action
     let autoLaunchError: Error | null = null
-    if (!this.options.relay.hasExtensionConnection && this.shouldAutoLaunchRelayAction(action)) {
+    if (this.resolveConnectionMode(params) === 'relay' && !this.options.relay.hasExtensionConnection && this.shouldAutoLaunchRelayAction(action)) {
       try {
         await this.autoLauncher.ensureRelayBrowserAvailable()
       } catch (error) {
@@ -377,11 +447,18 @@ export class BrowserControlService {
       }
     }
 
-    if (this.options.relay.hasExtensionConnection) {
-      return await this.handleRelayAction(params)
+    this.session.assertInvocationCurrent(invocation)
+    if (this.resolveConnectionMode(params) === 'relay' && this.options.relay.hasExtensionConnection) {
+      const targetId = 'targetId' in params ? asString(params.targetId) : undefined
+      return targetId && action === 'console'
+        ? await this.options.relay.withTargetClaim(targetId, this.resolvePrincipalId(invocation), () => this.handleRelayAction(params, invocation), this.resolveSessionGroupId(invocation))
+        : await this.handleRelayAction(params, invocation)
     }
 
-    const directEndpoint = await this.resolveDirectEndpoint()
+    const directEndpoint = this.resolveConnectionMode(params) === 'direct-cdp'
+      ? await this.resolveDirectEndpoint()
+      : null
+    this.session.assertInvocationCurrent(invocation)
     if (!directEndpoint) {
       if (autoLaunchError) {
         throw autoLaunchError
@@ -401,8 +478,10 @@ export class BrowserControlService {
         }
       }
       return createErrorResult(
-        'browser_unavailable',
-        'Browser extension not connected and no direct CDP browser detected.',
+        this.resolveConnectionMode(params) === 'direct-cdp' ? 'direct_cdp_unavailable' : 'browser_unavailable',
+        this.resolveConnectionMode(params) === 'direct-cdp'
+          ? 'No direct CDP browser detected.'
+          : 'Browser extension not connected.',
         {
           recoverable: true,
           suggestedNextActions: ['start', 'open'],
@@ -410,13 +489,13 @@ export class BrowserControlService {
       )
     }
 
-    return await this.handleDirectCdpAction(params, directEndpoint)
+    return await this.handleDirectCdpAction(params, directEndpoint, invocation)
   }
 
-  private async handleRelayAction(params: RelayDirectBrowserActionParams): Promise<BrowserActionResult> {
+  private async handleRelayAction(params: RelayDirectBrowserActionParams, invocation: PlaywrightInvocation): Promise<BrowserActionResult> {
+    this.session.assertInvocationCurrent(invocation)
     this.syncRelayCurrentTarget()
     const attachments = this.options.relay.listAttachments()
-    const tabs = this.options.relay.listTabs()
     const relayPort = this.options.relay.relayPort
     const action = params.action
 
@@ -458,6 +537,7 @@ export class BrowserControlService {
     }
 
     if (action === 'tabs') {
+      const tabs = this.options.relay.listTabs(this.resolvePrincipalId(invocation), this.resolveSessionGroupId(invocation))
       return {
         ok: true,
         running: true,
@@ -476,30 +556,34 @@ export class BrowserControlService {
           isSelectedBrowser: entry.selectedBrowser,
           isSelectedWindow: entry.selectedWindow,
           isPrimary: entry.primary,
-          isAgent: entry.physical ? this.tabState.isAgent(entry.targetId) : false,
-          isRetained: entry.physical ? this.tabState.isRetained(entry.targetId) : false,
+          isAgent: entry.isAgent,
+          isRetained: entry.isRetained,
         })),
       }
     }
 
     if (action === 'open') {
       const requestedUrl = this.resolveOpenUrl(params)
-      const created = await this.options.relay.openTarget(requestedUrl)
+      const principalId = this.resolvePrincipalId(invocation)
+      await this.options.relay.ensureExecutionWindowSelectionForBrowserUse(principalId, this.resolveSessionGroupId(invocation))
+      this.session.assertInvocationCurrent(invocation)
+      const created = await this.options.relay.openTarget(requestedUrl, {
+        principalId,
+        sessionGroupId: this.resolveSessionGroupId(invocation),
+        ...(asBoolean(params.retain) !== undefined ? { retain: params.retain } : {}),
+      })
       relayDebugWarn(
         this.options.logger,
         () => `[browser-relay] open action created target requestedUrl="${requestedUrl}" targetId=${created.targetId}`,
       )
+      this.session.assertInvocationCurrent(invocation)
       const attachedTarget = await this.options.relay.resolveReadyTarget(String(created.targetId))
+      this.session.assertInvocationCurrent(invocation)
       relayDebugWarn(
         this.options.logger,
         () => `[browser-relay] open action attached target requestedUrl="${requestedUrl}" targetId=${attachedTarget.targetId} sessionId=${attachedTarget.sessionId} windowId=${attachedTarget.windowId ?? 'null'} tabId=${attachedTarget.tabId ?? 'null'} url="${attachedTarget.url}" readyState="${attachedTarget.readyState}" mainFrameUrl="${attachedTarget.mainFrameUrl}"`,
       )
       const targetId = attachedTarget.targetId
-      const sessionKey = asString(params.sessionKey)
-      this.tabState.registerTab(targetId, {
-        retain: asBoolean(params.retain) === true,
-        sessionKey,
-      })
       this.tabState.setCurrentTarget(targetId)
       this.tabState.touchTab(targetId)
       const openedUrl = attachedTarget.url || requestedUrl
@@ -519,7 +603,12 @@ export class BrowserControlService {
       if (!targetId) {
         return createErrorResult('invalid_request', 'targetId is required for action=focus')
       }
-      await this.options.relay.focusTarget(targetId)
+      const principalId = this.resolvePrincipalId(invocation)
+      await this.options.relay.withTargetClaim(targetId, principalId, async () => {
+        this.session.assertInvocationCurrent(invocation)
+        await this.options.relay.focusTarget(targetId)
+        this.session.assertInvocationCurrent(invocation)
+      }, this.resolveSessionGroupId(invocation))
       this.tabState.setCurrentTarget(targetId)
       this.tabState.touchTab(targetId)
       return { ok: true, targetId }
@@ -530,9 +619,7 @@ export class BrowserControlService {
       if (!targetId) {
         return createErrorResult('invalid_request', 'targetId is required for action=close')
       }
-      await this.options.relay.closeTarget(targetId)
-      this.tabState.closeTab(targetId)
-      return { ok: true, targetId }
+      return await this.closeControlledTarget(targetId, 'relay', invocation)
     }
 
     if (action === 'console') {
@@ -540,37 +627,30 @@ export class BrowserControlService {
       if (!targetId) {
         return createErrorResult('invalid_request', 'targetId is required for action=console')
       }
-      const expression = asString(params.expression)
-      if (!expression) {
-        return createErrorResult('invalid_request', 'expression is required for action=console')
-      }
-      const result = await this.options.relay.evaluate(targetId, expression)
-      return { ok: true, targetId, result }
+      const endpoint = this.resolveRelayEndpoint()
+      if (!endpoint) return createErrorResult('browser_unavailable', 'Browser extension not connected.')
+      return await this.handleConsoleAction(params, endpoint.preferredUrl, targetId, 'relay', invocation)
     }
 
     if (!closeAgentTabsActions.includes(action)) {
       return createErrorResult('unsupported_action', `Unsupported relay action: ${action}`)
     }
 
-    const closeAgentTabsResult = await this.options.relay.closeAllAgentTabs()
-    this.tabState.reset()
-    return {
-      ok: true,
-      closed: (closeAgentTabsResult as { closed?: number }).closed ?? 0,
-      retained: (closeAgentTabsResult as { retained?: number }).retained ?? 0,
-    }
+    return await this.closeSessionRelayTabs(this.resolvePrincipalId(invocation), invocation)
   }
 
   private async handleDirectCdpAction(
     params: RelayDirectBrowserActionParams,
     endpoint: ResolvedCdpEndpoint,
+    invocation: PlaywrightInvocation,
   ): Promise<BrowserActionResult> {
+    this.session.assertInvocationCurrent(invocation)
     const action = params.action
     const cdpUrl = endpoint.preferredUrl
 
     if (action === 'start' || action === 'status' || action === 'profiles') {
       const version = await getDirectCdpVersion(endpoint.port)
-      const tabs = await this.syncDirectTabs(cdpUrl, endpoint.port)
+      const tabs = await this.syncDirectTabs(cdpUrl, endpoint.port, invocation)
       return {
         ok: true,
         enabled: true,
@@ -589,10 +669,11 @@ export class BrowserControlService {
     }
 
     if (action === 'tabs') {
-      const tabs = await this.syncDirectTabs(cdpUrl, endpoint.port)
+      const principalId = this.resolvePrincipalId(invocation)
+      const tabs = await this.syncDirectTabs(cdpUrl, endpoint.port, invocation)
       return {
         ok: true,
-        tabs: tabs.map((tab) => ({
+        tabs: tabs.filter((tab) => canAccessPage(this.tabState.getTab(tab.targetId) ?? { createdBy: null, claimedBy: null, sessionGroupId: null, retained: false }, principalId, this.resolveSessionGroupId(invocation))).map((tab) => ({
           targetId: tab.targetId,
           title: tab.title,
           url: tab.url,
@@ -604,9 +685,18 @@ export class BrowserControlService {
 
     if (action === 'open') {
       const requestedUrl = this.resolveOpenUrl(params)
+      const principalId = this.resolvePrincipalId(invocation)
       const result = await this.session.sendBrowserCdpCommand(cdpUrl, 'Target.createTarget', {
         url: requestedUrl,
-      }, 'direct-cdp')
+      }, 'direct-cdp', invocation, (created) => {
+        const targetId = String(created?.targetId ?? '').trim()
+        if (targetId) this.tabState.registerTab(targetId, {
+          retained: asBoolean(params.retain) === true,
+          createdBy: principalId,
+          claimedBy: principalId,
+          sessionGroupId: this.resolveSessionGroupId(invocation),
+        })
+      })
       const targetId = String(result?.targetId ?? '').trim()
       if (!targetId) {
         return createErrorResult('protocol_error', 'Target.createTarget returned no targetId', {
@@ -615,10 +705,7 @@ export class BrowserControlService {
           suggestedNextActions: ['open'],
         })
       }
-      this.tabState.registerTab(targetId, {
-        retain: asBoolean(params.retain) === true,
-        sessionKey: asString(params.sessionKey),
-      })
+      this.session.assertInvocationCurrent(invocation)
       this.tabState.setCurrentTarget(targetId)
       this.tabState.touchTab(targetId)
       return {
@@ -635,8 +722,10 @@ export class BrowserControlService {
       if (!targetId) {
         return createErrorResult('invalid_request', 'targetId is required for action=focus')
       }
-      const page = await this.session.getPageForTargetId({ cdpUrl, targetId, mode: 'direct-cdp' })
-      await page.bringToFront()
+      this.claimDirectTarget(targetId, invocation)
+      const page = await this.session.getPageForTargetId({ ...invocation, cdpUrl, targetId, mode: 'direct-cdp' })
+      this.session.assertInvocationCurrent(invocation)
+      await this.session.runInvocation(invocation, () => page.bringToFront())
       this.tabState.setCurrentTarget(targetId)
       this.tabState.touchTab(targetId)
       return { ok: true, targetId }
@@ -647,50 +736,98 @@ export class BrowserControlService {
       if (!targetId) {
         return createErrorResult('invalid_request', 'targetId is required for action=close')
       }
-      const page = await this.session.getPageForTargetId({ cdpUrl, targetId, mode: 'direct-cdp' })
-      await page.close()
-      this.tabState.closeTab(targetId)
-      return { ok: true, targetId }
+      return await this.closeControlledTarget(targetId, 'direct-cdp', invocation, cdpUrl)
     }
 
     if (action === 'console') {
       const targetId = asString(params.targetId)
-      const expression = asString(params.expression)
-      if (!targetId || !expression) {
-        return createErrorResult('invalid_request', 'targetId and expression are required for action=console')
-      }
-      const result = await this.actions.evaluate({
-        cdpUrl,
-        targetId,
-        mode: 'direct-cdp',
-        fnBody: expression,
-      })
-      return { ok: true, targetId, result }
+      if (!targetId) return createErrorResult('invalid_request', 'targetId is required for action=console')
+      this.claimDirectTarget(targetId, invocation)
+      return await this.handleConsoleAction(params, cdpUrl, targetId, 'direct-cdp', invocation)
     }
 
     if (action === 'closeagenttabs' || action === 'close_agent_tabs') {
-      const targetIds = this.tabState.nonRetainedIds
-      let closed = 0
-      for (const targetId of targetIds) {
-        try {
-          const page = await this.session.getPageForTargetId({ cdpUrl, targetId, mode: 'direct-cdp' })
-          await page.close()
-          this.tabState.closeTab(targetId)
-          closed += 1
-        } catch {
-          // noop
-        }
-      }
-      return { ok: true, closed, retained: this.tabState.retainedTabCount }
+      return await this.closeSessionDirectTabs(cdpUrl, invocation)
     }
 
     return createErrorResult('unsupported_action', `Unsupported direct CDP action: ${action}`)
   }
 
+  private async handleConsoleAction(
+    params: Extract<BrowserActionParams, { action: 'console' }>,
+    cdpUrl: string,
+    targetId: string,
+    mode: BrowserConnectionMode,
+    invocation: PlaywrightInvocation,
+  ): Promise<BrowserActionResult> {
+    invocation = this.session.withInvocationDeadline(invocation, params.timeoutMs ?? 30_000)
+    return await this.session.withPageOperation({ ...invocation, cdpUrl, targetId, mode }, () => this.executeConsoleAction(params, cdpUrl, targetId, mode, invocation))
+  }
+
+  private async executeConsoleAction(
+    params: Extract<BrowserActionParams, { action: 'console' }>,
+    cdpUrl: string,
+    targetId: string,
+    mode: BrowserConnectionMode,
+    invocation: PlaywrightInvocation,
+  ): Promise<BrowserActionResult> {
+    if (typeof params.expression !== 'string' && typeof params.scriptPath !== 'string') {
+      return { ok: true, ...await this.actions.consoleMessages({ ...invocation, cdpUrl, targetId, mode, level: params.level }) }
+    }
+    const workspaceDir = asString(params.workspaceDir)
+    let expression = params.expression
+    if (!expression && typeof params.scriptPath === 'string') {
+      const scriptPath = resolvePathWithinWorkspace(params.scriptPath, workspaceDir)
+      if (!scriptPath) return createErrorResult('invalid_request', 'scriptPath must be a valid path under the workspace')
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const realPath = await fs.realpath(scriptPath)
+          const realWorkspace = workspaceDir ? await fs.realpath(workspaceDir) : undefined
+          if (!resolvePathWithinWorkspace(realPath, realWorkspace)) return createErrorResult('invalid_request', 'scriptPath must resolve under the workspace')
+          expression = await fs.readFile(realPath, 'utf8')
+          break
+        } catch (error) {
+          if (attempt || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          await this.session.runInvocation(invocation, () => new Promise((resolve) => setTimeout(resolve, 300)))
+        }
+      }
+      this.session.assertInvocationCurrent(invocation)
+    }
+    if (!expression?.trim()) return createErrorResult('invalid_request', 'expression or scriptPath resolved to empty script')
+    const result = await this.session.withFrameCdpSession({ ...invocation, cdpUrl, targetId, mode }, asString(params.frameId), async ({ send, contextId }) => await send('Runtime.evaluate', {
+      expression, returnByValue: true, awaitPromise: true, ...(contextId !== undefined ? { contextId } : {}),
+    }))
+    if (result.exceptionDetails || result.result?.subtype === 'error') {
+      return createErrorResult('protocol_error', String(result.exceptionDetails?.exception?.description ?? result.exceptionDetails?.text ?? result.result?.description ?? 'Console expression failed'), { retryable: false })
+    }
+    const value = result.result?.value
+    const record = asRecord(value)
+    const payload = record && '__result' in record ? record.__result : value
+    const debug = Array.isArray(record?.__debug) ? record.__debug.map(String) : []
+    let save: Record<string, unknown> | undefined
+    if (params.savePath) {
+      const savePath = resolvePathWithinWorkspace(params.savePath, workspaceDir)
+      if (!savePath) save = { status: 'skipped', reason: 'Path outside workspace or invalid.' }
+      else if (payload == null) save = { status: 'skipped', reason: 'No return value.' }
+      else {
+        try {
+          await writeWorkspaceFile(savePath, JSON.stringify(payload, null, 2), workspaceDir, () => this.session.assertInvocationCurrent(invocation))
+          save = { status: 'written', path: savePath }
+        } catch (error) {
+          this.session.assertInvocationCurrent(invocation)
+          save = { status: 'failed', reason: error instanceof Error ? error.message : String(error) }
+        }
+      }
+    }
+    return { ok: true, targetId, result: payload, ...(debug.length ? { debug } : {}), ...(save ? { save } : {}) }
+  }
+
   private async handlePlaywrightAction(
     params: PlaywrightBrowserActionParams,
     connectionMode: BrowserConnectionMode,
+    invocation: PlaywrightInvocation,
   ): Promise<BrowserActionResult> {
+    invocation = this.session.withInvocationDeadline(invocation, params.action === 'navigate' ? 120_000 : (params.action === 'act' || params.action === 'utility' ? asNumber(params.request?.timeoutMs) : undefined) ?? asNumber(params.timeoutMs) ?? (params.action === 'utility' && ['goBack', 'goForward', 'reload'].includes(params.request?.kind ?? '') ? 10_000 : 120_000))
     if (connectionMode === 'relay' && !this.options.relay.hasExtensionConnection) {
       await this.autoLauncher.ensureRelayBrowserAvailable()
     }
@@ -720,22 +857,77 @@ export class BrowserControlService {
     const mode = connectionMode
     const cdpUrl = endpoint.preferredUrl
     const workspaceDir = asString(params.workspaceDir)
-    if (mode === 'relay' && !asString(params.targetId)) {
-      await this.options.relay.ensureExecutionWindowSelectionForBrowserUse()
+    const requestedTargetId = params.action === 'act' || params.action === 'utility'
+      ? asString(params.request?.targetId) ?? asString(params.targetId)
+      : asString(params.targetId)
+    const principalId = this.resolvePrincipalId(invocation)
+    this.session.assertInvocationCurrent(invocation)
+    if (mode === 'relay' && !requestedTargetId) {
+      await this.options.relay.ensureExecutionWindowSelectionForBrowserUse(principalId, this.resolveSessionGroupId(invocation))
+      this.session.assertInvocationCurrent(invocation)
     }
     const targetId = mode === 'relay'
-      ? await this.resolveRelayExecutionTarget(asString(params.targetId))
-      : this.resolveDirectExecutionTarget(asString(params.targetId))
+      ? await this.resolveRelayExecutionTarget(requestedTargetId)
+      : this.resolveDirectExecutionTarget(requestedTargetId)
 
-    if (targetId) {
-      this.tabState.touchTab(targetId)
+    this.session.assertInvocationCurrent(invocation)
+    this.tabState.touchTab(targetId)
+    if (params.action === 'act' && params.request?.kind === 'close') return await this.executePlaywrightAction(params, cdpUrl, targetId, mode, invocation, workspaceDir)
+    const execute = () => this.session.withPageOperation({ ...invocation, cdpUrl, targetId, mode }, () => this.executePlaywrightAction(params, cdpUrl, targetId, mode, invocation, workspaceDir))
+    if (mode === 'relay') {
+      return await this.options.relay.withTargetClaim(targetId, principalId, execute, this.resolveSessionGroupId(invocation))
     }
+    this.claimDirectTarget(targetId, invocation)
+    return await execute()
+  }
 
+  private async executePlaywrightAction(
+    params: PlaywrightBrowserActionParams,
+    cdpUrl: string,
+    targetId: string,
+    mode: BrowserConnectionMode,
+    invocation: PlaywrightInvocation,
+    workspaceDir?: string,
+  ): Promise<BrowserActionResult> {
+    this.session.assertInvocationCurrent(invocation)
     const action = params.action
+
+    if (params.action === 'utility' && params.request?.kind !== 'pdf') {
+      const request = params.request
+      if (!request || !browserUtilityKinds.includes(request.kind)) return createErrorResult('invalid_request', 'A supported utility request.kind is required')
+      switch (request.kind) {
+        case 'highlight': case 'upload': case 'dialog': case 'errors': case 'cookies':
+          return await this.executePlaywrightAction({ ...params, ...request, action: request.kind } as PlaywrightBrowserActionParams, cdpUrl, targetId, mode, invocation, workspaceDir)
+        case 'har': {
+          const workspace = invocation.context?.workspaceDir
+          const savePath = workspace && resolvePathWithinWorkspace(request.savePath, workspace)
+          if (!savePath) return createErrorResult('invalid_request', 'HAR savePath is required and must be under the trusted workspace')
+          const result = await this.session.executeUtility({ ...invocation, cdpUrl, targetId, mode }, request)
+          if (typeof result.content !== 'string') throw new Error('HAR capture did not return file content')
+          await this.session.runInvocation(invocation, () => writeWorkspaceFile(savePath, result.content as string, workspace, () => this.session.assertInvocationCurrent(invocation)))
+          if (request.clear === true) await this.session.clearNetwork({ ...invocation, cdpUrl, targetId, mode })
+          return { ok: true, targetId, entries: result.entries, savePath, bytes: result.content.length }
+        }
+        case 'som': {
+          const result = await this.session.executeUtility({ ...invocation, cdpUrl, targetId, mode }, request, async () => {
+            const viewport = await this.session.sendPageCdpCommand({ ...invocation, cdpUrl, targetId, mode }, 'Runtime.evaluate', { expression: '({x:scrollX,y:scrollY,width:document.documentElement.clientWidth,height:document.documentElement.clientHeight})', returnByValue: true })
+            const clip = viewport?.result?.value
+            const image = await this.session.sendPageCdpCommand({ ...invocation, cdpUrl, targetId, mode }, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { ...clip, scale: 1 } })
+            const normalized = await normalizeScreenshot(Buffer.from(image.data, 'base64'), 'png')
+            this.session.assertInvocationCurrent(invocation)
+            return normalized.buffer.toString('base64')
+          })
+          return { ok: true, targetId, ...result }
+        }
+        default:
+          return { ok: true, targetId, ...await this.session.executeUtility({ ...invocation, cdpUrl, targetId, mode }, request) }
+      }
+    }
 
     if (action === 'navigate') {
       const url = requiredString(params.url, 'url')
       const result = await this.actions.navigate({
+        ...invocation,
         cdpUrl,
         targetId,
         mode,
@@ -748,11 +940,14 @@ export class BrowserControlService {
 
     if (action === 'snapshot') {
       const result = await this.actions.snapshot({
+        ...invocation,
         cdpUrl,
         targetId,
         mode,
         selector: asString(params.selector),
         frameSelector: asString(params.frame),
+        limit: asNumber(params.limit),
+        maxChars: asNumber(params.maxChars),
         timeoutMs: asNumber(params.timeoutMs),
         options: {
           interactive: asBoolean(params.interactive),
@@ -775,18 +970,29 @@ export class BrowserControlService {
         ...(result.truncated ? { truncated: true } : {}),
         ...(result.sparse ? { sparse: true } : {}),
         ...(result.refRange ? { refRange: result.refRange } : {}),
+        degraded: result.degraded,
+        source: result.source,
+        ...(result.degradedReason ? { degradedReason: result.degradedReason } : {}),
+        ...(result.frames ? { frames: result.frames } : {}),
+        ...(result.actionKey ? { actionKey: result.actionKey } : {}),
       }
     }
 
     if (action === 'screenshot') {
+      const savePath = resolvePathWithinWorkspace(asString(params.savePath), workspaceDir)
+      if (params.savePath !== undefined && !savePath) {
+        return createErrorResult('invalid_request', 'savePath must be a valid path under the workspace')
+      }
+      const imageType = params.type === 'jpeg' ? 'jpeg' : 'png'
       const result = await this.actions.screenshot({
+        ...invocation,
         cdpUrl,
         targetId,
         mode,
         ref: asString(params.ref),
         element: asString(params.element),
         fullPage: asBoolean(params.fullPage),
-        type: asString(params.type) === 'jpeg' ? 'jpeg' : 'png',
+        type: imageType,
         quality: asNumber(params.quality),
         timeoutMs: asNumber(params.timeoutMs),
         animations: asString(params.animations) === 'allow' ? 'allow' : 'disabled',
@@ -794,32 +1000,33 @@ export class BrowserControlService {
         scale: asString(params.scale) === 'device' ? 'device' : 'css',
         omitBackground: asBoolean(params.omitBackground),
       })
-      const normalizedBuffer = await normalizeScreenshot(result.buffer)
-      const savePath = resolvePathWithinWorkspace(asString(params.savePath), workspaceDir)
+      const normalized = await normalizeScreenshot(result.buffer, imageType)
       if (savePath) {
+        this.session.assertInvocationCurrent(invocation)
         await fs.mkdir(path.dirname(savePath), { recursive: true })
-        await fs.writeFile(savePath, normalizedBuffer)
+        this.session.assertInvocationCurrent(invocation)
+        await fs.writeFile(savePath, normalized.buffer)
       }
       return {
         ok: true,
         targetId,
         url: result.pageUrl,
-        imageBase64: normalizedBuffer.toString('base64'),
-        imageType: 'png',
+        imageBase64: normalized.buffer.toString('base64'),
+        imageType: normalized.imageType,
         ...(savePath ? { savedTo: savePath } : {}),
       }
     }
 
     if (action === 'scroll') {
-      return { ok: true, targetId, result: await this.actions.scroll({ cdpUrl, targetId, mode, direction: asString(params.scrollDirection), amount: asNumber(params.scrollAmount) }) }
+      return { ok: true, targetId, result: await this.actions.scroll({ ...invocation, cdpUrl, targetId, mode, direction: asString(params.scrollDirection), amount: asNumber(params.scrollAmount) }) }
     }
 
     if (action === 'errors') {
-      return { ok: true, ...(await this.actions.pageErrors({ cdpUrl, targetId, mode, clear: asBoolean(params.clear) })) }
+      return { ok: true, ...(await this.actions.pageErrors({ ...invocation, cdpUrl, targetId, mode, clear: asBoolean(params.clear) })) }
     }
 
     if (action === 'requests') {
-      return { ok: true, ...(await this.actions.networkRequests({ cdpUrl, targetId, mode, filter: asString(params.filter), clear: asBoolean(params.clear) })) }
+      return { ok: true, ...(await this.actions.networkRequests({ ...invocation, cdpUrl, targetId, mode, filter: asString(params.filter), clear: asBoolean(params.clear) })) }
     }
 
     if (action === 'cookies') {
@@ -830,6 +1037,7 @@ export class BrowserControlService {
       return {
         ok: true,
         data: await this.handleCookiesAction({
+          ...invocation,
           cdpUrl,
           targetId,
           mode,
@@ -848,67 +1056,87 @@ export class BrowserControlService {
       return {
         ok: true,
         data: await this.actions.storage({
+          ...invocation,
           cdpUrl,
           targetId,
           mode,
           storageType,
           operation,
-          key: asString(params.key),
-          value: asString(params.value),
+          key: typeof params.key === 'string' ? params.key : undefined,
+          value: typeof params.value === 'string' ? params.value : typeof params.value === 'number' || typeof params.value === 'boolean' ? String(params.value) : undefined,
         }),
       }
     }
 
     if (action === 'highlight') {
       await this.actions.highlight({
+        ...invocation,
         cdpUrl,
         targetId,
         mode,
-        ref: requiredString(params.ref, 'ref'),
+        ref: asString(params.ref),
+        backendNodeId: params.backendNodeId,
+        frameId: params.frameId,
         durationMs: asNumber(params.durationMs),
       })
       return { ok: true, targetId }
     }
 
     if (action === 'upload') {
+      const ref = asString(params.ref)
+      const inputRef = asString(params.inputRef)
+      const element = asString(params.element)
+      if (!ref && !inputRef && !element && params.backendNodeId === undefined) return createErrorResult('invalid_request', 'ref, inputRef or element is required for action=upload')
       const paths = asStringArray(params.paths)
       if (!paths?.length) {
         return createErrorResult('invalid_request', 'paths is required for action=upload')
       }
-      const resolvedPaths = paths
-        .map((entry) => resolvePathWithinWorkspace(entry, workspaceDir))
-        .filter((entry): entry is string => Boolean(entry))
-      if (!resolvedPaths.length) {
-        return createErrorResult('invalid_request', 'No valid upload paths after validation')
+      const resolvedPaths: string[] = []
+      for (const entry of paths) {
+        const resolved = resolvePathWithinWorkspace(entry, workspaceDir)
+        if (!resolved) return createErrorResult('invalid_request', 'Every upload path must be under the workspace')
+        const realPath = await fs.realpath(resolved)
+        if (!resolvePathWithinWorkspace(realPath, workspaceDir)) return createErrorResult('invalid_request', 'Every upload path must resolve under the workspace')
+        resolvedPaths.push(realPath)
       }
-      await this.actions.setInputFiles({
-        cdpUrl,
-        targetId,
-        mode,
-        paths: resolvedPaths,
-        inputRef: asString(params.inputRef),
-        element: asString(params.element),
-      })
+      if (ref && !inputRef && !element && params.backendNodeId === undefined) {
+        const upload = this.session.withInvocationDeadline({ ...invocation, cdpUrl, targetId, mode, timeoutMs: params.timeoutMs }, 10_000)
+        const chooser = await this.actions.armFileChooser({ ...upload, paths: resolvedPaths })
+        await this.actions.click({ ...upload, ref })
+        await chooser.waitAndSetFiles()
+      } else {
+        await this.actions.setInputFiles({ ...invocation, cdpUrl, targetId, mode, paths: resolvedPaths, inputRef, element, backendNodeId: params.backendNodeId, frameId: params.frameId })
+      }
       return { ok: true, targetId, paths: resolvedPaths }
     }
 
     if (action === 'dialog') {
       await this.actions.armDialog({
+        ...invocation,
         cdpUrl,
         targetId,
         mode,
         accept: asBoolean(params.accept),
-        promptText: asString(params.promptText),
+        promptText: typeof params.promptText === 'string' ? params.promptText : undefined,
       })
       return { ok: true, targetId, accept: asBoolean(params.accept) === true }
     }
 
-    if (action === 'pdf') {
-      const pdf = await this.actions.pdf({ cdpUrl, targetId, mode })
-      const savePath = resolvePathWithinWorkspace(asString(params.savePath) ?? `browser-${sanitizeFileName(targetId ?? 'page')}.pdf`, workspaceDir)
+    if (params.action === 'pdf' || params.action === 'utility' && params.request?.kind === 'pdf') {
+      const utility = params.action === 'utility' && params.request?.kind === 'pdf' ? params.request : undefined
+      const workspace = utility ? invocation.context?.workspaceDir : workspaceDir
+      const requestedPath = asString(utility?.savePath ?? (params.action === 'pdf' ? params.savePath : undefined)) ?? (utility ? undefined : `browser-${sanitizeFileName(targetId ?? 'page')}.pdf`)
+      const savePath = utility && !workspace ? null : resolvePathWithinWorkspace(requestedPath, workspace)
+      if (requestedPath && !savePath) return createErrorResult('invalid_request', 'savePath must be a valid path under the workspace')
+      const pdf = await this.actions.pdf({ ...invocation, cdpUrl, targetId, mode, ...(utility ? { landscape: utility.landscape, printBackground: utility.printBackground === true, paper: utility.paper, scale: utility.scale } : {}) })
       if (savePath) {
-        await fs.mkdir(path.dirname(savePath), { recursive: true })
-        await fs.writeFile(savePath, pdf.buffer)
+        if (utility) await this.session.runInvocation(invocation, () => writeWorkspaceFile(savePath, pdf.buffer, workspace, () => this.session.assertInvocationCurrent(invocation)))
+        else {
+          this.session.assertInvocationCurrent(invocation)
+          await fs.mkdir(path.dirname(savePath), { recursive: true })
+          this.session.assertInvocationCurrent(invocation)
+          await fs.writeFile(savePath, pdf.buffer)
+        }
       }
       return {
         ok: true,
@@ -919,10 +1147,223 @@ export class BrowserControlService {
     }
 
     if (action === 'act') {
-      return await this.handleActRequest(params, cdpUrl, targetId, mode)
+      return await this.handleActRequest(params, cdpUrl, targetId, mode, invocation)
     }
 
     return createErrorResult('unsupported_action', `Unsupported browser action: ${action}`)
+  }
+
+  private resolvePrincipalId(invocation: BrowserActionInvocation): string {
+    if (!invocation.context) throw new Error('Trusted browser invocation context is required')
+    return browserPrincipalId(invocation.context)
+  }
+
+  private resolveSessionGroupId(invocation: BrowserActionInvocation): string {
+    return invocation.context?.sessionGroupId ?? this.resolvePrincipalId(invocation)
+  }
+
+  private claimDirectTarget(targetId: string, invocation: PlaywrightInvocation): void {
+    this.session.assertInvocationCurrent(invocation)
+    const ownership = this.tabState.getTab(targetId) ?? { createdBy: null, claimedBy: null, sessionGroupId: null, retained: false }
+    this.tabState.registerTab(targetId, claimPage(ownership, this.resolvePrincipalId(invocation), this.resolveSessionGroupId(invocation)))
+  }
+
+  private async closeControlledTarget(
+    targetId: string,
+    mode: BrowserConnectionMode,
+    invocation: PlaywrightInvocation,
+    cdpUrl?: string,
+  ): Promise<BrowserActionResult> {
+    this.session.assertInvocationCurrent(invocation)
+    const principalId = this.resolvePrincipalId(invocation)
+    const nativeTab = mode === 'relay'
+      ? this.options.relay.listTabs().find((entry) => entry.targetId === targetId || entry.targetKey === targetId)
+      : undefined
+    const ownership = mode === 'relay'
+      ? nativeTab && { createdBy: nativeTab.createdBy, claimedBy: nativeTab.claimedBy, sessionGroupId: nativeTab.sessionGroupId, retained: nativeTab.isRetained }
+      : this.tabState.getTab(targetId)
+    if (!ownership || !canClosePage(ownership, principalId)) {
+      return { ok: false, success: false, targetId, skipped: true, reason: 'Only this session’s non-retained, unclaimed-by-others agent pages can be closed.', retryable: false }
+    }
+    if (mode === 'relay') {
+      const receipt = await this.options.relay.closeTarget(targetId, principalId)
+      if (receipt.success && !receipt.skipped) {
+        this.tabState.closeTab(targetId)
+        this.session.clearCachedState(targetId)
+      }
+      return { ok: receipt.success, targetId, ...receipt }
+    }
+    await this.actions.closePage({ ...invocation, cdpUrl: requiredString(cdpUrl, 'cdpUrl'), targetId, mode })
+    this.tabState.closeTab(targetId)
+    this.session.clearCachedState(targetId)
+    return { ok: true, success: true, targetId }
+  }
+
+  private async closeSessionRelayTabs(principalId: string, invocation: PlaywrightInvocation): Promise<BrowserActionResult> {
+    this.session.assertInvocationCurrent(invocation)
+    const targetIds = this.options.relay.listTabs()
+      .filter((entry) => canClosePage({ createdBy: entry.createdBy, claimedBy: entry.claimedBy, sessionGroupId: entry.sessionGroupId, retained: entry.isRetained }, principalId))
+      .map((entry) => entry.targetId || entry.targetKey)
+    const receipt = await this.options.relay.closeAgentTabs(targetIds, principalId)
+    for (const targetId of [...receipt.closedIds, ...receipt.alreadyClosedIds]) {
+      this.tabState.closeTab(targetId)
+      this.session.clearCachedState(targetId)
+    }
+    return { ok: receipt.success, ...receipt }
+  }
+
+  private async closeSessionDirectTabs(cdpUrl: string, invocation: PlaywrightInvocation): Promise<BrowserActionResult> {
+    const principalId = this.resolvePrincipalId(invocation)
+    const closedIds: string[] = []
+    const failedDetails: BrowserActionResult[] = []
+    for (const targetId of this.tabState.nonRetainedIds) {
+      const ownership = this.tabState.getTab(targetId)!
+      if (!canClosePage(ownership, principalId)) continue
+      this.session.assertInvocationCurrent(invocation)
+      try {
+        const receipt = await this.closeControlledTarget(targetId, 'direct-cdp', invocation, cdpUrl)
+        if (receipt.ok) closedIds.push(targetId)
+        else failedDetails.push(receipt)
+      } catch (error) {
+        failedDetails.push({ targetId, ...this.classifyActionError(error, { action: 'close', connectionMode: 'direct-cdp' }) })
+      }
+    }
+    const unknown = failedDetails.some((entry) => entry.outcome === 'unknown')
+    return {
+      ok: failedDetails.length === 0,
+      closed: closedIds.length,
+      closedIds,
+      retained: this.tabState.allTargetIds.filter((id) => this.tabState.getTab(id)?.createdBy === principalId && this.tabState.isRetained(id)).length,
+      failed: failedDetails.length,
+      failedDetails,
+      ...(unknown ? { outcome: 'unknown', retryable: false } : {}),
+    }
+  }
+
+  private async stopSession(invocation: PlaywrightInvocation): Promise<BrowserActionResult> {
+    const principalId = this.resolvePrincipalId(invocation)
+    await this.session.drainSession({ context: invocation.context!, scope: 'executor' })
+    await this.session.cleanupSessionUtilities({ context: invocation.context!, scope: 'executor' })
+    this.session.assertInvocationCurrent(invocation)
+    await this.options.relay.releaseSessionClaims(principalId, this.resolveSessionGroupId(invocation))
+    this.session.assertInvocationCurrent(invocation)
+    for (const targetId of this.tabState.allTargetIds) {
+      const ownership = this.tabState.getTab(targetId)!
+      if (ownership.claimedBy === principalId) this.tabState.registerTab(targetId, releasePage(ownership, principalId))
+    }
+    const relay = this.options.relay.hasExtensionConnection
+      ? await this.closeSessionRelayTabs(principalId, invocation)
+      : undefined
+    const directIds = this.tabState.nonRetainedIds.filter((id) => canClosePage(this.tabState.getTab(id)!, principalId))
+    let direct: BrowserActionResult | undefined
+    if (directIds.length) {
+      const cdpUrl = this.session.getConnection('direct-cdp')?.cdpUrl
+      this.session.assertInvocationCurrent(invocation)
+      direct = cdpUrl
+        ? await this.closeSessionDirectTabs(cdpUrl, invocation)
+        : createErrorResult('direct_cdp_unavailable', 'Original direct CDP browser disconnected; session pages were not closed.', { retryable: false })
+    }
+    const ok = relay?.ok !== false && direct?.ok !== false
+    return { ok, stopped: ok, ...(relay ? { relay } : {}), ...(direct ? { direct } : {}) }
+  }
+
+  private async handleDownloadRequest(params: BrowserUtilityAction, invocation: BrowserActionInvocation): Promise<BrowserActionResult> {
+    const request = params.request
+    if (request?.kind !== 'download') return createErrorResult('invalid_request', 'download request is required')
+    if (this.resolveConnectionMode(params) !== 'relay') {
+      return createErrorResult('unsupported_action', 'utility.download requires an extension-backed browser.')
+    }
+    if (request.savePath !== undefined && request.dir !== undefined) {
+      return createErrorResult('invalid_request', 'download savePath and dir are mutually exclusive', { retryable: false })
+    }
+    if (!invocation.context?.workspaceDir) {
+      return createErrorResult('invalid_request', 'download requires a trusted workspace', { retryable: false })
+    }
+    const timeoutMs = request.timeoutMs ?? params.timeoutMs ?? 60_000
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 600_000) {
+      return createErrorResult('invalid_request', 'download timeoutMs must be between 1 and 600000 milliseconds')
+    }
+    const trigger = request.trigger
+    if (trigger && trigger.kind !== 'click' && trigger.kind !== 'clickCoords') {
+      return createErrorResult('invalid_request', 'download trigger must be click or clickCoords')
+    }
+    const requestedTargetId = asString(trigger?.targetId) ?? asString(request.targetId) ?? asString(params.targetId)
+    if (trigger?.kind === 'clickCoords' && (asNumber(trigger.x) === undefined || asNumber(trigger.y) === undefined)) {
+      return createErrorResult('invalid_request', 'x and y are required for download clickCoords trigger')
+    }
+    if (trigger?.kind === 'click' && !asString(trigger.ref) && !asString(trigger.selector) && trigger.backendNodeId === undefined) {
+      return createErrorResult('invalid_request', 'ref, selector or backendNodeId is required for download click trigger')
+    }
+    const principalId = this.resolvePrincipalId(invocation)
+    if (!this.options.relay.hasExtensionConnection) await this.autoLauncher.ensureRelayBrowserAvailable()
+    this.session.assertInvocationCurrent(invocation)
+    if (!requestedTargetId) await this.options.relay.ensureExecutionWindowSelectionForBrowserUse(principalId, this.resolveSessionGroupId(invocation))
+    this.session.assertInvocationCurrent(invocation)
+    const targetId = await this.resolveRelayExecutionTarget(requestedTargetId)
+    this.session.assertInvocationCurrent(invocation)
+    const endpoint = this.resolveRelayEndpoint()
+    if (!endpoint) return createErrorResult('browser_unavailable', 'Browser extension not connected.')
+    const operation: PlaywrightInvocation = { ...invocation, deadlineAt: Date.now() + timeoutMs }
+    const assertCurrent = () => this.session.assertInvocationCurrent(operation)
+    return await this.options.relay.withTargetClaim(targetId, principalId, async () => {
+      assertCurrent()
+      const browserInstanceId = this.options.relay.listTabs().find((tab) => tab.targetId === targetId || tab.targetKey === targetId)?.browserInstanceId
+      if (!browserInstanceId) return createErrorResult('browser_unavailable', 'Download browser instance is no longer available.', { retryable: false })
+      const sourceDirectory = await this.session.runInvocation(operation, () => resolveLocalDownloadDirectory(browserInstanceId, assertCurrent))
+      const destination = await this.session.runInvocation(operation, () => prepareWorkspaceDownload(request, invocation.context?.workspaceDir, assertCurrent))
+      assertCurrent()
+      const download = await this.options.relay.watchDownload(targetId, this.session.remainingTimeout(operation, timeoutMs), trigger ? async (context) => {
+        context.signal.throwIfAborted()
+        invocation.signal?.throwIfAborted()
+        invocation.assertInvocationCurrent?.()
+        if (trigger) {
+          const result = await this.session.withPageOperation({ ...invocation, ...context, cdpUrl: endpoint.preferredUrl, targetId, mode: 'relay' }, () => this.handleActRequest({ action: 'act', request: { ...trigger, targetId }, timeoutMs: trigger.timeoutMs ?? timeoutMs }, endpoint.preferredUrl, targetId, 'relay', { ...invocation, ...context }))
+          if (result.ok === false || result.actionPerformed === false) {
+            throw Object.assign(new Error(String(result.error ?? result.reason ?? 'Download trigger failed')), {
+              errorDetail: asRecord(result.errorDetail) ?? { code: result.errorCode, outcome: result.actionPerformed === false ? 'not_performed' : result.outcome ?? 'unknown', retryable: result.retryable ?? false },
+            })
+          }
+        }
+      } : undefined, invocation.signal)
+      const receipt = {
+        action: 'utility.download',
+        browserInstanceId: download.browserInstanceId,
+        attribution: 'browser_time_window',
+        downloadId: download.downloadId,
+        downloadState: 'completed',
+        triggerOutcome: download.triggerOutcome,
+        ...(download.triggerError ? { triggerError: download.triggerError } : {}),
+        url: download.url,
+        mime: download.mime,
+        startTimeMs: download.startTimeMs,
+        browserFilePath: download.filePath,
+        fileSizeBytes: download.fileSizeBytes,
+      }
+      let saved: Awaited<ReturnType<typeof saveWorkspaceDownload>> | undefined
+      let pendingSavePath: string | undefined
+      try {
+        if (download.browserInstanceId !== browserInstanceId) throw new Error('Download browser instance changed before saving.')
+        await this.session.runInvocation(operation, async () => {
+          saved = await saveWorkspaceDownload(download, sourceDirectory, destination, assertCurrent, (savePath) => { pendingSavePath = savePath })
+        })
+        return { ok: true, ...receipt, ...saved, saveOutcome: 'saved' }
+      } catch (error) {
+        // A submitted filesystem operation remains tracked by the original invocation until it settles.
+        if (saved) return { ok: true, ...receipt, ...saved, saveOutcome: 'saved' }
+        const failure = this.classifyActionError(error, { action: 'utility.download', connectionMode: 'relay' })
+        const partial = asRecord(asRecord(error)?.partial)
+        return {
+          ...failure,
+          ...receipt,
+          ...(pendingSavePath ? { pendingSavePath } : {}),
+          ...(partial ?? {}),
+          ok: false,
+          saveOutcome: partial?.saveOutcome ?? (failure.outcome === 'unknown' ? 'unknown' : 'failed'),
+          retryable: false,
+          hint: 'The browser download completed. Do not repeat the download trigger; inspect the save outcome and file locations.',
+        }
+      }
+    }, this.resolveSessionGroupId(invocation))
   }
 
   private async handleActRequest(
@@ -930,7 +1371,27 @@ export class BrowserControlService {
     cdpUrl: string,
     defaultTargetId: string | undefined,
     mode: 'relay' | 'direct-cdp',
+    invocation: PlaywrightInvocation = {},
   ): Promise<BrowserActionResult> {
+    const kind = params.request?.kind
+    if (!kind || !['click', 'clickCoords', 'type', 'press', 'hover', 'scrollIntoView', 'select'].includes(kind)) {
+      return await this.executeActRequest(params, cdpUrl, defaultTargetId, mode, invocation)
+    }
+    return await this.actions.observeAction(
+      { ...invocation, cdpUrl, targetId: params.request?.targetId ?? defaultTargetId, mode },
+      kind === 'click' || kind === 'clickCoords' || kind === 'press' || (kind === 'type' && params.request?.submit === true),
+      () => this.executeActRequest(params, cdpUrl, defaultTargetId, mode, invocation),
+    )
+  }
+
+  private async executeActRequest(
+    params: BrowserActAction,
+    cdpUrl: string,
+    defaultTargetId: string | undefined,
+    mode: 'relay' | 'direct-cdp',
+    invocation: PlaywrightInvocation = {},
+  ): Promise<BrowserActionResult> {
+    this.session.assertInvocationCurrent(invocation)
     const request = params.request
     if (!request) {
       return createErrorResult('invalid_request', 'request is required for action=act')
@@ -947,6 +1408,7 @@ export class BrowserControlService {
         action: 'act.evaluate',
         targetId,
         result: await this.actions.evaluate({
+          ...invocation,
           cdpUrl,
           targetId,
           mode,
@@ -964,18 +1426,22 @@ export class BrowserControlService {
     switch (payload.kind) {
       case 'click': {
         const selector = asString(payload.selector)
-        await this.actions.click({
+        const result = await this.actions.click({
+          ...invocation,
           cdpUrl,
           targetId,
           mode,
           ref: selector ? undefined : asString(payload.ref),
+          backendNodeId: payload.backendNodeId,
+          frameId: payload.frameId,
           selector,
           timeoutMs,
           doubleClick: payload.doubleClick,
           button: asMouseButton(payload.button),
           modifiers: payload.modifiers,
+          humanize: payload.humanize,
         })
-        return { ok: true, action: 'act.click', targetId }
+        return { ok: true, action: 'act.click', targetId, ...result }
       }
       case 'clickCoords': {
         const x = asNumber(payload.x)
@@ -984,6 +1450,7 @@ export class BrowserControlService {
           return createErrorResult('invalid_request', 'x and y are required for request.kind=clickCoords')
         }
         await this.actions.click({
+          ...invocation,
           cdpUrl,
           targetId,
           mode,
@@ -992,45 +1459,48 @@ export class BrowserControlService {
           timeoutMs,
           doubleClick: payload.doubleClick,
           button: asMouseButton(payload.button),
+          modifiers: payload.modifiers,
+          humanize: payload.humanize,
           delayMs: asNumber(payload.delayMs),
         })
         return { ok: true, action: 'act.clickCoords', targetId }
       }
-      case 'type':
-        await this.actions.type({ cdpUrl, targetId, mode, ref: requiredString(payload.ref, 'ref'), text: requiredString(payload.text, 'text'), submit: payload.submit, slowly: payload.slowly, clearFirst: payload.clearFirst, timeoutMs })
-        return { ok: true, action: 'act.type', targetId }
+      case 'type': {
+        if (typeof payload.text !== 'string') return createErrorResult('invalid_request', 'text is required')
+        const result = await this.actions.type({ ...invocation, cdpUrl, targetId, mode, ref: asString(payload.ref), backendNodeId: payload.backendNodeId, frameId: payload.frameId, text: payload.text, submit: payload.submit, slowly: payload.slowly, clearFirst: payload.clearFirst, timeoutMs })
+        return { ok: true, action: 'act.type', targetId, ...result }
+      }
       case 'press':
-        await this.actions.press({ cdpUrl, targetId, mode, key: requiredString(payload.key, 'key'), delayMs: payload.delayMs })
+        await this.actions.press({ ...invocation, cdpUrl, targetId, mode, key: requiredString(payload.key, 'key'), delayMs: payload.delayMs })
         return { ok: true, action: 'act.press', targetId }
       case 'hover':
-        await this.actions.hover({ cdpUrl, targetId, mode, ref: requiredString(payload.ref, 'ref'), timeoutMs })
-        return { ok: true, action: 'act.hover', targetId }
+        return { ok: true, action: 'act.hover', targetId, ...await this.actions.hover({ ...invocation, cdpUrl, targetId, mode, ref: asString(payload.ref), backendNodeId: payload.backendNodeId, frameId: payload.frameId, timeoutMs }) }
       case 'scrollIntoView':
-        await this.actions.scrollIntoView({ cdpUrl, targetId, mode, ref: requiredString(payload.ref, 'ref'), timeoutMs })
-        return { ok: true, action: 'act.scrollIntoView', targetId }
+        return { ok: true, action: 'act.scrollIntoView', targetId, ...await this.actions.scrollIntoView({ ...invocation, cdpUrl, targetId, mode, ref: asString(payload.ref), backendNodeId: payload.backendNodeId, frameId: payload.frameId, timeoutMs }) }
       case 'drag':
-        await this.actions.drag({ cdpUrl, targetId, mode, startRef: requiredString(payload.startRef, 'startRef'), endRef: requiredString(payload.endRef, 'endRef'), timeoutMs })
-        return { ok: true, action: 'act.drag', targetId }
+        return { ok: true, action: 'act.drag', targetId, ...await this.actions.drag({ ...invocation, cdpUrl, targetId, mode, startRef: requiredString(payload.startRef, 'startRef'), endRef: requiredString(payload.endRef, 'endRef'), timeoutMs }) }
       case 'select':
-        await this.actions.select({ cdpUrl, targetId, mode, ref: requiredString(payload.ref, 'ref'), values: payload.values ?? [], timeoutMs })
-        return { ok: true, action: 'act.select', targetId }
-      case 'fill':
-        await this.actions.fill({
-          cdpUrl,
-          targetId,
-          mode,
-          fields: (payload.fields ?? []).map((field) => {
-            if (typeof field.ref !== 'string') throw new Error('ref is required for relay fill fields')
-            return { ...field, ref: field.ref }
-          }),
-          timeoutMs,
+        return { ok: true, action: 'act.select', targetId, ...await this.actions.select({ ...invocation, cdpUrl, targetId, mode, ref: asString(payload.ref), backendNodeId: payload.backendNodeId, frameId: payload.frameId, values: payload.values ?? [], timeoutMs }) }
+      case 'fill': {
+        if (!Array.isArray(payload.fields) || !payload.fields.length) return createErrorResult('invalid_request', 'fields must be a non-empty array')
+        const fields = payload.fields.map((field) => {
+          const ref = asString(field?.ref)
+          if (!ref && field?.backendNodeId === undefined) throw new Error('fill requires ref or backendNodeId')
+          const type = asString(field.type) ?? 'text'
+          if (!['text', 'select', 'checkbox', 'radio'].includes(type)) throw new Error('fill type must be text/select/checkbox/radio')
+          return { ...field, ref, type }
         })
-        return { ok: true, action: 'act.fill', targetId }
+        const result = await this.actions.fill({ ...invocation, cdpUrl, targetId, mode, fields, timeoutMs })
+        return result.failed.length
+          ? { ok: false, action: 'act.fill', targetId, error: 'BROWSER_FILL_PARTIAL_FAILURE', retryable: false, partial: result }
+          : { ok: true, action: 'act.fill', targetId, appliedCount: result.applied.length }
+      }
       case 'resize':
-        await this.actions.resize({ cdpUrl, targetId, mode, width: payload.width ?? 0, height: payload.height ?? 0 })
+        await this.actions.resize({ ...invocation, cdpUrl, targetId, mode, width: payload.width ?? 0, height: payload.height ?? 0 })
         return { ok: true, action: 'act.resize', targetId }
       case 'wait':
         await this.actions.waitFor({
+          ...invocation,
           cdpUrl,
           targetId,
           mode,
@@ -1050,6 +1520,7 @@ export class BrowserControlService {
           action: 'act.evaluate',
           targetId,
           result: await this.actions.evaluate({
+            ...invocation,
             cdpUrl,
             targetId,
             mode,
@@ -1059,22 +1530,20 @@ export class BrowserControlService {
           }),
         }
       case 'close':
-        await this.actions.closePage({ cdpUrl, targetId, mode })
-        if (targetId) {
-          this.tabState.closeTab(targetId)
-        }
-        return { ok: true, action: 'act.close', targetId }
+        return { ...await this.closeControlledTarget(requiredString(targetId, 'targetId'), mode, invocation, cdpUrl), action: 'act.close' }
       case 'scroll':
         return {
           ok: true,
           action: 'act.scroll',
           targetId,
           result: await this.actions.scroll({
+            ...invocation,
             cdpUrl,
             targetId,
             mode,
             direction: payload.scrollDirection,
             amount: payload.scrollAmount,
+            pace: true,
           }),
         }
       default:
@@ -1115,12 +1584,15 @@ export class BrowserControlService {
       : null
   }
 
-  private async syncDirectTabs(cdpUrl: string, port: number): Promise<Array<{ targetId: string; url: string; title: string; type?: string }>> {
+  private async syncDirectTabs(cdpUrl: string, port: number, invocation: PlaywrightInvocation): Promise<Array<{ targetId: string; url: string; title: string; type?: string }>> {
     const tabs = await this.tabState.withSyncLock(async () => {
+      this.session.assertInvocationCurrent(invocation)
       let list = await listDirectCdpTabs(port)
+      this.session.assertInvocationCurrent(invocation)
       if (list.length === 1 && list[0]?.targetId === M144_PLACEHOLDER_TARGET_ID) {
         try {
-          const connection = await this.session.connectBrowser(cdpUrl, 'direct-cdp')
+          const connection = await this.session.connectBrowser(cdpUrl, 'direct-cdp', invocation)
+          this.session.assertInvocationCurrent(invocation)
           const browser = connection.browser as PlaywrightBrowserLike
           const discoveredPages = browser
             .contexts()
@@ -1133,23 +1605,26 @@ export class BrowserControlService {
               type: 'page',
             })),
           )).filter((entry: { targetId: string }) => entry.targetId)
-        } catch {
-          list = []
+        } catch (error) {
+          this.session.assertInvocationCurrent(invocation)
+          throw error
         }
       }
 
+      this.session.assertInvocationCurrent(invocation)
       const validTargetIds = new Set(list.map((entry) => entry.targetId).filter(Boolean))
       this.tabState.purgeStale(validTargetIds)
       return list
     })
 
+    const principalId = invocation.context ? browserPrincipalId(invocation.context) : undefined
     for (const idleTargetId of this.tabState.getIdleTabs(10 * 60 * 1000)) {
+      if (!principalId || !canClosePage(this.tabState.getTab(idleTargetId)!, principalId)) continue
+      this.session.assertInvocationCurrent(invocation)
       try {
-        const page = await this.session.getPageForTargetId({ cdpUrl, targetId: idleTargetId, mode: 'direct-cdp' })
-        await page.close()
-        this.tabState.closeTab(idleTargetId)
+        await this.closeControlledTarget(idleTargetId, 'direct-cdp', invocation, cdpUrl)
       } catch {
-        // noop
+        this.session.assertInvocationCurrent(invocation)
       }
     }
 
@@ -1162,23 +1637,26 @@ export class BrowserControlService {
     mode: 'relay' | 'direct-cdp'
     operation: 'get' | 'set' | 'clear'
     cookies?: BrowserCookieInput[]
-  }): Promise<unknown> {
+  } & PlaywrightInvocation): Promise<unknown> {
+    this.session.assertInvocationCurrent(input)
     if (!input.targetId) {
       throw new Error('targetId is required')
     }
 
     if (input.mode === 'relay') {
-      return await this.handleRelayCookiesAction(input.targetId, input.operation, input.cookies)
+      return await this.handleRelayCookiesAction(input.targetId, input.operation, input.cookies, input)
     }
 
-    return await this.handleDirectCdpCookiesAction(input, input.targetId)
+    return await this.handleDirectCdpCookiesAction({ ...input, mode: input.mode }, input.targetId)
   }
 
   private async handleRelayCookiesAction(
     targetId: string,
     operation: 'get' | 'set' | 'clear',
-    cookies?: BrowserCookieInput[],
+    cookies: BrowserCookieInput[] | undefined,
+    invocation: PlaywrightInvocation,
   ): Promise<unknown> {
+    this.session.assertInvocationCurrent(invocation)
     if (operation === 'get') {
       return (await this.options.relay.getCookies(targetId))
         .map((cookie) => normalizeBrowserCookieRecord(cookie))
@@ -1203,14 +1681,17 @@ export class BrowserControlService {
       mode: 'direct-cdp'
       operation: 'get' | 'set' | 'clear'
       cookies?: BrowserCookieInput[]
-    },
+    } & PlaywrightInvocation,
     targetId: string,
   ): Promise<unknown> {
+    this.session.assertInvocationCurrent(input)
     const page = await this.session.getPageForTargetId({
+      ...input,
       cdpUrl: input.cdpUrl,
       targetId,
       mode: input.mode,
     })
+    this.session.assertInvocationCurrent(input)
     const pageUrl = typeof page?.url === 'function' ? String(page.url()).trim() : ''
     const currentPageCookieUrl = this.resolveCookieCapableUrl(pageUrl)
 
@@ -1219,12 +1700,12 @@ export class BrowserControlService {
         return []
       }
       const result = await this.session.sendPageCdpCommand(
-        { cdpUrl: input.cdpUrl, targetId, mode: input.mode },
+        { ...input, cdpUrl: input.cdpUrl, targetId, mode: input.mode },
         'Network.getCookies',
         { urls: [currentPageCookieUrl] },
       )
       const cookies = Array.isArray(result?.cookies) ? result.cookies : []
-      return cookies.map((cookie) => normalizeBrowserCookieRecord(cookie)).filter(Boolean)
+      return cookies.map((cookie: unknown) => normalizeBrowserCookieRecord(cookie)).filter(Boolean)
     }
 
     if (input.operation === 'set') {
@@ -1244,7 +1725,7 @@ export class BrowserControlService {
       }
 
       await this.session.sendPageCdpCommand(
-        { cdpUrl: input.cdpUrl, targetId, mode: input.mode },
+        { ...input, cdpUrl: input.cdpUrl, targetId, mode: input.mode },
         'Network.setCookies',
         { cookies: normalizedCookies },
       )
@@ -1256,7 +1737,7 @@ export class BrowserControlService {
     }
 
     const existing = await this.session.sendPageCdpCommand(
-      { cdpUrl: input.cdpUrl, targetId, mode: input.mode },
+      { ...input, cdpUrl: input.cdpUrl, targetId, mode: input.mode },
       'Network.getCookies',
       { urls: [currentPageCookieUrl] },
     )
@@ -1267,7 +1748,7 @@ export class BrowserControlService {
       const name = typeof record.name === 'string' ? record.name : ''
       if (!name) continue
       await this.session.sendPageCdpCommand(
-        { cdpUrl: input.cdpUrl, targetId, mode: input.mode },
+        { ...input, cdpUrl: input.cdpUrl, targetId, mode: input.mode },
         'Network.deleteCookies',
         {
           name,
@@ -1330,9 +1811,39 @@ export class BrowserControlService {
     error: unknown,
     context: { action: string; connectionMode: BrowserConnectionMode },
   ): BrowserActionResult {
-    const originalMessage = error instanceof Error ? error.message : String(error)
-    const mappedMessage = this.session.mapActionError(error)
+    if (error instanceof NativePageUpdatedError) {
+      const partial = asRecord(asRecord(error)?.partial)
+      const appliedCount = Array.isArray(partial?.applied) ? partial.applied.length : 0
+      return {
+        ok: appliedCount === 0,
+        actionPerformed: appliedCount > 0,
+        pageUpdated: true,
+        reason: error.reason,
+        ...(partial ? { partial } : {}),
+        ...(appliedCount ? { error: 'BROWSER_FILL_PARTIAL_FAILURE', appliedCount, retryable: false, hint: 'Earlier fields were applied. Inspect the updated page and continue only with remaining fields; do not repeat the whole fill.' } : {}),
+        ...(error.freshSnapshot ? { snapshot: error.freshSnapshot.snapshot, refs: error.freshSnapshot.refs } : {}),
+      }
+    }
+    const { message: originalMessage, errorDetail } = readRelayError(error)
+    const mappedMessage = this.session.mapActionError(new Error(originalMessage))
     const combinedMessage = `${originalMessage}\n${mappedMessage}`
+    if (errorDetail) {
+      return {
+        ...createErrorResult('protocol_error', mappedMessage, {
+          ...(errorDetail.outcome === 'unknown' ? { retryable: false } : typeof errorDetail.retryable === 'boolean' ? { retryable: errorDetail.retryable } : {}),
+        }),
+        errorDetail,
+        ...(asRecord(error)?.partial ? { partial: asRecord(error)!.partial } : {}),
+        ...(typeof errorDetail.outcome === 'string' ? { outcome: errorDetail.outcome } : {}),
+      }
+    }
+
+    if (/timeout|timed out|deadline|cancel|abort/i.test(combinedMessage)) {
+      return {
+        ...createErrorResult('protocol_error', mappedMessage, { retryable: false }),
+        outcome: 'unknown',
+      }
+    }
 
     if (combinedMessage.includes('No current browser target available.')) {
       return createErrorResult('no_current_target', mappedMessage, {
@@ -1341,7 +1852,7 @@ export class BrowserControlService {
       })
     }
 
-    if (combinedMessage.includes('Unknown ref "')) {
+    if (combinedMessage.includes('Unknown ref "') || combinedMessage.includes('Unknown fused ref:')) {
       return createErrorResult('stale_snapshot_ref', mappedMessage, {
         recoverable: true,
         suggestedNextActions: ['snapshot'],
@@ -1371,10 +1882,7 @@ export class BrowserControlService {
     }
 
     if (combinedMessage.includes('Execution context was destroyed')) {
-      return createErrorResult('page_context_destroyed', mappedMessage, {
-        recoverable: true,
-        retryable: true,
-      })
+      return { ...createErrorResult('page_context_destroyed', mappedMessage, { recoverable: true, retryable: false }), outcome: 'unknown' }
     }
 
     if (

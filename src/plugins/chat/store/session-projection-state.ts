@@ -8,6 +8,11 @@ export type SessionProjectionState = Omit<SessionView, 'modelState' | 'inputRece
   runtimeNotice?: ChatSessionRuntimeState['runtimeNotice'] | null;
   retiredItemIds?: ReadonlySet<string>;
   recordKey?: string;
+  previewLoad?: {
+    recordIdentity: SessionIdentity;
+    controller?: AbortController;
+    pending: boolean;
+  };
 };
 
 type ProjectionOwner = {
@@ -70,6 +75,7 @@ export function resetSessionProjection(get: () => ChatStoreState, sessionKey: st
       if (key === sessionKey || view.recordKey === sessionKey || identityKey === sessionKey
         || identities.has(identityKey) || baseIdentityKey === sessionKey
         || baseIdentityKey !== null && identities.has(baseIdentityKey)) {
+        view.previewLoad?.controller?.abort();
         store.delete(key);
         owner.rendered.delete(key);
       }

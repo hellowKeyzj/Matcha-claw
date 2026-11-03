@@ -4,6 +4,7 @@ import type {
   SessionLargeTextMetadata,
   SessionRenderAssistantBubbleToolResult,
   SessionRenderAttachedFile,
+  SessionRenderContentNotice,
   SessionRenderImage,
   SessionRenderToolCard,
   SessionTimelineContentBlock,
@@ -195,117 +196,39 @@ export function isSessionImageGenerationToolName(value: string | null | undefine
   return typeof value === 'string' && IMAGE_GENERATION_TOOL_NAME_PATTERN.test(value);
 }
 
-type SessionImageGenerationToolCandidate = Pick<SessionRenderToolCard, 'id' | 'toolCallId' | 'name' | 'status'>
-  & Partial<Pick<SessionRenderToolCard, 'summary' | 'inputText' | 'output' | 'result'>>;
+type SessionImageGenerationTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'deleted';
 
-const IMAGE_GENERATION_BACKGROUND_START_PATTERN = /^Background task started for image generation\s*\(([0-9a-f-]{36})\)\.?/i;
-
-function stringifyToolPayload(value: unknown): string | null {
-  if (value == null) {
-    return null;
-  }
-  return typeof value === 'string' ? value : JSON.stringify(value) ?? null;
-}
-
-function imageGenerationToolTextCandidates(tool: SessionImageGenerationToolCandidate): string[] {
-  const result = tool.result;
-  return [
-    tool.summary,
-    tool.inputText,
-    stringifyToolPayload(tool.output),
-    result && 'collapsedPreview' in result ? result.collapsedPreview : null,
-    result && 'bodyText' in result ? result.bodyText : null,
-    result && 'rawText' in result ? result.rawText : null,
-  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-}
-
-function imageGenerationBackgroundTaskId(tool: SessionImageGenerationToolCandidate): string | null {
-  for (const text of imageGenerationToolTextCandidates(tool)) {
-    const match = IMAGE_GENERATION_BACKGROUND_START_PATTERN.exec(text.trim());
-    if (match?.[1]) {
-      return match[1];
-    }
-  }
-  return null;
-}
-
-function hasImageGenerationBackgroundStart(tool: SessionImageGenerationToolCandidate): boolean {
-  return imageGenerationBackgroundTaskId(tool) != null;
-}
-
-function imageGenerationToolTaskId(tool: SessionImageGenerationToolCandidate): string {
-  return imageGenerationBackgroundTaskId(tool) ?? tool.toolCallId ?? tool.id;
-}
-
-export function isSessionImageGenerationStatusNarration(text: string): boolean {
-  const value = text.trim();
-  if (!value) {
-    return false;
-  }
-  if (IMAGE_GENERATION_BACKGROUND_START_PATTERN.test(value)) {
-    return true;
-  }
-  if (value.length > 120) {
-    return false;
-  }
-  if (/^(?:图片(?:正在)?生成中|正在生成(?:图片|图像)|生成中)[，,。！!\s]*(?:请)?(?:稍候|稍等|等一下)?[，,。！!\s]*$/i.test(value)) {
-    return true;
-  }
-  return /(?:稍等|稍候|please wait|one moment)/i.test(value) && /(?:图片|图像|image|generat)/i.test(value);
-}
-
-function hasImageGenerationMedia(item: SessionAssistantTurnItem): boolean {
-  return item.images.length > 0
-    || item.attachedFiles.some((file) => file.mimeType.toLowerCase().startsWith('image/') || !!file.gatewayUrl)
-    || item.segments.some((segment) => (
-      segment.kind === 'media'
-      && (
-        segment.images.length > 0
-        || segment.attachedFiles.some((file) => file.mimeType.toLowerCase().startsWith('image/') || !!file.gatewayUrl)
-      )
-    ));
-}
-
-function hasImageGenerationCompletionContent(item: SessionAssistantTurnItem): boolean {
-  if (hasImageGenerationMedia(item)) {
-    return true;
-  }
-  const text = item.text.trim();
-  return text.length > 0
-    && !isSessionImageGenerationStatusNarration(text)
-    && /(?:图片|图像|image|generat|生成|failed|failure|error|失败|出错|无法|cannot|unable)/i.test(text);
+export function sessionImageGenerationTask(tool: SessionRenderToolCard): { taskId: string; runId: string | null; status: SessionImageGenerationTaskStatus } | null {
+  if (tool.runtimeAdapterId !== 'openclaw' || tool.name !== 'image_generate'
+    || !tool.details || typeof tool.details !== 'object') return null;
+  const details = tool.details as Record<string, unknown>;
+  const task = details.task;
+  if (!task || typeof task !== 'object') return null;
+  const { taskId, status, runId } = task as Record<string, unknown>;
+  if (typeof taskId !== 'string' || !taskId || taskId !== details.taskId) return null;
+  if (status !== 'queued' && status !== 'running' && status !== 'completed'
+    && status !== 'failed' && status !== 'timed_out' && status !== 'cancelled' && status !== 'deleted') return null;
+  const taskRunId = typeof runId === 'string' && runId ? runId : details.runId;
+  return { taskId, runId: typeof taskRunId === 'string' && taskRunId ? taskRunId : null, status };
 }
 
 export function deriveSessionImageGenerationPendingStateFromItems(
   items: ReadonlyArray<SessionRenderItem>,
-  current?: SessionImageGenerationPendingState | null,
 ): SessionImageGenerationPendingState {
-  const taskIds = new Set(current?.pendingTaskIds ?? []);
+  const taskIds = new Set<string>();
   for (const item of items) {
-    if (item.kind !== 'assistant-turn') {
-      continue;
-    }
+    if (item.kind !== 'assistant-turn') continue;
     for (const tool of item.tools) {
-      if (!isSessionImageGenerationToolName(tool.name)) {
-        continue;
+      if (!isSessionImageGenerationToolName(tool.name)) continue;
+      const task = sessionImageGenerationTask(tool);
+      if (task ? task.status === 'queued' || task.status === 'running'
+        : tool.status === 'running' && (item.status === 'streaming' || item.status === 'waiting_tool')) {
+        taskIds.add(task?.taskId ?? tool.toolCallId ?? tool.id);
       }
-      const taskId = imageGenerationToolTaskId(tool);
-      const backgroundStart = hasImageGenerationBackgroundStart(tool);
-      if (tool.status === 'running' || backgroundStart) {
-        taskIds.add(taskId);
-        continue;
-      }
-      taskIds.delete(taskId);
-    }
-    if (taskIds.size > 0 && hasImageGenerationCompletionContent(item)) {
-      taskIds.clear();
     }
   }
   const pendingTaskIds = [...taskIds];
-  return {
-    active: pendingTaskIds.length > 0,
-    pendingTaskIds,
-  };
+  return { active: pendingTaskIds.length > 0, pendingTaskIds };
 }
 
 export interface SessionRenderItemBase {
@@ -326,6 +249,7 @@ export interface SessionRenderUserMessageItem extends SessionRenderItemBase {
   text: string;
   images: ReadonlyArray<SessionRenderImage>;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  contentNotices?: ReadonlyArray<SessionRenderContentNotice>;
   largeText?: SessionLargeTextMetadata;
   messageId?: string;
   clientId?: string;

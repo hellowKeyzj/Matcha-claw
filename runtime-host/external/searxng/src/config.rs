@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, fs, path::Path};
 
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_yaml::Value as YamlValue;
 
 use crate::{Error, ServiceConfig};
 
@@ -90,25 +91,26 @@ pub(crate) fn settings(resources: &Path, config: &ServiceConfig) -> Result<Vec<u
         if configured.is_none() && !is_bing(definition) {
             continue;
         }
-        let mut patch = json!({ "name": name });
+        let mut patch = YamlValue::Null;
+        patch["name"] = name.into();
         if is_bing(definition) {
             // Pinned searx/settings.yml and the four bing*.py modules support the China host.
-            patch["base_url"] = json!("https://cn.bing.com");
+            patch["base_url"] = "https://cn.bing.com".into();
         }
         if let Some(engine) = configured {
             // disabled is a default selection, not inactive: explicit per-query engine choices still work.
-            patch["disabled"] = json!(!engine.enabled);
+            patch["disabled"] = (!engine.enabled).into();
             if engine.enabled && definition.get("inactive").and_then(Value::as_bool) == Some(true) {
-                patch["inactive"] = json!(false);
+                patch["inactive"] = false.into();
             }
             if let Some(timeout) = engine.timeout_seconds {
-                patch["timeout"] = json!(timeout);
+                patch["timeout"] = timeout.into();
             }
             if let Some(weight) = engine.weight {
-                patch["weight"] = json!(weight);
+                patch["weight"] = weight.into();
             }
             for (key, value) in &engine.options {
-                patch[key] = value.clone();
+                patch[key] = value.as_str().ok_or(Error::InvalidConfig)?.into();
             }
         }
         engines.push(patch);
@@ -119,19 +121,27 @@ pub(crate) fn settings(resources: &Path, config: &ServiceConfig) -> Result<Vec<u
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let mut settings = json!({
-        "use_default_settings": true,
-        "general": { "debug": false, "enable_metrics": false },
-        "search": { "formats": ["json"], "default_lang": config.language, "safe_search": config.safe_search, "autocomplete": "" },
-        "server": { "bind_address": "127.0.0.1", "limiter": false, "public_instance": false, "secret_key": secret, "image_proxy": false },
-        "valkey": { "url": false },
-        "outgoing": { "request_timeout": config.request_timeout_seconds, "max_request_timeout": config.request_timeout_seconds },
-        "engines": engines
-    });
+    let mut settings = YamlValue::Null;
+    settings["use_default_settings"] = true.into();
+    settings["general"]["debug"] = false.into();
+    settings["general"]["enable_metrics"] = false.into();
+    settings["search"]["formats"] = vec!["json"].into();
+    settings["search"]["default_lang"] = config.language.clone().into();
+    settings["search"]["safe_search"] = config.safe_search.into();
+    settings["search"]["autocomplete"] = "".into();
+    settings["server"]["bind_address"] = "127.0.0.1".into();
+    settings["server"]["limiter"] = false.into();
+    settings["server"]["public_instance"] = false.into();
+    settings["server"]["secret_key"] = secret.into();
+    settings["server"]["image_proxy"] = false.into();
+    settings["valkey"]["url"] = false.into();
+    settings["outgoing"]["request_timeout"] = config.request_timeout_seconds.into();
+    settings["outgoing"]["max_request_timeout"] = config.request_timeout_seconds.into();
+    settings["engines"] = engines.into();
     if let Some(proxy) = &config.proxy_url {
-        settings["outgoing"]["proxies"] = json!({ "all://": proxy });
+        settings["outgoing"]["proxies"]["all://"] = proxy.clone().into();
     }
-    settings["general"]["instance_name"] = json!("Matcha Search");
+    settings["general"]["instance_name"] = "Matcha Search".into();
     serde_yaml::to_string(&settings)
         .map(String::into_bytes)
         .map_err(|_| Error::InvalidConfig)

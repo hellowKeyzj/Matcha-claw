@@ -127,7 +127,7 @@ fn graph_patch_tool() -> Value {
                     schema(json!({ "op": { "const": "remove_edge", "description": "删除当前仍存在的边，edgeId 从 context 或本次前序操作取得。" }, "edgeId": identifier() }), &["op", "edgeId"]),
                     schema(json!({
                         "op": { "const": "set_metadata", "description": "逐键设置图元数据；不是节点配置。值限标识字符串、布尔值或非负整数，不用 null 删除键。" },
-                        "metadata": { "type": "object", "minProperties": 1, "additionalProperties": { "oneOf": [{ "type": "string" }, { "type": "boolean" }, { "type": "integer", "minimum": 0, "maximum": u64::MAX }] } }
+                        "metadata": { "type": "object", "minProperties": 1, "additionalProperties": { "oneOf": [{ "type": "string" }, { "type": "boolean" }, { "type": "integer", "minimum": 0 }] } }
                     }), &["op", "metadata"]),
                     schema(json!({
                         "op": { "const": "set_node_prompt", "description": "运行中仅替换已有 work/review 的任务正文，不修改拓扑、角色或绑定。" },

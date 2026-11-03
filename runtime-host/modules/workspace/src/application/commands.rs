@@ -78,6 +78,12 @@ pub(crate) enum WorkspaceOperation {
         reference: String,
         reply: oneshot::Sender<Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>>,
     },
+    PlaybackMedia {
+        endpoint: RuntimeEndpoint,
+        session_key: String,
+        reference: String,
+        reply: oneshot::Sender<Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>>,
+    },
     ThumbnailMedia {
         endpoint: RuntimeEndpoint,
         session_key: String,
@@ -170,6 +176,7 @@ impl WorkspaceOperation {
             | Self::WriteBinary { endpoint, agent_id, .. } => (endpoint, WorkspaceSelection::Agent(agent_id)),
             Self::PrepareMedia { endpoint, session_key, .. }
             | Self::ResolveMedia { endpoint, session_key, .. }
+            | Self::PlaybackMedia { endpoint, session_key, .. }
             | Self::ThumbnailMedia { endpoint, session_key, .. }
             | Self::ThumbnailMediaReference { endpoint, session_key, .. }
             | Self::ThumbnailMediaGateway { endpoint, session_key, .. }
@@ -183,6 +190,7 @@ impl WorkspaceOperation {
 
     pub(crate) fn needs_workspace(&self) -> bool {
         !matches!(self, Self::ResolveMedia { .. }
+            | Self::PlaybackMedia { .. }
             | Self::ThumbnailMediaReference { .. }
             | Self::ThumbnailMediaGateway { .. }
             | Self::StageBufferMedia { .. }

@@ -10,7 +10,7 @@ use crate::{
         call::{self, CallFailure, UsageCallDetail},
         commands::{UsageCommand, UsageQuery},
     },
-    domain::model::{UsageEntry, UsageReadError},
+    domain::model::{UsageHistory, UsageReadError},
 };
 
 #[derive(Clone)]
@@ -36,7 +36,7 @@ impl UsageHandle {
         &self,
         endpoint: RuntimeEndpoint,
         limit: usize,
-    ) -> Result<Vec<UsageEntry>, UsageReadError> {
+    ) -> Result<UsageHistory, UsageReadError> {
         self.recorded_query(
             "usage.recent",
             UsageCallDetail::recent(limit),
@@ -55,7 +55,7 @@ impl UsageHandle {
         endpoint: RuntimeEndpoint,
         agent_id: String,
         session_id: String,
-    ) -> Result<Vec<UsageEntry>, UsageReadError> {
+    ) -> Result<UsageHistory, UsageReadError> {
         self.recorded_query(
             "usage.sessionTimeseries",
             UsageCallDetail::session_timeseries(),
@@ -76,9 +76,9 @@ impl UsageHandle {
         detail: UsageCallDetail,
         query: impl FnOnce(
             Option<CallContext<UsageCallDetail>>,
-            oneshot::Sender<Result<Vec<UsageEntry>, UsageReadError>>,
+            oneshot::Sender<Result<UsageHistory, UsageReadError>>,
         ) -> UsageQuery,
-    ) -> Result<Vec<UsageEntry>, UsageReadError> {
+    ) -> Result<UsageHistory, UsageReadError> {
         let call = match &self.recorder {
             Some(recorder) => Some(recorder.begin(command, &detail).await.map_err(|error| {
                 eprintln!("[usage:call] begin failed command={command} error={error}");

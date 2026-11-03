@@ -91,6 +91,164 @@ DP-xxx 或 `none`
 
 ## 6. 当前归档案例
 
+## Case: OpenClaw 原生媒体配置先于运行包交付
+
+### Status
+
+promoted
+
+### Linked pattern
+
+DP-001；P2/P4/P6 与 `CODING_CONSTITUTION.md` §26 已覆盖，不另增同义规则。
+
+### Source incident
+
+2026-11-03，原生图片多账号接线后，真实 Gateway 拒绝 `models.providers.<key>.media`；用户随后质疑实际改动是否为依赖补丁，以及为什么声称已适配。
+
+### Wrong path taken
+
+Rust 已生产新字段，只在独立补丁副本验证 schema／工具注册；未先验证正常启动实际选择的包。把编译产物补丁笼统称为“适配”，未清楚说明非上游配置契约及版本耦合。
+
+### Root cause boundary
+
+实际进程使用开发态 `node_modules/openclaw/openclaw.mjs`。同一隔离配置在该包校验 exit 1／未知 media，在适配副本 exit 0；`pnpm dev` 不调用统一适配，新增补丁也不会自动重触发 postinstall。完整 bundle 对复制产物应用补丁，不能证明开发安装包已更新。[VERIFY: scripts/patch-openclaw-dev.mjs:6-12] [VERIFY: scripts/dev.mjs] [VERIFY: electron/main/runtime-host-delivery/bootstrap-resources.ts:221-223,269] [VERIFY: scripts/openclaw-media-patches.mjs:23-35,165-185]
+
+### Fix boundary
+
+用户授权后通过既有入口应用实际开发包；开发启动在构建／启动前复用同一入口，失败沿原 run() 退出，不删除 media、不在 Host 增加 fallback，也不另建补丁执行器。[VERIFY: scripts/dev.mjs:11-31]
+
+### Verification closure
+
+实际包适配 applied 后二次 clean，真实 profile 只读配置校验 exit 0／11 条 warnings 未归因；质量收口后入口幂等、脚本语法／限定 diffcheck、实际包隔离 CLI 校验及原生 image_generate 列表均通过。未执行完整 dev 启动、收费生图或真实会话／附件验收，不把运行包校验当业务完成。详见 [Provider dev](../architecture-knowledge/modules/provider-model-secret/dev.md#2026-11-03-openclaw-原生图片账号接线真实会话验收-open)。
+
+### Reusable rule
+
+依赖代码改写必须明确称为补丁；配置 producer、schema consumer 与工具注册必须落在同一实际交付包，并核正常启动路径选中的工件。脚本已注册、隔离副本通过和编译成功都不能证明真实运行包已更新。
+
+## Case: 发送空窗先加等待提示，混淆两段独立延迟
+
+### Status
+
+promoted
+
+### Linked pattern
+
+DP-001、P3/P5/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖，不另增同义规则。
+
+### Source incident
+
+2026-11-03，用户报告发送后输入被吞、很久没有输出，并指出先增加等待提示没有解决问题。
+
+### Wrong path taken
+
+在提交交接尚未修正时增加输入框等待条；解释中还容易把创建前约16秒空窗与接单后约120秒等待混为一谈。提示条已撤销。
+
+### Root cause boundary
+
+原输入 take 清空编辑，但消息区只消费实际 send record；创建／配置期间原文仍在 submission 快照，未进入正常消息展示。另一个独立故障是 Gateway 的 owner 停止通道监听 stdin，而无显式 input 的 Git 子进程继承同一 Windows 管道，baseline 卡到预算结束。原日志分别定位16189ms创建与120434ms baseline；同步可继承 named-pipe 单变量复现中隔离 child stdin 后返回268ms。创建自身的16秒尚未完整归因，不以消息提前可见宣称后台已加速。
+
+### Fix boundary
+
+本地提交沿原 composer store 进入正常消息区，实际 send record 写好后交接同 operation；不造 Session／run／回执，不再加独立提示。stdin 隔离由既有 owned-stdin-stop 适配负责，只隔离 active owner 的私有通道，保普通 CLI 继承、显式 input 和停止帧。
+
+### Verification closure
+
+实现与既有检查、真实应用未验边界分别记录于 [Session / Chat](../architecture-knowledge/modules/session-chat/dev.md) 与 [stdin 专项记录](../../.scratch/openclaw-first-send-20261103.md)。组件、静态检查不替代真实新会话的正文可见、回执接替与最终回复验收。
+
+### Reusable rule
+
+先区分输入 custody、展示交接、接单与执行等待；修各自真实 owner，不用提示掩盖空窗，也不把一段延迟的证据套到另一段。
+
+## Case: Browser Relay 移植擅自改变连接成功时机
+
+### Status
+
+promoted
+
+### Linked pattern
+
+DP-001；P4/P6/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖，不另增同义规则。
+
+### Source incident
+
+2026-11-03，用户指出扩展长时间“连接中”，对照 Accio 后再次纠正未经确认改变语义流程。
+
+### Symptom
+
+服务端已经握手成功并收到页面，扩展仍可处于连接中；本次各阶段耗时未采集，不能把全部等待归因于该差异。
+
+### Real minimum loop
+
+扩展加密握手 → 发布连接成功 → 后台初始化页面；具体页面动作在原 readiness 边界等待就绪。
+
+### Wrong path taken
+
+将 `onConnected` 初始化同步放入 CONNECTED 前置等待，混淆连接与页面就绪；解释延迟时先批评 30 秒重试，未先查参考实现也使用该间隔。
+
+### Root cause boundary
+
+参考实现握手后先 CONNECTED、后台调用 `onConnected`；本地改为 await 后才 CONNECTED。此为未经确认的可观察状态时序变化，不是移植必需项。证据：参考 `D:/accio_work/resources/chrome-extension/accio-browser-relay/lib/cdp/relay/connection.js:1194-1208`，本地 `resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/relay/connection.js:1225-1252`。
+
+### Fix boundary
+
+已在连接 lifecycle 恢复握手成功后先 CONNECTED、后台 onConnected/resync；动作准入仍由自己的 tabsReadyBarrier 与 socket/generation 核验负责。没有新增重试策略或提前放行业务动作。
+
+### Verification closure
+
+已核对双方状态转换、await 位置及相同 30 秒重试，相关生产修改通过语法检查；本轮现有真实加密 WS 握手用例通过。本地 connection 夹具仍发送明文 ACK，与现有强制密文门禁冲突，不能视为通过或据此放宽加密。未做真实 Chrome 时序测量，不宣称等待耗时或整体 ready 性能已验收。
+
+### Reusable rule
+
+移植中的状态语义与返回时机也是行为合同；安全、架构质量或 final-form 不授予擅改权限。
+
+### Archive note
+
+属于既有原则执行偏离的追溯案例，不增加新的诊断模式。
+
+### 2026-11-03 续记：下载事实不应成为上层业务特判
+
+用户再次质疑补丁式实现。下载保存虽沿原 service／watch，execution agent/admin 与 tool 却三次解析下载动作／公开状态以保留取消后的回执；这是语义散落，不是把条件包成 helper 就能解决。现由 service 对真实完成事实标记私有、不可枚举 Symbol receipt，上层只消费机制，不增加公共字段或第二 owner；原入口取消与 raw drain 保留。文件边界独立审阅另发现符号链接工作区下绝对目标误拒，复用既有路径解析映射真实根，保留真实祖先与 protected 校验。[VERIFY: packages/openclaw-browser-relay-plugin/src/browser-action-contract.ts:560-569] [VERIFY: packages/openclaw-browser-relay-plugin/src/service/browser-control-service.ts:385-390] [VERIFY: packages/openclaw-browser-relay-plugin/src/application/browser-execution.ts:122-126,221-223] [VERIFY: packages/openclaw-browser-relay-plugin/src/application/browser-relay-tool.ts:577-578] [VERIFY: packages/openclaw-browser-relay-plugin/src/service/workspace-files.ts:83-122]
+
+复用既有 §26／P4 的责任方原则，不新增同义规范、不因资深标签扩大重构。最终 strict／五文件 nofix lint／插件构建与46份产物及2metadata核对通过，25原测试SHA未变；既有定向回归15pass／1fail，保留单参数断言失败。没有真实下载、跨盘或取消竞态运行证明，完整证据见[质量整改记录](../../.scratch/relay-download-workspace-20261103-verification.md#后续质量整改责任归位不叠补丁)。
+
+## Case: 工作区连续性被修窄为文件入口保留
+
+### Status
+
+archived
+
+### Linked pattern
+
+既有 §26 与 P3／P6／P7 已覆盖，属于执行未遵守，不新增同义规则。
+
+### Source incident
+
+2026-11-03，用户指出切换会话时工作区消失，先前实现只保留文件目录入口；后续用户明确公共容器与手动网页都应保留，不应为了交给另一 Agent 操作而重新打开网页。
+
+### Real minimum loop
+
+手动打开网页 → 切 Agent／会话 → 容器意图和原网页资源继续 → 原 Agent 独占操作 → 真实终态／停止排空 → 另一 Agent 领取同一原页。可见、资源身份与操作权限不是同一归属。
+
+### Wrong path taken
+
+先把“工作区”按同名文件入口解释，未校准公共容器；更早只保 dock open 又漏掉 descriptor／React key／native visibility。把局部状态修复视为完整连续性修复，导致用户反复指出仍会收起或闪动。
+
+### Fix boundary
+
+WorkspaceProvider 切 scope 保 open／layout；手动 open 合同移除 identity，Main 初始 creator／claim／group 为 null；仅 createdBy===null 的手动 IAB 页跨 scope 展示并用 workspace lifetime。Agent 准入和物理排空释放不变；Main 关闭共享页不沿 claim group 选 Agent 后继，先确定后继再 close；活 claim 派生的 Agent popup 沿原 show-requested 过滤，不直接抢 native active。[VERIFY: src/plugins/workspace/context.tsx:22-27] [VERIFY: src/plugins/iab/browser-page.tsx:12-42] [VERIFY: src/plugins/iab/store.ts:24-28] [VERIFY: electron/main/iab/manager.ts:207-222,257-280,438-447]
+
+### Verification closure
+
+Main noEmit 与七文件 no-fix lint 通过（1 条既有 warning）；首次 Renderer noEmit 被另一会话正在交接的 ChatInput／composer-drafts 契约阻断，未抢写其文件。未运行应用，不宣称同一 WebContents、无视觉闪动、claim 接管或 popup／关闭帧序已验。后续类型复查及完整证据以[本轮记录](../../.scratch/workspace-browser-session-continuity-20261103-verification.md)为准。
+
+### 质量复核续记：下载完成仍有独立选页旁路
+
+同日用户再次质疑补丁式修改。限定复核发现 download popup 的完成回调先将 activeTabId 改回 opener 再 close，绕过统一后继规则；从已释放 claim 的 retained Agent 页派生用户 popup 后，切 B 再完成下载，可走到激活 A 的任务页。现删除回调里的 opener 预选，仅保原 popup 实例校验并调用 close；不在 Renderer 补 hide、不增加第二个显示权限判断。[VERIFY: electron/main/iab/manager.ts:452-455] 本次为静态因果确认，未实机复现；Main noEmit 与单文件 no-fix lint 结果见同一[验证记录](../../.scratch/workspace-browser-session-continuity-20261103-verification.md)。
+
+### Reusable rule
+
+沿已有完整链路规则，在目标冻结和最终复核时分别检查容器意图、页面生命周期、原生实例和操作权；不能用保一个 flag 或类型成功替代用户原始结果。无需扩大为全会话页面缓存或另一套权限系统。
+
 ## Case: 设计插件修复停在局部补丁与错误验证结论
 
 ### Status
@@ -181,6 +339,12 @@ DP-001；既有 P4/P6/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖，属于执
 
 用户追问增强提示词来源，确认先前仅参考机制、正文为自行编写后，明确要求直接用Accio原文。静态追到提取包本地默认`xfo.PROMPT_ENHANCE_SYSTEM_PROMPT`与`xza/Sza`最终规则，增强组件现逐字保留1642字符原文，删除旧JSON rewrite与摘要伪领域增强路径。不将单prompt桥冒称原system/user两消息，不复制候选增强器平台或更改服务端。原文逐字比较、定向lint及Renderer noEmit通过，未调用模型；来源hash、必要适配及未验限制见[本轮台账](../../.scratch/design-interaction-20261031/README.md#2026-10-31-直接复用-accio-原增强提示词)。这是既有参考忠实与§26的执行纠偏，不新增同义规则。[VERIFY: src/plugins/chat/components/ComposerPromptEnhancement.tsx]
 
+### 2026-11-03 浏览器工具原文忠实性纠偏
+
+用户要求迁入 Accio 全部浏览器工具使用规则。首版虽对照原始定义，却大量独立改写并添加不存在 API 清单、实现细节与重复告诫；用户要求尽量沿用原文且不要废话后，主侧又误将其理解成缩写原文参数描述。用户打断后明确边界：能用的原句、WHEN/RULES 与示例原样保留，只替换工具名、调用格式、参数名及真实行为差异；删的是额外补写，不是原规则。已暂停错误精简，按该标准返工，模型可见入口仍为同一 `createBrowserToolCatalog(mode)`，不改 schema 结构或执行行为。[VERIFY: packages/openclaw-browser-relay-plugin/src/application/browser-relay-tool.ts] [VERIFY: packages/openclaw-browser-relay-plugin/src/application/browser-tool-description.ts]
+
+原始材料为 Accio 0.36.2 提取包 `out__main__gateway-worker.js`：17 项原子工具定义在4298–4314行，统一 `browser` 在10557行，`browser_script` 从10420行起；只静态读取、不执行。返工后逐项保留原用途／WHEN／RULES／示例，只适配单工具调用、参数及已核本地差异；移除自写手册与不存在API清单。主侧对照原文、最终两模式目录及62条可静态提取规则，另检查条件文本和示例；脚本找出的文字差异按真实能力核对，不把未匹配机械当作遗漏。目录证据见 `.scratch/browser-tool-catalog-20261103.json`。最终 Electron 原配置 noEmit、两文件 nofix lint、参数去description后深比较与动作覆盖均通过；未新增测试／probe、未重建或做真实 Agent 加载验收，上一轮工具回归的6通过／1失败仍不改称全过。此为既有上游忠实性规则与§26的执行纠偏，读取边界、原catalog落点、单一路径及旧自写说明替换已收口，不新增同义流程或提示词平台。
+
 ### 2026-11-01 增强按钮挤占发送槽
 
 用户实际截图与当前登录应用均复现：工具栏只有四列，新增增强按钮没有布局槽，正文非空时自动占第4列，固定第4列的发送按钮被排到下一行。原生 DOM 实测工具栏662px宽、76px高，发送未禁用且中心命中正确；不能把换行直接认定为发送失败。[VERIFY: src/plugins/chat/components/ComposerPromptEnhancement.tsx:118-129] [VERIFY: src/plugins/chat/ChatInput.tsx:1988-2052]
@@ -194,6 +358,44 @@ DP-001；既有 P4/P6/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖，属于执
 同日工程复核保留正确的布局操作槽与原增强生命周期，不为“高级实现”制造新框架。已在原 `ComposerInitialization` 增加 `createRejected` 终态，明确创建失败不再清空结果；页面从当前草稿键直接派生已有横幅，纯文字恢复仍删除 submission 并释放发送资格，关闭只隐藏当前结果，显式重试以新 operation 进入 creating，另开新会话退休该结果。`createUnknown` 仍阻止盲重建，pending 配置恢复保持原 operation；未订阅混合了其他操作错误的顶层 store.error、未留失败 submission 堵 gate、未加 toast／平行错误 store。新增文案同步四语言；本块共享状态与直接消费者由单一 writer 修改，检查并行，未另派重复全链调查。[VERIFY: src/plugins/chat/composer-drafts.ts:59-66] [VERIFY: src/plugins/chat/store/session-initialization.ts:211-253] [VERIFY: src/plugins/chat/store/session-actions.ts:1523-1531] [VERIFY: src/plugins/chat/ChatMessages.tsx:308-315]
 
 最终 Renderer noEmit、六文件 no-fix ESLint、四语言 JSON/文案检查与限定 diffcheck 均通过；真实应用只读核当前唯一 composer、1286×824 页面及36px无溢出工具行，未改草稿。未发模型／发送请求、未注入 store 或 mock、未重启；新增创建拒绝→恢复→横幅→关闭／重试状态尚未实机验证，OpenClaw 原生 superseded 拒绝仍未修复。检查与边界见同台账“初始化失败结果归属纠偏”。
+
+### 2026-11-02 画板随包分发工程复核
+
+用户在接入画板预装时再次要求避免补丁式修改。范围固定为 builder 目标工件→平台 resources→首次 catalog→原 owner 安装／更新，不另建 built-in registry 或第二 installer；独立构建 ZIP 不代表应用安装成功。构建与运行时分边界并行，主线程核验实际 native、收据、安装事实与失败边界，内部 bundle receipt 随原 catalog 原子发布，不回传 Renderer；首次目录读取等待同 lane 的预装，保留停用、卸载、回滚和用户覆盖，插件 data 不参与归档清理。[VERIFY: scripts/bundle-app-plugins.mjs] [VERIFY: electron/main/app-plugins/bundled.ts] [VERIFY: electron/main/app-plugins/owner.ts] [VERIFY: electron/main/app-plugins/storage.ts] [VERIFY: electron/main/app-bootstrap.ts]
+
+Windows x64 工件及生产验包、Renderer／Design types、owner 窄类型与限定 lint 通过；临时目录真实 owner＋package worker 已验证首次安装、HTML读取、停用／卸载跨实例、真实 v1.0.4→1.0.5 保留数据／停用／previous、回滚保留和错误收据拒绝。完整 Electron 类型检查最初有 IAB／Browser Relay 的18条接口错误，中途重跑剩 IAB 的13条 SessionEntry 缺字段错误；负责该边界的既有会话修复后，本会话独立重跑完整 noEmit 已 exit 0。本轮未修改这些边界，也不据类型通过宣称其业务通过。一次 no-incremental 检查因 composite 参数错误退出，修正调用再验。没有生成应用安装包、安装／启动应用、模型调用、签名／公证或跨平台验收；Windows arm64 缺真实 FFmpeg。完整记录见 [bundled-plugin-20261102.md](../../.scratch/design-interaction-20261031/bundled-plugin-20261102.md)。这是执行既有§26/P4/P6与事实分级要求，不新增通用框架。
+
+用户同日再次指出质量疑虑，进一步复核实证两处遗漏：`list()` 等待全部pending导致commit通知回读排到自身之后；跳过bundle仍更新digest基线导致“回滚→旧应用→新应用”覆盖用户选择。前者改回已提交快照读取，并禁止内部未提交load提前发布缓存；后者保持真正安装基线，不新增状态或豁免开关。改前分别用真实owner／worker观察到通知阻塞和版本错误回到1.0.5，改后同边界验证跨实例回滚维持1.0.4、停用／data保持、卸载不复活及同版不同收据后仍可正常升级。owner窄类型／限定lint通过；全量检查出现其他会话IAB文件引入的新TS6307，已通知原owner。本次还确认ARM64缺工件会使正式Windows job及后续tag发布阻塞，不能只标“未验”。详见同一[记录](../../.scratch/design-interaction-20261031/bundled-plugin-20261102.md#再次质量纠正提交快照与安装基线)。这是遗漏应用既有提交点／事实源／P6要求，不新增同义框架。
+
+用户随后澄清“其他插件”而非“其他操作系统”，要求实现可扩展清单。已将公共构建／bootstrap 的 Design 硬编码替换为 `apps/bundled.json` → 各插件 `buildPlugin` → ZIP＋统一索引 → 原 owner 逐项安装；Design 原生校验／签名归回自身，无第二 installer 或旧单收据兼容路径。新清单 Windows x64 实际构建／生产验包、两个既有合法插件的索引安装及独立状态保留、新 Design 索引升级／回滚／data 复验通过；最终完整 Electron noEmit 和限定 lint 通过，前述 TS6307 未再出现。完整应用安装包与跨平台未验，ARM64 producer 缺口不变。详见[清单验证](../../.scratch/design-interaction-20261031/bundled-plugin-20261102.md#可扩展随包清单)。
+
+同日按“补齐”授权增加 Windows ARM64 专属原生准备入口，固定官方 Skia、BtbN FFmpeg 与微软 VC redist 的版本／SHA，静态提取两份 ARM64 VC DLL 与 Skia 同目录随包，不执行安装器、不全局安装；未用本机 x64 或许可未明确覆盖的 LLVM/bin DLL 代替。真实 ARM64 ZIP 55,573,579 B／14文件，通过 SDK／目标校验；重复准备、损坏 VC 缓存拒绝并保旧目标、缺失／错架构 DLL 拒绝及 x64 digest 不变均有实际验证。ARM64 真机、整个安装包与公开发布未执行；GPL 完整对应源码／构建材料分发及微软许可前提仍须落实，不再把 producer 缺失作为当前事实，也不把验包当运行或合规证明。[VERIFY: apps/design/prepare-win-arm64.mjs] [VERIFY: apps/design/native.mjs] [VERIFY: apps/design/build.mjs] [VERIFY: .github/workflows/release.yml] 详见[同轮补齐记录](../../.scratch/design-interaction-20261031/bundled-plugin-20261102.md#windows-arm64-原生工件补齐)。
+
+### 2026-11-03 无会话媒体扫描与原生协议错配
+
+截图显示新对话画板的“会话媒体列表读取失败 [list]”。源码确认无sessionIdentity仍安排list，AppFrame无media owner拒绝且无stable code，能够产生该表象；真实profile未捕获该次请求，因此不把此路径认定为已实机复现的唯一根因。沿同链另证OpenClaw 2026.9.3 closed schema不支持consumer发送的type／limit／cursor／transport，普通图片ID规则也不符；不能只吞UI异常或删参数就宣称能力恢复。[VERIFY: apps/design/src/ui/useSessionMedia.ts] [VERIFY: src/plugins/application-plugins/AppFrame.tsx] [VERIFY: node_modules/openclaw/dist/src-CxpZ9eYs.mjs:2441-2479] [VERIFY: node_modules/openclaw/dist/artifacts-DjgRxHy9.mjs:216-218,407-499]
+
+修复归原hook资格与OpenClaw integration：无会话不扫描但仍可编辑，原生scope-only请求加consumer本地分页／摘要失效，bytes ID与managed ticket分开核；Host DTO／SDK／native及授权边界不动。Design v1.0.6的双Windows架构ZIP生产验包、类型／限定lint、Rust库check／限定格式通过；未安装、启动、发送消息或发模型请求，真实截图与有媒体归集仍未验。初次pack因旧ZIP存在被wx拒绝，保留旧包另产版本化ZIP；初次Rust检查exit125，降低并发并调整已测资源预算后通过，不改业务或全仓警告来通过检查。完整事实与收据见[修复记录](../../.scratch/design-interaction-20261031/session-media-20261103.md)。这是执行既有P3/P4/P6与§26，不新增规则或框架。
+
+同日用户再次质疑补丁式修改，定向复核确认上一轮仍遗漏传输与恢复语义：native单帧base64受tungstenite默认16 MiB frame／64 MiB message限制，原共享control会因大原件失败而连带断开；隐藏中止没有恢复通知，“重新读取”也没有重试媒体。现已在原Gateway复用认证建立有界媒体短连接（只请求operator.read，download为50 MiB base64＋1 MiB envelope限额，list保默认），保留control默认限额并删除无producer的旧transcript HTTP-ticket分支；AppFrame用原pending信号／dirty串起中止、隐藏拒绝和恢复，Design重读复用原扫描request，不增加自动重试。v1.0.7双Windows架构重建／验包、Design和完整Renderer noEmit、限定lint、Rust库check通过；client.rs原全文件格式未改，仅核新增片段。真实native下载／隐藏恢复／截图仍未验，未安装启动或替换宿主；不能以这些静态结果再宣称行为闭环。[VERIFY: runtime-host/integrations/openclaw/src/gateway/artifacts.rs] [VERIFY: runtime-host/integrations/openclaw/src/gateway/client.rs] [VERIFY: src/plugins/application-plugins/AppFrame.tsx] [VERIFY: apps/design/src/ui/useSessionMedia.ts] [VERIFY: apps/design/src/ui/Editor.tsx] 实测收据与首轮遗漏保留在同一[记录](../../.scratch/design-interaction-20261031/session-media-20261103.md#质量复核修正同日v107)。
+
+### 2026-11-03 空草稿画板晋升链遗漏
+
+用户追问空会话变为正式会话是否自动读取，源码确认原Workspace在composer草稿key变为正式record key时移除application页；AppFrame虽然会按正式身份重建，原页却已不存在。只保页也不够：原无身份随机文档与正式会话默认hash文档不相同。漏项是完整生命周期与文档归属，不是缺一条媒体通知。[VERIFY: src/plugins/chat/store/session-actions.ts] [VERIFY: src/plugins/workspace/context.tsx] [VERIFY: src/plugins/application-plugins/AppFrame.tsx] [VERIFY: apps/design/src/backend/documents.ts]
+
+按已批准范围冻结共享合同后，三个agent分别实现Chat／Workspace、应用冻结context、Design绑定；主线程集成。真实create与原选择资格产生准确晋升事实，Workspace只承接对应草稿已开opt-in页，页级ID避免正式会话后来新开页面借用旧草稿。原Documents保同文档及已保存内容／history／消费集合，先原子绑定再写派生索引，索引缺失可从真实文档恢复，冲突拒绝；undo保当前身份。没有新增轮询／bus／第二store／常驻页，SDK仅增加可选非授权context字段，native与权限不变。[VERIFY: src/plugins/chat/store/types.ts] [VERIFY: src/plugins/workspace/extensions.ts] [VERIFY: src/plugins/application-plugins/application-workspace.tsx] [VERIFY: sdk/app-plugins/src/api.ts] [VERIFY: apps/design/src/ui/Editor.tsx] [VERIFY: apps/design/src/backend/documents.ts]
+
+SDK构建、完整Renderer及稳定Design noEmit、Design限定lint和v1.0.8双Windows架构生产验包通过。Host严格lint为0 errors／2个改前既存warnings；两个既有suite为9通过／10失败，保留旧入口／缺runtimeScopeKey的fixture失败，未改断言求绿。首次build命令在所有构建与bundle验包后因收据打印误读manifest.tools而exit1；改用真实contributes.tools只读复验exit0，未覆盖版本化ZIP。未授权安装／启动／模型请求／新测试或probe，真实自动交接、native扫描与中断恢复仍未验，不以静态检查抵扣。沿用既有§26及P3–P7，不增加同义规则；实测收据见[交接记录](../../.scratch/design-interaction-20261031/draft-handoff-20261103.md)。
+
+同日用户再次质疑补丁式修改，有界复核发现首轮为了保晋升回执，在same-current显式刷新中直接复用currentConversation，意外合并了两笔请求的选择资格。非OpenClaw会话连续刷新且身份／endpointSessionId／pendingTurn不变时，第二笔成功后第一笔迟到失败仍可通过引用检查并写回error；HEAD每次新对象会拒绝旧笔，这是本轮引入的源码时序缺陷，未执行实机或probe。修正保原builder产出的语义及promotedDraft，但显式刷新生成新选择对象，恢复原isCurrent引用隔离；不新增请求序号store／wrapper，也不为风格重写其余正确路径。目录投影仍保对象连续性，两种生命周期不能混用。[VERIFY: src/plugins/chat/store/session-actions.ts:855-870] [VERIFY: src/plugins/chat/store/session-runtime-graph.ts:364-386] 完整Renderer noEmit与单文件严格lint复验通过；新并发行为、自动交接仍未动态验证，旧suite没有覆盖此触发，不重跑作有效证据。详见同一[交接记录](../../.scratch/design-interaction-20261031/draft-handoff-20261103.md#同日质量复核选择实例与晋升信息分离)。沿用§26与已有异步资格规则，本次是执行遗漏，不新增同义规范。
+
+### 2026-11-03 空草稿 compose 遗漏与推荐缺配置误报
+
+用户随后截图指出：空会话画板标注无法“添加到对话”；前轮只完成草稿→正式会话保板，并未覆盖发送前添加。直接失败由 application-workspace 无正式身份时不提供 onCompose 产生，下游 composer-actions、ChatComposer 与 Input 也各要求正式身份。按§26将原 compose 目标改为正式身份或真实草稿实例，保原暂存／revision／附件 custody 和手动发送，Input scope 同时区别同 Agent 不同草稿，不通过提前创建会话或去除隔离绕过。AppFrame 原 compose／ui/message 同核冻结草稿 ID，媒体和文件授权不放宽。[VERIFY: src/plugins/application-plugins/application-workspace.tsx] [VERIFY: src/plugins/application-plugins/AppFrame.tsx] [VERIFY: src/plugins/chat/composer-actions.ts] [VERIFY: src/plugins/chat/ChatComposer.tsx] [VERIFY: src/plugins/chat/ChatInput.tsx]
+
+另一截图把未配置推荐模型／路由显示成红色内部英文。native 已返回 selection-unavailable，Main／CJS 桥丢 code 才使 Design 无法区分配置未就绪。修复在原错误链保留稳定 code，Design 推荐边界映射为 recommendation_unavailable，四语言 UI 呈中性状态；真实失败仍保失败＋手动重试，空候选不伪造，不做额外预检／自动重试。共享合同由主线程先冻结，再同批四独占写 agent 实施；未扩 native／SDK 或建立第二 owner。静态检查、构建结果与实机未验边界见[本轮记录](../../.scratch/design-interaction-20261031/draft-compose-20261103.md)。这仍是已有完整链路与类型化错误规则的执行遗漏，不增加同义规范。[VERIFY: runtime-host/modules/provider/src/adapters/loopback/text.rs:199] [VERIFY: electron/main/app-plugins/media.ts] [VERIFY: electron/main/app-plugins/protocol.ts] [VERIFY: electron/main/app-plugins/runtime.ts] [VERIFY: electron/main/app-plugins/worker.ts] [VERIFY: apps/design/src/backend/analysis.ts] [VERIFY: apps/design/src/ui/Recommendations.tsx]
+
+复核又发现本轮 UI 丢弃失败原因的回归：有模型但账号缺少凭据时，native 已给 `credential-missing`，却只显示“稍后重试”；`invalid_model_output` 同样失去换模型建议。只读对照 HEAD 与 producer/consumer 后，在 Design 原推荐工具错误结果保留已有 code，UI 仅将已知原因映射为简短四语言提示，未知原因不透出内部英文，不为恢复文案修改 native／SDK 或另建预检。用户进一步要求提示言简意赅，最终 v1.0.11 文案为“请检查模型账号凭据。”等短句；类型、定向严格 lint 与双Windows生产验包通过，真实应用未验。沿用既有“用户错误可行动”与完整错误链规则，不增加同义规范。[VERIFY: runtime-host/modules/provider/src/adapters/loopback/text.rs:225-238] [VERIFY: apps/design/src/activate.ts:29-35] [VERIFY: apps/design/src/backend/analysis.ts] [VERIFY: apps/design/src/ui/Recommendations.tsx]
 
 ### Archive note
 
@@ -270,6 +472,14 @@ Renderer 安装贡献落点及插件 UI，不是 Rust Provider、插件后台 ow
 既有规则已清楚，问题是执行失败；在入口理解和截图验收阶段核原参考，不扩写项目规范。
 
 ## Case: 热切模型暴露内部命令误分类与乐观输入残留
+
+### 2026-11-03 同类：工具上下文被当作外部输入
+
+实际 Session 的唯一 native result 为 success，input ID 与 ACK 均精确匹配；ExecuteExtraTool 的“先发现工具”内部提示却以另一 user UUID 输出，App Server 据此置 `ownership_ambiguous`，随后输出 `native_result_ownership_ambiguous`。native terminal 已经到达 Renderer，不能归因于前端漏消费或更早的 history_source_changed。[VERIFY: matcha-agent/packages/builtin-tools/src/tools/ExecuteTool/ExecuteTool.ts] [VERIFY: matcha-agent/app-server/src/session/observation.rs] [VERIFY: matcha-agent/app-server/src/session/run.rs]
+
+最初建议只改该工具失败出口，遗漏 Skill／FileRead 正常附加上下文及 Agent progress；这是既有 DP-001 P4／P7 与宪法 §26 的执行失败，不新增同义规则。修复改在公共工具消息来源与 Server 当前 Run 归属判断：保原模型上下文与工具行为，真实 foreign input 仍保守收口。下次在修复方案冻结／reviewer pass 核同一消息出口的成功、失败、进度及拆块路径，不将单次触发点当作完整修复边界。[VERIFY: matcha-agent/src/services/tools/toolExecution.ts] [VERIFY: matcha-agent/src/utils/messages.ts] [VERIFY: matcha-agent/src/utils/queryHelpers.ts] [VERIFY: matcha-agent/app-server/src/session/observation.rs]
+
+诊断现场与新代码验证分开；静态检查、既有回归及尚缺的真实业务验收见 [Integration 本轮记录](../architecture-knowledge/modules/openclaw-matcha-integrations/dev.md#2026-11-03-工具上下文误判-unknown--源码已改业务未验收)。不修改真实 transcript／Run 数据来消除已有错误。
 
 ### Status
 
@@ -786,6 +996,14 @@ runtime-host session ingress、event bridge、protocol adapter、canonical sessi
 
 不新增状态存储或 OpenClaw 专属 record 字段；上述遗漏仍由既有宪法 §26、P4/P7 与语义隔离规则覆盖，原因是执行未遵守，不再补同义长期规则。最终集成检查单独记本轮，不沿用前轮成绩；源码、编译与已有测试不替代两端实际发送验收，live 与全部 OpenClaw 等价仍未验证。
 
+### 2026-11-03：流式正常，结束后用户与助手倒序
+
+真实事件与产品日志表明：普通 user ACK 直到正文结束才发出，Integration 又过滤 live UserMessage，因而同步前只有助手 A。终态历史读取当时只有用户 U，Integration 内部三方 Merge 在无共同前驱时将 A 插到 U 前，Host 已收到 `[A,U]`；Renderer 乐观 U 被 exact 身份接管后才显现倒序。最终原生 JSONL 主链实际为 `[U,A]`，不是文件丢失、前端排序或 OpenClaw 共享私有 reducer 故障。[VERIFY: runtime-host/integrations/matcha-agent/src/session/events.rs] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/observation.rs] [VERIFY: runtime-host/modules/sessions/src/domain/model.rs] [VERIFY: src/plugins/chat/store/session-item-reconciliation.ts]
+
+仅在 result 前追加 flush 的建议没有闭合两个反例：输出期间也可读历史；原 flush 先排队列再等异步生产结束，会漏掉随后入队的记录，recordTranscript 的首次 await 之前也未登记生产任务。修复归原生输入确认、存储屏障与 Matcha 精确输入投影，不在共享 Merge 加角色排序，也不让前端猜顺序。最后正文到 content_block_stop 的 9674ms 是独立等待，现有证据不足以归因，本次不改模型结束语义。[VERIFY: matcha-agent/src/QueryEngine.ts] [VERIFY: matcha-agent/src/utils/sessionStorage.ts] [VERIFY: matcha-agent/src/services/api/openai/responsesAdapter.ts]
+
+既有 P3/P7、DP-001 与宪法 §26 已明确要求完整失败链路和真实闭环；本次过早将局部方案称为最终方案属于执行未遵守，不新增同义规则。下一次在 bugfix 入口与 reviewer pass 同时核对实际事件身份、顺序、文件可读屏障及 Renderer 接管；编译、模型自评或另一 agent 认可不能替代动态结果。验证结果另记本轮模块 dev，不沿用本卡早期成绩。
+
 ## Case: Gateway retry re-entered prepare
 
 ### Status
@@ -1150,3 +1368,77 @@ open；原始动态视觉割裂尚未闭合。
 旧锁经用户明确授权删除后，后续专用profile均正常获锁／释放。性能对照固定缓存Main指纹；同期另一会话将共享OpenClaw降为9.3，故本次不证明其SDK兼容或automation授权链。原始上下割裂及整体丝滑目标仍OPEN。
 
 原始证据：`.scratch/workspace-resize-20261101/product-perf-ab-20261102/` 下 `measure-fixed-window/comparison.json`、`measure-candidate/{comparison,validity,environment-boundary}.json`、`measure-commit/comparison.json`、`measure-task/{failure,assessment}.json`；最终落盘工件与独立复验另见该目录 `final.json` 与 `measure-final/`。
+
+### 2026-11-02 续记：高速复现与 IAB 引入前后源码反证
+
+用户补充“加入浏览器功能后才注意到”，随后指出自动拖动可能太慢。此前把软件输出路径参与最小复现说成已经排除本方回归，归因过早；应分别验证故障机制与回归引入点，不用慢速零捕获证明旧版正常。
+
+隔离提取 `7d1ef797`（IAB 前）与 `88ce0ced`（IAB 后）的 Main／Renderer，固定当前 Electron 44.10.0、GPU 关闭、2078×824 client、专用 licensed Profile，交替执行系统鼠标轨迹并采 DXGI 桌面。两提交的 package.json 均指定相同 Electron；但安装依赖和 runtime-host 共享当前版本，因此这是源码对照，不是完整历史发行包对照。慢速峰值约565px/s 的1666帧均未捕获；提高到约2304px/s、240Hz 输入后：
+
+- **旧 Main＋旧 Renderer** 两轮1049有效帧中有8帧错位，最大45px；截图中输入框与竖线沿同一水平边界断开。IAB 不是该故障的必要条件，但这不证明新代码没有提高显现率。
+- 新 Main 下分别只恢复线条半像素平移、只取消 rAF 合并，均仍错位：原版12/1248、平移20/1281、即时更新21/1291。只证明两处单变量回退均不能消除故障，不把相关帧当独立样本推导发生率回归。
+- 旧 Main 导航至 about:blank，移除应用文档，只注入一个 rAF 变宽 CSS Grid、竖线与灰色方块；无 React／业务 Renderer、无 IAB 视图，仍捕获162/784及281/849帧错位，最大39px。该自动动画是机制反证，不是产品验收，发生率不与产品直接比较。
+
+有效判据为精确绿线实色／半像素混色、每帧全部764扫描行、非零 LastPresentTime；早期宽松色阈值误识别 ClearType 的采集已标 invalid，不混入结果。正式截图连续采集关闭，DXGI 及其余 trace 开销仍影响时序；截图中完整容器断开才是故障证据，不拿 DOM、rAF 或 IPC 代替。
+
+当前支持软件绘制／呈现边界继续调查；源 DIB、GDI 提交、窗口重定向与 DWM 尚未分别观测，不能宣布精确原生根因或修复。未改生产代码、正式 E2E 或 GPU 配置；两个候选只在 ignored 诊断目录。六次有效会话均有 Electron exit0 记录，5GiB 整树硬限、超时及 owned 清理；状态仍 OPEN。
+
+证据：`.scratch/workspace-drag-ab-GI6ANB/assessment-20261102.json`、`inputs.json`，各 `desktop-*/comparison.json`／`exit.json`；旧版原始截图 `desktop-before-main-fast/0-before/desktop-410.png`，纯页面反证 `desktop-minimal-fast/0-minimal/desktop-225.png`。
+
+### 2026-11-02 续记：直接源 DIB 与原生提交边界闭合
+
+用户要求继续“钉死”。本轮在真实新版应用 GPU 子进程的 `BitBlt` 入口设原生断点，按实际 `CreateDIBSection` 返回的像素地址及 `SelectObject` 关系，暂停时读取本次源位图，而非另取 CopyOutput 图。716次完整764行源像素全部笔直；同次613有效桌面帧中出现5张上下混帧，5张的上下x均精确对应桌面QPC前相邻两次正确源提交。例如源514全高x1459、源515全高x1432，桌面411却在y520拼为这两个x。断点改变时序，但坏帧仍出现；这直接排除本次故障在提交前已由DOM／软件源位图画歪。
+
+独立Win32最小程序彻底移除Electron，再验证相同输出边界：
+
+- 普通 `BitBlt → HWND` 61/791帧混合，加 `GdiFlush` 仍64/864；另一轮 `DwmFlush` 也未消除，不把等待完成误当原子提交。
+- 两张初始化后永不改写的位图，固定x1180／1400交替，排除源内存复用；无鼠标输入的 `BitBlt + GdiFlush` 两轮42/825帧混合。相同源、窗口尺寸与采集，仅换 `UpdateLayeredWindow` 两轮0/824；所有源图逐行正确，全部提交返回成功。零捕获仅限本对照，不宣布产品已修好。
+- 独立Windows.Graphics.Capture窗口帧同样看到不可变源混合，143/809及161/790，说明不必等到物理显示器扫描，也不只是DXGI采集器误判。窗口DC读回会改变同步并压掉复现，不能拿这种正确读回代表故障时刻的重定向表面。
+
+归属已缩到**正确源位图经普通GDI窗口更新到桌面合成的非整帧一致性边界**，不是Chat／Workspace宽度状态、上下两根线或IAB视图bounds。精确到Windows内部哪一个驱动／内核／DWM函数仍未证明，不能把边界归属冒称OS函数级定位。修复方向是保留GPU关闭和原生窗口功能的整帧提交路径；已知透明窗口副作用仍使其不可交付，不新增CSS补丁或宣称flush修复。
+
+失败／无效实验独立保留：主进程IAT探针未命中真实提交，GPU DLL未加载时未关沙箱；只读共享区扫描未找到源；一轮鼠标轨迹偏离作废；WGC边框遮住DXGI三行导致零有效帧，且应用WGC缓存静止帧，不把其零坏帧当通过。最终证据使用直接原生断点＋原DXGI。真实应用正常exit0、PID已退出、专用锁释放；生产源码、正式E2E、GPU和沙箱配置未改。诊断边界已闭合，产品修复仍OPEN。
+
+证据：`.scratch/workspace-drag-ab-GI6ANB/native-boundary-20261102.json`；`product-native-breakpoint/source-desktop-association.json`、`source-debug/source.jsonl`、`0-after/capture.json`；`native-gdi-immutable-atomic-noinput/comparison.json`、`native-gdi-wgc-ab/*-wgc.jsonl`。工具、失败记录与资源限制均保留在同一ignored诊断目录。
+
+### 2026-11-02 续记：稳定版 Electron 对照未找到现成修复
+
+用户同意先查发布记录和隔离版本对照。核实最近补丁44.10.1、最新稳定主版本45.2.1的官方发布与具体backport，未找到明确对应GDI混帧的修复；这不等于证明上游所有分支均无修复。两份win32-x64运行包只下载到新建scratch目录，镜像包SHA256与官方GitHub release asset digest一致，不安装依赖、不改项目package／lockfile。
+
+固定同一Main／preload／Renderer指纹、GPU关闭、不透明窗口、2078×824 client、240Hz同轨系统鼠标，每版本两轮12秒：基线44.10.0（Chromium152）19/1114有效帧混合；44.10.1（同Chromium152）7/1185；45.2.1（Chromium156.0.8078.75）8/1154。每个候选两轮均复现，结论仅为**都不能消除故障**，不从短时相关坏帧数量宣称发生率改善。
+
+实际运行路径／版本、GPU compositing=`disabled_software`、真实license receipt与exit0逐项核验。每版本用专用E2E licensed Profile的独立克隆，非日常Profile；许可验证不变，Bun load-time只改诊断进程的profileRoot，正式E2E未改。首次基线因同PID有两个可见HWND失败，已排除；随后从BrowserWindow读取精确native handle并保留PID／前台验证，不再猜窗口。
+
+Chromium156源码仍以 `GetDC → CopyHDC → ReleaseDC` 执行Direct；Win10仍被排除出RemoveRedirectionBitmap的新提交路径，与实测未修复一致。两个候选已失败视觉门，不追加完整窗口／内嵌浏览器验收，不升级依赖，也不未经确认转自维护Electron补丁。全部实测进程正常退出，克隆锁释放、GUI资源已向并行会话交还；产品修复仍OPEN。
+
+证据：`.scratch/workspace-drag-ab-GI6ANB/electron-version-assessment-20261102.json`、`electron-version-inputs.json`，`version-44.10.0-r2/`、`version-44.10.1-r1/`、`version-45.2.1-r1/`的`session.json`、`version-environment.json`、`comparison.json`、原始capture与`exit.json`。45.2.1原图为`version-45.2.1-r1/1-after/desktop-456.png`，分隔线与输入框同高断开。
+
+### 2026-11-02 续记：CPU 软件交换链可行，尚非可发布修复
+
+用户同意继续隔离验证整帧提交。独立原生程序在同一不透明窗口交替提交两张不可变源图，ABBA 对照中普通 GDI 为37/787有效帧混合；`D3D_DRIVER_TYPE_WARP`、`FLIP_SEQUENTIAL`、`AlphaMode=IGNORE` 为0/822。软件设备 vendor5140／device140，源图每行正确、提交均成功。这只证明该原生对照，不拿它替代真实应用。
+
+Chromium 已有 `SoftwareOutputDeviceWinSwapChain`，其 backing 明确创建 WARP 软件设备；Win10 在现有 factory 政策下未选择此分支。匹配官方 Breakpad MODULE 与 PE 后，仅在完整私有 Electron44.10.0 副本的 `CreateSoftwareOutputDeviceWin` 中，将该 factory 的五字节政策调用结果置真，选择现有 child-HWND／DirectComposition／composition-swapchain 实现；全局版本谓词、沙箱、许可和授权检查未改。**这是签名失效的私有可行性实验，绝不能安装或发布；尚无源码集成、重建和签名验证。**
+
+真实应用两轮空工作区0/1018有效全高帧混合；额外四个独立应用会话ABBA中，原版30/1115，候选0/1017。各轮均为同一专用 Profile、固定历史Main／Renderer、2078×824 client、12秒、240Hz系统鼠标、实际x1070–1510。候选仍 `hardwareAcceleration=false`、GPU compositing／rasterization=`disabled_software`、opacity1，未以透明主窗或硬件渲染换视觉结果。
+
+功能闭环 `swapchain-functional-r6` 正常退出：真实标题栏双击最大化／精确还原、Win+Left贴边、1800×950 resize 均通过，始终无 `WS_EX_LAYERED`；实际内嵌网页导航、输入、点击成功，“更多”原生透明浮层出现并可Escape关闭，高速拖动后输入值与clicked状态保留。全桌面原图证明网页可见；r5虽因错误role定位失败，其桌面原图独立证明浮层盖在网页上。r6共有515张桌面帧，448张全764扫描行有效，0混合；另67张仅上方89行marker可见，恰止于native网页y149，**必须排除，不能宣称跨原生面的边缘同步已解决**。
+
+无效验收分别留档：r1在窄窗开侧栏未得到resizer；r2把成功贴边后的Snap Assist抢焦点当失败；r3在resize已关闭侧栏时找browser按钮；r4／r5要求菜单具有实际并不存在的dialog角色。修正观测流程后才取得r6收据，不把工具失败冒称产品回归，也不把失败轮计入通过。
+
+性能补充：完整桌面ABBA中，基线可见位置变化中位16.88／16.85ms，候选32.32／17.00ms；候选对应采集间隔也为32.17／17.01ms，存在漏采与采集负担。随后只缩小DXGI传输区域为780×764、保留全764行及完全相同精确色判据，并用既有原图逐像素核对分类和x计算一致。有效AB中基线142/671混合、候选0/650，可见变化中位16.70／16.72ms、P95 33.43／33.36ms；不支持候选必然降为30Hz，也不能凭单对样本证明广泛性能无回退。其后候选在采集前失去resizer，失败DOM显示窗口1812px且右侧为非docked状态；该次不计通过，末次基线未启动，不能称轻量ABBA已完成。未再重试，全部应用仍正常exit0、PID退出、锁释放，GUI交还。此前完整容器证据不被窄采样替代；输入到呈现延迟、跨native面的同步与整体丝滑仍未证明。
+
+产品源码、安装版Electron、依赖和正式E2E未改；安装版exe哈希仍为`4d313d128cb9d2412dc17a7beefb1d79269825e3a3ffa0af611c203c836a1ab6`。上述应用会话全部exit0、PID退出、专用锁释放；5GiB整树硬限与owned cleanup保留。当前无Electron／Chromium完整源码或depot_tools、剩余磁盘约17GiB，未擅自启动全量下载／构建。
+
+证据：`.scratch/workspace-drag-ab-GI6ANB/swapchain-progress-20261102.json`、`swapchain-candidate-inputs.json`、`native-warp-atomic-ab/comparison.json`、`swapchain-product-r1/`、`swapchain-functional-r6/{native-window-acceptance,resize-acceptance,browser-acceptance,browser-after-drag,comparison,version-environment,exit}.json`、`presenter-timing-abba-assessment.json`、`presenter-slim-assessment.json`；实屏图`swapchain-functional-r6/0-after/desktop-0.png`及`swapchain-functional-r5/failure-desktop/desktop-0.png`。
+
+### 2026-11-03 续记：改走硬件加速，提供设置与恢复闭环
+
+只读核实当前 Accio 的启动日志、GPU feature 与设备：硬件加速、合成／栅格化实际开启，RTX 3070／ANGLE D3D11，不是 GPU 安全模式。用户随后明确选择 Windows 默认启用加速、关闭 GPU 进程沙箱，并要求设置页可控、连续崩溃自动降级与手动恢复；此前软件模式实验约束不再是当前产品方向。未投递私有 WARP 二进制或升级 Electron。
+
+GPU 策略、当前 userData 的 graphics.json 与崩溃观察归 Main `desktop/graphics.ts`；设置→通用开关通过仅主窗口主框架允许的 retained IPC，统一退出先保存浏览器数据，再原子写模式，清理确认后 native relaunch。30 秒内 6 次 GPU crashed 请求软件 recovery，失败后冷却 90 秒并等待新风暴，软件模式不重复重启。读取坏配置有日志并进入 recovery；不新增 Rust desired、OpenClaw 字段、Renderer persist 或通用恢复框架。
+
+真实专用 licensed profile 取消与开关重启通过；最终关闭后 hardware=false／gpu_compositing=disabled_software，恢复后 hardware=true／合成与栅格化 enabled，实际 RTX 3070／ANGLE D3D11。重启后早期 feature status 可能尚为软件快照，需完整进入页面并 await getGPUInfo('complete') 后交叉核设备，不能只拿设置开关证明硬件恢复。另在真实 Main 注入模拟 GPU crashed 事件，前 5 次不降级，第 6 次沿产品真实退出／持久化／native relaunch 进入软件 recovery、显示原因，软件模式再 12 次事件不重启；用户开关恢复硬件通过。模拟事件不证明真实驱动崩溃分类、跨显卡兼容或所有故障可恢复。
+
+双 noEmit、定向 lint、JS build、check:e2e 通过。现有两 suites 11 项为 2 pass／9 fail：7 项旧 Electron mock 缺 hasSwitch，另 2 项当前 export／IPC 精确快照差异（含本轮新增 GPU 通道），未改测试洗绿。真实磁盘失败与浏览器 prepareQuit 拒绝未动态验；软件降级仍可能回到原 Win10 GDI 混帧路径，不能宣称无条件根治拖动。全部最终应用 exit0、无专用残留进程、锁释放，专用偏好恢复 enabled；未改日常 Accio／Matcha 配置，未发布。本轮 JS 工件不作为其他会话未构建的 native IAB 链路证据。详细原件与失败轮：[GPU 验证记录](../../.scratch/workspace-drag-ab-GI6ANB/gpu-settings-validation-20261103.md)。
+
+同日用户再次质疑补丁式实现。前版真实重启通过，但 controller changing／restarting 与入口 graphicsRestart 共同持有同一变更，保存和回执通过 save/resolve 回调交接；此前直接宣称 Final-form 已收口过满。最终在原两生产文件收敛：GPU owner 用 requested／committed 单一联合状态持有变更、原子保存、失败回执和 relaunch 策略，入口只编排浏览器准备→GPU提交→原清理→GPU确认重启；旧回调与重复标记全部删除，UI／IPC／文件格式不变，不新增通用框架。最终 Electron noEmit、限定lint、JSbuild、check:e2e均0；新工件同一专用profile真实取消、关闭→开启→模拟GPU风暴降级→UI恢复四次native relaunch通过，逐次核实际软件／RTX3070合成，最终exit0、进程清空、锁释放。源码内存验证另覆盖取消、写失败、并发、冷却及unconfirmed不重启；不当作真实磁盘／驱动故障。旧11项单测本次未重跑，不声明失败消失。证据：上述验证记录最终结构节、`gpu-single-owner-20261103/{receipts,exit}.json`。

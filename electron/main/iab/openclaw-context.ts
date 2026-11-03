@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import type { SessionEntry } from 'openclaw/plugin-sdk/session-store-runtime';
+import type { BrowserActionContext, BrowserSessionCleanup } from '../../../packages/openclaw-browser-relay-plugin/src/browser-action-contract';
 import { buildSessionIdentityKey, type SessionIdentity } from '../../../src/types/desktop/runtime-address';
 import { getOpenClawConfigDir, getOpenClawDir } from '../../utils/paths';
 import type { IabTrustedContext } from './contracts';
@@ -136,11 +137,8 @@ function receipt(entry: SessionEntry) {
     incognito: entry.incognito,
     initializationPending: entry.initializationPending,
     spawnedBy: entry.spawnedBy,
-    spawnedBySessionId: entry.spawnedBySessionId,
-    spawnedBySenderIsOwner: entry.spawnedBySenderIsOwner,
     parentSessionKey: entry.parentSessionKey,
     parentSessionId: entry.parentSessionId,
-    parentSessionLifecycleRevision: entry.parentSessionLifecycleRevision,
   };
 }
 type CapturedHop = {
@@ -172,8 +170,7 @@ export async function resolveIabOpenClawContext(
   const hops: CapturedHop[] = [];
   const seen = new Set<string>();
   let sessionKey = leaf.sessionKey;
-  let sessionId = leaf.sessionId;
-  let lifecycleRevision: string | undefined;
+  let sessionId: string | undefined = leaf.sessionId;
 
   const read = (hop: Pick<CapturedHop, 'agentId' | 'sessionKey' | 'storePath'>): SessionEntry | undefined => {
     try {
@@ -205,7 +202,7 @@ export async function resolveIabOpenClawContext(
   for (let depth = 0; depth < 64; depth += 1) {
     assertActive(signal);
     const parsed = routing.parseAgentSessionKey(sessionKey);
-    if (!parsed || !identifier(sessionId) || depth === 0 && parsed.agentId !== leaf.agentId) throw failure('INVALID');
+    if (!parsed || sessionId !== undefined && !identifier(sessionId) || depth === 0 && parsed.agentId !== leaf.agentId) throw failure('INVALID');
     const agentId = routing.normalizeAgentIdStrict(parsed.agentId);
     if (!agentId.ok || agentId.value !== parsed.agentId) throw failure('INVALID');
     if (routing.isIncognitoSessionKey(sessionKey)) throw failure('INCOGNITO');
@@ -218,26 +215,24 @@ export async function resolveIabOpenClawContext(
     catch { throw failure('UNAVAILABLE'); }
     const address = { agentId: parsed.agentId, sessionKey, storePath };
     const entry = read(address);
-    if (!entry || entry.sessionId !== sessionId || depth > 0 && entry.lifecycleRevision !== lifecycleRevision) throw failure('STALE');
+    if (!entry || !identifier(entry.sessionId) || sessionId !== undefined && entry.sessionId !== sessionId) throw failure('STALE');
     if (entry.incognito) throw failure('INCOGNITO');
     if (entry.initializationPending || entry.lifecycleRevision !== undefined && !identifier(entry.lifecycleRevision)) throw failure('INVALID');
     hops.push({ ...address, receipt: receipt(entry) });
-    if (entry.spawnedBy !== undefined) {
-      if (!identifier(entry.spawnedBy) || !identifier(entry.spawnedBySessionId)
-        || typeof entry.spawnedBySenderIsOwner !== 'boolean'
-        || entry.parentSessionKey !== undefined && entry.parentSessionKey !== entry.spawnedBy
-        || entry.parentSessionId !== undefined && entry.parentSessionId !== entry.spawnedBySessionId
-        || entry.parentSessionLifecycleRevision !== undefined && !identifier(entry.parentSessionLifecycleRevision)) {
+    if (entry.spawnedBy !== undefined || entry.parentSessionKey !== undefined) {
+      const parentKey = entry.parentSessionKey ?? entry.spawnedBy;
+      if (!identifier(parentKey) || entry.parentSessionId !== undefined && !identifier(entry.parentSessionId)
+        || entry.spawnedBy !== undefined && (!identifier(entry.spawnedBy) || entry.spawnedBy !== parentKey)) {
         throw failure('INVALID');
       }
-      sessionKey = entry.spawnedBy;
-      sessionId = entry.spawnedBySessionId;
-      lifecycleRevision = entry.parentSessionLifecycleRevision;
+      // The native parent key defines the logical group. Explicit parentSessionId is
+      // strict; sessions_spawn's key-only edge captures the parent's current entry
+      // below for currency checks, not a birth receipt or a generation lease.
+      sessionKey = parentKey;
+      sessionId = entry.parentSessionId;
       continue;
     }
-    if (routing.isSubagentSessionKey(sessionKey) || entry.parentSessionKey !== undefined || entry.parentSessionId !== undefined
-      || entry.parentSessionLifecycleRevision !== undefined || entry.spawnedBySessionId !== undefined
-      || entry.spawnedBySenderIsOwner !== undefined) throw failure('INVALID');
+    if (routing.isSubagentSessionKey(sessionKey) || entry.parentSessionId !== undefined) throw failure('INVALID');
     const identity: SessionIdentity = Object.freeze({
       endpoint: Object.freeze({ kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }),
       agentId: parsed.agentId,
@@ -246,6 +241,11 @@ export async function resolveIabOpenClawContext(
     assertCurrent();
     return Object.freeze({
       principalId: buildSessionIdentityKey(identity),
+      executorId: buildSessionIdentityKey({
+        endpoint: identity.endpoint,
+        agentId: hops[0].agentId,
+        sessionKey: hops[0].sessionKey,
+      }),
       identity,
       sessionKey: leaf.sessionKey,
       ...(leaf.workspaceDir !== undefined ? { workspaceDir: leaf.workspaceDir } : {}),
@@ -253,4 +253,107 @@ export async function resolveIabOpenClawContext(
     });
   }
   throw failure('INVALID');
+}
+
+type BrowserRun = {
+  context: IabTrustedContext;
+  controller: AbortController;
+  pending: Set<Promise<void>>;
+  release?: Promise<void>;
+  cleanup?: Promise<void>;
+};
+function runKey(context: BrowserActionContext): string {
+  return JSON.stringify([context.agentId, context.sessionKey, context.sessionId, context.runId]);
+}
+
+/** Only admitted native identities can be cleaned; late end never resolves a reset key. */
+export class IabOpenClawRuns {
+  private readonly runs = new Map<string, BrowserRun>();
+  private readonly ended = new Set<string>();
+  private readonly executors = new Map<string, BrowserRun>();
+  private readonly groups = new Map<string, Promise<unknown>>();
+  private readonly cleanupBarriers = new Map<string, Promise<void>>();
+  private closed = false;
+
+  constructor(private readonly cleanupSession: (executorId: string, principalId: string, scope: 'executor' | 'group') => Promise<void>) {}
+
+  async execute<T>(leaf: BrowserActionContext, signal: AbortSignal, action: (context: IabTrustedContext, signal: AbortSignal) => Promise<T>): Promise<T> {
+    const key = runKey(leaf);
+    if (this.closed || leaf.runId && this.ended.has(key)) throw failure('STALE');
+    const verified = await resolveIabOpenClawContext(leaf, signal);
+    if (!leaf.runId) return action(verified, signal);
+    const run = await this.inGroup(verified.principalId, async () => {
+      if (this.closed) throw failure('CANCELLED');
+      if (this.ended.has(key)) throw failure('STALE');
+      await this.cleanupBarriers.get(verified.principalId);
+      if (this.ended.has(key)) throw failure('STALE');
+      let captured = this.runs.get(key);
+      if (captured) {
+        if (captured.context.executorId !== verified.executorId || captured.context.principalId !== verified.principalId) throw failure('STALE');
+      } else {
+        const previous = this.executors.get(verified.executorId);
+        if (previous) await this.cleanup(previous, previous.context.executorId === previous.context.principalId ? 'group' : 'executor');
+        verified.assertCurrent();
+        captured = { context: verified, controller: new AbortController(), pending: new Set() };
+        this.runs.set(key, captured);
+        this.executors.set(verified.executorId, captured);
+      }
+      captured.controller.signal.throwIfAborted();
+      return captured;
+    });
+    const current: IabTrustedContext = Object.freeze({ ...verified, assertCurrent: () => {
+      run.controller.signal.throwIfAborted(); verified.assertCurrent();
+    } });
+    const combined = AbortSignal.any([signal, run.controller.signal]);
+    current.assertCurrent();
+    const pending = action(current, combined);
+    const settled = pending.then(() => {}, () => {});
+    run.pending.add(settled);
+    try { return await pending; }
+    finally { run.pending.delete(settled); }
+  }
+
+  async end(input: BrowserSessionCleanup): Promise<void> {
+    const key = runKey(input.context);
+    this.ended.add(key);
+    const run = this.runs.get(key);
+    if (!run) return;
+    await this.inGroup(run.context.principalId, () => this.cleanup(run, input.scope));
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    const outcomes = await Promise.allSettled([...this.runs.values()].map((run) => this.inGroup(run.context.principalId, () => this.cleanup(run, 'group'))));
+    const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected').map((outcome) => outcome.reason);
+    if (failures.length) throw new AggregateError(failures, 'OpenClaw browser runs did not finish cleanup');
+  }
+
+  private inGroup<T>(principalId: string, action: () => Promise<T>): Promise<T> {
+    const pending = (this.groups.get(principalId) ?? Promise.resolve()).then(action, action);
+    const tail = pending.then(() => {}, () => {});
+    this.groups.set(principalId, tail);
+    void tail.then(() => { if (this.groups.get(principalId) === tail) this.groups.delete(principalId); });
+    return pending;
+  }
+
+  private cleanup(run: BrowserRun, scope: 'executor' | 'group'): Promise<void> {
+    if (run.cleanup) return run.cleanup;
+    if (scope === 'executor' && run.release) return run.release;
+    const affected = scope === 'group'
+      ? [...this.runs.values()].filter((candidate) => candidate.context.principalId === run.context.principalId && !candidate.cleanup)
+      : [run];
+    for (const candidate of affected) candidate.controller.abort(failure('STALE'));
+    const settling = affected.flatMap((candidate) => [...candidate.pending, ...(candidate.release ? [candidate.release] : [])]);
+    const pending = Promise.resolve().then(async () => {
+      await this.cleanupSession(run.context.executorId, run.context.principalId, scope);
+      await Promise.all(settling);
+    });
+    if (scope === 'group') for (const candidate of affected) candidate.cleanup = pending;
+    else run.release = pending;
+    this.cleanupBarriers.set(run.context.principalId, pending);
+    void pending.then(() => {
+      if (this.cleanupBarriers.get(run.context.principalId) === pending) this.cleanupBarriers.delete(run.context.principalId);
+    }, () => {});
+    return pending;
+  }
 }

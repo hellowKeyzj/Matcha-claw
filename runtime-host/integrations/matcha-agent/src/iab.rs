@@ -1,3 +1,7 @@
+mod run;
+
+pub use run::{RunRelease, RunReleased, RunWait, RunWaited};
+
 use std::{
     collections::{HashMap, hash_map::Entry},
     path::Path,
@@ -33,6 +37,8 @@ pub struct Acquire {
     capability: Capability,
     #[serde(deserialize_with = "uuid")]
     invocation_id: String,
+    #[serde(deserialize_with = "uuid")]
+    input_message_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -71,6 +77,8 @@ pub struct Acquired {
     #[serde(deserialize_with = "uuid")]
     instance_id: String,
     workspace_dir: String,
+    #[serde(deserialize_with = "uuid")]
+    run_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -148,6 +156,7 @@ impl Failure {
 #[derive(Clone, Default)]
 pub struct Leases {
     invocations: Arc<Mutex<HashMap<Uuid, Invocation>>>,
+    runs: Arc<Mutex<HashMap<run::RunKey, run::Run>>>,
 }
 
 struct Invocation {
@@ -224,6 +233,7 @@ impl Leases {
             || acquired.instance_id != input.capability.instance_id
             || !crate::session::model::valid_agent_id(&acquired.agent_id)
             || !Path::new(&acquired.workspace_dir).is_absolute()
+            || acquired.workspace_dir.contains('\0')
         {
             return Err(Failure::Protocol);
         }
@@ -235,6 +245,7 @@ impl Leases {
         if !matches!(invocation.state, InvocationState::Acquiring) {
             return Err(Failure::LeaseRevoked);
         }
+        self.register_run(&acquired, &connection)?;
         invocation.state = InvocationState::Active;
         invocation.lease_id = Some(acquired.lease_id.clone());
         Ok(acquired)

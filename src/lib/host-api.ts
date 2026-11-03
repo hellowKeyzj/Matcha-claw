@@ -110,6 +110,7 @@ import {
 const DEFAULT_HOST_API_PORT = 13210;
 const DEFAULT_HOST_API_BASE = `http://127.0.0.1:${DEFAULT_HOST_API_PORT}`;
 const SESSION_PEER_RPC_TIMEOUT_MS = 30_000;
+const WORKSPACE_HISTORICAL_MEDIA_TIMEOUT_MS = 150_000;
 const WORKSPACE_FILE_CAPABILITY_ID = 'workspace.file';
 const SESSION_MANAGEMENT_CAPABILITY_ID = 'session.management';
 const SESSION_PROMPT_CAPABILITY_ID = 'session.prompt';
@@ -1506,6 +1507,58 @@ export async function hostFileThumbnails(payload: {
     // Batch thumbnail failures are soft failures per legacy contract.
   }
   return result;
+}
+
+export async function hostWorkspaceMediaResolve(payload: {
+  reference: string;
+  sessionIdentity: SessionIdentity;
+}): Promise<Blob> {
+  const maxBytes = historicalMediaMaxBytes(payload.reference);
+  const result = await hostCapabilityExecute<unknown>(workspaceMediaPayload('media.resolve', payload.sessionIdentity, {
+    reference: payload.reference,
+  }), { timeoutMs: WORKSPACE_HISTORICAL_MEDIA_TIMEOUT_MS });
+  if (!isRecord(result) || !hasExactKeys(result, ['data'])) {
+    throw new Error('Workspace media is unavailable');
+  }
+  return decodeWorkspaceMediaBlob(result.data, maxBytes);
+}
+
+export async function hostWorkspaceMediaPlayback(payload: {
+  reference: string;
+  sessionIdentity: SessionIdentity;
+}): Promise<Blob> {
+  const maxBytes = historicalMediaMaxBytes(payload.reference);
+  const result = await hostCapabilityExecute<unknown>(workspaceMediaPayload('media.playback', payload.sessionIdentity, {
+    reference: payload.reference,
+  }), { timeoutMs: WORKSPACE_HISTORICAL_MEDIA_TIMEOUT_MS });
+  if (!isRecord(result) || !hasExactKeys(result, ['data', 'mimeType'])
+    || typeof result.mimeType !== 'string' || result.mimeType.length === 0
+    || result.mimeType.length > 255 || result.mimeType.includes('\0')) {
+    throw new Error('Workspace media is unavailable');
+  }
+  return decodeWorkspaceMediaBlob(result.data, maxBytes, result.mimeType);
+}
+
+function historicalMediaMaxBytes(reference: string): number {
+  if (reference.length > 512 || !/^(?:oc|ma)-media:1:[A-Za-z0-9_-]+$/.test(reference)) {
+    throw new Error('Workspace media reference is invalid');
+  }
+  return (reference.startsWith('oc-media:1:') ? 100 : 50) * 1024 * 1024;
+}
+
+function decodeWorkspaceMediaBlob(data: unknown, maxBytes: number, mimeType = ''): Blob {
+  if (typeof data !== 'string' || data.length > Math.ceil(maxBytes / 3) * 4
+    || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+    throw new Error('Workspace media is unavailable');
+  }
+  const binary = atob(data);
+  if (binary.length > maxBytes
+    || binary.length > 0 && btoa(binary.slice(-(binary.length % 3 || 3))) !== data.slice(-4)) {
+    throw new Error('Workspace media is unavailable');
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: mimeType });
 }
 
 type WorkspaceMediaThumbnailPayload = {

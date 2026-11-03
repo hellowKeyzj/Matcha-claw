@@ -34,43 +34,43 @@ const log = createLogger('evt:dialog')
  */
 export function handleDialogEvent(method, tabId, params, _ctx) {
   if (method === 'Page.javascriptDialogOpening') {
-    return handleDialogOpening(tabId, params)
+    return handleDialogOpening(tabId, params, _ctx.debuggee)
   }
 
   if (method === 'Page.javascriptDialogClosed') {
-    log.debug(() => [
+    log.debug(
       'dialog closed:', tabId,
       'result:', params?.result,
       'userInput:', params?.userInput ? `"${truncate(params.userInput, 40)}"` : '(none)',
-    ])
+    )
   }
 }
 
-function handleDialogOpening(tabId, params) {
+function handleDialogOpening(tabId, params, debuggee) {
   const type = params?.type
   const message = params?.message || ''
   const defaultPrompt = params?.defaultPrompt || ''
   const hasBrowserHandler = params?.hasBrowserHandler
 
-  log.info(() => [
+  log.info(
     'dialog opening:', tabId,
     `type=${type}`,
     `hasBrowserHandler=${hasBrowserHandler}`,
     `message="${truncate(message, 100)}"`,
-  ])
+  )
 
   switch (type) {
     case 'beforeunload':
     case 'alert':
     case 'confirm':
-      acceptDialog(tabId, true)
+      acceptDialog(debuggee, true)
       break
     case 'prompt':
-      acceptDialog(tabId, true, defaultPrompt)
+      acceptDialog(debuggee, true, defaultPrompt)
       break
     default:
       log.warn('unknown dialog type, auto-accepting:', tabId, type)
-      acceptDialog(tabId, true)
+      acceptDialog(debuggee, true)
       break
   }
 }
@@ -84,13 +84,14 @@ function handleDialogOpening(tabId, params) {
  * can still override by sending its own Page.handleJavaScriptDialog
  * before observing the dialogClosed event.
  */
-function acceptDialog(tabId, accept, promptText) {
+function acceptDialog(debuggee, accept, promptText) {
+  const { tabId } = debuggee
   const cmdParams = { accept }
   if (promptText !== undefined) cmdParams.promptText = promptText
 
   chrome.debugger
-    .sendCommand({ tabId }, 'Page.handleJavaScriptDialog', cmdParams)
-    .then(() => log.debug(() => ['dialog handled:', tabId, accept ? 'accepted' : 'dismissed']))
+    .sendCommand(debuggee, 'Page.handleJavaScriptDialog', cmdParams)
+    .then(() => log.debug('dialog handled:', tabId, accept ? 'accepted' : 'dismissed'))
     .catch((err) => log.warn('dialog handle failed:', tabId, err?.message || err))
 }
 

@@ -32,7 +32,7 @@ type AuthMode = 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'token' | 'cliReuse'
 
 type AccountKind = 'chat' | 'media';
 type ApiProtocol = 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
-type MediaProtocol = 'google' | 'openAi' | 'openRouter';
+type MediaProtocol = 'google' | 'openAi' | 'openRouter' | 'dashScope' | 'ark';
 
 export type ProviderAccount = Readonly<{
   id: string;
@@ -293,7 +293,7 @@ function optionalApiProtocol(value: unknown): value is ApiProtocol | undefined {
 }
 
 function isMediaProtocol(value: unknown): value is MediaProtocol {
-  return value === 'google' || value === 'openAi' || value === 'openRouter';
+  return value === 'google' || value === 'openAi' || value === 'openRouter' || value === 'dashScope' || value === 'ark';
 }
 
 function isAuthMode(value: unknown): value is AuthMode {

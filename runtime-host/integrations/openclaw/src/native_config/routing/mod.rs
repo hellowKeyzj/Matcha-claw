@@ -5,8 +5,8 @@ use std::{
 };
 
 use ::provider::{
-    ProviderAccount, ProviderAccountKind, ProviderModelCatalog,
-    ProviderRouting as DesiredProviderRouting, ProviderRoutingCapability,
+    ProviderAccount, ProviderModelCatalog, ProviderRouting as DesiredProviderRouting,
+    ProviderRoutingCapability,
 };
 use serde_json::{Map, Value};
 
@@ -192,21 +192,6 @@ impl CapabilityRouting {
                 "imageModel",
                 self.image_understand.as_ref(),
             ),
-            (
-                ProviderRoutingCapability::ImageGenerate,
-                "imageGenerationModel",
-                self.image_generate.as_ref(),
-            ),
-            (
-                ProviderRoutingCapability::VideoGenerate,
-                "videoGenerationModel",
-                self.video_generate.as_ref(),
-            ),
-            (
-                ProviderRoutingCapability::MusicGenerate,
-                "musicGenerationModel",
-                self.music_generate.as_ref(),
-            ),
         ] {
             if !self.preserved.contains(&capability) {
                 set_route(
@@ -217,20 +202,40 @@ impl CapabilityRouting {
                 )?;
             }
         }
-        if self.has_media_route() {
-            defaults.insert(
-                "mediaGenerationAutoProviderFallback".into(),
-                Value::Bool(false),
-            );
-        } else if ![
-            ProviderRoutingCapability::ImageGenerate,
-            ProviderRoutingCapability::VideoGenerate,
-            ProviderRoutingCapability::MusicGenerate,
-        ]
-        .iter()
-        .any(|capability| self.preserved.contains(capability))
-        {
-            defaults.remove("mediaGenerationAutoProviderFallback");
+        let mut media_models = object(defaults.get("mediaModels"));
+        for (capability, key, route) in [
+            (
+                ProviderRoutingCapability::ImageGenerate,
+                "image",
+                self.image_generate.as_ref(),
+            ),
+            (
+                ProviderRoutingCapability::VideoGenerate,
+                "video",
+                self.video_generate.as_ref(),
+            ),
+            (
+                ProviderRoutingCapability::MusicGenerate,
+                "music",
+                self.music_generate.as_ref(),
+            ),
+        ] {
+            if !self.preserved.contains(&capability) {
+                set_route(&mut media_models, key, route, true)?;
+            }
+        }
+        if media_models.is_empty() {
+            defaults.remove("mediaModels");
+        } else {
+            defaults.insert("mediaModels".into(), Value::Object(media_models));
+        }
+        for key in [
+            "imageGenerationModel",
+            "videoGenerationModel",
+            "musicGenerationModel",
+            "mediaGenerationAutoProviderFallback",
+        ] {
+            defaults.remove(key);
         }
         agents.insert("defaults".into(), Value::Object(defaults));
         Ok(replace(document, "agents", Value::Object(agents)))
@@ -269,12 +274,6 @@ impl CapabilityRouting {
         );
         messages.insert("tts".into(), Value::Object(tts));
         replace(document, "messages", Value::Object(messages))
-    }
-
-    fn has_media_route(&self) -> bool {
-        self.image_generate.is_some()
-            || self.video_generate.is_some()
-            || self.music_generate.is_some()
     }
 }
 
@@ -499,17 +498,11 @@ fn reference_for(
             return Err(ProviderRoutingProjectionError::CredentialUnavailable);
         }
     }
-    let model = match account.configuration().kind() {
-        ProviderAccountKind::Chat => reference.model_id().to_owned(),
-        ProviderAccountKind::Media => format!("{key}/{}", reference.model_id()),
-    };
-    let provider = match account.configuration().kind() {
-        ProviderAccountKind::Chat => key.clone(),
-        ProviderAccountKind::Media => "matchaclaw-media".to_owned(),
-    };
     Ok(ModelReference::new(
-        ProviderKey::try_new(provider).map_err(|_| ProviderRoutingProjectionError::InvalidRoute)?,
-        ModelId::try_new(model).map_err(|_| ProviderRoutingProjectionError::InvalidRoute)?,
+        ProviderKey::try_new(key.clone())
+            .map_err(|_| ProviderRoutingProjectionError::InvalidRoute)?,
+        ModelId::try_new(reference.model_id().to_owned())
+            .map_err(|_| ProviderRoutingProjectionError::InvalidRoute)?,
     ))
 }
 

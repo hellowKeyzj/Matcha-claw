@@ -300,6 +300,7 @@
         "composeReceiverConflict": "The chat input is in an unexpected state. Reopen the chat and try again.",
         "composeAttachmentFailed": "An attachment could not be staged or has been removed. Add it again and retry.",
         "editContextPrompt": "Edit operation requirements",
+        "invalidModelContext": "Operation context exceeds the limits or is invalid. Remove some operations and try again.",
         "composeChanged": "The draft changed. This operation was not applied. Try again.",
         "composeEditFailed": "The reference image was not removed: {{error}}. Retry or remove the entire operation.",
         "moreActions": "More actions",
@@ -450,9 +451,23 @@
         "contextUsageTitle": "Context used {{pct}}% ({{detail}})"
     },
     "goal": {
-        "title": "Session goal", "set": "Set goal", "edit": "Edit goal", "cancel": "Cancel goal mode", "placeholder": "Describe the goal, Enter to submit, Shift+Enter for a newline", "pause": "Pause", "resume": "Resume", "complete": "Mark complete", "block": "Mark blocked", "clear": "Clear goal", "more": "More goal actions", "refresh": "Confirm latest state", "unknown": "Goal state unconfirmed", "note": "Note", "tokens": "{{count}} tokens used", "budget": "{{count}} token budget", "inlineOnly": "Goal mode only supports file attachments up to 5 MB. Remove larger files or directories.", "noAttachmentsOnEdit": "Editing only changes the goal. Remove attachments first.",
+        "title": "Session goal", "set": "Set goal", "edit": "Edit goal", "cancel": "Cancel goal mode", "placeholder": "Describe the goal, Enter to submit, Shift+Enter for a newline", "pause": "Pause", "resume": "Resume", "complete": "Mark complete", "block": "Mark blocked", "clear": "Clear goal", "more": "More goal actions", "refresh": "Confirm latest state", "unknown": "Goal state unconfirmed", "note": "Note", "tokens": "{{count}} tokens used", "budget": "{{count}} token budget", "inlineOnly": "Goal mode requires files that can be sent directly. Remove directories, path-only attachments, or files exceeding the current runtime's limits.", "noAttachmentsOnEdit": "Editing only changes the goal. Remove attachments first.",
         "status": { "active": "Active", "paused": "Paused", "blocked": "Blocked", "complete": "Complete", "budget_limited": "Budget exhausted", "usage_limited": "Usage limited" },
-        "errors": { "unknown": "The result is unconfirmed. Your text is saved; click “Confirm latest state” and do not submit again.", "unsupported": "This runtime does not support goals. Switch to a runtime that supports goals or cancel goal mode.", "unavailable": "Goal actions are unavailable. Check the runtime connection and try again.", "target_rejected": "The runtime rejected the goal action. Confirm the latest state and try again once the current reply has ended.", "empty": "Enter a goal before submitting.", "active": "The current reply is running or stopping. Wait for it to finish before submitting a goal.", "missing-session": "The session is not ready. Wait for it to load or reopen it before submitting.", "goal-attachments": "Goals only support file attachments up to 5 MB. Remove larger files or directories before submitting.", "error": "The goal action failed. Your text is saved; confirm the latest state before trying again." }
+        "errors": { "goal-model-context": "Exit goal mode to send app operations.", "unknown": "The result is unconfirmed. Your text is saved; click “Confirm latest state” and do not submit again.", "unsupported": "This runtime does not support goals. Switch to a runtime that supports goals or cancel goal mode.", "unavailable": "Goal actions are unavailable. Check the runtime connection and try again.", "target_rejected": "The runtime rejected the goal action. Confirm the latest state and try again once the current reply has ended.", "empty": "Enter a goal before submitting.", "active": "The current reply is running or stopping. Wait for it to finish before submitting a goal.", "missing-session": "The session is not ready. Wait for it to load or reopen it before submitting.", "goal-attachments": "Remove directories, path-only attachments, or files exceeding the current runtime's limits before submitting the goal.", "error": "The goal action failed. Your text is saved; confirm the latest state before trying again." }
+    },
+    "media": {
+        "unavailable": "This media could not be loaded. Reopen the conversation or ask the agent to provide it again.",
+        "contentOmitted": "Some content in this message is unavailable.",
+        "imageLoading": "Loading image…",
+        "loading": "Loading media…",
+        "download": "Download attachment",
+        "previewUnavailable": "Preview unavailable",
+        "imageUnavailable": "Unable to load the image. Reopen the conversation or open the source file.",
+        "file": "File",
+        "folder": "Folder",
+        "uploaded": "Uploaded",
+        "toolResult": "Tool result",
+        "messageReference": "Message attachment"
     },
     "reuseMessage": "Fill message input",
     "noLogs": "(No logs available yet)",
@@ -475,6 +490,8 @@
         "mutating": "Applying changes..."
     },
     "pending": {
+        "creatingSession": "Creating session",
+        "configuringSession": "Configuring session",
         "typing": "Thinking",
         "activity": "Working",
         "compacting": "Compressing context, then the reply will continue",
@@ -595,6 +612,12 @@
         "copyPathCopied": "Path copied",
         "copyPathFailed": "Failed to copy path: {{error}}",
         "openFailed": "Failed to open file: {{error}}",
+        "fileNotFound": "The file or folder does not exist. Check the path or ask the agent to recreate it.",
+        "fileAccessFailed": "Unable to read the file or folder. Check access permissions and the runtime connection, then try again.",
+        "fileInvalidPath": "The path is invalid. Check it and try again.",
+        "localPathUnavailable": "The local path is unavailable. Locate the file in the workspace and try again.",
+        "previewOutsideWorkspace": "This file is outside the current agent workspace. Open it with a system app.",
+        "fileOpenRecovery": "Check the path, access permissions, and default system app, then try again.",
         "confirmOpenTitle": "Open file",
         "confirmOpenMessage": "Open \"{{fileName}}\" with your system app?",
         "confirmOpenDetail": "This file will be opened with the default app on your system.",

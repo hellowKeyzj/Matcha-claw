@@ -1882,7 +1882,8 @@ async function* queryLoop(
     const queuedCommandsSnapshot = getCommandsByMaxPriority(
       sleepRan ? 'later' : 'next',
     ).filter(cmd => {
-      if (cmd.nativeExecution || cmd.nativeBudget || cmd.nativeInputMessage) return false
+      if (cmd.nativeExecution || cmd.nativeBudget || cmd.nativeInputMessage)
+        return false
       if (isSlashCommand(cmd)) return false
       if (isMainThread) return cmd.agentId === undefined
       // Subagents only drain task-notifications addressed to them — never

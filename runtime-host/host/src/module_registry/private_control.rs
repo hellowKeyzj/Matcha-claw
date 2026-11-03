@@ -60,6 +60,8 @@ const COMMANDS: &[PrivateControlDescriptor] = &[
     PrivateControlDescriptor::new("iab.lease.acquire", true),
     PrivateControlDescriptor::new("iab.lease.wait", true),
     PrivateControlDescriptor::new("iab.lease.release", true),
+    PrivateControlDescriptor::new("iab.run.wait", true),
+    PrivateControlDescriptor::new("iab.run.release", true),
 ];
 
 #[derive(Clone)]
@@ -119,6 +121,18 @@ impl PrivateControlRegistry {
                     return invalid_input();
                 };
                 iab_outcome(self.iab.release(&peer.matcha_client(), input).await)
+            }
+            "iab.run.wait" => {
+                let Some(input) = command.input().and_then(|input| serde_json::from_value::<matcha_agent::iab::RunWait>(input.0.clone()).ok()) else {
+                    return invalid_input();
+                };
+                iab_outcome(self.iab.run_wait(input).await)
+            }
+            "iab.run.release" => {
+                let Some(input) = command.input().and_then(|input| serde_json::from_value::<matcha_agent::iab::RunRelease>(input.0.clone()).ok()) else {
+                    return invalid_input();
+                };
+                iab_outcome(self.iab.run_release(input).await)
             }
             WORLD_STORAGE_CONNECT => {
                 let Some(input) = command.input().and_then(|input| serde_json::from_value::<StorageConnect>(input.0.clone()).ok()) else {

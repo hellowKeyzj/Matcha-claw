@@ -15,47 +15,51 @@
         </div>
         <div class="header-text">
           <h1>MatchaClaw Browser Relay <span class="version-badge" id="version-badge"></span></h1>
-          <p>Connect your browser to MatchaClaw.</p>
+          <p data-i18n="subtitle">Port settings, logs and help. Use the extension popup for browser controls.</p>
         </div>
       </div>
 
-      <!-- Toggle + status -->
-      <div class="status-card anim-entrance" style="--delay:1" id="status-card" data-state="disabled">
-        <div class="status-glow"></div>
-        <div class="status-row">
-          <span class="status-indicator"></span>
-          <span class="status-label" id="status-label">Checking…</span>
-          <span class="status-meta" id="status-meta"></span>
-          <label class="toggle" title="Enable / disable relay">
-            <input type="checkbox" id="relay-toggle" />
-            <span class="toggle-track"></span>
-          </label>
+      <!-- Settings -->
+      <details class="collapsible anim-entrance" style="--delay:1" open>
+        <summary class="collapsible-trigger">
+          <svg class="collapsible-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 4 10 8 6 12"/></svg>
+          <span data-i18n="settings">Settings</span>
+        </summary>
+        <div class="collapsible-body">
+          <div class="card">
+            <div class="card-title" data-i18n="controlPort">Control port</div>
+            <div class="card-body" data-i18n="controlPortDetail">Only change this if you use a custom control port in MatchaClaw.</div>
+            <div class="port-row">
+              <input id="port" inputmode="numeric" pattern="[0-9]*" placeholder="9234" />
+              <button id="save" type="button" data-i18n="save">Save</button>
+            </div>
+            <div class="port-hint" data-i18n="portHint">Default: 9234. Relay port = control port + 2.</div>
+            <div class="port-status" id="port-status"></div>
+          </div>
+          <div class="card">
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+              <span data-i18n="cdpLogs">CDP logs</span>
+              <button id="logs-refresh" type="button" class="logs-refresh-btn" data-i18n="refresh">Refresh</button>
+            </div>
+            <div id="logs-container" class="logs-container">
+              <div class="logs-empty" data-i18n="noLogs">No log entries yet</div>
+            </div>
+          </div>
         </div>
-        <div class="status-detail" id="status-detail"></div>
-        <div class="tab-stats" id="tab-stats"></div>
-      </div>
-
-      <!-- Attached tabs -->
-      <div class="section anim-entrance" style="--delay:2; display:none" id="tabs-section">
-        <div class="section-label">Attached Tabs</div>
-        <div class="card">
-          <div id="tabs-list" class="tab-list"></div>
-          <div id="tabs-empty" class="tab-list-empty">No tabs attached</div>
-        </div>
-      </div>
+      </details>
 
       <!-- Collapsible: Quick Start -->
       <details class="collapsible anim-entrance" style="--delay:2">
         <summary class="collapsible-trigger">
           <svg class="collapsible-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 4 10 8 6 12"/></svg>
-          <span>Quick Start</span>
+          <span data-i18n="quickStart">Quick start</span>
         </summary>
         <div class="collapsible-body">
           <div class="card">
             <ol class="steps">
-              <li>Make sure <strong>MatchaClaw</strong> is running with browser control enabled.</li>
-              <li>The relay connects automatically — a green dot on the icon means ready.</li>
-              <li>Ask MatchaClaw a browser-related question — it can now see and control your tabs.</li>
+              <li data-i18n="stepRun">Make sure MatchaClaw is running with browser control enabled.</li>
+              <li data-i18n="stepReady">The relay connects automatically. A green dot means the encrypted handshake is ready.</li>
+              <li data-i18n="stepSelect">Select a window in the extension, then ask MatchaClaw to work with its current page.</li>
             </ol>
           </div>
         </div>
@@ -65,20 +69,20 @@
       <details class="collapsible anim-entrance" style="--delay:3">
         <summary class="collapsible-trigger">
           <svg class="collapsible-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 4 10 8 6 12"/></svg>
-          <span>How It Works</span>
+          <span data-i18n="howItWorks">How it works</span>
         </summary>
         <div class="collapsible-body">
           <div class="card">
-            <div class="card-title">Always-on relay</div>
-            <div class="card-body">The relay is enabled by default and connects automatically when MatchaClaw is running. Use the toggle above to pause if needed.</div>
+            <div class="card-title" data-i18n="alwaysOn">Automatic connection</div>
+            <div class="card-body" data-i18n="alwaysOnDetail">The relay connects automatically when enabled and MatchaClaw is running. Use the popup toggle to pause it.</div>
           </div>
           <div class="card">
-            <div class="card-title">Auto-reconnect</div>
-            <div class="card-body">If the connection drops, the extension reconnects automatically. No manual intervention needed.</div>
+            <div class="card-title" data-i18n="reconnect">Automatic reconnection</div>
+            <div class="card-body" data-i18n="reconnectDetail">If the connection drops, the extension reconnects automatically.</div>
           </div>
           <div class="card">
-            <div class="card-title">Tab safety</div>
-            <div class="card-body">Your existing tabs are protected — the agent can only close tabs it opened. Personal tabs are never affected.</div>
+            <div class="card-title" data-i18n="tabSafety">Tab safety</div>
+            <div class="card-body" data-i18n="tabSafetyDetail">Only agent-created tabs can be closed by the agent. Retained tabs and temporarily claimed personal tabs stay protected.</div>
           </div>
         </div>
       </details>
@@ -87,17 +91,17 @@
       <details class="collapsible anim-entrance" style="--delay:4">
         <summary class="collapsible-trigger">
           <svg class="collapsible-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 4 10 8 6 12"/></svg>
-          <span>Status Indicators</span>
+          <span data-i18n="indicators">Status indicators</span>
         </summary>
         <div class="collapsible-body">
           <div class="card">
             <div class="badge-grid">
               <span class="indicator-dot indicator-dot--green"></span>
-              <span class="badge-text">Connected — agent can control your tabs</span>
+              <span class="badge-text" data-i18n="indicatorConnected">Encrypted relay ready — the selected window’s current page can be controlled</span>
               <span class="indicator-dot indicator-dot--yellow"></span>
-              <span class="badge-text">Connecting / reconnecting to local relay server</span>
+              <span class="badge-text" data-i18n="indicatorConnecting">Connecting or completing the encrypted handshake</span>
               <span class="indicator-dot indicator-dot--dim"></span>
-              <span class="badge-text">Relay disabled — no indicator</span>
+              <span class="badge-text" data-i18n="indicatorDisabled">Relay disabled — no indicator</span>
             </div>
           </div>
         </div>
@@ -107,45 +111,16 @@
       <details class="collapsible anim-entrance" style="--delay:5">
         <summary class="collapsible-trigger">
           <svg class="collapsible-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 4 10 8 6 12"/></svg>
-          <span>Troubleshooting</span>
+          <span data-i18n="troubleshooting">Troubleshooting</span>
         </summary>
         <div class="collapsible-body">
           <div class="card">
-            <div class="card-title">Stays on yellow dot (connecting)</div>
-            <div class="card-body">Relay server not reachable. Ensure MatchaClaw is running with browser control enabled.</div>
+            <div class="card-title" data-i18n="yellowTitle">The dot stays yellow</div>
+            <div class="card-body" data-i18n="yellowDetail">Make sure MatchaClaw is running with browser control enabled and the relay port matches.</div>
           </div>
           <div class="card">
-            <div class="card-title">Pages not responding</div>
-            <div class="card-body">Internal Chrome pages (<code>chrome://</code>) cannot be controlled. Navigate to a regular webpage.</div>
-          </div>
-        </div>
-      </details>
-
-      <!-- Collapsible: Settings -->
-      <details class="collapsible anim-entrance" style="--delay:6">
-        <summary class="collapsible-trigger">
-          <svg class="collapsible-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 4 10 8 6 12"/></svg>
-          <span>Settings</span>
-        </summary>
-        <div class="collapsible-body">
-          <div class="card">
-            <div class="card-title">Control Port</div>
-            <div class="card-body">Only change if you use a custom port in MatchaClaw config.</div>
-            <div class="port-row">
-              <input id="port" inputmode="numeric" pattern="[0-9]*" placeholder="9234" />
-              <button id="save" type="button">Save</button>
-            </div>
-            <div class="port-hint">Default: <code>9234</code>. Relay = control port + 2.</div>
-            <div class="port-status" id="port-status"></div>
-          </div>
-          <div class="card">
-            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-              CDP Logs
-              <button id="logs-refresh" type="button" class="logs-refresh-btn">Refresh</button>
-            </div>
-            <div id="logs-container" class="logs-container">
-              <div class="logs-empty">No log entries yet</div>
-            </div>
+            <div class="card-title" data-i18n="pageTitle">A page does not respond</div>
+            <div class="card-body" data-i18n="pageDetail">Internal Chrome pages (chrome://) cannot be controlled. Open a regular webpage.</div>
           </div>
         </div>
       </details>

@@ -1,10 +1,12 @@
 import type { SessionAssistantTurnItem, SessionRenderItem } from '@/types/session/render-item';
-import type { SessionAssistantTurnSegment, SessionRenderAttachedFile, SessionRenderImage, SessionRenderToolCard } from '@/types/session/tool-card';
+import type { SessionAssistantTurnSegment, SessionRenderToolCard } from '@/types/session/tool-card';
 import type { SessionWireContent, SessionWireItem, SessionWireRuntime, SessionWireTool } from '@/types/session/snapshot';
 import { getSessionTextModel } from '@/plugins/chat/store/session-presentation';
-import { projectSessionMedia } from '@/plugins/chat/store/media-projection';
+import { projectSessionMedia, type ProjectedSessionMedia } from '@/plugins/chat/store/media-projection';
 import { adoptSessionProjectionFact, isSessionProjectionFact, stringifySessionToolPayload } from '@/plugins/chat/store/session-projection-facts';
 import { factValue, type SessionProjectionState } from '@/plugins/chat/store/session-projection-state';
+import { reconcileHydratedAttachmentItems } from '@/plugins/chat/store/attachment-helpers';
+import type { SessionIdentity } from '@/types/desktop/runtime-address';
 
 function projectionItemStatus(status: SessionWireItem['status']): SessionAssistantTurnItem['status'] {
   switch (status) {
@@ -47,7 +49,7 @@ function projectionToolCard(
   };
 }
 
-function projectionMedia(content: SessionWireContent): { images: SessionRenderImage[]; attachedFiles: SessionRenderAttachedFile[] } {
+function projectionMedia(content: SessionWireContent): ProjectedSessionMedia {
   return projectSessionMedia(content);
 }
 
@@ -92,6 +94,23 @@ export function projectControlledSessionViewItems(
     caches.set(key, cache);
   }
   return projectItems(view, cache);
+}
+
+export function commitSessionPreviewItems(
+  cache: SessionRenderProjectionCache | undefined,
+  items: SessionRenderItem[],
+  identity: SessionIdentity,
+): void {
+  if (!cache || cache.identityKey !== JSON.stringify(identity)) return;
+  for (const item of items) {
+    const entry = cache.items.get(item.key);
+    if (!entry || entry.item === item || entry.item.kind !== item.kind) continue;
+    const [merged] = reconcileHydratedAttachmentItems([entry.item], [item], identity);
+    if (merged === entry.item) continue;
+    const hydrated = adoptSessionProjectionFact(merged);
+    if (isSessionProjectionFact(hydrated)) controlledItems.add(hydrated);
+    entry.item = hydrated;
+  }
 }
 
 function projectItems(view: SessionProjectionState, cache?: SessionRenderProjectionCache): SessionRenderItem[] {
@@ -159,6 +178,7 @@ function projectItems(view: SessionProjectionState, cache?: SessionRenderProject
       return previous.item;
     }
     let rendered = projectItem(item);
+    if (previous) [rendered] = reconcileHydratedAttachmentItems([rendered], [previous.item], view.identity);
     if (referencedTools.every((tool) => !tool || controlledTools.has(tool))) {
       rendered = adoptSessionProjectionFact(rendered);
       if (isSessionProjectionFact(rendered)) controlledItems.add(rendered);
@@ -184,6 +204,7 @@ function projectItems(view: SessionProjectionState, cache?: SessionRenderProject
         text: text.user(largeText ? item.content.find((content) => content.kind === 'largeText')!.text : item.text),
         images: media.flatMap((entry) => entry.images),
         attachedFiles: media.flatMap((entry) => entry.attachedFiles),
+        contentNotices: media.flatMap((entry) => entry.contentNotices ?? []),
         ...(largeText ? { largeText } : {}),
         ...(item.messageId ? { messageId: item.messageId } : {}),
       };
@@ -216,7 +237,7 @@ function projectItems(view: SessionProjectionState, cache?: SessionRenderProject
         segments.push({ kind: 'thinking', key: `${item.itemId}:thinking:${thinkingIndex++}`, text: content.text });
       } else if (content.kind === 'media' || content.kind === 'omitted') {
         const media = projectionMedia(content);
-        if (media.images.length || media.attachedFiles.length) {
+        if (media.images.length || media.attachedFiles.length || media.contentNotices?.length) {
           segments.push({ kind: 'media', key: `${item.itemId}:media:${mediaIndex++}`, ...media });
         }
       } else if (content.kind === 'toolUse' || content.kind === 'toolResult') {

@@ -1,9 +1,10 @@
 import Ajv, { type ValidateFunction } from 'ajv';
+import { AppConfirmationUnavailableError, isAppConfirmationRequest } from '../../../src/types/desktop/app-plugin-sdk';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { join } from 'node:path';
-import type { AppMediaModelListRequest, AppModelRequest, AppTextModelRequest, AppVideoTaskRequest, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
-import { isJson, isToolResult, toolError, type PluginLoad } from './protocol';
+import type { AppMediaModelListRequest, AppModelRequest, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppVideoTaskRequest, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import { isJson, isModelErrorCode, isToolResult, toolError, type PluginLoad } from './protocol';
 import { preparePluginPython, pluginProcessEnvironment } from './python-runtime';
 import { AppPluginProcess } from './runtime-process';
 import { AppPluginRuntimeStartupError, capturePluginLog, type AppPluginDevelopmentRuntime, type AppPluginModels, type AppPluginRuntimeCallbacks } from './runtime';
@@ -24,6 +25,7 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
   private readonly controller = new AbortController();
   private readonly pending = new Map<string, { name?: string; resolve(value: unknown): void; reject(error: unknown): void }>();
   private readonly models = new Map<RequestId, AbortController>();
+  private readonly confirmations = new Map<RequestId, { callId: string; controller: AbortController }>();
   private readonly schemas = new Map<string, { input: ValidateFunction; output?: ValidateFunction }>();
   private chunks: Buffer[] = [];
   private frameBytes = 0;
@@ -139,7 +141,11 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
     if (this.pending.size >= 128) return Promise.reject(new Error('Too many app plugin requests.'));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const finish = () => { signal.removeEventListener('abort', cancel); this.pending.delete(id); };
+      const finish = () => {
+        signal.removeEventListener('abort', cancel);
+        this.pending.delete(id);
+        for (const confirmation of this.confirmations.values()) if (confirmation.callId === id) confirmation.controller.abort();
+      };
       const cancel = () => {
         try { this.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: 'Caller cancelled; external effects may already have occurred.' } }); }
         catch { /* Process exit is already reported to all pending callers. */ }
@@ -211,7 +217,10 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
 
   private receiveNotification(method: string, value: unknown): void {
     if (method === 'notifications/cancelled') {
-      if (isRecord(value) && isRequestId(value.requestId)) this.models.get(value.requestId)?.abort(new Error('Plugin cancelled the model request; external effects may already have occurred.'));
+      if (isRecord(value) && isRequestId(value.requestId)) {
+        this.models.get(value.requestId)?.abort(new Error('Plugin cancelled the model request; external effects may already have occurred.'));
+        this.confirmations.get(value.requestId)?.controller.abort(new Error('Plugin cancelled the confirmation request.'));
+      }
       return;
     }
     if (method === 'notifications/message') {
@@ -239,7 +248,20 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
     let controller: AbortController | undefined;
     try {
       if (method === 'ping') { this.send({ jsonrpc: '2.0', id, result: {} }); return; }
-      if (!method.startsWith('matcha/models/') || !['list', 'generate', 'generateText', 'submitVideo', 'queryVideo', 'collectVideo'].includes(method.slice('matcha/models/'.length))) {
+      if (method === 'matcha/requestConfirmation') {
+        if (this.state !== 'active' || !isRecord(request) || Object.keys(request).some((key) => key !== 'request' && key !== 'callId')
+          || typeof request.callId !== 'string' || !this.pending.get(request.callId)?.name || !isAppConfirmationRequest(request.request)
+          || !this.callbacks.requestConfirmation || this.confirmations.has(id) || this.confirmations.size >= 128) throw new AppConfirmationUnavailableError('Approval unavailable: confirmation requires an active tool call and foreground owner.');
+        const confirmation = { callId: request.callId, controller: new AbortController() };
+        this.confirmations.set(id, confirmation);
+        try {
+          const result = await this.callbacks.requestConfirmation(request.request, confirmation.controller.signal);
+          confirmation.controller.signal.throwIfAborted();
+          this.send({ jsonrpc: '2.0', id, result });
+        } finally { if (this.confirmations.get(id) === confirmation) this.confirmations.delete(id); }
+        return;
+      }
+      if (!method.startsWith('matcha/models/') || !['list', 'generate', 'generateText', 'generateSpeech', 'transcribe', 'generateMusic', 'submitVideo', 'queryVideo', 'collectVideo'].includes(method.slice('matcha/models/'.length))) {
         this.send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found.' } }); return;
       }
       if (!isRecord(request) || !isJson(request)) { this.send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'Model params must contain the original request object.' } }); return; }
@@ -252,13 +274,18 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
         case 'list': result = await this.modelApi.list(request as unknown as AppMediaModelListRequest, signal); break;
         case 'generate': result = await this.modelApi.generate(request as unknown as AppModelRequest, signal); break;
         case 'generateText': result = await this.modelApi.generateText(request as unknown as AppTextModelRequest, signal); break;
+        case 'generateSpeech': result = await this.modelApi.generateSpeech(request as unknown as AppSpeechModelRequest, signal); break;
+        case 'transcribe': result = await this.modelApi.transcribe(request as unknown as AppTranscriptionModelRequest, signal); break;
+        case 'generateMusic': result = await this.modelApi.generateMusic(request as unknown as AppMusicModelRequest, signal); break;
         case 'submitVideo': result = await this.modelApi.submitVideo(request as unknown as AppModelRequest & { readonly kind: 'video' }, signal); break;
         case 'queryVideo': result = await this.modelApi.queryVideo(request as unknown as AppVideoTaskRequest, signal); break;
         case 'collectVideo': result = await this.modelApi.collectVideo(request as unknown as AppVideoTaskRequest, signal); break;
       }
       this.send({ jsonrpc: '2.0', id, result });
     } catch (error) {
-      try { this.send({ jsonrpc: '2.0', id, error: { code: -32603, message: error instanceof Error ? error.message.slice(0, 2000) : 'Model request failed; external effects may already have occurred.' } }); }
+      const code = error instanceof Error && 'code' in error && (isModelErrorCode(error.code) || error.code === 'approval_unavailable') ? error.code : undefined;
+      try { this.send({ jsonrpc: '2.0', id, error: { code: -32603, message: error instanceof Error ? error.message.slice(0, 2000) : 'Model request failed; external effects may already have occurred.',
+        ...(code === undefined ? {} : { data: { code } }) } }); }
       catch { /* Never replay a reverse request after process exit. */ }
     } finally { if (controller && this.models.get(id) === controller) this.models.delete(id); }
   }
@@ -267,5 +294,6 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
     this.controller.abort(error);
     for (const pending of this.pending.values()) pending.reject(error);
     for (const model of this.models.values()) model.abort(error);
+    for (const confirmation of this.confirmations.values()) confirmation.controller.abort(error);
   }
 }

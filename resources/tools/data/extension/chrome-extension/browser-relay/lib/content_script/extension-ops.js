@@ -9,23 +9,54 @@
  * capabilities similar to Manus (content extraction, element marking, etc).
  */
 
+import {
+  DEFAULT_CDP_OPERATION_TIMEOUT_MS,
+  awaitWithDeadline,
+  getCdpOperationTimeoutMs,
+} from '../cdp/commands/deadline.js'
 import { unwrapScriptResult } from './helpers.js'
+
+function awaitOperation(commandContext, stage, operation, options) {
+  return commandContext
+    ? awaitWithDeadline(commandContext, stage, operation, options)
+    : operation()
+}
+
+function executeScript(commandContext, method, injection) {
+  return awaitOperation(
+    commandContext,
+    `chrome.scripting.executeScript:${method}`,
+    () => chrome.scripting.executeScript(injection),
+    { maxWaitMs: DEFAULT_CDP_OPERATION_TIMEOUT_MS, native: true },
+  )
+}
 
 // ── Viewport & Zoom ──
 
-function wrapDebuggerCommand(tabId, fn) {
-  return fn().catch((err) => {
+async function wrapDebuggerCommand(tabId, operation) {
+  try {
+    return await operation()
+  } catch (err) {
     const msg = err?.message || String(err)
     if (msg.includes('attach') || msg.includes('debugger') || msg.includes('Another debugger')) {
       throw new Error(`Tab ${tabId} is not attached to debugger. Ensure ensureAttached was called first. Original: ${msg}`)
     }
     throw err
-  })
+  }
 }
 
-export async function extGetViewportInfo(tabId) {
+function debuggerCommand(tabId, commandContext, stage, operation) {
+  return awaitOperation(
+    commandContext,
+    `chrome.debugger.sendCommand:${stage}`,
+    () => wrapDebuggerCommand(tabId, operation),
+    { maxWaitMs: getCdpOperationTimeoutMs(stage), native: true },
+  )
+}
+
+export async function extGetViewportInfo(tabId, commandContext) {
   const debuggee = { tabId }
-  const result = await wrapDebuggerCommand(tabId, () => chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
+  const result = await debuggerCommand(tabId, commandContext, 'Runtime.evaluate:getViewportInfo', () => chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
     expression: `JSON.stringify({
       width: window.innerWidth,
       height: window.innerHeight,
@@ -41,12 +72,26 @@ export async function extGetViewportInfo(tabId) {
   return JSON.parse(result?.result?.value || '{}')
 }
 
-export async function extEnsureZoom(tabId, params) {
+export async function extEnsureZoom(tabId, params, commandContext) {
   const targetZoom = typeof params?.zoom === 'number' ? params.zoom : 1
-  const currentZoom = await chrome.tabs.getZoom(tabId)
+  const currentZoom = await awaitOperation(
+    commandContext,
+    'chrome.tabs.getZoom',
+    () => chrome.tabs.getZoom(tabId),
+    { maxWaitMs: DEFAULT_CDP_OPERATION_TIMEOUT_MS, native: true },
+  )
   if (Math.abs(currentZoom - targetZoom) > 0.01) {
-    await chrome.tabs.setZoom(tabId, targetZoom)
-    await new Promise((r) => setTimeout(r, 150))
+    await awaitOperation(
+      commandContext,
+      'chrome.tabs.setZoom',
+      () => chrome.tabs.setZoom(tabId, targetZoom),
+      { maxWaitMs: DEFAULT_CDP_OPERATION_TIMEOUT_MS, native: true },
+    )
+    await awaitOperation(
+      commandContext,
+      'Extension.ensureZoom:delay',
+      () => new Promise((resolve) => setTimeout(resolve, 150)),
+    )
     return { changed: true, from: currentZoom, to: targetZoom }
   }
   return { changed: false, current: currentZoom }
@@ -54,37 +99,64 @@ export async function extEnsureZoom(tabId, params) {
 
 // ── Screenshot ──
 
-export async function extCaptureViewport(tabId, params) {
+export async function extCaptureViewport(tabId, params, commandContext) {
   const debuggee = { tabId }
   const format = params?.format || 'png'
   const quality = params?.quality || 80
 
-  await wrapDebuggerCommand(tabId, () => chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
-    expression: 'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))',
-    awaitPromise: true,
-  })).catch(() => {})
+  const waitForAnimationFrames = async () => {
+    try {
+      await wrapDebuggerCommand(tabId, () => chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
+        expression: 'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))',
+        awaitPromise: true,
+      }))
+    } catch {
+      // Best-effort rendering stabilization.
+    }
+  }
+  await awaitOperation(
+    commandContext,
+    'chrome.debugger.sendCommand:Runtime.evaluate:animationFrames',
+    waitForAnimationFrames,
+    { maxWaitMs: DEFAULT_CDP_OPERATION_TIMEOUT_MS, native: true },
+  )
 
-  const metrics = await wrapDebuggerCommand(tabId, () => chrome.debugger.sendCommand(debuggee, 'Page.getLayoutMetrics'))
+  const metrics = await debuggerCommand(
+    tabId,
+    commandContext,
+    'Page.getLayoutMetrics',
+    () => chrome.debugger.sendCommand(debuggee, 'Page.getLayoutMetrics'),
+  )
   const vv = metrics?.visualViewport || {}
 
-  const vpResult = await wrapDebuggerCommand(tabId, () => chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
-    expression: 'JSON.stringify({ dpr: window.devicePixelRatio || 1 })',
-    returnByValue: true,
-  }))
+  const vpResult = await debuggerCommand(
+    tabId,
+    commandContext,
+    'Runtime.evaluate:devicePixelRatio',
+    () => chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
+      expression: 'JSON.stringify({ dpr: window.devicePixelRatio || 1 })',
+      returnByValue: true,
+    }),
+  )
   const { dpr } = JSON.parse(vpResult?.result?.value || '{"dpr":1}')
 
-  const screenshot = await wrapDebuggerCommand(tabId, () => chrome.debugger.sendCommand(debuggee, 'Page.captureScreenshot', {
-    format,
-    quality: format === 'jpeg' ? quality : undefined,
-    clip: {
-      x: vv.pageX || 0,
-      y: vv.pageY || 0,
-      width: vv.clientWidth || 1280,
-      height: vv.clientHeight || 720,
-      scale: 1 / dpr,
-    },
-    captureBeyondViewport: false,
-  }))
+  const screenshot = await debuggerCommand(
+    tabId,
+    commandContext,
+    'Page.captureScreenshot',
+    () => chrome.debugger.sendCommand(debuggee, 'Page.captureScreenshot', {
+      format,
+      quality: format === 'jpeg' ? quality : undefined,
+      clip: {
+        x: vv.pageX || 0,
+        y: vv.pageY || 0,
+        width: vv.clientWidth || 1280,
+        height: vv.clientHeight || 720,
+        scale: 1 / dpr,
+      },
+      captureBeyondViewport: false,
+    }),
+  )
 
   return {
     data: screenshot?.data,
@@ -96,8 +168,8 @@ export async function extCaptureViewport(tabId, params) {
 
 // ── Content Extraction ──
 
-export async function extExtractContent(tabId) {
-  const results = await chrome.scripting.executeScript({
+export async function extExtractContent(tabId, commandContext) {
+  const results = await executeScript(commandContext, 'Extension.extractContent', {
     target: { tabId },
     func: () => {
       const title = document.title
@@ -161,8 +233,8 @@ export async function extExtractContent(tabId) {
 
 // ── Interactive Element Marking ──
 
-export async function extMarkElements(tabId, params) {
-  const results = await chrome.scripting.executeScript({
+export async function extMarkElements(tabId, params, commandContext) {
+  const results = await executeScript(commandContext, 'Extension.markElements', {
     target: { tabId },
     func: (options) => {
       const INTERACTIVE_SELECTOR = [
@@ -253,7 +325,7 @@ export async function extMarkElements(tabId, params) {
         const text = (el.textContent || el.value || el.placeholder
           || el.getAttribute('aria-label') || el.title || '').trim().slice(0, 100)
 
-        el.setAttribute('data-accio-idx', String(idx))
+        el.setAttribute('data-matcha-idx', String(idx))
 
         elements.push({
           idx, tag,
@@ -286,8 +358,8 @@ export async function extMarkElements(tabId, params) {
 
 // ── DOM Actions ──
 
-export async function extClick(tabId, params) {
-  const results = await chrome.scripting.executeScript({
+export async function extClick(tabId, params, commandContext) {
+  const results = await executeScript(commandContext, 'Extension.click', {
     target: { tabId },
     func: (p) => {
       function deepQuery(root, sel) {
@@ -305,7 +377,7 @@ export async function extClick(tabId, params) {
       if (p.index != null) {
         const idx = Number(p.index)
         if (!Number.isInteger(idx) || idx <= 0) return { success: false, error: 'Invalid index' }
-        el = deepQuery(document, `[data-accio-idx="${idx}"]`)
+        el = deepQuery(document, `[data-matcha-idx="${idx}"]`)
       } else if (p.selector) {
         try { el = deepQuery(document, p.selector) } catch { return { success: false, error: 'Invalid selector' } }
       } else if (p.x != null && p.y != null) {
@@ -360,21 +432,21 @@ export async function extClick(tabId, params) {
   })
   const result = unwrapScriptResult(results, 'Extension.click')
   if (result?.success && result._cx != null) {
-    showClickRipple(tabId, result._cx, result._cy).catch(() => {})
+    void showClickRipple(tabId, result._cx, result._cy, commandContext).catch(() => {})
     delete result._cx
     delete result._cy
   }
   return result
 }
 
-async function showClickRipple(tabId, x, y) {
-  await chrome.scripting.executeScript({
+async function showClickRipple(tabId, x, y, commandContext) {
+  await executeScript(commandContext, 'Extension.clickRipple', {
     target: { tabId },
     func: (cx, cy) => {
-      if (!document.getElementById('accio-ripple-style')) {
+      if (!document.getElementById('matcha-ripple-style')) {
         const s = document.createElement('style')
-        s.id = 'accio-ripple-style'
-        s.textContent = '@keyframes accio-r{0%{transform:scale(0);opacity:1}100%{transform:scale(2.5);opacity:0}}'
+        s.id = 'matcha-ripple-style'
+        s.textContent = '@keyframes matcha-r{0%{transform:scale(0);opacity:1}100%{transform:scale(2.5);opacity:0}}'
         document.head.appendChild(s)
       }
       const d = document.createElement('div')
@@ -382,7 +454,7 @@ async function showClickRipple(tabId, x, y) {
         position: 'fixed', left: `${cx - 16}px`, top: `${cy - 16}px`,
         width: '32px', height: '32px', borderRadius: '50%',
         background: 'rgba(99,102,241,0.4)', pointerEvents: 'none',
-        zIndex: '2147483647', animation: 'accio-r .8s ease-out forwards',
+        zIndex: '2147483647', animation: 'matcha-r .8s ease-out forwards',
       })
       document.body.appendChild(d)
       d.onanimationend = () => d.remove()
@@ -391,8 +463,8 @@ async function showClickRipple(tabId, x, y) {
   })
 }
 
-export async function extInput(tabId, params) {
-  const results = await chrome.scripting.executeScript({
+export async function extInput(tabId, params, commandContext) {
+  const results = await executeScript(commandContext, 'Extension.input', {
     target: { tabId },
     func: (p) => {
       function deepQuery(root, sel) {
@@ -410,7 +482,7 @@ export async function extInput(tabId, params) {
       if (p.index != null) {
         const idx = Number(p.index)
         if (!Number.isInteger(idx) || idx <= 0) return { success: false, error: 'Invalid index' }
-        el = deepQuery(document, `[data-accio-idx="${idx}"]`)
+        el = deepQuery(document, `[data-matcha-idx="${idx}"]`)
       } else if (p.selector) {
         try { el = deepQuery(document, p.selector) } catch { return { success: false, error: 'Invalid selector' } }
       }

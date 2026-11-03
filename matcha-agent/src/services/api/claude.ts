@@ -69,7 +69,12 @@ import {
   getModelMaxOutputTokens,
   getSonnet1mExpTreatmentEnabled,
 } from '../../utils/context.js'
-import { isEffortLevel, resolveAnthropicEffort, resolveAppliedEffort, traceEffort } from '../../utils/effort.js'
+import {
+  isEffortLevel,
+  resolveAnthropicEffort,
+  resolveAppliedEffort,
+  traceEffort,
+} from '../../utils/effort.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { errorMessage } from '../../utils/errors.js'
 import { captureAPIRequest, logError } from '../../utils/log.js'
@@ -816,15 +821,30 @@ function getNonstreamingFallbackTimeoutMs(): number {
   return isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) ? 120_000 : 300_000
 }
 
-function traceAnthropicEffort(params: BetaMessageStreamParams, requested?: EffortValue, requestId?: string): void {
+function traceAnthropicEffort(
+  params: BetaMessageStreamParams,
+  requested?: EffortValue,
+  requestId?: string,
+): void {
   if (process.env.MATCHACLAW_TRACE !== '1') return
-  const internal = 'anthropic_internal' in params ? params.anthropic_internal : undefined
-  const override = internal && typeof internal === 'object' && 'effort_override' in internal ? internal.effort_override : undefined
+  const internal =
+    'anthropic_internal' in params ? params.anthropic_internal : undefined
+  const override =
+    internal && typeof internal === 'object' && 'effort_override' in internal
+      ? internal.effort_override
+      : undefined
   const effort: unknown = params.output_config?.effort ?? override
   traceEffort('sender_request', params.model, requested, {
     requestId,
-    actual: (typeof effort === 'number' && Number.isInteger(effort)) || (typeof effort === 'string' && isEffortLevel(effort)) ? effort : null,
-    senderField: params.output_config?.effort !== undefined ? 'output_config.effort' : 'anthropic_internal.effort_override',
+    actual:
+      (typeof effort === 'number' && Number.isInteger(effort)) ||
+      (typeof effort === 'string' && isEffortLevel(effort))
+        ? effort
+        : null,
+    senderField:
+      params.output_config?.effort !== undefined
+        ? 'output_config.effort'
+        : 'anthropic_internal.effort_override',
   })
 }
 
@@ -1718,11 +1738,8 @@ async function* queryModelRequest(
         : []
     const extraBodyParams = getExtraBodyParams(bedrockBetas)
 
-    const { outputConfig, includeBeta, effortOverride } = resolveAnthropicEffort(
-      options.model,
-      effort,
-      extraBodyParams,
-    )
+    const { outputConfig, includeBeta, effortOverride } =
+      resolveAnthropicEffort(options.model, effort, extraBodyParams)
     if (includeBeta) betasParams.push(EFFORT_BETA_HEADER)
     if (effortOverride !== undefined) {
       const existingInternal =
@@ -2758,7 +2775,11 @@ async function* queryModelRequest(
           : 'other') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
       const result = yield* executeNonStreamingRequest(
-        { model: options.model, source: options.querySource, effortValue: options.effortValue },
+        {
+          model: options.model,
+          source: options.querySource,
+          effortValue: options.effortValue,
+        },
         {
           model: options.model,
           fallbackModel: options.fallbackModel,
@@ -2861,7 +2882,11 @@ async function* queryModelRequest(
       try {
         // Fall back to non-streaming mode
         const result = yield* executeNonStreamingRequest(
-          { model: options.model, source: options.querySource, effortValue: options.effortValue },
+          {
+            model: options.model,
+            source: options.querySource,
+            effortValue: options.effortValue,
+          },
           {
             model: options.model,
             fallbackModel: options.fallbackModel,

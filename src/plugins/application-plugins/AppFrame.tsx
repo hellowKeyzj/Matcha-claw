@@ -15,6 +15,7 @@ import { buildAppDocument, getAppBridgeMessages } from './browser-sdk';
 import { useSettingsStore } from '@/plugins/settings/store';
 import { useResolvedTheme } from '@/lib/use-resolved-theme';
 import { createAppSessionMedia } from './session-media';
+import { AppPluginConfirmation } from './Confirmation';
 
 export interface AppFrameProps {
   pluginId: string;
@@ -22,6 +23,7 @@ export interface AppFrameProps {
   html: string;
   title: string;
   sessionIdentity?: SessionIdentity;
+  workspaceDraftId?: string;
   onCompose?: (request: AppComposeRequest, source: AppComposeSource, signal: AbortSignal) => Promise<void>;
   registerCloseHandler?: AppWebviewApi['onCloseRequested'];
   development?: {
@@ -35,7 +37,7 @@ export interface AppFrameProps {
   };
 }
 
-export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFrame({ pluginId, digest, html, title, sessionIdentity, onCompose, registerCloseHandler, development }, ref) {
+export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFrame({ pluginId, digest, html, title, sessionIdentity, workspaceDraftId, onCompose, registerCloseHandler, development }, ref) {
   const { t, i18n } = useTranslation('common');
   const theme = useResolvedTheme(useSettingsStore((state) => state.theme));
   const framePort = useRef<MessagePort | null>(null);
@@ -57,12 +59,13 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     getBounds: () => developmentHandle.current?.getBounds() ?? null,
   }), [t]);
   const sessionIdentityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : undefined;
-  const identity = useMemo(() => ({ pluginId, digest, html, title, sessionIdentityKey, development }), [pluginId, digest, html, title, sessionIdentityKey, development]);
-  const readContext = useEffectEvent((): AppWebviewContext => ({ ...(sessionIdentity ? { sessionIdentity } : {}), language: i18n.resolvedLanguage ?? i18n.language, theme }));
+  const identity = useMemo(() => ({ pluginId, digest, html, title, sessionIdentityKey, workspaceDraftId, development }), [pluginId, digest, html, title, sessionIdentityKey, workspaceDraftId, development]);
+  const readContext = useEffectEvent((): AppWebviewContext => ({ ...(sessionIdentity ? { sessionIdentity } : {}), ...(!development && workspaceDraftId ? { workspaceDraftId } : {}), language: i18n.resolvedLanguage ?? i18n.language, theme }));
   const isCurrentSession = useEffectEvent((sourceIdentityKey: string | undefined) => sourceIdentityKey === sessionIdentityKey);
   const canCompose = useEffectEvent(() => !!onCompose);
-  const compose = useEffectEvent((request: AppComposeRequest, source: AppComposeSource, sourceIdentityKey: string | undefined, signal: AbortSignal) => {
-    if (sourceIdentityKey !== sessionIdentityKey || source.pluginId !== pluginId || source.digest !== digest) throw new Error(t('appFrame.sessionChanged'));
+  const compose = useEffectEvent((request: AppComposeRequest, source: AppComposeSource, sourceIdentityKey: string | undefined, sourceDraftId: string | undefined, signal: AbortSignal) => {
+    signal.throwIfAborted();
+    if (sourceIdentityKey !== sessionIdentityKey || sourceDraftId !== workspaceDraftId || source.pluginId !== pluginId || source.digest !== digest) throw new Error(t('appFrame.sessionChanged'));
     if (!onCompose) throw new Error(t('appFrame.noComposer'));
     return onCompose(request, source, signal);
   });
@@ -97,8 +100,8 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     const media = context.sessionIdentity ? createAppSessionMedia(context.sessionIdentity) : null;
     let mediaRequest = new AbortController();
     let mediaDirty = false;
-    let mediaReadPending = false;
-    let mediaListPending = false;
+    let mediaReadPending: AbortSignal | undefined;
+    let mediaListPending: AbortSignal | undefined;
     let workspaceSavePending = false;
     let finishWorkspaceSave: ((allowed: boolean) => void) | null = null;
     let unsubscribeMedia = () => {};
@@ -164,12 +167,13 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     const isMediaActive = () => !closed && ready && !frame.closest('[inert]') && isCurrentSession(identity.sessionIdentityKey);
     const notifyMediaChanged = () => {
       mediaDirty = true;
-      if (!isMediaActive()) return;
+      if (!isMediaActive() || mediaReadPending || mediaListPending) return;
       channel.port1.postMessage({ type: 'event', topic: 'media.changed', data: {} });
       mediaDirty = false;
     };
     const visibility = new MutationObserver(() => {
       finishWorkspaceSave?.(false);
+      if (mediaReadPending === mediaRequest.signal || mediaListPending === mediaRequest.signal) mediaDirty = true;
       mediaRequest.abort(new Error(text('sessionChanged')));
       mediaRequest = new AbortController();
       if (mediaDirty && isMediaActive()) notifyMediaChanged();
@@ -291,7 +295,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
           if (error) throw new Error(i18n.t(error));
           // This product stages the user's draft; it never submits a chat turn on an App's behalf.
           if (!requestCurrent()) throw new Error(text('sessionChanged'));
-          await compose(request, { pluginId: identity.pluginId, digest: identity.digest }, identity.sessionIdentityKey, staging.signal);
+          await compose(request, { pluginId: identity.pluginId, digest: identity.digest }, identity.sessionIdentityKey, identity.workspaceDraftId, staging.signal);
           return {};
         }
         if (method === 'tools/call') {
@@ -399,6 +403,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
       const mediaOperation = value.type === 'media-list' || value.type === 'media-read';
       if (mediaOperation) {
         if (!media || !isMediaActive()) {
+          if (media) mediaDirty = true;
           channel.port1.postMessage({ type: 'result', id: value.id, error: text('sessionChanged') });
           return;
         }
@@ -451,12 +456,12 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
         return;
       }
       const id = Number(value.id);
-      if (value.type === 'media-read') mediaReadPending = true;
-      if (value.type === 'media-list') mediaListPending = true;
+      const mediaSignal = mediaRequest.signal;
+      if (value.type === 'media-read') mediaReadPending = mediaSignal;
+      if (value.type === 'media-list') mediaListPending = mediaSignal;
       if (value.type === 'workspace-save') workspaceSavePending = true;
       pending.add(id);
       // Closing drops backend replies and any not-yet-dispatched local UI side effects.
-      const mediaSignal = mediaRequest.signal;
       const operation = mediaOperation
         ? Promise.resolve().then(async () => {
           mediaSignal.throwIfAborted();
@@ -498,8 +503,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
         })
         : value.type === 'compose'
           ? Promise.resolve().then(async () => {
-            staging.signal.throwIfAborted();
-            await compose(value.request as AppComposeRequest, { pluginId: identity.pluginId, digest: identity.digest }, identity.sessionIdentityKey, staging.signal);
+            await compose(value.request as AppComposeRequest, { pluginId: identity.pluginId, digest: identity.digest }, identity.sessionIdentityKey, identity.workspaceDraftId, staging.signal);
             return { content: [] };
           })
           : Promise.resolve().then(() => callDeclaredTool(value.name as string, value.arguments as Record<string, unknown>));
@@ -517,9 +521,13 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
         },
       ).catch(() => fail(text('resultFailed'))).finally(() => {
         pending.delete(id);
-        if (value.type === 'media-read') mediaReadPending = false;
-        if (value.type === 'media-list') mediaListPending = false;
+        if (value.type === 'media-read') mediaReadPending = undefined;
+        if (value.type === 'media-list') mediaListPending = undefined;
         if (value.type === 'workspace-save') workspaceSavePending = false;
+        if (mediaOperation && mediaDirty && !closed) {
+          try { notifyMediaChanged(); }
+          catch { fail(text('eventFailed')); }
+        }
       });
     };
     channel.port1.onmessageerror = () => fail(text('decodeFailed'));
@@ -554,6 +562,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     <div ref={container} className="h-full w-full" style={{ visibility: current && !current.error ? 'visible' : 'hidden' }} />
     {!current && <div role="status" className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">{t('appFrame.loading')}</div>}
     {current?.error && <div role="alert" className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-destructive [overflow-wrap:anywhere]">{current.error}</div>}
+    {!development && current && !current.error && <AppPluginConfirmation pluginId={pluginId} digest={digest} container={container} />}
     <ConfirmDialog open={workspaceSave?.identity === identity} title={t('appFrame.workspaceSaveTitle')}
       message={t('appFrame.workspaceSaveMessage', { name: title, path: workspaceSave?.path ?? '' })}
       confirmLabel={t('appFrame.workspaceSaveConfirm')} cancelLabel={t('appFrame.workspaceSaveCancel')}

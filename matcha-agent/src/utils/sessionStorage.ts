@@ -76,7 +76,11 @@ import { uniq } from './array.js'
 import { registerCleanup } from './cleanupRegistry.js'
 import { updateSessionName } from './concurrentSessions.js'
 import { getCwd } from './cwd.js'
-import { logForDebugging } from './debug.js'
+import {
+  debugIdentifierHash,
+  logForDebugging,
+  traceSessionTiming,
+} from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
 import { isENOENT, isFsInaccessible } from './errors.js'
@@ -572,14 +576,16 @@ class Project {
   private internalSubagentEventReader: InternalEventReader | null = null
   private pendingWriteCount: number = 0
   private flushResolvers: Array<() => void> = []
-  // Per-file write queues. Each entry carries a resolve callback so
-  // callers of enqueueWrite can optionally await their specific write.
-  private writeQueues = new Map<
-    string,
-    Array<{ entry: Entry; resolve: () => void }>
-  >()
+  private activeFlushCount = 0
+  // Producer failures are consumed once all overlapping flushes observe them.
+  private producerFailure: { error: unknown } | null = null
+  // A failed append/serialization batch invalidates this Project's later barriers.
+  private writeFailure: { error: unknown } | null = null
+  private writeQueues = new Map<string, Entry[]>()
   private flushTimer: ReturnType<typeof setTimeout> | null = null
   private activeDrain: Promise<void> | null = null
+  private traceOperationId = 0
+  private tracedAssistantResponseId: string | undefined
   private FLUSH_INTERVAL_MS = 100
   private readonly MAX_CHUNK_BYTES = 100 * 1024 * 1024
 
@@ -589,6 +595,9 @@ class Project {
   _resetFlushState(): void {
     this.pendingWriteCount = 0
     this.flushResolvers = []
+    this.activeFlushCount = 0
+    this.producerFailure = null
+    this.writeFailure = null
     if (this.flushTimer) clearTimeout(this.flushTimer)
     this.flushTimer = null
     this.activeDrain = null
@@ -611,62 +620,111 @@ class Project {
     }
   }
 
-  private async trackWrite<T>(fn: () => Promise<T>): Promise<T> {
+  trackWrite<T>(fn: () => Promise<T>): Promise<T> {
     this.incrementPendingWrites()
-    try {
-      return await fn()
-    } finally {
-      this.decrementPendingWrites()
-    }
+    const write = (async () => {
+      try {
+        return await fn()
+      } catch (error) {
+        this.producerFailure ??= { error }
+        throw error
+      } finally {
+        this.decrementPendingWrites()
+      }
+    })()
+    // Fire-and-forget producers are observed by flush; awaited callers still reject.
+    void write.catch(() => {})
+    return write
   }
 
-  private enqueueWrite(filePath: string, entry: Entry): Promise<void> {
-    return new Promise<void>(resolve => {
-      let queue = this.writeQueues.get(filePath)
-      if (!queue) {
-        queue = []
-        this.writeQueues.set(filePath, queue)
-      }
-      // Drop oldest entries when queue exceeds limit to prevent unbounded memory growth
-      if (queue.length >= 1000) {
-        const dropped = queue.splice(0, queue.length - 999)
-        for (const d of dropped) {
-          d.resolve()
-        }
-      }
-      queue.push({ entry, resolve })
-      this.scheduleDrain()
-    })
+  private enqueueWrite(filePath: string, entry: Entry): void {
+    let queue = this.writeQueues.get(filePath)
+    if (!queue) {
+      queue = []
+      this.writeQueues.set(filePath, queue)
+    }
+    // Drop oldest entries when queue exceeds limit to prevent unbounded memory growth
+    if (queue.length >= 1000) {
+      queue.splice(0, queue.length - 999)
+    }
+    queue.push(entry)
+    this.scheduleDrain()
   }
 
   private scheduleDrain(): void {
-    if (this.flushTimer) {
+    if (this.flushTimer || this.activeDrain || this.writeFailure) {
       return
     }
-    this.flushTimer = setTimeout(async () => {
+    this.flushTimer = setTimeout(() => {
       this.flushTimer = null
-      this.activeDrain = this.drainWriteQueue()
-      await this.activeDrain
-      this.activeDrain = null
-      // If more items arrived during drain, schedule again
-      if (this.writeQueues.size > 0) {
-        this.scheduleDrain()
-      }
+      void this.drainWriteQueue().then(
+        () => {
+          // If more items arrived during drain, schedule again
+          if (this.writeQueues.size > 0) this.scheduleDrain()
+        },
+        () => {}, // flush reports the retained failure; never retry a failed batch.
+      )
     }, this.FLUSH_INTERVAL_MS)
   }
 
-  private async appendToFile(filePath: string, data: string): Promise<void> {
+  private async appendToFile(
+    filePath: string,
+    data: string,
+    entryCount: number,
+  ): Promise<void> {
+    const tracing = process.env.MATCHACLAW_TRACE === '1'
+    const opId = tracing ? ++this.traceOperationId : 0
+    const startedAt = tracing ? performance.now() : 0
+    const bytes = tracing ? Buffer.byteLength(data, 'utf8') : 0
+    let phase = 'append'
+    let completed = false
+    traceSessionTiming('storage.append.begin', () => ({
+      opId, bytes, entryCount,
+      pendingProducers: this.pendingWriteCount,
+      queueCount: this.writeQueues.size,
+    }))
     try {
-      await fsAppendFile(filePath, data, { mode: 0o600 })
-    } catch {
-      // Directory may not exist — some NFS-like filesystems return
-      // unexpected error codes, so don't discriminate on code.
-      await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
-      await fsAppendFile(filePath, data, { mode: 0o600 })
+      try {
+        await fsAppendFile(filePath, data, { mode: 0o600 })
+      } catch {
+        // Directory may not exist — some NFS-like filesystems return
+        // unexpected error codes, so don't discriminate on code.
+        phase = 'mkdir'
+        await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
+        phase = 'append_retry'
+        await fsAppendFile(filePath, data, { mode: 0o600 })
+      }
+      completed = true
+    } finally {
+      traceSessionTiming('storage.append.end', () => ({
+        opId, bytes, entryCount,
+        elapsedMs: performance.now() - startedAt,
+        outcome: completed ? 'completed' : 'failed',
+        phase,
+        pendingProducers: this.pendingWriteCount,
+        queueCount: this.writeQueues.size,
+      }))
     }
   }
 
-  private async drainWriteQueue(): Promise<void> {
+  private drainWriteQueue(): Promise<void> {
+    if (this.activeDrain) return this.activeDrain
+    if (this.writeFailure) return Promise.reject(this.writeFailure.error)
+    const drain = this.appendQueuedEntries()
+    this.activeDrain = drain
+    void drain.then(
+      () => {
+        this.activeDrain = null
+      },
+      error => {
+        this.writeFailure ??= { error }
+        this.activeDrain = null
+      },
+    )
+    return drain
+  }
+
+  private async appendQueuedEntries(): Promise<void> {
     for (const [filePath, queue] of this.writeQueues) {
       if (queue.length === 0) {
         continue
@@ -674,30 +732,24 @@ class Project {
       const batch = queue.splice(0)
 
       let content = ''
-      const resolvers: Array<() => void> = []
+      const tracing = process.env.MATCHACLAW_TRACE === '1'
+      let entryCount = 0
 
-      for (const { entry, resolve } of batch) {
+      for (const entry of batch) {
         const line = jsonStringify(entry) + '\n'
 
         if (content.length + line.length >= this.MAX_CHUNK_BYTES) {
-          // Flush chunk and resolve its entries before starting a new one
-          await this.appendToFile(filePath, content)
-          for (const r of resolvers) {
-            r()
-          }
-          resolvers.length = 0
+          await this.appendToFile(filePath, content, entryCount)
           content = ''
+          entryCount = 0
         }
 
         content += line
-        resolvers.push(resolve)
+        if (tracing) entryCount++
       }
 
       if (content.length > 0) {
-        await this.appendToFile(filePath, content)
-        for (const r of resolvers) {
-          r()
-        }
+        await this.appendToFile(filePath, content, entryCount)
       }
     }
 
@@ -871,25 +923,80 @@ class Project {
   }
 
   async flush(): Promise<void> {
-    // Cancel pending timer
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer)
-      this.flushTimer = null
+    const tracing = process.env.MATCHACLAW_TRACE === '1'
+    const opId = tracing ? ++this.traceOperationId : 0
+    const startedAt = tracing ? performance.now() : 0
+    const initialPendingProducers = tracing ? this.pendingWriteCount : 0
+    const initialQueueCount = tracing ? this.writeQueues.size : 0
+    const initialQueuedEntries = tracing
+      ? [...this.writeQueues.values()].reduce((count, queue) => count + queue.length, 0)
+      : 0
+    let producerWaitMs = 0
+    let drainWaitMs = 0
+    let waitStartedAt = 0
+    let phase = 'producer'
+    let completed = false
+    this.activeFlushCount++
+    traceSessionTiming('storage.flush.begin', () => ({
+      opId,
+      pendingProducers: initialPendingProducers,
+      queueCount: initialQueueCount,
+      queuedEntries: initialQueuedEntries,
+      drainActive: this.activeDrain !== null,
+      activeFlushes: this.activeFlushCount,
+    }))
+    let producerFailure: { error: unknown } | null = null
+    try {
+      do {
+        // Producers must finish enqueueing before the final drain, not after it.
+        if (tracing) waitStartedAt = performance.now()
+        while (this.pendingWriteCount > 0) {
+          await new Promise<void>(resolve => {
+            this.flushResolvers.push(resolve)
+          })
+        }
+        if (tracing) producerWaitMs += performance.now() - waitStartedAt
+        producerFailure ??= this.producerFailure
+        if (this.flushTimer) {
+          clearTimeout(this.flushTimer)
+          this.flushTimer = null
+        }
+        phase = 'drain'
+        if (tracing) waitStartedAt = performance.now()
+        await this.drainWriteQueue()
+        if (tracing) drainWaitMs += performance.now() - waitStartedAt
+        phase = 'producer'
+      } while (this.pendingWriteCount > 0 || this.writeQueues.size > 0)
+      if (this.writeFailure) throw this.writeFailure.error
+      producerFailure ??= this.producerFailure
+      if (producerFailure) throw producerFailure.error
+      completed = true
+    } finally {
+      const failedProducer = producerFailure !== null || this.producerFailure !== null
+      this.activeFlushCount--
+      if (
+        this.activeFlushCount === 0 &&
+        this.producerFailure === producerFailure
+      ) {
+        this.producerFailure = null
+      }
+      traceSessionTiming('storage.flush.summary', () => ({
+        opId,
+        elapsedMs: performance.now() - startedAt,
+        producerWaitMs,
+        drainWaitMs: drainWaitMs + (!completed && phase === 'drain'
+          ? performance.now() - waitStartedAt : 0),
+        outcome: completed ? 'completed' : 'failed',
+        failure: this.writeFailure ? 'append_or_serialization'
+          : failedProducer ? 'producer' : completed ? 'none' : 'drain',
+        initialPendingProducers, initialQueueCount, initialQueuedEntries,
+        pendingProducers: this.pendingWriteCount,
+        queueCount: this.writeQueues.size,
+        queuedEntries: [...this.writeQueues.values()].reduce((count, queue) => count + queue.length, 0),
+        bufferedEntries: this.pendingEntries.length,
+        activeFlushes: this.activeFlushCount,
+      }))
     }
-    // Wait for any in-flight drain to finish
-    if (this.activeDrain) {
-      await this.activeDrain
-    }
-    // Drain anything remaining in the queues
-    await this.drainWriteQueue()
-
-    // Wait for non-queue tracked operations (e.g. removeMessageByUuid)
-    if (this.pendingWriteCount === 0) {
-      return
-    }
-    return new Promise<void>(resolve => {
-      this.flushResolvers.push(resolve)
-    })
   }
 
   /**
@@ -1029,90 +1136,88 @@ class Project {
     startingParentUuid?: UUID | null,
     teamInfo?: { teamName?: string; agentName?: string },
   ) {
-    return this.trackWrite(async () => {
-      let parentUuid: UUID | null = startingParentUuid ?? null
+    let parentUuid: UUID | null = startingParentUuid ?? null
 
-      // First user/assistant message materializes the session file.
-      // Hook progress/attachment messages alone stay buffered.
+    // First user/assistant message materializes the session file.
+    // Hook progress/attachment messages alone stay buffered.
+    if (
+      this.sessionFile === null &&
+      messages.some(m => m.type === 'user' || m.type === 'assistant')
+    ) {
+      await this.materializeSessionFile()
+    }
+
+    // Get current git branch once for this message chain
+    let gitBranch: string | undefined
+    try {
+      gitBranch = await getBranch()
+    } catch {
+      // Not in a git repo or git command failed
+      gitBranch = undefined
+    }
+
+    // Get slug if one exists for this session (used for plan files, etc.)
+    const sessionId = getSessionId()
+    const slug = getPlanSlugCache().get(sessionId)
+
+    for (const message of messages) {
+      const isCompactBoundary = isCompactBoundaryMessage(message)
+
+      // For tool_result messages, use the assistant message UUID from the message
+      // if available (set at creation time), otherwise fall back to sequential parent
+      let effectiveParentUuid = parentUuid
       if (
-        this.sessionFile === null &&
-        messages.some(m => m.type === 'user' || m.type === 'assistant')
+        message.type === 'user' &&
+        'sourceToolAssistantUUID' in message &&
+        message.sourceToolAssistantUUID
       ) {
-        await this.materializeSessionFile()
+        effectiveParentUuid = message.sourceToolAssistantUUID as UUID
       }
 
-      // Get current git branch once for this message chain
-      let gitBranch: string | undefined
-      try {
-        gitBranch = await getBranch()
-      } catch {
-        // Not in a git repo or git command failed
-        gitBranch = undefined
+      const transcriptMessage: TranscriptMessage = {
+        parentUuid: isCompactBoundary ? null : effectiveParentUuid,
+        logicalParentUuid: isCompactBoundary ? parentUuid : undefined,
+        isSidechain,
+        teamName: teamInfo?.teamName,
+        agentName: teamInfo?.agentName,
+        promptId:
+          message.type === 'user' ? (getPromptId() ?? undefined) : undefined,
+        agentId,
+        ...message,
+        // Session-stamp fields MUST come after the spread. On --fork-session
+        // and --resume, messages arrive as SerializedMessage (carries source
+        // sessionId/cwd/etc. because removeExtraFields only strips parentUuid
+        // and isSidechain). If sessionId isn't re-stamped, FRESH.jsonl ends up
+        // with messages stamped sessionId=A but content-replacement entries
+        // stamped sessionId=FRESH (from insertContentReplacement), and
+        // loadFullLog's sessionId-keyed contentReplacements lookup misses →
+        // replacement records lost → FROZEN misclassification.
+        userType: getUserType(),
+        entrypoint: getEntrypoint(),
+        cwd: getCwd(),
+        sessionId,
+        timestamp: new Date().toISOString(),
+        version: VERSION,
+        gitBranch,
+        slug,
       }
-
-      // Get slug if one exists for this session (used for plan files, etc.)
-      const sessionId = getSessionId()
-      const slug = getPlanSlugCache().get(sessionId)
-
-      for (const message of messages) {
-        const isCompactBoundary = isCompactBoundaryMessage(message)
-
-        // For tool_result messages, use the assistant message UUID from the message
-        // if available (set at creation time), otherwise fall back to sequential parent
-        let effectiveParentUuid = parentUuid
-        if (
-          message.type === 'user' &&
-          'sourceToolAssistantUUID' in message &&
-          message.sourceToolAssistantUUID
-        ) {
-          effectiveParentUuid = message.sourceToolAssistantUUID as UUID
-        }
-
-        const transcriptMessage: TranscriptMessage = {
-          parentUuid: isCompactBoundary ? null : effectiveParentUuid,
-          logicalParentUuid: isCompactBoundary ? parentUuid : undefined,
-          isSidechain,
-          teamName: teamInfo?.teamName,
-          agentName: teamInfo?.agentName,
-          promptId:
-            message.type === 'user' ? (getPromptId() ?? undefined) : undefined,
-          agentId,
-          ...message,
-          // Session-stamp fields MUST come after the spread. On --fork-session
-          // and --resume, messages arrive as SerializedMessage (carries source
-          // sessionId/cwd/etc. because removeExtraFields only strips parentUuid
-          // and isSidechain). If sessionId isn't re-stamped, FRESH.jsonl ends up
-          // with messages stamped sessionId=A but content-replacement entries
-          // stamped sessionId=FRESH (from insertContentReplacement), and
-          // loadFullLog's sessionId-keyed contentReplacements lookup misses →
-          // replacement records lost → FROZEN misclassification.
-          userType: getUserType(),
-          entrypoint: getEntrypoint(),
-          cwd: getCwd(),
-          sessionId,
-          timestamp: new Date().toISOString(),
-          version: VERSION,
-          gitBranch,
-          slug,
-        }
-        await this.appendEntry(transcriptMessage)
-        if (isChainParticipant(message)) {
-          parentUuid = message.uuid
-        }
+      await this.appendEntry(transcriptMessage)
+      if (isChainParticipant(message)) {
+        parentUuid = message.uuid
       }
+    }
 
-      // Cache this turn's user prompt for reAppendSessionMetadata —
-      // the --resume picker shows what the user was last doing.
-      // Overwritten every turn by design.
-      if (!isSidechain) {
-        const text = getFirstMeaningfulUserMessageTextContent(messages)
-        if (text) {
-          const flat = text.replace(/\n/g, ' ').trim()
-          this.currentSessionLastPrompt =
-            flat.length > 200 ? flat.slice(0, 200).trim() + '…' : flat
-        }
+    // Cache this turn's user prompt for reAppendSessionMetadata —
+    // the --resume picker shows what the user was last doing.
+    // Overwritten every turn by design.
+    if (!isSidechain) {
+      const text = getFirstMeaningfulUserMessageTextContent(messages)
+      if (text) {
+        const flat = text.replace(/\n/g, ' ').trim()
+        this.currentSessionLastPrompt =
+          flat.length > 200 ? flat.slice(0, 200).trim() + '…' : flat
       }
-    })
+    }
   }
 
   async insertFileHistorySnapshot(
@@ -1190,46 +1295,46 @@ class Project {
     // Only load current session messages if needed
     if (entry.type === 'summary') {
       // Summaries can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'custom-title') {
       // Custom titles can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'ai-title') {
       // AI titles can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'last-prompt') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'task-summary') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'tag') {
       // Tags can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'agent-name') {
       // Agent names can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'agent-color') {
       // Agent colors can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'agent-setting') {
       // Agent settings can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'pr-link') {
       // PR links can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'file-history-snapshot') {
       // File history snapshots can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'attribution-snapshot') {
       // Attribution snapshots can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'speculation-accept') {
       // Speculation accept entries can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'mode') {
       // Mode entries can always be appended
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'worktree-state') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'content-replacement') {
       // Content replacement records can always be appended. Subagent records
       // go to the sidechain file (for AgentTool resume); main-thread
@@ -1237,24 +1342,24 @@ class Project {
       const targetFile = entry.agentId
         ? getAgentTranscriptPath(entry.agentId)
         : sessionFile
-      void this.enqueueWrite(targetFile, entry)
+      this.enqueueWrite(targetFile, entry)
     } else if (entry.type === 'marble-origami-commit') {
       // Always append. Commit order matters for restore (later commits may
       // reference earlier commits' summary messages), so these must be
       // written in the order received and read back sequentially.
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'marble-origami-snapshot') {
       // Always append. Last-wins on restore — later entries supersede.
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'goal') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'goal-cleared') {
-      void this.enqueueWrite(sessionFile, entry)
+      this.enqueueWrite(sessionFile, entry)
     } else {
       const messageSet = await getSessionMessages(sessionId)
       if (entry.type === 'queue-operation') {
         // Queue operations are always appended to the session file
-        void this.enqueueWrite(sessionFile, entry)
+        this.enqueueWrite(sessionFile, entry)
       } else {
         // At this point, entry must be a TranscriptMessage (user/assistant/attachment/system)
         // All other entry types have been handled above
@@ -1279,7 +1384,21 @@ class Project {
         const isNewUuid = !messageSet.has(entry.uuid)
         if (isAgentSidechain || isNewUuid) {
           // Enqueue write — appendToFile handles ENOENT by creating directories
-          void this.enqueueWrite(targetFile, entry)
+          this.enqueueWrite(targetFile, entry)
+          if (process.env.MATCHACLAW_TRACE === '1' && entry.type === 'assistant') {
+            const responseId = entry.message?.id || entry.uuid
+            if (responseId !== this.tracedAssistantResponseId) {
+              this.tracedAssistantResponseId = responseId
+              traceSessionTiming('storage.assistant.enqueued', () => ({
+                assistantHash: debugIdentifierHash(entry.uuid),
+                providerMessageHash: entry.message?.id
+                  ? debugIdentifierHash(entry.message.id) : undefined,
+                sidechain: !!isAgentSidechain,
+                pendingProducers: this.pendingWriteCount,
+                queueCount: this.writeQueues.size,
+              }))
+            }
+          }
 
           if (!isAgentSidechain) {
             // messageSet is main-file-authoritative. Sidechain entries go to a
@@ -1452,59 +1571,65 @@ export type TeamInfo = {
 //  - Compaction (useLogMessages): new CB/summary appear FIRST, then recorded
 //    messagesToKeep → not a prefix → not tracked → CB gets parentUuid=null
 //    (correct: truncates --continue chain at compact boundary).
-export async function recordTranscript(
+export function recordTranscript(
   messages: Message[],
   teamInfo?: TeamInfo,
   startingParentUuidHint?: UUID,
   allMessages?: readonly Message[],
 ): Promise<UUID | null> {
-  const cleanedMessages = cleanMessagesForLogging(messages, allMessages)
-  const sessionId = getSessionId() as UUID
-  const messageSet = await getSessionMessages(sessionId)
-  const newMessages: typeof cleanedMessages = []
-  let startingParentUuid: UUID | undefined = startingParentUuidHint
-  let seenNewMessage = false
-  for (const m of cleanedMessages) {
-    if (messageSet.has(m.uuid as UUID)) {
-      // Only track skipped messages that form a prefix. After compaction,
-      // messagesToKeep appear AFTER new CB/summary, so this skips them.
-      if (!seenNewMessage && isChainParticipant(m)) {
-        startingParentUuid = m.uuid as UUID
+  const project = getProject()
+  return project.trackWrite(async () => {
+    const cleanedMessages = cleanMessagesForLogging(messages, allMessages)
+    const sessionId = getSessionId() as UUID
+    const messageSet = await getSessionMessages(sessionId)
+    const newMessages: typeof cleanedMessages = []
+    let startingParentUuid: UUID | undefined = startingParentUuidHint
+    let seenNewMessage = false
+    for (const m of cleanedMessages) {
+      if (messageSet.has(m.uuid as UUID)) {
+        // Only track skipped messages that form a prefix. After compaction,
+        // messagesToKeep appear AFTER new CB/summary, so this skips them.
+        if (!seenNewMessage && isChainParticipant(m)) {
+          startingParentUuid = m.uuid as UUID
+        }
+      } else {
+        newMessages.push(m)
+        seenNewMessage = true
       }
-    } else {
-      newMessages.push(m)
-      seenNewMessage = true
     }
-  }
-  if (newMessages.length > 0) {
-    await getProject().insertMessageChain(
-      newMessages,
-      false,
-      undefined,
-      startingParentUuid,
-      teamInfo,
-    )
-  }
-  // Return the last ACTUALLY recorded chain-participant's UUID, OR the
-  // prefix-tracked UUID if no new chain participants were recorded. This lets
-  // callers (useLogMessages) maintain the correct parent chain even when the
-  // slice is all-recorded (rewind, /resume scenarios where every message is
-  // already in messageSet). Progress is skipped — it's written to the JSONL
-  // but nothing chains TO it (see isChainParticipant).
-  const lastRecorded = newMessages.findLast(isChainParticipant)
-  return (lastRecorded?.uuid as UUID | undefined) ?? startingParentUuid ?? null
+    if (newMessages.length > 0) {
+      await project.insertMessageChain(
+        newMessages,
+        false,
+        undefined,
+        startingParentUuid,
+        teamInfo,
+      )
+    }
+    // Return the last ACTUALLY recorded chain-participant's UUID, OR the
+    // prefix-tracked UUID if no new chain participants were recorded. This lets
+    // callers (useLogMessages) maintain the correct parent chain even when the
+    // slice is all-recorded (rewind, /resume scenarios where every message is
+    // already in messageSet). Progress is skipped — it's written to the JSONL
+    // but nothing chains TO it (see isChainParticipant).
+    const lastRecorded = newMessages.findLast(isChainParticipant)
+    return (lastRecorded?.uuid as UUID | undefined) ?? startingParentUuid ?? null
+  })
 }
 
-export async function recordSidechainTranscript(
+export function recordSidechainTranscript(
   messages: Message[],
   agentId?: string,
   startingParentUuid?: UUID | null,
 ) {
-  await getProject().insertMessageChain(
-    cleanMessagesForLogging(messages),
-    true,
-    agentId,
-    startingParentUuid,
+  const project = getProject()
+  return project.trackWrite(() =>
+    project.insertMessageChain(
+      cleanMessagesForLogging(messages),
+      true,
+      agentId,
+      startingParentUuid,
+    ),
   )
 }
 
@@ -3266,13 +3391,17 @@ async function scanPreBoundaryMetadata(
   const { createReadStream } = await import('fs')
   const NEWLINE = 0x0a
 
-  const stream = source === undefined
-    ? createReadStream(filePath, { end: endOffset - 1 })
-    : (function* () {
-        for (let offset = 0; offset < endOffset; offset += 64 * 1024) {
-          yield source.subarray(offset, Math.min(offset + 64 * 1024, endOffset))
-        }
-      })()
+  const stream =
+    source === undefined
+      ? createReadStream(filePath, { end: endOffset - 1 })
+      : (function* () {
+          for (let offset = 0; offset < endOffset; offset += 64 * 1024) {
+            yield source.subarray(
+              offset,
+              Math.min(offset + 64 * 1024, endOffset),
+            )
+          }
+        })()
   const metadataLines: string[] = []
   let carry: Buffer | null = null
 
@@ -3651,13 +3780,13 @@ export async function loadTranscriptFile(
     let metadataLines: string[] | null = null
     let hasPreservedSegment = false
     if (!isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP)) {
-      const size = source === undefined
-        ? (await stat(filePath)).size
-        : source.length
+      const size =
+        source === undefined ? (await stat(filePath)).size : source.length
       if (size > SKIP_PRECOMPACT_THRESHOLD) {
-        const scan = source === undefined
-          ? await readTranscriptForLoad(filePath, size)
-          : readTranscriptBufferForLoad(source)
+        const scan =
+          source === undefined
+            ? await readTranscriptForLoad(filePath, size)
+            : readTranscriptBufferForLoad(source)
         buf = scan.postBoundaryBuf
         hasPreservedSegment = scan.hasPreservedSegment
         // >0 means we truncated pre-boundary bytes and must recover
@@ -3676,7 +3805,7 @@ export async function loadTranscriptFile(
         }
       }
     }
-    buf ??= source ?? await readFile(filePath)
+    buf ??= source ?? (await readFile(filePath))
     // For large buffers (which here means readTranscriptForLoad output with
     // attr-snaps already stripped at the fd level — the <5MB readFile path
     // falls through the size gate below), the dominant cost is parsing dead
@@ -3835,7 +3964,8 @@ export async function loadTranscriptFile(
       if (
         !isENOENT(error) ||
         (error instanceof Error && error.cause !== undefined)
-      ) throw error
+      )
+        throw error
     }
     // File doesn't exist or can't be read
   }
@@ -4010,7 +4140,9 @@ export async function getSessionMessages(sessionId: UUID): Promise<Set<UUID>> {
       !settledSessionMessageLoads.has(existing) &&
       sessionMessageLoadScopes.get(existing) !== scope
     ) {
-      throw new InvestigationAdmissionError('investigation_session_load_scope_mismatch')
+      throw new InvestigationAdmissionError(
+        'investigation_session_load_scope_mismatch',
+      )
     }
     const messages = await trackInvestigationOperation(existing)
     requireInvestigationEffects([])

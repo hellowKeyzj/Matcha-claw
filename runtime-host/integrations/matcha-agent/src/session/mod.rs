@@ -3,6 +3,7 @@ mod catalog;
 pub mod events;
 pub mod history;
 pub mod interaction;
+pub(crate) mod media;
 pub mod model;
 mod normalization;
 pub mod projection;

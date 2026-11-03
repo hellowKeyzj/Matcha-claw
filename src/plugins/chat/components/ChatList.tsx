@@ -68,6 +68,8 @@ export interface ChatListHandle {
 export interface ChatListProps {
   isActive: boolean;
   currentSessionKey: string;
+  scrollScopeKey?: string;
+  submissionPending?: { itemKey: string; label: string };
   runtime: ChatSessionRuntimeState;
   viewport: ChatSessionViewportState;
   items: ChatRenderItem[];
@@ -86,7 +88,7 @@ export interface ChatListProps {
   jumpToBottomLabel: string;
   artifactGroups: ChatArtifactGroup[];
   onOpenArtifactFile: (file: GeneratedFile) => void;
-  onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
+  onOpenAttachedArtifact: (file: AttachedFileMeta) => boolean | void;
   onReuseMessage?: (text: string) => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
@@ -105,6 +107,7 @@ interface ChatListSurfaceProps {
   onWheel: WheelEventHandler<HTMLDivElement>;
   onViewportClickCapture: MouseEventHandler<HTMLDivElement>;
   items: ChatRenderItem[];
+  submissionPending?: ChatListProps['submissionPending'];
   activity?: Extract<ChatSessionPending, { kind: 'activity' }>['mode'] | null;
   assistantPresentation?: ChatAssistantPresentation;
   showLoadOlder: boolean;
@@ -120,7 +123,7 @@ interface ChatListSurfaceProps {
   onJumpToItemKey: (itemKey?: string) => void;
   artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
   onOpenArtifactFile: (file: GeneratedFile) => void;
-  onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
+  onOpenAttachedArtifact: (file: AttachedFileMeta) => boolean | void;
   onReuseMessage?: (text: string) => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
@@ -153,7 +156,8 @@ function hasVisibleUserOutput(item: ChatUserMessageItem): boolean {
   return !!item.largeText
     || item.text.trim().length > 0
     || item.images.length > 0
-    || item.attachedFiles.length > 0;
+    || item.attachedFiles.length > 0
+    || !!item.contentNotices?.length;
 }
 
 function hasVisibleAssistantOutput(
@@ -173,7 +177,7 @@ function hasVisibleAssistantOutput(
       return toolSlots?.get(segment.key)?.kind !== 'covered';
     }
     if (segment.kind === 'media') {
-      return segment.images.length > 0 || segment.attachedFiles.length > 0;
+      return segment.images.length > 0 || segment.attachedFiles.length > 0 || !!segment.contentNotices?.length;
     }
     return false;
   })
@@ -249,7 +253,7 @@ function renderChatItem(input: {
   onJumpToItemKey: (itemKey?: string) => void;
   artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
   onOpenArtifactFile: (file: GeneratedFile) => void;
-  onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
+  onOpenAttachedArtifact: (file: AttachedFileMeta) => boolean | void;
   onReuseMessage?: (text: string) => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
@@ -320,6 +324,7 @@ function renderChatItem(input: {
     <ChatMessage
       item={input.item as ChatUserMessageItem}
       onReuseMessage={input.onReuseMessage}
+      onOpenFile={input.onOpenAttachedArtifact}
       userAvatarImageUrl={input.userAvatarImageUrl}
       sessionIdentity={input.sessionIdentity}
       endpointSessionId={input.endpointSessionId}
@@ -333,6 +338,7 @@ const ChatListContent = memo(function ChatListContent({
   showBlockingError,
   errorMessage,
   items,
+  submissionPending,
   activity,
   assistantPresentation,
   showLoadOlder,
@@ -459,6 +465,14 @@ const ChatListContent = memo(function ChatListContent({
                       onRuntimeSendMessage,
                       onRuntimeOpenLink,
                     })}
+                    {submissionPending?.itemKey === item.key ? (
+                      <div className={cn(MESSAGE_LAYOUT_TOKENS.messageShell, MESSAGE_LAYOUT_TOKENS.messageShellUserColumns)}>
+                        <div className={cn(MESSAGE_LAYOUT_TOKENS.messageContentColumn, MESSAGE_LAYOUT_TOKENS.messageContentUserOrder)}>
+                          <span role="status" aria-live="polite" className="text-xs text-muted-foreground">{submissionPending.label}</span>
+                        </div>
+                        <div aria-hidden="true" className={cn(MESSAGE_LAYOUT_TOKENS.messageAvatar, MESSAGE_LAYOUT_TOKENS.messageAvatarUserOrder, 'invisible')} />
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -541,6 +555,7 @@ export const ChatListSurface = memo(function ChatListSurface({
   onWheel,
   onViewportClickCapture,
   items,
+  submissionPending,
   activity,
   assistantPresentation,
   showLoadOlder,
@@ -598,6 +613,7 @@ export const ChatListSurface = memo(function ChatListSurface({
               showBlockingError={showBlockingError}
               errorMessage={errorMessage}
               items={items}
+              submissionPending={submissionPending}
               activity={activity}
               assistantPresentation={assistantPresentation}
               showLoadOlder={showLoadOlder}
@@ -632,8 +648,10 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   {
     isActive,
     currentSessionKey,
+    scrollScopeKey = currentSessionKey,
     viewport,
     items,
+    submissionPending,
     activity,
     assistantPresentation,
     liveView,
@@ -753,7 +771,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     jumpToBottom,
   } = useChatScroll({
     enabled: isActive,
-    scrollScopeKey: currentSessionKey,
+    scrollScopeKey,
     contentSignal,
     setChromePhase: scrollChromeStore.setPhase,
     viewportRef: messagesViewportRef,
@@ -772,11 +790,11 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     }
     if (viewport.windowStartOffset < pending.windowStartOffset) {
       olderPageAnchorRef.current = null;
-      prepareScopeAnchorRestore(currentSessionKey, pending.anchor);
+      prepareScopeAnchorRestore(scrollScopeKey, pending.anchor);
     } else if (!viewport.isLoadingMore || viewport.windowStartOffset !== pending.windowStartOffset) {
       olderPageAnchorRef.current = null;
     }
-  }, [currentSessionKey, identityKey, isActive, prepareScopeAnchorRestore, viewport]);
+  }, [currentSessionKey, identityKey, isActive, prepareScopeAnchorRestore, scrollScopeKey, viewport]);
 
   const handleLoadOlder = useCallback(() => {
     if (!currentSessionKey || !identityKey || !viewport.hasMore || viewport.isLoadingMore) {
@@ -808,18 +826,19 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   }, []);
 
   const handleJumpToLatestBottom = useCallback(() => {
-    if (!currentSessionKey) {
+    if (!scrollScopeKey) {
       return;
     }
     olderPageAnchorRef.current = null;
-    if (viewport.isAtLatest) {
+    if (!currentSessionKey || viewport.isAtLatest) {
       jumpToBottom();
       return;
     }
-    prepareScopeBottomAlign(currentSessionKey);
+    prepareScopeBottomAlign(scrollScopeKey);
     onJumpToLatest();
   }, [
     currentSessionKey,
+    scrollScopeKey,
     jumpToBottom,
     onJumpToLatest,
     prepareScopeBottomAlign,
@@ -845,11 +864,11 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
 
   useImperativeHandle(ref, () => ({
     prepareCurrentLatestBottomAlign: () => {
-      if (!currentSessionKey) {
+      if (!scrollScopeKey) {
         return;
       }
       olderPageAnchorRef.current = null;
-      prepareScopeBottomAlign(currentSessionKey);
+      prepareScopeBottomAlign(scrollScopeKey);
     },
     scrollByWheelDelta: (deltaY) => {
       scrollViewportByWheelDelta(deltaY);
@@ -857,7 +876,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     notifyComposerGeometryChanged: () => {
       notifyViewportGeometryChanged();
     },
-  }), [currentSessionKey, notifyViewportGeometryChanged, prepareScopeBottomAlign, scrollViewportByWheelDelta]);
+  }), [notifyViewportGeometryChanged, prepareScopeBottomAlign, scrollScopeKey, scrollViewportByWheelDelta]);
 
   return (
     <ChatListSurface
@@ -873,6 +892,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       onWheel={handleViewportWheel}
       onViewportClickCapture={handleViewportClickCapture}
       items={items}
+      submissionPending={submissionPending}
       activity={activity}
       assistantPresentation={assistantPresentation}
       showLoadOlder={viewport.hasMore || viewport.isLoadingMore}

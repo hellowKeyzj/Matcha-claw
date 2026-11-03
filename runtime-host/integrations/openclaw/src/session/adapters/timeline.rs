@@ -440,6 +440,13 @@ impl OpenClawReplayProjection {
             crate::session::projection::CanonicalSessionChange::RunStarted { run_id } => {
                 self.apply_run_started(run_id.as_str())
             }
+            crate::session::projection::CanonicalSessionChange::RunYielded { run_id } => {
+                self.runtime.phase = RunPhase::Yielded;
+                self.runtime.active_run_id = Some(run_id.as_str().to_owned());
+                self.runtime.run_progress = None;
+                self.runtime.runtime_activity = None;
+                Some(())
+            }
             crate::session::projection::CanonicalSessionChange::AssistantTurnChunk {
                 run_id, status, ..
             } => {
@@ -1138,7 +1145,10 @@ fn transcript_content(
             crate::session::window::MessageContent::Media {
                 media_type,
                 reference: Some(reference),
-                bytes: None,
+                file_name,
+                size_bytes,
+                resource_id,
+                ..
             } => public_media_reference(reference).map_or(
                 Some(SessionContent::Omitted {
                     reason: OmissionReason::UnsafeMedia,
@@ -1147,6 +1157,9 @@ fn transcript_content(
                     Some(SessionContent::Media {
                         media_type: media_type.clone(),
                         reference,
+                        file_name: file_name.clone(),
+                        size_bytes: *size_bytes,
+                        resource_id: resource_id.clone(),
                     })
                 },
             ),
@@ -1212,6 +1225,9 @@ fn append_transcript_delivery(
             SessionContent::Media {
                 media_type: media.media_type().map(str::to_owned),
                 reference: media.reference().to_owned(),
+                file_name: None,
+                size_bytes: None,
+                resource_id: None,
             },
         )?;
     }
@@ -1422,9 +1438,10 @@ fn merge_tool_field<T>(existing: &mut Option<T>, incoming: Option<T>, preferred:
 
 fn merge_tool_details(
     existing: &mut Option<serde_json::Value>,
-    incoming: Option<serde_json::Value>,
+    mut incoming: Option<serde_json::Value>,
     preferred: bool,
 ) {
+    crate::session::image_tasks::preserve_task_details(existing, &mut incoming);
     if let (Some(serde_json::Value::Object(current)), Some(serde_json::Value::Object(next)))
         = (existing.as_mut(), incoming.as_ref())
     {
@@ -1438,7 +1455,7 @@ fn merge_tool_details(
     }
 }
 
-pub(in crate::session) fn upsert_replay_tool(tools: &mut Vec<ToolView>, tool: ToolView) {
+pub(in crate::session) fn upsert_replay_tool(tools: &mut Vec<ToolView>, mut tool: ToolView) {
     if let Some(existing) = tools
         .iter_mut()
         .find(|existing| existing.tool_call_id == tool.tool_call_id)
@@ -1460,6 +1477,7 @@ pub(in crate::session) fn upsert_replay_tool(tools: &mut Vec<ToolView>, tool: To
             existing.output = tool.output;
         }
         if tool.details.is_some() {
+            crate::session::image_tasks::preserve_task_details(&existing.details, &mut tool.details);
             existing.details = tool.details;
         }
         if tool.is_error.is_some() {
@@ -1747,6 +1765,7 @@ mod tests {
                 media_type,
                 reference,
                 bytes: None,
+                ..
             } => json!({"type": "media", "mediaType": media_type, "reference": reference}),
             _ => json!({"type": "unknown"}),
         }

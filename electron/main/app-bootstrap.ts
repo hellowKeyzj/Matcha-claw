@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { ApplicationPluginOwner } from './app-plugins/owner';
 import { AppPluginPackageWorker } from './app-plugins/package-client';
 import { AppPluginHost, type AppPluginHostOptions } from './app-plugins/host';
-import { collectPluginVideo, generatePluginMedia, generatePluginText, listPluginMediaModels, queryPluginVideo, submitPluginVideo } from './app-plugins/media';
+import { collectPluginVideo, generatePluginAudio, generatePluginMedia, generatePluginText, listPluginMediaModels, queryPluginVideo, submitPluginVideo } from './app-plugins/media';
 import { startAppPluginAgentGateway } from './app-plugins/agent-gateway';
 import type { RuntimeHostApiDependencies } from '../api/context';
 import { createHostApiDispatcher } from '../api/dispatcher';
@@ -47,7 +47,7 @@ import {
 import {
   createProviderCredentialStatusTransport,
   createProviderPrivateAuth,
-  type ProviderPrivateAccountDependencies,
+  type ProviderPrivateAuthDependencies,
 } from './providers/private-auth';
 import { registerProviderPrivateAuthHandlers } from '../api/ipc/provider-private-auth';
 import { createFleetCredentialWriteAdapter } from './fleet/credentials';
@@ -57,6 +57,7 @@ import { createChannelAuthorization } from './channels/authorization';
 import { composeLicenseService } from './license/composition';
 import { createIab } from './iab/composition';
 import { registerIabHandlers } from '../api/ipc/iab-ipc';
+import { registerAppPluginConfirmationHandlers } from '../api/ipc/app-plugin-confirmation';
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 const e2eStartupOutcomeKey = '__matchaclawE2EStartupOutcome';
@@ -244,6 +245,7 @@ export function bootstrapMainApplication(deps: {
   const appPluginHost = new AppPluginHost({
     rootDir: appPluginRoot, owner: appPlugins, packageWorker: appPluginPackages,
     publish: (event) => deps.hostEventBus.emit('app-plugins:runtime', event),
+    publishConfirmation: (event) => deps.hostEventBus.emit('app-plugins:confirmation', event),
     list: async (request, signal) => {
       await apiRuntime;
       signal.throwIfAborted();
@@ -269,6 +271,24 @@ export function bootstrapMainApplication(deps: {
       return collectPluginVideo(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
     },
     generateText,
+    generateSpeech: async (request, signal) => {
+      await apiRuntime;
+      signal.throwIfAborted();
+      if (!delivery) throw new Error('Model delivery is unavailable.');
+      return generatePluginAudio(delivery.issuer, delivery.runtimeHostTransportPort, 'tts', request, signal);
+    },
+    transcribe: async (request, signal) => {
+      await apiRuntime;
+      signal.throwIfAborted();
+      if (!delivery) throw new Error('Model delivery is unavailable.');
+      return generatePluginAudio(delivery.issuer, delivery.runtimeHostTransportPort, 'transcribe', request, signal);
+    },
+    generateMusic: async (request, signal) => {
+      await apiRuntime;
+      signal.throwIfAborted();
+      if (!delivery) throw new Error('Model delivery is unavailable.');
+      return generatePluginAudio(delivery.issuer, delivery.runtimeHostTransportPort, 'music', request, signal);
+    },
     generate: async (request, signal) => {
       await apiRuntime;
       signal.throwIfAborted();
@@ -276,12 +296,17 @@ export function bootstrapMainApplication(deps: {
       return generatePluginMedia(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
     },
   });
-  const appPluginAgentGateway = startAppPluginAgentGateway({
+  const stopAppPluginConfirmation = registerAppPluginConfirmationHandlers(appPluginHost, mainWindow);
+  const bundledAppPluginsReady = app.isPackaged
+    ? appPlugins.installBundled(join(process.resourcesPath, 'app-plugins', 'bundled'))
+    : Promise.resolve();
+  void bundledAppPluginsReady.catch(() => undefined);
+  const appPluginAgentGateway = bundledAppPluginsReady.then(() => startAppPluginAgentGateway({
     owner: appPlugins, host: appPluginHost,
     onPreview: (developmentId) => deps.hostEventBus.emit('app-plugins:preview', { developmentId }),
     root: join(app.getPath('userData'), 'app-plugin-agent'),
     sdkArchive: app.isPackaged ? join(process.resourcesPath, 'app-plugins', 'sdk.tgz') : join(app.getAppPath(), 'sdk', 'app-plugins', 'matcha-app-plugins-sdk-1.0.0.tgz'),
-  });
+  }));
   const appPluginGatewaySettled = appPluginAgentGateway.then(() => undefined, () => {
     logger.warn('[AppPlugins] Agent SDK gateway unavailable; existing runtimes will start without plugin development tools');
   });
@@ -311,9 +336,11 @@ export function bootstrapMainApplication(deps: {
   const runtimeSetup = (async (): Promise<{
     api: RuntimeHostApiDependencies;
     account: CloudAccountRuntime;
-    providerAuth: ProviderPrivateAccountDependencies;
+    providerAuth: ProviderPrivateAuthDependencies;
   }> => {
     try {
+      assertStarting();
+      await bundledAppPluginsReady;
       assertStarting();
       await appPluginGatewaySettled;
       assertStarting();
@@ -355,6 +382,7 @@ export function bootstrapMainApplication(deps: {
         providerAccountsTransport: transports.providerAccountsTransport,
         providerModelsTransport: transports.providerModelsTransport,
         awaitProviderCall,
+        onChanged: () => deps.hostEventBus.emit('providers:changed', {}),
       });
       subscriptions.push(
         runtimeHost.onDisconnect(() => iab.invalidateAgentControl()),
@@ -403,11 +431,11 @@ export function bootstrapMainApplication(deps: {
             packageChanged: (operationId) => deps.hostEventBus.emit('package:changed', { operationId }),
           },
         },
-        providerAuth: { transport: transports.providerAccountsTransport, awaitProviderCall },
+        providerAuth: { transport: transports.providerAccountsTransport, modelsTransport: transports.providerModelsTransport, awaitProviderCall },
       } satisfies {
         api: RuntimeHostApiDependencies;
         account: CloudAccountRuntime;
-        providerAuth: ProviderPrivateAccountDependencies;
+        providerAuth: ProviderPrivateAuthDependencies;
       };
       runtimeReady = true;
       return result;
@@ -493,6 +521,7 @@ export function bootstrapMainApplication(deps: {
         .finally(() => appPluginHost.close()).finally(() => appPlugins.close()).finally(() => appPluginPackages.close());
       void appPluginsClosed.catch(() => undefined);
       stopIabIpc();
+      stopAppPluginConfirmation();
       const iabClosed = iab.close();
       void iabClosed.catch(() => undefined);
       shutdownStage = 'startup';

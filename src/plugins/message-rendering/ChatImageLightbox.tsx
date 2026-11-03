@@ -1,9 +1,10 @@
-import { Fragment, useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Download, FolderOpen, Loader2, Maximize, Minus, Plus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { invokeIpc } from '@/lib/api-client';
+import { hostWorkspaceMediaResolve } from '@/lib/host-api';
 import { useContributions } from '@/plugin-host/react';
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
 import { imagePreviewActions } from './extensions';
@@ -12,15 +13,17 @@ interface ChatImageLightboxProps {
   src: string;
   fileName: string;
   filePath?: string;
+  mediaReference?: string;
+  mimeType?: string;
   sessionIdentity?: SessionIdentity;
   onClose: () => void;
 }
 
 export function ChatImageLightbox(props: ChatImageLightboxProps) {
-  return <Fragment key={props.src}><ImageLightbox key={JSON.stringify([props.fileName, props.sessionIdentity])} {...props} /></Fragment>;
+  return <Fragment key={props.src}><ImageLightbox key={JSON.stringify([props.fileName, props.sessionIdentity, props.mediaReference])} {...props} /></Fragment>;
 }
 
-function ImageLightbox({ src, fileName, filePath, sessionIdentity, onClose }: ChatImageLightboxProps) {
+function ImageLightbox({ src, fileName, filePath, mediaReference, mimeType, sessionIdentity, onClose }: ChatImageLightboxProps) {
   const { t } = useTranslation('common');
   const actions = useContributions(imagePreviewActions);
   const viewport = useRef<HTMLDivElement>(null);
@@ -32,6 +35,18 @@ function ImageLightbox({ src, fileName, filePath, sessionIdentity, onClose }: Ch
   const [zoom, setZoom] = useState<number | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [originalSrc, setOriginalSrc] = useState<string | null>(null);
+  useEffect(() => {
+    if (!mediaReference || !sessionIdentity) return;
+    let active = true;
+    let url: string | undefined;
+    void hostWorkspaceMediaResolve({ reference: mediaReference, sessionIdentity }).then((blob) => {
+      if (!active) return;
+      url = URL.createObjectURL(new Blob([blob], { type: mimeType || 'application/octet-stream' }));
+      setOriginalSrc(url);
+    }).catch(() => { if (active) setError(t('imagePreview.loadFailed')); });
+    return () => { active = false; if (url) URL.revokeObjectURL(url); };
+  }, [mediaReference, mimeType, sessionIdentity, t]);
   const fit = image && available.width && available.height ? Math.min(1, available.width / image.width, available.height / image.height) : 1;
   const scale = zoom ?? fit;
   const close = useCallback(() => {
@@ -59,14 +74,15 @@ function ImageLightbox({ src, fileName, filePath, sessionIdentity, onClose }: Ch
   }, [image]);
 
   const downloadImage = async () => {
-    if (!image || download.current) return;
+    const downloadSrc = mediaReference ? originalSrc : image?.src;
+    if (!downloadSrc || download.current) return;
     const controller = new AbortController();
     download.current = controller;
     setDownloading(true);
     setError(null);
     const timeout = window.setTimeout(() => controller.abort(), 30_000);
     try {
-      const response = await fetch(image.src, { signal: controller.signal });
+      const response = await fetch(downloadSrc, { signal: controller.signal });
       if (!response.ok) throw new Error();
       const blob = await response.blob();
       if (controller.signal.aborted) return;
@@ -103,7 +119,7 @@ function ImageLightbox({ src, fileName, filePath, sessionIdentity, onClose }: Ch
         <Dialog.Title className="pointer-events-none absolute left-6 right-6 top-5 z-10 truncate text-sm font-medium text-white/75">{fileName}</Dialog.Title>
         <div ref={viewport} className="mt-10 min-h-0 flex-1 overflow-auto overscroll-contain" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
           <div className="flex min-h-full min-w-full w-max items-center justify-center p-6" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
-            <img src={src} alt={fileName} draggable={false} onLoad={(event) => {
+            <img src={originalSrc ?? src} alt={fileName} draggable={false} onLoad={(event) => {
               const current = event.currentTarget;
               setImage({ src: current.src, width: current.naturalWidth, height: current.naturalHeight });
             }} onError={() => { setImage(null); setError(t('imagePreview.loadFailed')); }} className="block shrink-0 rounded-xl object-contain shadow-2xl" style={image ? { width: image.width * scale, height: image.height * scale, maxWidth: 'none' } : { maxWidth: '85vw', maxHeight: '75vh' }} />
@@ -112,12 +128,12 @@ function ImageLightbox({ src, fileName, filePath, sessionIdentity, onClose }: Ch
         <div className="flex shrink-0 flex-col items-center gap-3 px-4 pb-6 pt-3">
           {error && <p role="alert" className="max-w-xl text-center text-sm text-white/90">{error}</p>}
           <div className="flex max-w-full flex-wrap items-center justify-center gap-2 rounded-2xl border border-white/12 bg-black/45 p-2 shadow-lg backdrop-blur-xl">
-            {image && actions.map(({ id, component: Action }) => <Action key={id} src={image.src} fileName={fileName} sessionIdentity={sessionIdentity} onClose={close} />)}
-            <Button type="button" variant="ghost" size="sm" className="h-9 rounded-full text-white/85 hover:bg-white/12 hover:text-white motion-reduce:transition-none" disabled={!image || downloading} onClick={() => { void downloadImage(); }} aria-busy={downloading}>
+            {image && (!mediaReference || originalSrc) && actions.map(({ id, component: Action }) => <Action key={id} src={originalSrc ?? image.src} fileName={fileName} sessionIdentity={sessionIdentity} onClose={close} />)}
+            <Button type="button" variant="ghost" size="sm" className="h-9 rounded-full text-white/85 hover:bg-white/12 hover:text-white motion-reduce:transition-none" disabled={!image || downloading || !!mediaReference && !originalSrc} onClick={() => { void downloadImage(); }} aria-busy={downloading}>
               {downloading ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Download aria-hidden="true" className="h-4 w-4" />}
               {t('imagePreview.downloadOriginal')}
             </Button>
-            {filePath && <Button type="button" variant="ghost" size="icon" className={iconButton} onClick={() => { void invokeIpc('shell:showItemInFolder', filePath).catch(() => { if (viewport.current?.isConnected) setError(t('imagePreview.showInFolderFailed')); }); }} title={t('imagePreview.showInFolder')} aria-label={t('imagePreview.showInFolder')}>
+            {filePath && <Button type="button" variant="ghost" size="icon" className={iconButton} onClick={() => { void invokeIpc<{ success: boolean }>('shell:showItemInFolder', filePath).then((result) => { if (!result.success) throw new Error(); }).catch(() => { if (viewport.current?.isConnected) setError(t('imagePreview.showInFolderFailed')); }); }} title={t('imagePreview.showInFolder')} aria-label={t('imagePreview.showInFolder')}>
               <FolderOpen aria-hidden="true" className="h-4 w-4" />
             </Button>}
             <span aria-hidden="true" className="mx-1 h-5 w-px bg-white/15" />

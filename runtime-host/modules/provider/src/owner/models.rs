@@ -1,7 +1,6 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt::Write as _,
-    io::Read as _,
     time::Duration,
 };
 
@@ -21,9 +20,9 @@ use crate::{
     ProviderRouting, ProviderRoutingCapability, ProviderTextGenerationModelLimits,
     ProviderTextGenerationModelLimitsOutcome, ProviderTextGenerationModelLimitsRequest,
     ProviderTextGenerationOutcome, ProviderTextGenerationRequest, ProviderTextGenerationUnavailableReason, Resolver,
-    application::{model_reference, receipts::*},
+    application::receipts::*,
     llm_client::{LlmClient, LlmClientError, LlmCredential, LlmEndpoint, LlmRequest},
-    ports::{ProviderModelDiscoveryPortOutcome, ProviderRuntimeDirectory},
+    ports::ProviderRuntimeDirectory,
     provider_model_matches_routing_reference, provider_routing_model_capability,
 };
 
@@ -40,7 +39,6 @@ const SILICONFLOW_DEFAULT_BASE_URL: &str = "https://api.siliconflow.cn/v1";
 const DEEPSEEK_DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
 const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
-const MAX_DISCOVERY_RESPONSE_BYTES: u64 = 256 * 1024;
 const GENERATION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -485,93 +483,6 @@ impl ProviderModelOwner {
         Ok(None)
     }
 
-    pub(crate) async fn discover(
-        &self,
-        runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &mut ProviderCascade,
-        account_id: &ProviderAccountId,
-        diagnostic: &mut Option<ProviderTextGenerationUnavailableReason>,
-    ) -> ProviderModelDiscoverOutcome {
-        if cascade.reload().is_err() {
-            return ProviderModelDiscoverOutcome::Unavailable;
-        }
-        let Some(account) = cascade.account(account_id).cloned() else {
-            return ProviderModelDiscoverOutcome::Rejected;
-        };
-        if runtime_discovery_provider(&account) {
-            let Some(identity_ops) = runtime.provider_runtime_identity_ops(&ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint()) else {
-                return ProviderModelDiscoverOutcome::Unavailable;
-            };
-            let Ok(identity) = identity_ops.runtime_identity(&account) else {
-                return ProviderModelDiscoverOutcome::Rejected;
-            };
-            let Some(discovery_ops) = runtime.provider_model_discovery_ops() else {
-                return ProviderModelDiscoverOutcome::Unavailable;
-            };
-            let models = match discovery_ops
-                .discover_provider_models(&account, &identity)
-                .await
-            {
-                ProviderModelDiscoveryPortOutcome::Discovered(models) => models,
-                ProviderModelDiscoveryPortOutcome::Rejected => {
-                    return ProviderModelDiscoverOutcome::Rejected;
-                }
-                ProviderModelDiscoveryPortOutcome::Unavailable => {
-                    return ProviderModelDiscoverOutcome::Unavailable;
-                }
-            };
-            let mut drafts = Vec::new();
-            let mut seen = BTreeSet::new();
-            for model in models {
-                let before = drafts.len();
-                push_discovered_chat_model(account.id(), &mut seen, &mut drafts, &model.id);
-                if drafts.len() > before {
-                    let draft = drafts.last_mut().expect("model was appended");
-                    draft.context_window = model.context_window.or(draft.context_window);
-                    if model.input.iter().any(|input| input == "image")
-                        && !draft
-                            .capabilities
-                            .contains(&ProviderModelCapability::ImageUnderstand)
-                    {
-                        draft
-                            .capabilities
-                            .push(ProviderModelCapability::ImageUnderstand);
-                    }
-                }
-            }
-            return ProviderModelDiscoverOutcome::Discovered(discovery_views(drafts));
-        }
-        if provider_discovery_endpoint(&account).is_none() {
-            return ProviderModelDiscoverOutcome::Rejected;
-        }
-        let api_key = match account.configuration().auth_mode() {
-            ProviderAccountAuthMode::Local => None,
-            ProviderAccountAuthMode::ApiKey | ProviderAccountAuthMode::Token => {
-                match provider_api_key(&account, &self.private_resolver).await {
-                    Ok(key) => Some(key),
-                    Err(reason) => {
-                        *diagnostic = Some(reason);
-                        return ProviderModelDiscoverOutcome::Unavailable;
-                    }
-                }
-            }
-            _ => return ProviderModelDiscoverOutcome::Rejected,
-        };
-        tokio::task::spawn_blocking(move || {
-            match discover_provider_models(&account, api_key) {
-                Ok(models) => ProviderModelDiscoverOutcome::Discovered(discovery_views(models)),
-                Err(ProviderModelDiscoveryError::Rejected) => {
-                    ProviderModelDiscoverOutcome::Rejected
-                }
-                Err(ProviderModelDiscoveryError::Unavailable) => {
-                    ProviderModelDiscoverOutcome::Unavailable
-                }
-            }
-        })
-        .await
-        .unwrap_or(ProviderModelDiscoverOutcome::Unavailable)
-    }
-
     pub(super) fn replace_for_account(
         &mut self,
         runtime: &dyn ProviderRuntimeDirectory,
@@ -783,12 +694,6 @@ impl ResolvedProviderModelSelection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProviderModelDiscoveryError {
-    Rejected,
-    Unavailable,
-}
-
 fn session_model_capability(endpoint: ProviderSessionEndpoint) -> Option<ProviderModelCapability> {
     match endpoint {
         ProviderSessionEndpoint::OpenClawLocal | ProviderSessionEndpoint::MatchaAgentLocal => {
@@ -847,239 +752,7 @@ fn provider_auth_mode_label(auth_mode: ProviderAccountAuthMode) -> &'static str 
     }
 }
 
-fn runtime_discovery_provider(account: &ProviderAccount) -> bool {
-    matches!(
-        account.configuration().auth_mode(),
-        ProviderAccountAuthMode::CliReuse
-            | ProviderAccountAuthMode::OAuthBrowser
-            | ProviderAccountAuthMode::OAuthDevice
-    ) || matches!(
-        account.provider().as_str(),
-        "provider:qianfan"
-            | "provider:stepfun"
-            | "provider:tencent-tokenhub"
-            | "provider:tencent-tokenplan"
-            | "provider:xiaomi"
-            | "provider:xiaomi-token-plan"
-            | "provider:qwen"
-            | "provider:qwen-token-plan"
-            | "provider:kimi"
-            | "provider:volcengine-plan"
-            | "provider:opencode"
-            | "provider:opencode-go"
-            | "provider:github-copilot"
-    )
-}
-
-fn discovery_views(drafts: Vec<ProviderModelDraft>) -> Vec<ProviderModelDiscoveryView> {
-    drafts
-        .into_iter()
-        .map(ProviderModelDiscoveryView::from_draft)
-        .collect()
-}
-
-fn discover_provider_models(
-    account: &ProviderAccount,
-    api_key: Option<String>,
-) -> Result<Vec<ProviderModelDraft>, ProviderModelDiscoveryError> {
-    let configuration = account.configuration();
-    let provider = account.provider().as_str();
-    if provider == "provider:github-copilot" {
-        return Err(ProviderModelDiscoveryError::Rejected);
-    }
-    let base_url =
-        provider_discovery_endpoint(account).ok_or(ProviderModelDiscoveryError::Rejected)?;
-    if provider == "provider:ollama" {
-        return discover_ollama_models(account.id(), base_url);
-    }
-    match configuration
-        .protocol()
-        .or_else(|| default_discovery_protocol(provider))
-        .ok_or(ProviderModelDiscoveryError::Rejected)?
-    {
-        ProviderApiProtocol::AnthropicMessages => {
-            discover_anthropic_models(account.id(), base_url, api_key, configuration.auth_mode())
-        }
-        ProviderApiProtocol::GoogleGenerativeAi => {
-            discover_google_models(account.id(), base_url, api_key)
-        }
-        ProviderApiProtocol::OpenAiCompletions | ProviderApiProtocol::OpenAiResponses => {
-            discover_openai_compatible_models(account.id(), base_url, api_key)
-        }
-    }
-}
-
-fn discover_openai_compatible_models(
-    account_id: &ProviderAccountId,
-    base_url: &str,
-    api_key: Option<String>,
-) -> Result<Vec<ProviderModelDraft>, ProviderModelDiscoveryError> {
-    let url = format!("{}/models", openai_models_base_url(base_url)?);
-    let mut request = discovery_client()?.get(url);
-    if let Some(api_key) = api_key {
-        request = request.bearer_auth(api_key);
-    }
-    let value = discovery_json(request)?;
-    let models = value
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(ProviderModelDiscoveryError::Unavailable)?;
-    let mut drafts = Vec::new();
-    let mut seen = BTreeSet::new();
-    for model in models {
-        let Some(model_id) = model.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        push_discovered_chat_model(account_id, &mut seen, &mut drafts, model_id);
-    }
-    Ok(drafts)
-}
-
-fn discover_anthropic_models(
-    account_id: &ProviderAccountId,
-    base_url: &str,
-    api_key: Option<String>,
-    auth_mode: ProviderAccountAuthMode,
-) -> Result<Vec<ProviderModelDraft>, ProviderModelDiscoveryError> {
-    let api_key = api_key.ok_or(ProviderModelDiscoveryError::Rejected)?;
-    let url = format!("{}/models", anthropic_models_base_url(base_url)?);
-    let request = discovery_client()?
-        .get(url)
-        .header("anthropic-version", "2023-06-01");
-    let request = if auth_mode == ProviderAccountAuthMode::Token {
-        request
-            .bearer_auth(api_key)
-            .header("anthropic-beta", "oauth-2025-04-20")
-    } else {
-        request.header("x-api-key", api_key)
-    };
-    let value = discovery_json(request)?;
-    let models = value
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(ProviderModelDiscoveryError::Unavailable)?;
-    let mut drafts = Vec::new();
-    let mut seen = BTreeSet::new();
-    for model in models {
-        let Some(model_id) = model.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        push_discovered_chat_model(account_id, &mut seen, &mut drafts, model_id);
-    }
-    Ok(drafts)
-}
-
-fn discover_google_models(
-    account_id: &ProviderAccountId,
-    base_url: &str,
-    api_key: Option<String>,
-) -> Result<Vec<ProviderModelDraft>, ProviderModelDiscoveryError> {
-    let api_key = api_key.ok_or(ProviderModelDiscoveryError::Rejected)?;
-    let url = format!("{}/models", normalized_base_url(base_url)?);
-    let value = discovery_json(
-        discovery_client()?
-            .get(url)
-            .query(&[("pageSize", "1000"), ("key", api_key.as_str())]),
-    )?;
-    let models = value
-        .get("models")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(ProviderModelDiscoveryError::Unavailable)?;
-    let mut drafts = Vec::new();
-    let mut seen = BTreeSet::new();
-    for model in models {
-        if !supports_google_generate_content(model) {
-            continue;
-        }
-        let Some(model_id) = model.get("name").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        push_discovered_chat_model(
-            account_id,
-            &mut seen,
-            &mut drafts,
-            google_model_id(model_id),
-        );
-    }
-    Ok(drafts)
-}
-
-fn discover_ollama_models(
-    account_id: &ProviderAccountId,
-    base_url: &str,
-) -> Result<Vec<ProviderModelDraft>, ProviderModelDiscoveryError> {
-    let url = format!("{}/api/tags", ollama_base_url(base_url)?);
-    let value = discovery_json(discovery_client()?.get(url))?;
-    let models = value
-        .get("models")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(ProviderModelDiscoveryError::Unavailable)?;
-    let mut drafts = Vec::new();
-    let mut seen = BTreeSet::new();
-    for model in models {
-        let Some(model_id) = model.get("name").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        push_discovered_chat_model(account_id, &mut seen, &mut drafts, model_id);
-    }
-    Ok(drafts)
-}
-
-fn push_discovered_chat_model(
-    account_id: &ProviderAccountId,
-    seen: &mut BTreeSet<String>,
-    drafts: &mut Vec<ProviderModelDraft>,
-    model_id: &str,
-) {
-    let model_id = model_id
-        .trim()
-        .strip_prefix("models/")
-        .unwrap_or(model_id.trim());
-    if model_id.is_empty() || !seen.insert(model_id.to_owned()) {
-        return;
-    }
-    let reference = model_reference::find(model_id);
-    let draft = ProviderModelDraft {
-        model_id: model_id.to_owned(),
-        capabilities: reference
-            .map(model_reference::ModelReference::capabilities)
-            .unwrap_or_else(|| vec![ProviderModelCapability::Chat]),
-        context_window: reference.and_then(model_reference::ModelReference::context_window),
-        max_tokens: reference.and_then(model_reference::ModelReference::max_tokens),
-        timeout_ms: None,
-        aspect_ratio: None,
-        resolution: None,
-        quality: None,
-    };
-    if draft.clone().materialize(account_id.clone(), None).is_ok() {
-        drafts.push(draft);
-    }
-}
-
-fn supports_google_generate_content(model: &serde_json::Value) -> bool {
-    model
-        .get("supportedGenerationMethods")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|methods| {
-            methods
-                .iter()
-                .any(|method| method.as_str() == Some("generateContent"))
-        })
-}
-
-fn google_model_id(model_id: &str) -> &str {
-    model_id.strip_prefix("models/").unwrap_or(model_id)
-}
-
-fn provider_discovery_endpoint(account: &ProviderAccount) -> Option<&str> {
-    account
-        .configuration()
-        .endpoint()
-        .map(|endpoint| endpoint.as_str())
-        .or_else(|| default_discovery_endpoint(account.provider().as_str()))
-}
-
-fn default_discovery_endpoint(provider: &str) -> Option<&'static str> {
+pub(super) fn default_discovery_endpoint(provider: &str) -> Option<&'static str> {
     match provider {
         "provider:anthropic" => Some(ANTHROPIC_DEFAULT_BASE_URL),
         "provider:google" => Some(GOOGLE_DEFAULT_BASE_URL),
@@ -1097,7 +770,7 @@ fn default_discovery_endpoint(provider: &str) -> Option<&'static str> {
     }
 }
 
-fn default_discovery_protocol(provider: &str) -> Option<ProviderApiProtocol> {
+pub(super) fn default_discovery_protocol(provider: &str) -> Option<ProviderApiProtocol> {
     match provider {
         "provider:anthropic" | "provider:kimi" => Some(ProviderApiProtocol::AnthropicMessages),
         "provider:google" => Some(ProviderApiProtocol::GoogleGenerativeAi),
@@ -1145,76 +818,6 @@ fn runtime_default_provider_endpoint(provider: &str) -> Option<&'static str> {
         "provider:github-copilot" => "https://api.individual.githubcopilot.com",
         _ => return None,
     })
-}
-
-fn discovery_client() -> Result<reqwest::blocking::Client, ProviderModelDiscoveryError> {
-    reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|_| ProviderModelDiscoveryError::Unavailable)
-}
-
-fn discovery_json(
-    request: reqwest::blocking::RequestBuilder,
-) -> Result<serde_json::Value, ProviderModelDiscoveryError> {
-    let response = request
-        .send()
-        .map_err(|_| ProviderModelDiscoveryError::Unavailable)?;
-    if response.status().as_u16() == 401 || response.status().as_u16() == 403 {
-        return Err(ProviderModelDiscoveryError::Rejected);
-    }
-    if !response.status().is_success() {
-        return Err(ProviderModelDiscoveryError::Unavailable);
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DISCOVERY_RESPONSE_BYTES)
-    {
-        return Err(ProviderModelDiscoveryError::Unavailable);
-    }
-    let mut reader = response.take(MAX_DISCOVERY_RESPONSE_BYTES + 1);
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|_| ProviderModelDiscoveryError::Unavailable)?;
-    if bytes.len() > MAX_DISCOVERY_RESPONSE_BYTES as usize {
-        return Err(ProviderModelDiscoveryError::Unavailable);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| ProviderModelDiscoveryError::Rejected)
-}
-
-fn openai_models_base_url(base_url: &str) -> Result<String, ProviderModelDiscoveryError> {
-    let mut base = normalized_base_url(base_url)?;
-    for suffix in ["/chat/completions", "/responses", "/response"] {
-        if let Some(prefix) = base.strip_suffix(suffix) {
-            base = prefix.to_owned();
-        }
-    }
-    Ok(base)
-}
-
-fn anthropic_models_base_url(base_url: &str) -> Result<String, ProviderModelDiscoveryError> {
-    let mut base = normalized_base_url(base_url)?;
-    if !base.ends_with("/v1") {
-        base.push_str("/v1");
-    }
-    Ok(base)
-}
-
-fn ollama_base_url(base_url: &str) -> Result<String, ProviderModelDiscoveryError> {
-    let base = normalized_base_url(base_url)?;
-    Ok(base.strip_suffix("/v1").map(str::to_owned).unwrap_or(base))
-}
-
-fn normalized_base_url(base_url: &str) -> Result<String, ProviderModelDiscoveryError> {
-    let base = base_url.trim().trim_end_matches('/');
-    if base.is_empty() || base.contains('@') || base.contains('?') || base.contains('#') {
-        return Err(ProviderModelDiscoveryError::Rejected);
-    }
-    if !(base.starts_with("https://") || base.starts_with("http://")) {
-        return Err(ProviderModelDiscoveryError::Rejected);
-    }
-    Ok(base.to_owned())
 }
 
 pub(super) fn text_generation_model_limits(
@@ -1286,7 +889,7 @@ pub(crate) async fn provider_generation_credential(
     }
 }
 
-async fn provider_api_key(
+pub(super) async fn provider_api_key(
     account: &ProviderAccount,
     private_resolver: &Resolver,
 ) -> Result<String, ProviderTextGenerationUnavailableReason> {

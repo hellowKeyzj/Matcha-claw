@@ -87,7 +87,13 @@ import {
   saveGlobalConfig,
 } from './utils/config.js';
 import { seedEarlyInput, stopCapturingEarlyInput } from './utils/earlyInput.js';
-import { EFFORT_LEVELS, getInitialEffortSetting, getModelEffortCapabilities, isEffortLevel, parseEffortValue } from './utils/effort.js';
+import {
+  EFFORT_LEVELS,
+  getInitialEffortSetting,
+  getModelEffortCapabilities,
+  isEffortLevel,
+  parseEffortValue,
+} from './utils/effort.js';
 import {
   getInitialFastModeSetting,
   isFastModeEnabled,
@@ -2617,8 +2623,13 @@ async function run(): Promise<CommanderCommand> {
       setInitialMainLoopModel(getUserSpecifiedModelSetting() || null);
       const initialMainLoopModel = getInitialMainLoopModel();
       const resolvedInitialModel = parseUserSpecifiedModel(initialMainLoopModel ?? getDefaultMainLoopModel());
-      if (options.effort && !getModelEffortCapabilities(resolvedInitialModel).supportedEffortLevels.includes(options.effort)) {
-        process.stderr.write(`Error: Effort "${options.effort}" is not supported by model "${resolvedInitialModel}" on the active provider route.\n`);
+      if (
+        options.effort &&
+        !getModelEffortCapabilities(resolvedInitialModel).supportedEffortLevels.includes(options.effort)
+      ) {
+        process.stderr.write(
+          `Error: Effort "${options.effort}" is not supported by model "${resolvedInitialModel}" on the active provider route.\n`,
+        );
         process.exit(1);
       }
 

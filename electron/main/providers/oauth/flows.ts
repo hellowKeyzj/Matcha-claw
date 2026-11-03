@@ -110,21 +110,23 @@ async function runOAuth(
     if (signal.aborted) return;
     publish(getMainWindow, { flowId: flow.flowId, status: oauthOutcome(replacement.outcome) });
     if (replacement.outcome === 'stored') {
-      publishLegacy(getMainWindow, 'oauth:success', {
-        provider: flow.provider,
-        accountId: replacement.accountId ?? flow.account.id,
+      publishLegacy(getMainWindow, flow, 'oauth:success', {
         success: true,
-      });
+      }, replacement.accountId ?? flow.account.id);
     } else {
-      publishLegacy(getMainWindow, 'oauth:error', {
+      publishLegacy(getMainWindow, flow, 'oauth:error', {
         message: oauthErrorMessage(replacement.outcome),
+        outcome: replacement.outcome,
       });
     }
   } catch {
     if (!signal.aborted && (flowClaimed || activeFlows.get(flow.flowId) === flow)) {
       if (activeFlows.get(flow.flowId) === flow) activeFlows.delete(flow.flowId);
       publish(getMainWindow, { flowId: flow.flowId, status: 'unknown' });
-      publishLegacy(getMainWindow, 'oauth:error', { message: OAUTH_ERROR_MESSAGE });
+      publishLegacy(getMainWindow, flow, 'oauth:error', {
+        message: OAUTH_ERROR_MESSAGE,
+        outcome: flowClaimed ? 'unknown' : 'unavailable',
+      });
     }
   } finally {
     shutdownListener[Symbol.dispose]();
@@ -142,7 +144,7 @@ async function loginFlow(flow: Flow, getMainWindow: () => BrowserWindow | null):
   const onVerification = (info: { verificationUri: string; userCode: string; expiresIn: number }) => {
     if (signal.aborted) return;
     publish(getMainWindow, { flowId: flow.flowId, status: 'device_code', ...info });
-    publishLegacy(getMainWindow, 'oauth:code', { provider: flow.provider, ...info });
+    publishLegacy(getMainWindow, flow, 'oauth:code', info);
   };
   if (flow.provider === 'openrouter') {
     const { key } = await loginOpenRouterOAuth({ openUrl, signal });
@@ -168,8 +170,7 @@ async function openAiSecret(flow: Flow, getMainWindow: () => BrowserWindow | nul
     onManualCodeRequired: ({ authorizationUrl, reason }) => {
       if (signal.aborted || activeFlows.get(flow.flowId) !== flow) return;
       publish(getMainWindow, { flowId: flow.flowId, status: 'manual_code_required', authorizationUrl });
-      publishLegacy(getMainWindow, 'oauth:code', {
-        provider: flow.provider,
+      publishLegacy(getMainWindow, flow, 'oauth:code', {
         mode: 'manual',
         authorizationUrl,
         message: manualCodeMessage(reason),
@@ -199,8 +200,7 @@ async function deviceSecret(flow: Flow, getMainWindow: () => BrowserWindow | nul
     const userCode = verificationUri ? new URL(verificationUri).searchParams.get('user_code') : undefined;
     if (verificationUri && userCode) {
       publish(getMainWindow, { flowId: flow.flowId, status: 'device_code', verificationUri, userCode, expiresIn: 300 });
-      publishLegacy(getMainWindow, 'oauth:code', {
-        provider: flow.provider,
+      publishLegacy(getMainWindow, flow, 'oauth:code', {
         verificationUri,
         userCode,
         expiresIn: 300,
@@ -242,10 +242,15 @@ function publish(getMainWindow: () => BrowserWindow | null, payload: Record<stri
 
 function publishLegacy(
   getMainWindow: () => BrowserWindow | null,
+  flow: Flow,
   eventName: 'oauth:code' | 'oauth:success' | 'oauth:error',
   payload: Record<string, unknown>,
+  accountId = flow.account.id,
 ): void {
-  getMainWindow()?.webContents.send('host:event', { eventName, payload });
+  getMainWindow()?.webContents.send('host:event', {
+    eventName,
+    payload: { ...payload, flowId: flow.flowId, accountId, provider: flow.provider },
+  });
 }
 
 function manualCodeMessage(reason: 'port_in_use' | 'callback_timeout'): string {

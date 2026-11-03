@@ -8,10 +8,11 @@ import type { SessionDelta, SessionFact, SessionView, SessionWireItem, SessionWi
 import { syncViewportState } from '@/plugins/chat/store/viewport-state';
 import { useTaskCenterStore } from '@/plugins/tasks/stores/task-center-store';
 import { getCronSessionBaseKey } from '@/plugins/chat/store/cron-session-utils';
-import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity, summarizeSessionChanges, summarizeWireItem, summarizeRenderItem } from '@/lib/session-trace';
+import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier, summarizeSessionIdentity, summarizeSessionChanges, summarizeWireItem, summarizeRenderItem } from '@/lib/session-trace';
 import { reconcileSessionDirectory } from '@/plugins/chat/store/session-directory';
 import { getSessionRecord, patchSessionMeta, patchSessionRecord } from '@/plugins/chat/store/session-record-projection';
-import { projectControlledSessionViewItems } from '@/plugins/chat/store/session-render-projection';
+import { commitSessionPreviewItems, projectControlledSessionViewItems } from '@/plugins/chat/store/session-render-projection';
+import { buildHydratedAttachmentItemsPatch, hasPendingItemPreviewLoads, hydrateAttachedFilesFromItems, loadMissingItemPreviews } from '@/plugins/chat/store/attachment-helpers';
 import { adoptSessionProjectionFact } from '@/plugins/chat/store/session-projection-facts';
 import { factValue, projectionStore, windowStore, renderProjectionStore, type SessionProjectionState } from '@/plugins/chat/store/session-projection-state';
 export { getSessionProjectionWatermark, resetSessionProjection, getSessionWindowCacheStats } from '@/plugins/chat/store/session-projection-state';
@@ -42,6 +43,64 @@ type SessionProjectionApplyInput = {
   set: (partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState)) => void;
   get: () => ChatStoreState;
 };
+
+function scheduleSessionPreviewLoads(
+  input: SessionProjectionApplyInput,
+  recordKey: string,
+  view: SessionProjectionState,
+  previous: SessionProjectionState | undefined,
+  previousItems: SessionRenderItem[],
+): void {
+  const identity = input.get().loadedSessions[recordKey]?.meta.sessionIdentity;
+  if (!identity) return;
+  const key = displayProjectionKey(input.get(), view.identity);
+  const windows = windowStore(input.get);
+  const display = windows.get(key);
+  if (!display) return;
+  const reuse = previous?.epoch === display.epoch
+    && buildSessionIdentityKey(previous.identity) === buildSessionIdentityKey(display.identity)
+    && previous.previewLoad?.recordIdentity === identity;
+  if (!reuse) previous?.previewLoad?.controller?.abort();
+  const previewLoad = reuse ? previous.previewLoad! : { recordIdentity: identity, pending: false };
+  windows.set(key, { ...display, previewLoad });
+  const isCurrent = () => !previewLoad.controller?.signal.aborted
+    && input.get().loadedSessions[recordKey]?.meta.sessionIdentity === identity
+    && windows.get(key)?.previewLoad === previewLoad
+    && windows.get(key)?.epoch === display.epoch;
+  input.set((state) => {
+    if (!isCurrent()) return state;
+    const restored = reuse ? buildHydratedAttachmentItemsPatch(state, recordKey, previousItems) : state;
+    const current = { ...state, ...restored };
+    return buildHydratedAttachmentItemsPatch(current, recordKey,
+      hydrateAttachedFilesFromItems(getSessionRecord(current, recordKey).items));
+  });
+  commitSessionPreviewItems(renderProjectionStore(input.get).get(key), getSessionRecord(input.get(), recordKey).items, view.identity);
+  previewLoad.pending = true;
+  if (previewLoad.controller) return;
+  previewLoad.controller = new AbortController();
+  const signal = previewLoad.controller.signal;
+  void (async () => {
+    try {
+      while (previewLoad.pending && isCurrent()) {
+        previewLoad.pending = false;
+        const items = getSessionRecord(input.get(), recordKey).items;
+        if (!hasPendingItemPreviewLoads(items)) break;
+        const updated = await loadMissingItemPreviews(items, { sessionIdentity: identity }, signal);
+        if (!isCurrent()) {
+          previewLoad.controller?.abort();
+          break;
+        }
+        if (!updated) continue;
+        input.set((state) => isCurrent() ? buildHydratedAttachmentItemsPatch(state, recordKey, updated) : state);
+        commitSessionPreviewItems(renderProjectionStore(input.get).get(key), getSessionRecord(input.get(), recordKey).items, view.identity);
+      }
+    } finally {
+      previewLoad.controller = undefined;
+    }
+  })().catch((error) => {
+    if (!signal.aborted) console.warn('[session.preview]', summarizeError(error));
+  });
+}
 
 function summarizeWireAssistantTurn(item: SessionWireItem) {
   return summarizeWireItem(item);
@@ -102,6 +161,7 @@ function projectionRuntimePhase(phase: SessionWireRuntime['phase']): ChatSession
   switch (phase) {
     case 'queued': return 'submitted';
     case 'started': return 'streaming';
+    case 'yielded': return 'idle';
     case 'waiting_for_approval': return 'waiting_tool';
     case 'cancellation_requested': return 'stopping';
     case 'cancelled': return 'aborted';
@@ -119,7 +179,7 @@ function projectionRuntime(
 ): ChatSessionRuntimeState {
   const runtime = factValue(fact);
   if (!runtime) return current;
-  const imageGeneration = deriveSessionImageGenerationPendingStateFromItems(items, current.imageGeneration);
+  const imageGeneration = deriveSessionImageGenerationPendingStateFromItems(items);
   const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
   return {
     ...current,
@@ -238,11 +298,18 @@ function applyDecodedSessionView(
   terminalRunIds: readonly string[] = [],
   terminatedRunIds: readonly string[] = [],
   observedTerminalRunIds: readonly string[] = [],
+  refreshPreviews = true,
 ): boolean {
   const state = input.get();
   const identity = sessionIdentityForProjection(state, view);
   const recordKey = identity ? displayRecordKey(state, identity) : null;
   if (!recordKey) return false;
+  const previous = windowStore(input.get).get(displayProjectionKey(state, view.identity));
+  const previousItems = getSessionRecord(state, recordKey).items;
+  if (previous && (previous.epoch !== display.epoch
+    || previous.previewLoad && previous.previewLoad.recordIdentity !== state.loadedSessions[recordKey]?.meta.sessionIdentity)) {
+    renderProjectionStore(input.get).delete(displayProjectionKey(state, view.identity));
+  }
   input.set((nextState) => {
     const current = getSessionRecord(nextState, recordKey);
     const nextIdentity = current.meta.sessionIdentity ?? identity;
@@ -311,7 +378,7 @@ function applyDecodedSessionView(
     }));
     if (timing) timing.traceEmitElapsedMs += performance.now() - placeholderTraceStartedAt;
     const nextWindow = projectionWindow(current.window, display.window);
-    windows.set(displayKey, { ...display, recordKey });
+    windows.set(displayKey, { ...display, recordKey, previewLoad: previous?.previewLoad });
     const loadedSessions = patchSessionRecord(nextState, recordKey, {
       meta: nextMeta,
       items: nextItems,
@@ -327,6 +394,7 @@ function applyDecodedSessionView(
       pendingApprovalsBySession: nextApprovals,
     };
   });
+  if (refreshPreviews) scheduleSessionPreviewLoads(input, recordKey, display, previous, previousItems);
   return true;
 }
 
@@ -422,6 +490,12 @@ export function applySessionView(
         .map((tool) => [tool.toolCallId, tool])).values()] } : view.tools,
       recordKey,
     };
+    const previousDisplay = windowStore(input.get).get(displayProjectionKey(input.get(), view.identity));
+    const previousItems = getSessionRecord(input.get(), recordKey).items;
+    if (previousDisplay && (previousDisplay.epoch !== display.epoch
+      || previousDisplay.previewLoad && previousDisplay.previewLoad.recordIdentity !== input.get().loadedSessions[recordKey]?.meta.sessionIdentity)) {
+      renderProjectionStore(input.get).delete(displayProjectionKey(input.get(), view.identity));
+    }
     windowStore(input.get).set(displayProjectionKey(input.get(), view.identity), display);
     input.set((state) => {
       const current = getSessionRecord(state, recordKey);
@@ -445,6 +519,7 @@ export function applySessionView(
       });
       return { loadedSessions, ...reconcileSessionDirectory(state, loadedSessions, [recordKey]) };
     });
+    scheduleSessionPreviewLoads(input, recordKey, display, previousDisplay, previousItems);
     return finish({ status: 'applied', sessionKey: recordKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
   }
   if (previous) {
@@ -623,8 +698,17 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
             || current.messageId !== change.messageId) {
             return next;
           }
-          const text = change.replace ? change.text : `${current.text}${change.text}`;
-          next[index] = adoptSessionProjectionFact({ ...current, status: change.status, text, segments: [{ kind: 'text', text }] });
+          const segments = change.replace ? current.segments.filter((segment) => segment.kind !== 'text') : [...current.segments];
+          const last = segments.at(-1);
+          if (change.text) {
+            if (!change.replace && last?.kind === 'text') {
+              segments[segments.length - 1] = { kind: 'text', text: `${last.text}${change.text}` };
+            } else {
+              segments.push({ kind: 'text', text: change.text });
+            }
+          }
+          const text = segments.map((segment) => segment.kind === 'text' || segment.kind === 'largeText' ? segment.text : '').join('');
+          next[index] = adoptSessionProjectionFact({ ...current, status: change.status, text, segments });
         } else {
           next.push(adoptSessionProjectionFact({
             kind: 'assistantTurn',
@@ -883,7 +967,9 @@ export function applySessionDelta(
   const terminatedRunIds = delta.changes.flatMap((change) => change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase)
     ? [change.runId] : []);
   if (!applyDecodedSessionView(input, projected, undefined, display, traceId, undefined,
-    terminalRunIds, terminatedRunIds, observedTerminalRunIds)) {
+    terminalRunIds, terminatedRunIds, observedTerminalRunIds,
+    epochChanged || delta.changes.some((change) => change.kind === 'messageUpdated'
+      || change.kind === 'messageReplaced' || change.kind === 'itemsReplaced'))) {
     return finish({ status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' });
   }
   if (traceRuntimeState) {

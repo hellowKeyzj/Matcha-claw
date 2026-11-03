@@ -48,7 +48,7 @@ pub(super) async fn open(
     }
     let (output, notifications) = mpsc::channel(1);
     let connection = client
-        .open(Some(output), &tokio_util::sync::CancellationToken::new())
+        .open_session(Some(output), &tokio_util::sync::CancellationToken::new())
         .await?;
     let mut subscription = Subscription {
         _client: client.clone(),

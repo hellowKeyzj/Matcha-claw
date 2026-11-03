@@ -9,14 +9,16 @@ import {
   browserToolActions,
   browserIabToolActions,
   browserUtilityKinds,
+  hasBrowserActionReceipt,
   type BrowserActionContext,
   type BrowserActionInvocation,
   type BrowserActionParams,
 } from '../browser-action-contract.js'
 import type { BrowserBackendMode } from '../manifest.js'
+import { browserToolDescription } from './browser-tool-description.js'
 
 type BrowserRelayToolContext = Pick<OpenClawPluginToolContext,
-  'sessionKey' | 'agentId' | 'sessionId' | 'workspaceDir' | 'assertInvocationCurrent'>
+  'sessionKey' | 'agentId' | 'sessionId' | 'workspaceDir'>
 
 type BrowserRelayToolParams = BrowserActionParams
 
@@ -29,64 +31,63 @@ const browserRelayToolParameters = (mode: BrowserBackendMode) => ({
   additionalProperties: mode === 'relay',
   required: ['action'],
   properties: {
-    action: { type: 'string', enum: [...(mode === 'iab' ? browserIabToolActions : browserToolActions)] },
+    action: { type: 'string', enum: [...(mode === 'iab' ? browserIabToolActions : browserToolActions)], description: 'Browser action to perform.' },
     ...(mode === 'relay' ? {
-      target: { type: 'string', enum: ['node', 'sandbox', 'host'] },
-      node: { type: 'string' },
-      profile: { type: 'string' },
-      connectionMode: { type: 'string', enum: ['relay', 'direct-cdp'] },
+      target: { type: 'string', enum: ['node', 'sandbox', 'host'], description: 'Optional browser routing hint.' },
+      node: { type: 'string', description: 'Optional node routing hint.' },
+      profile: { type: 'string', description: 'Optional browser profile hint.' },
+      connectionMode: { type: 'string', enum: ['relay', 'direct-cdp'], description: 'Extension relay by default; direct-cdp is for explicitly requested debugging only.' },
     } : {}),
-    url: { type: 'string' },
-    targetId: { type: 'string' },
-    limit: { type: 'number' },
-    maxChars: { type: 'number' },
-    mode: { type: 'string', enum: ['efficient'] },
+    url: { type: 'string', description: 'URL to open or navigate to (for open/navigate).' },
+    targetId: { type: 'string', description: 'Tab target ID from a previous tabs or open response. REQUIRED for screenshot, snapshot, navigate, console, act. Use the targetId returned by action=open.' },
+    limit: { type: 'number', description: 'Snapshot output line limit.' },
+    maxChars: { type: 'number', description: 'Maximum snapshot text length.' },
+    mode: { type: 'string', enum: ['efficient'], description: mode === 'iab' ? 'Snapshot: efficient preset.' : 'Not applied by Relay snapshot; use compact or efficient instead.' },
     ...(mode === 'relay' ? {
-      snapshotFormat: { type: 'string', enum: ['aria', 'ai'] },
-      refs: { type: 'string', enum: ['role', 'aria'] },
+      snapshotFormat: { type: 'string', enum: ['aria', 'ai'], description: 'Snapshot format hint.' },
+      refs: { type: 'string', enum: ['role', 'aria'], description: 'Snapshot reference mode hint.' },
     } : {}),
-    interactive: { type: 'boolean' },
-    compact: { type: 'boolean' },
-    efficient: { type: 'boolean' },
-    depth: { type: 'number' },
-    selector: { type: 'string' },
-    frame: { type: 'string' },
-    ...(mode === 'relay' ? { labels: { type: 'boolean' } } : {}),
-    fullPage: { type: 'boolean' },
-    ref: { type: 'string' },
-    element: { type: 'string' },
-    type: { type: 'string', enum: ['jpeg', 'png'] },
-    quality: { type: 'number' },
-    level: { type: 'string' },
-    paths: { type: 'array', items: { type: 'string' } },
-    inputRef: { type: 'string' },
-    timeoutMs: { type: 'number' },
-    accept: { type: 'boolean' },
-    promptText: { type: 'string' },
-    expression: { type: 'string' },
+    interactive: { type: 'boolean', description: 'Snapshot: only interactive elements.' },
+    compact: { type: 'boolean', description: 'Snapshot: compact tree.' },
+    efficient: { type: 'boolean', description: 'Snapshot: efficient preset.' },
+    depth: { type: 'number', description: 'Snapshot: max depth.' },
+    selector: { type: 'string', description: 'Snapshot: CSS selector.' },
+    frame: { type: 'string', description: 'Snapshot: frame selector.' },
+    ...(mode === 'relay' ? { labels: { type: 'boolean', description: 'Snapshot label hint.' } } : {}),
+    fullPage: { type: 'boolean', description: 'Screenshot: capture the full page instead of the viewport. Do not combine with ref or element cropping.' },
+    ref: { type: 'string', description: 'Element ref from a recent browser snapshot. MUST match e<n> (ARIA/role snapshot). Example: "e13". Do NOT pass CSS selectors here.' },
+    element: { type: 'string', description: 'Screenshot/upload: CSS selector.' },
+    type: { type: 'string', enum: ['jpeg', 'png'], description: 'Image format (default png).' },
+    quality: { type: 'number', description: 'Screenshot: JPEG quality, 0 to 100; ignored for PNG.' },
+    level: { type: 'string', description: 'Mode B: filter captured console messages by level. Omit for all levels.' },
+    paths: { type: 'array', items: { type: 'string' }, description: 'File paths to upload (must be under workspace).' },
+    inputRef: { type: 'string', description: 'Input element ref (e<n>) for upload direct-set mode.' },
+    timeoutMs: { type: 'number', description: 'Operation timeout in milliseconds.' },
+    accept: { type: 'boolean', description: 'Accept (true) or dismiss (false) the dialog.' },
+    promptText: { type: 'string', description: 'Text for prompt() dialogs.' },
+    expression: { type: 'string', description: 'JavaScript expression to evaluate in the page (for console). Use either expression or scriptPath.' },
+    scriptPath: { type: 'string', description: 'Path to a .js file in the workspace. Use after writing the script to a file (e.g. with write); console loads and runs this file.' },
+    frameId: { type: 'string', description: 'Evaluate inside this native frame instead of the main document. Also scopes backendNodeId where supported.' },
+    backendNodeId: { type: 'integer', minimum: 1, description: 'For upload/highlight: DOM node ID returned as [dom=N] by a degraded snapshot; use frameId to disambiguate frames.' },
+    savePath: { type: 'string', description: 'For console: save return value as JSON. For screenshot: save image file locally. For PDF: save the PDF. Path must be under workspace.' },
     ...(mode === 'iab' ? {
-      scriptPath: { type: 'string' },
-      frameId: { type: 'string' },
-      backendNodeId: { type: 'integer', minimum: 1, description: 'For upload/highlight: DOM node ID returned as [dom=N] by a degraded snapshot; use frameId to disambiguate frames.' },
+      landscape: { type: 'boolean', description: 'PDF: use landscape orientation.' },
+      printBackground: { type: 'boolean', description: 'PDF: include page background graphics.' },
+      paper: { type: 'string', enum: ['a3', 'a4', 'a5', 'letter', 'legal', 'tabloid', 'ledger'], description: 'PDF paper size.' },
     } : {}),
-    savePath: { type: 'string' },
-    ...(mode === 'iab' ? {
-      landscape: { type: 'boolean' },
-      printBackground: { type: 'boolean' },
-      paper: { type: 'string', enum: ['a3', 'a4', 'a5', 'letter', 'legal', 'tabloid', 'ledger'] },
-    } : {}),
-    retain: { type: 'boolean' },
-    clear: { type: 'boolean' },
-    filter: mode === 'relay' ? { type: 'string' } : {
+    retain: { type: 'boolean', description: 'Mark tab as persistent (exempt from auto-cleanup). Default false. Use when the page has valuable state.' },
+    clear: { type: 'boolean', description: 'Errors/requests: clear after read.' },
+    filter: mode === 'relay' ? { type: 'string', description: 'Requests: URL filter.' } : {
+      description: 'Snapshot: keyword/role filter object. Requests: URL substring filter.',
       anyOf: [
         { type: 'string' },
         {
           type: 'object',
           properties: {
-            keywords: { type: 'array', items: { type: 'string' } },
-            roles: { type: 'array', items: { type: 'string' } },
-            contextLines: { type: 'number' },
-            maxMatches: { type: 'number' },
+            keywords: { type: 'array', items: { type: 'string' }, description: 'Snapshot: text keywords.' },
+            roles: { type: 'array', items: { type: 'string' }, description: 'Snapshot: accessibility roles.' },
+            contextLines: { type: 'number', description: 'Snapshot: context lines around matches.' },
+            maxMatches: { type: 'number', description: 'Snapshot: maximum matches.' },
           },
         },
       ],
@@ -94,177 +95,184 @@ const browserRelayToolParameters = (mode: BrowserBackendMode) => ({
     ...(mode === 'iab' ? {
       scope: {
         type: 'object',
-        properties: { frame: { type: 'string' }, landmark: { type: 'string' }, selector: { type: 'string' } },
+        description: 'Snapshot: frame, landmark or CSS scope.',
+        properties: { frame: { type: 'string', description: 'Frame selector.' }, landmark: { type: 'string', description: 'Accessibility landmark, e.g. main/nav/form/dialog.' }, selector: { type: 'string', description: 'CSS subtree selector.' } },
       },
     } : {}),
-    operation: { type: 'string', enum: mode === 'iab' ? ['get', 'set', 'clear', 'remove'] : ['get', 'set', 'clear'] },
+    operation: { type: 'string', enum: mode === 'iab' ? ['get', 'set', 'clear', 'remove'] : ['get', 'set', 'clear'], description: 'Cookies/storage operation; remove is IAB storage-only.' },
     cookies: {
       type: 'array',
+      description: 'Cookies to set.',
       items: {
         type: 'object',
         additionalProperties: true,
       },
     },
-    storageType: { type: 'string', enum: mode === 'iab' ? ['local', 'session', 'indexedDB'] : ['local', 'session'] },
-    key: { type: 'string' },
-    value: { type: ['string', 'number', 'boolean'] },
-    durationMs: { type: 'number' },
-    animations: { type: 'string', enum: ['allow', 'disabled'] },
-    caret: { type: 'string', enum: ['hide', 'initial'] },
-    scale: mode === 'iab' ? { anyOf: [{ type: 'string', enum: ['css', 'device'] }, { type: 'number', minimum: 0.1, maximum: 2 }], description: 'Screenshot: css/device. PDF: numeric scale from 0.1 to 2.' } : { type: 'string', enum: ['css', 'device'] },
-    omitBackground: { type: 'boolean' },
-    scrollDirection: { type: 'string' },
-    scrollAmount: { type: 'number' },
-    waitUntil: { type: 'string' },
+    storageType: { type: 'string', enum: mode === 'iab' ? ['local', 'session', 'indexedDB'] : ['local', 'session'], description: 'Storage scope.' },
+    key: { type: 'string', description: 'Storage key (required for set; optional for get; ignored for local/session clear). For indexedDB: database name.' },
+    value: { type: ['string', 'number', 'boolean'], description: 'Storage value (required for set).' },
+    durationMs: { type: 'number', description: 'Highlight duration ms.' },
+    animations: { type: 'string', enum: ['allow', 'disabled'], description: 'Screenshot: allow or temporarily disable animations during capture.' },
+    caret: { type: 'string', enum: ['hide', 'initial'], description: 'Screenshot: hide the text caret or preserve its current appearance.' },
+    scale: mode === 'iab' ? { anyOf: [{ type: 'string', enum: ['css', 'device'] }, { type: 'number', minimum: 0.1, maximum: 2 }], description: 'Screenshot: css/device. PDF: numeric scale from 0.1 to 2.' } : { type: 'string', enum: ['css', 'device'], description: 'Screenshot: css for one image pixel per CSS pixel, or device for native device scale.' },
+    omitBackground: { type: 'boolean', description: 'Screenshot: omit the default page background for transparency.' },
+    scrollDirection: { type: 'string', description: 'Scroll direction: up / down / left / right / top / bottom.' },
+    scrollAmount: { type: 'number', description: 'Pixels for up/down/left/right. Default: ~one viewport step.' },
+    waitUntil: { type: 'string', description: 'Navigation load state: load, domcontentloaded or networkidle. Prefer load by default, use domcontentloaded for earlier DOM readiness, and use networkidle only when you specifically need background network activity to settle.' },
     request: {
       type: 'object',
       additionalProperties: true,
+      description: 'Act/utility request. Element-targeting kinds click/type/hover/select/scrollIntoView require ref or a degraded snapshot backendNodeId/frameId; fill targets each field the same way. Press is page-level and requires key, not a ref. For utility, put kind and its options inside request.',
       properties: {
-        kind: { type: 'string', enum: mode === 'iab' ? [...new Set([...browserIabRequestKinds, ...browserUtilityKinds])] : [...browserRequestKinds] },
-        targetId: { type: 'string' },
-        ref: { type: 'string' },
-        x: { type: 'number' },
-        y: { type: 'number' },
-        doubleClick: { type: 'boolean' },
-        button: { type: 'string' },
-        modifiers: { type: 'array', items: { type: 'string' } },
-        text: { type: 'string' },
-        submit: { type: 'boolean' },
-        slowly: { type: 'boolean' },
-        clearFirst: { type: 'boolean' },
-        key: { type: 'string' },
-        delayMs: { type: 'number' },
-        startRef: { type: 'string' },
-        endRef: { type: 'string' },
-        values: { type: 'array', items: { type: 'string' } },
+        kind: { type: 'string', enum: [...new Set([...(mode === 'iab' ? browserIabRequestKinds : browserRequestKinds), ...browserUtilityKinds])], description: 'Interaction or utility operation kind.' },
+        targetId: { type: 'string', description: 'Tab target ID. Get from action=tabs (existing tab) or action=open (newly opened tab).' },
+        ref: { type: 'string', description: 'Element reference from snapshot for kind=click, type, hover, select, and scrollIntoView. A degraded snapshot backendNodeId/frameId is an alternative. Fill targets fields individually.' },
+        frameId: { type: 'string', description: 'Native frameId returned by the snapshot; scopes backendNodeId or frame-specific evaluation.' },
+        backendNodeId: { type: 'integer', minimum: 1, description: 'Alternative element target from a degraded snapshot [dom=N]; pass its frameId. Takes precedence over ref.' },
+        x: { type: 'number', description: 'Viewport X (CSS px) for coordinate click — alternative to ref (Set-of-Mark / visual grounding).' },
+        y: { type: 'number', description: 'Viewport Y (CSS px) for coordinate click — alternative to ref (Set-of-Mark / visual grounding).' },
+        doubleClick: { type: 'boolean', description: 'Double click instead of single. Default false.' },
+        button: { type: 'string', description: 'Mouse button (default left).' },
+        modifiers: { type: 'array', items: { type: 'string' }, description: 'Modifier keys held during click. "ControlOrMeta" maps to Cmd on macOS and Ctrl elsewhere — prefer it over Control/Meta for cross-platform selection.' },
+        text: { type: 'string', description: 'Text to type into the input; substring for wait; text filter for tree utilities.' },
+        submit: { type: 'boolean', description: 'Press Enter after typing (submit form). Default false.' },
+        slowly: { type: 'boolean', description: 'Type one character at a time instead of a single batch insert. Default false. Use only when the page has per-keystroke validation (autocomplete / search-as-you-type) — otherwise slower with no benefit.' },
+        clearFirst: { type: 'boolean', description: 'Clear existing value before typing. Default TRUE (replace semantics). Set false only to append to the current content.' },
+        key: { type: 'string', description: 'Key name (Playwright syntax): Enter, Escape, Tab, ArrowDown, Control+s, etc.' },
+        delayMs: { type: 'number', description: 'Delay in ms between keydown and keyup. Rare — only for animation-sensitive pages. Also used between mouse down/up for coordinate clicks.' },
+        startRef: { type: 'string', description: 'Drag: source element ref from the current snapshot.' },
+        endRef: { type: 'string', description: 'Drag: destination element ref from the same tab snapshot.' },
+        values: { type: 'array', items: { type: 'string' }, description: 'Option values (for select).' },
         fields: {
           type: 'array',
+          description: 'For kind=fill: fields to update. Every field requires a snapshot element ref: {ref, type?, value?}. Type defaults to text; select/checkbox/radio are supported. CSS selectors are not supported. Degraded snapshots may use backendNodeId/frameId instead of ref.',
           items: {
             type: 'object',
             additionalProperties: true,
-            ...(mode === 'iab' ? {
-              anyOf: [{ required: ['ref'] }, { required: ['backendNodeId'] }],
-              properties: {
-                ref: { type: 'string' },
-                backendNodeId: { type: 'integer', minimum: 1 },
-                frameId: { type: 'string' },
-                type: { type: 'string' },
-                value: { type: ['string', 'number', 'boolean'] },
-              },
-            } : {}),
+            anyOf: [{ required: ['ref'] }, { required: ['backendNodeId'] }],
+            properties: {
+              ref: { type: 'string', description: 'Element ref (e<n>).' },
+              backendNodeId: { type: 'integer', minimum: 1, description: 'Alternative DOM node ID from a degraded snapshot [dom=N].' },
+              frameId: { type: 'string', description: 'Frame containing backendNodeId, returned by the snapshot.' },
+              type: { type: 'string', description: 'Field type. Defaults to "text" when omitted.' },
+              value: { type: ['string', 'number', 'boolean'], description: 'Value to set. Required for type text/select; optional for checkbox/radio (omit means unchecked / false).' },
+            },
           },
         },
-        width: { type: 'number' },
-        height: { type: 'number' },
-        timeMs: { type: 'number' },
-        selector: { type: 'string' },
-        url: { type: 'string' },
-        loadState: { type: 'string' },
-        textGone: { type: 'string' },
-        timeoutMs: { type: 'number' },
-        fn: { type: 'string' },
-        expression: { type: 'string' },
-        scrollDirection: { type: 'string' },
-        scrollAmount: { type: 'number' },
+        width: { type: 'number', description: 'Viewport width (for resize).' },
+        height: { type: 'number', description: 'Viewport height (for resize).' },
+        timeMs: { type: 'number', description: 'Wait duration ms (for wait kind).' },
+        selector: { type: 'string', description: mode === 'iab' ? 'CSS selector wait condition: element must exist in the document. Also scopes som marks. Not an element target for click/type/hover/select/fill/scrollIntoView.' : 'Wait until the selector exists in the document (for wait kind). Also scopes som marks. Relay click also accepts selector as an alternative to ref.' },
+        url: { type: 'string', description: 'Wait for current location.href to contain this substring (for wait kind).' },
+        loadState: { type: 'string', description: 'Playwright page load state to wait for (for wait kind). Prefer load by default, use domcontentloaded for earlier DOM readiness, and use networkidle only when you specifically need background network activity to settle.' },
+        textGone: { type: 'string', description: 'Wait for text to disappear (for wait kind).' },
+        timeoutMs: { type: 'number', description: 'Wait timeout ms; for download, overall wait cap (default 60s).' },
+        fn: { type: 'string', description: 'JS expression to wait for OR evaluate (for wait/evaluate).' },
+        expression: { type: 'string', description: 'JavaScript expression to evaluate in the page (alternative to fn).' },
+        scrollDirection: { type: 'string', description: 'Scroll direction.' },
+        scrollAmount: { type: 'number', description: 'Pixels for up/down/left/right. Default: ~one viewport step.' },
+        trigger: {
+          type: 'object', required: ['kind'], additionalProperties: false,
+          description: 'Download: optional click/clickCoords trigger, sent once after arming the download watch.',
+          properties: {
+            kind: { type: 'string', enum: ['click', 'clickCoords'], description: 'One download-triggering element click or viewport-coordinate click.' },
+            ref: { type: 'string', description: 'Element ref from a recent browser snapshot.' },
+            x: { type: 'number', description: 'Viewport X (CSS px) for coordinate click.' }, y: { type: 'number', description: 'Viewport Y (CSS px) for coordinate click.' }, button: { type: 'string', enum: ['left', 'middle', 'right'], description: 'Mouse button (default left).' },
+            doubleClick: { type: 'boolean', description: 'Double click instead of single. Default false.' }, modifiers: { type: 'array', items: { type: 'string' }, description: 'Modifier keys held during click.' },
+            delayMs: { type: 'number', description: 'Coordinate-click delay between mouse down and up.' },
+            backendNodeId: { type: 'integer', minimum: 1, description: 'Alternative to ref: [dom=N] ID from a degraded snapshot.' }, frameId: { type: 'string', description: 'Frame containing backendNodeId.' },
+            ...(mode === 'iab' ? {
+              humanize: { type: 'boolean', description: 'Per-click input motion option.' },
+            } : {
+              selector: { type: 'string', description: 'CSS selector for the download control.' }, targetId: { type: 'string', description: 'Download-trigger tab; takes precedence over outer targetId.' }, timeoutMs: { type: 'number', description: 'Trigger click timeout only.' },
+            }),
+          },
+        },
         ...(mode === 'iab' ? {
-          ignoreCache: { type: 'boolean' },
-          humanize: { type: 'boolean' },
-          from: { type: 'object', required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
-          to: { type: 'object', required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
-          endX: { type: 'number' },
-          endY: { type: 'number' },
-          steps: { type: 'integer', minimum: 1, maximum: 60 },
-          deltaX: { type: 'number' },
-          deltaY: { type: 'number' },
-          landscape: { type: 'boolean' },
-          printBackground: { type: 'boolean' },
-          paper: { type: 'string', enum: ['a3', 'a4', 'a5', 'letter', 'legal', 'tabloid', 'ledger'] },
-          scale: { type: 'number', minimum: 0.1, maximum: 2 },
-          trigger: {
-            type: 'object', required: ['kind'], additionalProperties: false,
-            properties: {
-              kind: { type: 'string', enum: ['click', 'clickCoords'] },
-              ref: { type: 'string' }, backendNodeId: { type: 'integer', minimum: 1 }, frameId: { type: 'string' },
-              x: { type: 'number' }, y: { type: 'number' }, button: { type: 'string', enum: ['left', 'middle', 'right'] },
-              doubleClick: { type: 'boolean' }, modifiers: { type: 'array', items: { type: 'string' } },
-              delayMs: { type: 'number' }, humanize: { type: 'boolean' },
-            },
-          },
-          frameId: { type: 'string' },
-          backendNodeId: { type: 'integer', minimum: 1, description: 'DOM node ID returned as [dom=N]; pass frameId for a node inside a specific frame.' },
-          inputRef: { type: 'string' },
-          element: { type: 'string' },
-          paths: { type: 'array', items: { type: 'string' } },
-          durationMs: { type: 'number' },
-          accept: { type: 'boolean' },
-          promptText: { type: 'string' },
-          clear: { type: 'boolean' },
-          since: { type: 'number' },
-          settings: { type: ['object', 'string'], description: 'Runtime settings patch or JSON: {pace?:{minIntervalMs,jitterMs?}|null,humanize?:boolean|null,stealth?:{enabled:boolean}|null}. Omit to read.' },
-          filter: { type: 'string' },
-          last: { type: 'number' },
-          savePath: { type: 'string' },
-          operation: { type: 'string', enum: ['get', 'set', 'clear'] },
-          cookies: { type: 'array', items: { type: 'object', additionalProperties: true } },
-          includeSource: { type: 'boolean' },
-          limit: { type: 'number' },
-          maxChars: { type: 'number' },
-          max: { type: 'integer', minimum: 1, description: 'Tree output limit; a11yTree defaults to 4000, domTree to 2000.' },
-          scope: { type: 'string', description: 'domTree CSS selector; use iframe >>> child to scope through a frame.' },
-          depth: { type: 'integer', minimum: 1, description: 'domTree depth, default 24; text search is not depth-limited.' },
-          deepText: { type: 'boolean' },
-          includeHrefInFilter: { type: 'boolean' },
-          scriptId: { type: 'string' },
-          line: { type: 'number' },
-          column: { type: 'number' },
-          dir: { type: 'string' },
-          mode: { type: 'string', enum: ['dom', 'vision'] },
-          maxMarks: { type: 'number' },
-          screenshot: { type: 'boolean' },
-          rules: {
-            type: ['array', 'string'],
-            description: 'At most 50 rules or their JSON string. Pattern is a URL substring by default; match:glob enables * and ?. Patterns are at most 512 characters; regex is not supported.',
-            items: {
-              type: 'object',
-              required: ['pattern', 'action'],
-              properties: {
-                pattern: { type: 'string', maxLength: 512 },
-                match: { type: 'string', enum: ['substring', 'glob'] },
-                action: { type: 'string', enum: ['block', 'mock', 'modify', 'continue'] },
-                status: { type: 'number' },
-                headers: { type: 'object', additionalProperties: { type: 'string' } },
-                body: { type: 'string' },
-                contentType: { type: 'string' },
-                method: { type: 'string' },
-              },
-            },
-          },
-          cacheBypass: { type: 'boolean' },
-          action: { type: 'string', enum: ['device', 'timezone', 'locale', 'geolocation', 'colorScheme', 'userAgent', 'network', 'cpu'] },
-          device: { type: ['string', 'object'] },
-          timezoneId: { type: 'string' },
-          locale: { type: 'string' },
-          latitude: { type: 'number' },
-          longitude: { type: 'number' },
-          accuracy: { type: 'number' },
-          scheme: { type: 'string', enum: ['light', 'dark'] },
-          userAgent: { type: 'string' },
-          preset: { type: ['string', 'object'] },
-          rate: { type: 'number' },
+          humanize: { type: 'boolean', description: 'Per-action input motion option; omit to use the tab setting.' },
+          from: { type: 'object', required: ['x', 'y'], description: 'dragCoords starting point in viewport CSS pixels.', properties: { x: { type: 'number', description: 'Starting viewport CSS x coordinate.' }, y: { type: 'number', description: 'Starting viewport CSS y coordinate.' } } },
+          to: { type: 'object', required: ['x', 'y'], description: 'dragCoords ending point in viewport CSS pixels.', properties: { x: { type: 'number', description: 'Ending viewport CSS x coordinate.' }, y: { type: 'number', description: 'Ending viewport CSS y coordinate.' } } },
+          endX: { type: 'number', description: 'Drag: alternative destination x coordinate in viewport CSS pixels.' },
+          endY: { type: 'number', description: 'Drag: alternative destination y coordinate in viewport CSS pixels.' },
+          steps: { type: 'integer', minimum: 1, maximum: 60, description: 'Drag interpolation steps, from 1 to 60.' },
+          deltaX: { type: 'number', description: 'wheelCoords horizontal wheel distance in CSS pixels.' },
+          deltaY: { type: 'number', description: 'wheelCoords vertical wheel distance in CSS pixels.' },
         } : {}),
+        ignoreCache: { type: 'boolean', description: 'Utility reload: bypass cache for this reload.' },
+        landscape: { type: 'boolean', description: 'Utility PDF: landscape orientation.' },
+        printBackground: { type: 'boolean', description: 'Utility PDF: include background graphics.' },
+        paper: { type: 'string', enum: ['a3', 'a4', 'a5', 'letter', 'legal', 'tabloid', 'ledger'], description: 'Utility PDF paper size.' },
+        scale: { type: 'number', minimum: 0.1, maximum: 2, description: 'Utility PDF print scale, 0.1 to 2.' },
+        inputRef: { type: 'string', description: 'Input element ref (e<n>) for upload direct-set mode.' },
+        element: { type: 'string', description: 'CSS selector for <input type=file> (upload direct-set mode).' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'File paths to upload (must be under workspace).' },
+        durationMs: { type: 'number', description: mode === 'iab' ? 'Highlight duration ms; also gesture duration for drag.' : 'Highlight duration ms.' },
+        accept: { type: 'boolean', description: 'Accept (true) or dismiss (false) the dialog.' },
+        promptText: { type: 'string', description: 'Text for prompt() dialogs.' },
+        clear: { type: 'boolean', description: 'Clear log after reading; HAR clears only after saving successfully. For intercept: clear rules. For emulate: reset device/timezone/geolocation/network/cpu.' },
+        since: { type: 'number', description: 'Events: exclusive lower seq bound — return only events with seq > since (cursor from a previous events read).' },
+        settings: { type: ['object', 'string'], description: 'settings: patch object (or JSON string) — {pace?:{minIntervalMs, jitterMs?}|null, humanize?:bool|null, stealth?:{enabled:true}}; omit to GET current settings. null disables pace/humanize; stealth remains until tab close.' },
+        filter: { type: 'string', description: 'URL substring filter (requests / scripts / sourceMap / har); event kind filter (events: dialog | fileChooser | rendererCrash).' },
+        last: { type: 'number', description: 'Keep only the most recent N requests after filtering (requests / har).' },
+        savePath: { type: 'string', description: mode === 'iab' ? 'Save path for PDF / HAR export / download target (workspace); required for HAR.' : 'Workspace save path for PDF / HAR export; required for HAR. Download: optional workspace file path, mutually exclusive with dir; name collisions get a unique name without overwriting.' },
+        operation: { type: 'string', enum: ['get', 'set', 'clear'], description: 'Cookie operation.' },
+        cookies: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Cookies to set.' },
+        includeSource: { type: 'boolean', description: 'scripts: fetch script source bodies (requires filter).' },
+        limit: { type: 'number', description: 'scripts: max number of scripts returned.' },
+        maxChars: { type: 'number', description: 'scripts: per-script source cap (default 128KB, max 1MB).' },
+        max: { type: 'integer', minimum: 1, description: 'Tree output limit; a11yTree defaults to 4000, domTree to 2000.' },
+        scope: { type: 'string', description: 'domTree CSS selector; use iframe >>> child to scope through a frame.' },
+        depth: { type: 'integer', minimum: 1, description: 'domTree depth, default 24; text search is not depth-limited.' },
+        deepText: { type: 'boolean', description: 'domTree: include descendant text when matching the text filter.' },
+        includeHrefInFilter: { type: 'boolean', description: 'domTree: also match link hrefs in the text filter.' },
+        scriptId: { type: 'string', description: 'sourceMap: script id from scripts (or use filter).' },
+        line: { type: 'number', description: 'sourceMap: 1-based line in the minified file.' },
+        column: { type: 'number', description: 'sourceMap: 1-based column in the minified line (convert 0-based CDP stack frames).' },
+        dir: { type: 'string', description: mode === 'iab' ? 'download: directory for the file (workspace); filename comes from the server suggestion.' : 'Download: optional directory in the trusted workspace, mutually exclusive with savePath; defaults to workspace/downloads. Name collisions get a unique filename without overwriting.' },
+        mode: { type: 'string', enum: ['dom', 'vision'], description: 'som: "dom" (default) numbered-mark screenshot + marks table; "vision" clean screenshot + viewport size for visual grounding.' },
+        maxMarks: { type: 'number', description: 'som: cap on numbered marks (default 60).' },
+        screenshot: { type: 'boolean', description: 'som: include base64 screenshot in the result (default true).' },
+        rules: {
+          type: ['array', 'string'],
+          description: 'intercept: rule list (or JSON string) [{pattern, match?, action:"block"|"mock"|"modify"|"continue", status?, headers?, body?, contentType?, method?}]; pattern is a URL substring, or glob when match="glob".',
+          items: {
+            type: 'object',
+            required: ['pattern', 'action'],
+            properties: {
+              pattern: { type: 'string', maxLength: 512, description: 'Nonempty URL substring, or glob when match=glob. JavaScript regular expressions are unsupported.' },
+              match: { type: 'string', enum: ['substring', 'glob'], description: 'URL matching mode, substring by default.' },
+              action: { type: 'string', enum: ['block', 'mock', 'modify', 'continue'], description: 'Block, supply a mock response, modify the outgoing request, or continue it unchanged.' },
+              status: { type: 'number', description: 'Mock HTTP response status, 100 to 599.' },
+              headers: { type: 'object', additionalProperties: { type: 'string' }, description: 'Mock response headers or modified request headers; names and values must not contain newlines.' },
+              body: { type: 'string', description: 'Mock response body. The current modify action does not replace request bodies.' },
+              contentType: { type: 'string', description: 'Mock response Content-Type.' },
+              method: { type: 'string', description: 'Replacement outgoing HTTP method for modify.' },
+            },
+          },
+        },
+        cacheBypass: { type: 'boolean', description: 'intercept: also toggle Network.setCacheDisabled (true disables cache for deterministic loads).' },
+        action: { type: 'string', enum: ['device', 'timezone', 'locale', 'geolocation', 'colorScheme', 'userAgent', 'network', 'cpu'], description: 'emulate: which override to apply (see kind docs for per-action fields).' },
+        device: { type: ['string', 'object'], description: 'emulate(device): preset name or descriptor.' },
+        timezoneId: { type: 'string', description: 'emulate(timezone): e.g. "Asia/Shanghai".' },
+        locale: { type: 'string', description: 'emulate(locale): e.g. "zh-CN", "en-US".' },
+        latitude: { type: 'number', description: 'emulate(geolocation).' },
+        longitude: { type: 'number', description: 'emulate(geolocation).' },
+        accuracy: { type: 'number', description: 'emulate(geolocation): optional accuracy meters.' },
+        scheme: { type: 'string', enum: ['light', 'dark'], description: 'emulate(colorScheme).' },
+        userAgent: { type: 'string', description: 'emulate(userAgent).' },
+        preset: { type: ['string', 'object'], description: 'emulate(network): "Offline" | "Slow 3G" | "Fast 3G" | "4G" | "WiFi" or custom conditions object.' },
+        rate: { type: 'number', description: 'emulate(cpu): throttle rate 1..20.' },
       },
     },
   },
-  ...(mode === 'iab' ? {
-    allOf: [{
-      if: { properties: { action: { const: 'utility' } }, required: ['action'] },
-      then: {
-        required: ['request'],
-        properties: { request: { required: ['kind'], properties: { kind: { enum: [...browserUtilityKinds] } } } },
-      },
-      else: { properties: { request: { properties: { kind: { enum: [...browserIabRequestKinds] } } } } },
-    }],
-  } : {}),
+  allOf: [{
+    if: { properties: { action: { const: 'utility' } }, required: ['action'] },
+    then: {
+      required: ['request'],
+      properties: { request: { required: ['kind'], properties: { kind: { enum: [...browserUtilityKinds] } } } },
+    },
+    else: { properties: { request: { properties: { kind: { enum: mode === 'iab' ? [...browserIabRequestKinds] : [...browserRequestKinds] } } } } },
+  }],
 } as const)
 
 function asString(value: unknown): string | undefined {
@@ -304,8 +312,7 @@ function wrapExternalContent(content: string, options: { source: 'browser'; incl
 
 async function imageResultFromFile(params: { label: string; path: string; details?: Record<string, unknown> }) {
   const buffer = await fs.readFile(params.path)
-  const extension = path.extname(params.path).toLowerCase()
-  const mimeType = extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : 'image/png'
+  const mimeType = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff ? 'image/jpeg' : 'image/png'
 
   return {
     content: [{ type: 'image' as const, data: buffer.toString('base64'), mimeType }],
@@ -493,7 +500,7 @@ async function formatRelayToolResult(
     return await formatSnapshotResult(result)
   }
 
-  if (mode === 'iab' && (action === 'a11yTree' || action === 'domTree')) {
+  if (action === 'a11yTree' || action === 'domTree') {
     const metadata = { targetId: result.targetId, count: result.count, truncated: result.truncated }
     return await formatSnapshotResult({ ...result, snapshot: `${typeof result.tree === 'string' ? result.tree : asJsonText(result)}\n\n---\n${asJsonText(metadata)}` }, action)
   }
@@ -510,12 +517,12 @@ async function formatRelayToolResult(
     return await formatPdfResult(result)
   }
 
-  if (mode === 'iab' && action === 'som' && asString(result.imageBase64)) {
+  if (action === 'som') {
     const { imageBase64, ...details } = result
     return {
       content: [
         { type: 'text' as const, text: wrapExternalContent(asJsonText(details), { source: 'browser' }) },
-        { type: 'image' as const, data: String(imageBase64), mimeType: result.imageType === 'jpeg' ? 'image/jpeg' : 'image/png' },
+        ...(asString(imageBase64) ? [{ type: 'image' as const, data: String(imageBase64), mimeType: result.imageType === 'jpeg' ? 'image/jpeg' : 'image/png' }] : []),
       ],
       details,
     }
@@ -531,9 +538,7 @@ export function createBrowserToolCatalog(mode: BrowserBackendMode) {
   return {
     name: 'browser',
     label: 'Browser',
-    description: mode === 'iab'
-      ? 'Control the Matcha in-app browser for the current native runtime session. The backend is selected in settings; no Chrome extension or external CDP connection is used. Use act for page interactions, including clickCoords, hoverCoords, dragCoords and wheelCoords in viewport CSS pixels. Use utility with request.kind for goBack, goForward, reload, frames, a11yTree, domTree, scripts, sourceMap, har, download, pdf, events, settings, som, intercept, metrics and emulate. Download accepts an optional click or clickCoords trigger, armed before the click. PDF supports paper, landscape, printBackground and numeric scale; savePath is optional. Interception rules default to substring matching; choose match=glob explicitly for globs. If a snapshot degrades, use its [dom=N] value as backendNodeId with frameId, or its returned e-ref, for element actions. Utility options go inside request; targetId may be provided there or at the top level. console supports expression or workspace scriptPath and frameId; act evaluate also accepts frameId. Storage supports local, session and indexedDB with get/set/clear/remove. For indexedDB, key is the database name; set value is JSON {store,data}, remove value is JSON {store,key?}, or omit value to delete the database.'
-      : 'Control the browser through MatchaClaw Browser Relay. Default mode uses the extension relay; direct-cdp is debug-only and must be requested explicitly.',
+    description: browserToolDescription(mode),
     parameters: browserRelayToolParameters(mode),
   }
 }
@@ -542,6 +547,7 @@ export function createBrowserRelayTool(
   toolCtx: BrowserRelayToolContext,
   resolveControl: () => BrowserRelayControl,
   mode: BrowserBackendMode = 'relay',
+  resolveInvocation?: (toolCallId: string, context: BrowserActionContext) => BrowserActionInvocation,
 ) {
   const context: BrowserActionContext | undefined = toolCtx.sessionKey && toolCtx.agentId && toolCtx.sessionId ? {
     sessionKey: toolCtx.sessionKey,
@@ -551,28 +557,24 @@ export function createBrowserRelayTool(
   } : undefined
   return {
     ...createBrowserToolCatalog(mode),
-    async execute(_toolCallId: string, params: BrowserRelayToolParams, signal?: AbortSignal) {
+    async execute(toolCallId: string, params: BrowserRelayToolParams, signal?: AbortSignal) {
       signal?.throwIfAborted()
       const control = resolveControl()
+      if (resolveInvocation && !context) throw new Error('Browser requires trusted OpenClaw sessionKey, agentId and sessionId; no model or current UI identity is used.')
+      const invocation: BrowserActionInvocation = context && resolveInvocation ? resolveInvocation(toolCallId, context) : { context }
+      invocation.signal = invocation.signal && signal ? AbortSignal.any([invocation.signal, signal]) : invocation.signal ?? signal
       let result: Record<string, unknown>
       if (mode === 'iab') {
         if (!context) throw new Error('In-app browser requires trusted OpenClaw sessionKey, agentId and sessionId; no model or current UI identity is used.')
-        const assertInvocationCurrent = toolCtx.assertInvocationCurrent
-        if (!assertInvocationCurrent) throw new Error('In-app browser requires OpenClaw contextVersion 2 invocation authority.')
-        assertInvocationCurrent()
-        result = await control.handleRequest(params, {
-          context,
-          signal,
-          assertInvocationCurrent,
-        })
+        result = await control.handleRequest(params, invocation)
       } else {
-        toolCtx.assertInvocationCurrent?.()
         result = await control.handleRequest({
           ...params,
           ...(toolCtx.sessionKey ? { sessionKey: toolCtx.sessionKey } : {}),
           ...(toolCtx.workspaceDir ? { workspaceDir: toolCtx.workspaceDir } : {}),
-        })
+        }, invocation)
       }
+      if (!hasBrowserActionReceipt(result)) signal?.throwIfAborted()
       return await formatRelayToolResult(params, result, mode)
     },
   }

@@ -76,13 +76,14 @@ function setupCopyBlock(blockId, textToCopy) {
   });
 }
 
-function setupExtensionPath() {
+async function setupExtensionPath() {
   var params = new URLSearchParams(window.location.search);
   var extensionPath = params.get('extensionPath');
   if (!extensionPath) return;
 
   var el = document.getElementById('extension-path');
   if (el) {
+    var escapeHtml = (await import('./security.js')).escapeHtml;
     var sep = extensionPath.indexOf('/') >= 0 ? '/' : '\\';
     var parts = extensionPath.split(sep);
     var folderName = parts[parts.length - 1] || parts[parts.length - 2] || extensionPath;
@@ -92,8 +93,12 @@ function setupExtensionPath() {
       : parentParts.join(sep);
     var shortPath = shortPrefix + sep;
 
-    el.innerHTML = '<span class="path-short">' + shortPath + '<span class="path-highlight">' + folderName + '</span></span>'
-      + '<span class="path-full">' + extensionPath.replace(new RegExp(folderName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), '<span class="path-highlight">' + folderName + '</span>') + '</span>';
+    var safeFolderName = escapeHtml(folderName);
+    var fullHtml = extensionPath.endsWith(folderName)
+      ? escapeHtml(extensionPath.slice(0, -folderName.length)) + '<span class="path-highlight">' + safeFolderName + '</span>'
+      : escapeHtml(extensionPath);
+    el.innerHTML = '<span class="path-short">' + escapeHtml(shortPath) + '<span class="path-highlight">' + safeFolderName + '</span></span>'
+      + '<span class="path-full">' + fullHtml + '</span>';
     el.title = extensionPath;
   }
 

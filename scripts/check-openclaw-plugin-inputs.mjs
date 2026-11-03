@@ -39,13 +39,6 @@ const REQUIRED_LOCAL_PLUGINS = [
     sourceEntries: ['./src/index.ts'],
   },
   {
-    pluginId: 'matchaclaw-media',
-    sourceDir: 'packages/openclaw-matchaclaw-media-plugin',
-    expectedExtensions: ['./dist/index.js'],
-    sourceDirs: ['./src'],
-    sourceEntries: ['./src/index.ts'],
-  },
-  {
     pluginId: 'world-tools',
     sourceDir: 'packages/world-tools',
     expectedExtensions: ['./dist/index.js'],

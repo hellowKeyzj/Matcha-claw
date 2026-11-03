@@ -12,6 +12,8 @@ use zeroize::Zeroize;
 
 use crate::rpc::{self, Error};
 
+mod runs;
+
 const WAIT_WINDOW: Duration = Duration::from_secs(20);
 const DRAIN_WINDOW: Duration = Duration::from_secs(5);
 
@@ -46,6 +48,8 @@ struct Instance {
     admitted: bool,
     revoked: Option<Reason>,
     abandoned: bool,
+    active_run: Option<String>,
+    runs: BTreeMap<String, runs::Run>,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +68,7 @@ impl Drop for Capability {
 
 struct Invocation {
     instance_id: Option<String>,
+    run_id: Option<String>,
     lease_id: Option<String>,
     released: bool,
     waiting: bool,
@@ -105,6 +110,7 @@ pub(crate) struct Peer {
 struct Acquire {
     capability: Capability,
     invocation_id: String,
+    input_message_id: String,
 }
 
 #[derive(Deserialize)]
@@ -123,7 +129,7 @@ struct Release {
 }
 
 impl Owner {
-    pub(crate) fn register(
+    pub(crate) async fn register(
         &self,
         agent_id: &str,
         session_id: &str,
@@ -133,46 +139,67 @@ impl Owner {
         let workspace = workspace
             .to_str()
             .ok_or_else(|| Error::invalid("IAB workspace requires Unicode"))?;
-        let mut state = self.0.state.lock().expect("IAB owner lock");
-        if state.shutting_down {
-            return Err(revoked());
-        }
-        for instance in state
-            .instances
-            .values_mut()
-            .filter(|instance| instance.capability.session_id == session_id)
+        let mut changes = self.0.changed.subscribe();
         {
-            instance.revoked.get_or_insert(Reason::Replaced);
+            let mut state = self.0.state.lock().expect("IAB owner lock");
+            for instance in state
+                .instances
+                .values_mut()
+                .filter(|instance| instance.capability.session_id == session_id)
+            {
+                instance.revoked.get_or_insert(Reason::Replaced);
+            }
+            self.0.changed.send_replace(());
         }
-        self.0.changed.send_replace(());
-        if state.instances.iter().any(|(id, instance)| {
-            instance.capability.session_id == session_id && !drained(&state, id)
-        }) {
-            return Err(Error::unavailable(
-                "iab_lease_revoked",
-                "Previous browser invocations have not drained",
-            )
-            .with_data(json!({"cleanupComplete": false})));
-        }
-        state.instances.insert(
-            instance_id.to_owned(),
-            Instance {
-                capability: Capability {
-                    session_id: session_id.to_owned(),
-                    instance_id: instance_id.to_owned(),
-                    token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-                },
-                agent_id: agent_id.to_owned(),
-                workspace: workspace.to_owned(),
-                admitted: false,
-                revoked: None,
-                abandoned: false,
-            },
-        );
-        Ok(InstanceGuard {
-            owner: self.clone(),
-            instance_id: instance_id.to_owned(),
-        })
+        let pending = async {
+            loop {
+                {
+                    let mut state = self.0.state.lock().expect("IAB owner lock");
+                    if state.shutting_down {
+                        return Err(revoked());
+                    }
+                    if state.instances.iter().all(|(id, instance)| {
+                        instance.capability.session_id != session_id || drained(&state, id)
+                    }) {
+                        state.instances.insert(
+                            instance_id.to_owned(),
+                            Instance {
+                                capability: Capability {
+                                    session_id: session_id.to_owned(),
+                                    instance_id: instance_id.to_owned(),
+                                    token: format!(
+                                        "{}{}",
+                                        Uuid::new_v4().simple(),
+                                        Uuid::new_v4().simple()
+                                    ),
+                                },
+                                agent_id: agent_id.to_owned(),
+                                workspace: workspace.to_owned(),
+                                admitted: false,
+                                revoked: None,
+                                abandoned: false,
+                                active_run: None,
+                                runs: BTreeMap::new(),
+                            },
+                        );
+                        return Ok(InstanceGuard {
+                            owner: self.clone(),
+                            instance_id: instance_id.to_owned(),
+                        });
+                    }
+                }
+                changes.changed().await.map_err(|_| revoked())?;
+            }
+        };
+        tokio::time::timeout(DRAIN_WINDOW, pending)
+            .await
+            .map_err(|_| {
+                Error::unavailable(
+                    "iab_lease_revoked",
+                    "Previous browser invocations or run cleanup have not drained",
+                )
+                .with_data(json!({"cleanupComplete": false}))
+            })?
     }
 
     pub(crate) fn peer(&self) -> Peer {
@@ -273,6 +300,8 @@ impl Peer {
             "iab.lease.acquire" => self.acquire(rpc::params(params)?).await,
             "iab.lease.wait" => self.wait(rpc::params(params)?).await,
             "iab.lease.release" => self.release(rpc::params(params)?),
+            "iab.run.wait" => self.wait_run(rpc::params(params)?).await,
+            "iab.run.release" => self.release_run(rpc::params(params)?),
             _ => Err(Error::method(method)),
         }
     }
@@ -281,7 +310,9 @@ impl Peer {
         uuid(&input.invocation_id)?;
         uuid(&input.capability.session_id)?;
         uuid(&input.capability.instance_id)?;
+        uuid(&input.input_message_id)?;
         let mut changes = self.owner.0.changed.subscribe();
+        let run_id;
         {
             let mut state = self.owner.0.state.lock().expect("IAB owner lock");
             let calls = state.peers.get(&self.id).ok_or_else(peer_mismatch)?;
@@ -298,6 +329,18 @@ impl Peer {
             if instance.revoked.is_some() {
                 return Err(revoked());
             }
+            run_id = instance.active_run.clone().ok_or_else(revoked)?;
+            let run = instance.runs.get(&run_id).ok_or_else(revoked)?;
+            if run.terminal || run.message_id != input.input_message_id {
+                return Err(revoked());
+            }
+            if run
+                .peers
+                .get(&self.id)
+                .is_some_and(|cleanup| matches!(cleanup, runs::Cleanup::Released))
+            {
+                return Err(revoked());
+            }
             state
                 .peers
                 .get_mut(&self.id)
@@ -306,6 +349,7 @@ impl Peer {
                     input.invocation_id.clone(),
                     Invocation {
                         instance_id: Some(input.capability.instance_id.clone()),
+                        run_id: Some(run_id.clone()),
                         lease_id: None,
                         released: false,
                         waiting: false,
@@ -325,7 +369,12 @@ impl Peer {
                         .instances
                         .get(&input.capability.instance_id)
                         .ok_or_else(revoked)?;
-                    if instance.revoked.is_some() {
+                    if instance.revoked.is_some()
+                        || instance.active_run.as_deref() != Some(run_id.as_str())
+                        || instance.runs.get(&run_id).is_none_or(|run| {
+                            run.terminal || run.message_id != input.input_message_id
+                        })
+                    {
                         return Err(revoked());
                     }
                     if instance.admitted {
@@ -334,7 +383,18 @@ impl Peer {
                             "leaseId": lease_id, "invocationId": input.invocation_id,
                             "agentId": instance.agent_id, "sessionId": instance.capability.session_id,
                             "instanceId": instance.capability.instance_id, "workspaceDir": instance.workspace,
+                            "runId": run_id,
                         });
+                        state
+                            .instances
+                            .get_mut(&input.capability.instance_id)
+                            .expect("current IAB instance")
+                            .runs
+                            .get_mut(&run_id)
+                            .expect("current IAB run")
+                            .peers
+                            .entry(self.id.clone())
+                            .or_insert(runs::Cleanup::Unobserved);
                         state
                             .peers
                             .get_mut(&self.id)
@@ -449,6 +509,7 @@ impl Peer {
                 input.invocation_id.clone(),
                 Invocation {
                     instance_id: None,
+                    run_id: None,
                     lease_id: None,
                     released: true,
                     waiting: false,
@@ -472,6 +533,15 @@ impl Peer {
                     instance.abandoned = true;
                     instance.revoked.get_or_insert(Reason::Closing);
                 }
+            }
+            for instance in state.instances.values_mut().filter(|instance| {
+                instance
+                    .runs
+                    .values()
+                    .any(|run| matches!(run.peers.get(&self.id), Some(runs::Cleanup::Required)))
+            }) {
+                instance.abandoned = true;
+                instance.revoked.get_or_insert(Reason::Closing);
             }
         }
         self.owner.0.changed.send_replace(());
@@ -504,15 +574,13 @@ impl Drop for WaitGuard<'_> {
 }
 
 fn drained(state: &State, instance_id: &str) -> bool {
-    !state
-        .instances
-        .get(instance_id)
-        .is_some_and(|instance| instance.abandoned)
-        && !state.peers.values().any(|calls| {
-            calls
-                .values()
-                .any(|call| call.instance_id.as_deref() == Some(instance_id) && !call.released)
-        })
+    !state.instances.get(instance_id).is_some_and(|instance| {
+        instance.abandoned || instance.runs.values().any(|run| !run.drained())
+    }) && !state.peers.values().any(|calls| {
+        calls
+            .values()
+            .any(|call| call.instance_id.as_deref() == Some(instance_id) && !call.released)
+    })
 }
 
 fn matches_capability(expected: &Capability, actual: &Capability) -> bool {

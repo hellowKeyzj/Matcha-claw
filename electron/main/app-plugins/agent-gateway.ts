@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { AppPluginDevelopmentOwner } from './development';
 import { appPluginResources, appResourceUri, appToolName } from '../../../src/types/desktop/app-plugin-sdk';
 import type { AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppToolManifest } from '../../../src/types/desktop/app-plugin';
 import type { AppPluginHost } from './host';
 import { sendJson } from '../../api/route-utils';
 import { APP_PLUGIN_SDK, APP_PLUGIN_TOOLS, callAppPluginTool, type AppPluginToolOperations } from './agent-tools';
@@ -37,6 +38,12 @@ type ReaderObservation = Omit<AppPluginRuntimeStatusInput, 'message'> & {
   operation: symbol;
   pending: boolean;
 };
+
+function isModelVisibleTool(tool: AppToolManifest): boolean {
+  const ui = tool._meta?.ui;
+  if (!ui || typeof ui !== 'object' || Array.isArray(ui) || !('visibility' in ui)) return true;
+  return !Array.isArray(ui.visibility) || ui.visibility.includes('model');
+}
 
 async function readRequest(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -239,7 +246,7 @@ export async function startAppPluginAgentGateway(input: {
         if (revision === current) { res.writeHead(204); res.end(); return; }
         const enabled = catalog.plugins.filter((plugin) => plugin.enabled);
         sendJson(res, 200, { revision: current, tools: [...APP_PLUGIN_TOOLS,
-          ...enabled.flatMap((plugin) => (plugin.manifest.contributes.tools ?? []).map((tool) => ({ ...tool, name: appToolName(plugin.manifest.id, tool.name) })))],
+          ...enabled.flatMap((plugin) => (plugin.manifest.contributes.tools ?? []).filter(isModelVisibleTool).map((tool) => ({ ...tool, name: appToolName(plugin.manifest.id, tool.name) })))],
         resources: enabled.flatMap((plugin) => appPluginResources(plugin.manifest)) });
         return;
       }
@@ -270,7 +277,7 @@ export async function startAppPluginAgentGateway(input: {
       } else {
         const plugins = (await owner.list()).plugins.filter((plugin) => plugin.enabled);
         const match = plugins.flatMap((plugin) => (plugin.manifest.contributes.tools ?? []).map((tool) => ({ plugin, tool })))
-          .find(({ plugin, tool }) => appToolName(plugin.manifest.id, tool.name) === body.name);
+          .find(({ plugin, tool }) => isModelVisibleTool(tool) && appToolName(plugin.manifest.id, tool.name) === body.name);
         if (!match) throw new AppPluginError('not_found', 'App plugin tool is not available.');
         result = await host.call({ id: match.plugin.manifest.id, digest: match.plugin.digest, name: match.tool.name,
           arguments: body.arguments as Record<string, unknown> }, controller.signal);

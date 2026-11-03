@@ -67,8 +67,8 @@ export function createMainWindow(options: { showOnReady?: boolean } = {}): Brows
   const useCustomTitleBar = isWindows;
 
   const win = new BrowserWindow({
-    width: 1286,
-    height: 824,
+    width: 1152,
+    height: 895,
     minWidth: 960,
     minHeight: 600,
     backgroundColor: getWindowThemeBackgroundColor(nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),

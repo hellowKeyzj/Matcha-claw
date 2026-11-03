@@ -13,7 +13,7 @@ import { useGatewayStore } from '@/plugins/runtime/store';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { getProviderAccountRuntimeReport, useProviderStore } from '@/plugins/providers/stores/providers';
 import { useComposerDraftStore } from '@/plugins/chat/composer-drafts';
-import { CHAT_COMPOSER_STAGE_EVENT, type ComposerStageRequest } from './composer-actions';
+import { CHAT_COMPOSER_STAGE_EVENT, composerTargetMatches, type ComposerStageRequest } from './composer-actions';
 import { agentScope, buildCapabilityScopeKey, buildSessionIdentityKey, runtimeEndpointsEqual, runtimeInstanceScope, sessionIdentitiesEqual, sessionScope } from '@/types/desktop/runtime-address';
 import { getSessionApprovalStatus } from '@/plugins/chat/store/store-state-helpers';
 import { ChatInput, type ChatInputHandle } from '@/plugins/chat/ChatInput';
@@ -80,16 +80,15 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
       const detail = (event as CustomEvent<ComposerStageRequest>).detail;
       const current = selectChatSelection(useChatStore.getState());
       const input = composerRef.current;
-      if (input && currentWorkspaceIdentity && current.currentWorkspaceIdentity
-        && detail.draftKey === currentComposerDraftKey && detail.draftKey === current.currentComposerDraftKey
-        && sessionIdentitiesEqual(detail.identity, currentWorkspaceIdentity)
-        && sessionIdentitiesEqual(detail.identity, current.currentWorkspaceIdentity)) {
-        detail.accept(() => input.stagePrompt(detail.identity, detail.draftKey, detail.request, detail.source, detail.signal));
+      if (input && detail.draftKey === currentComposerDraftKey && detail.draftKey === current.currentComposerDraftKey
+        && composerTargetMatches(detail.target, currentConversation)
+        && composerTargetMatches(detail.target, current.currentConversation)) {
+        detail.accept(() => input.stagePrompt(detail.target, detail.draftKey, detail.request, detail.source, detail.signal));
       }
     };
     window.addEventListener(CHAT_COMPOSER_STAGE_EVENT, stage);
     return () => window.removeEventListener(CHAT_COMPOSER_STAGE_EVENT, stage);
-  }, [composerRef, currentComposerDraftKey, currentWorkspaceIdentity, isActive]);
+  }, [composerRef, currentComposerDraftKey, currentConversation, isActive]);
   const currentSessionConversation = currentConversation?.kind === 'session' ? currentConversation : null;
   const currentConversationEndpoint = currentConversation?.endpoint ?? null;
   const facts = useChatStore(useShallow(selectChatComposerFacts));
@@ -271,8 +270,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
     currentModelId: currentSessionModelId,
     availableModels: isOpenClawModelSession ? availableModels : EMPTY_AGENTS,
   }), [availableModels, currentSession.contextTokens, currentSessionModelId, isOpenClawModelSession]);
-  const activeRun = isRunActive(currentSession.runtime)
-    || currentSession.runtime.activeRunId != null;
+  const activeRun = isRunActive(currentSession.runtime) || imageGenerationActive;
   const handlePermissionIntent = useCallback<Parameters<typeof useChatPermissions>[0]['onSelectIntent']>((selection) => {
     setPermissionSelection(currentComposerDraftKey, selection);
   }, [currentComposerDraftKey, setPermissionSelection]);
@@ -548,6 +546,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
         {modelAccountNotice ? <p role="status" className={CHAT_LAYOUT_TOKENS.inputBannerItem}>{modelAccountNotice}</p> : null}
       </>}
       draftKey={currentComposerDraftKey}
+      composerDraftId={currentConversation?.kind === 'draft' ? currentConversation.id : undefined}
       onSend={handleSendMessage}
       goal={goal}
       goalDock={goalDock}

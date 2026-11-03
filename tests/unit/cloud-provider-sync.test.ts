@@ -108,7 +108,7 @@ describe('cloud provider sync', () => {
       {
         id: 'matcha-cloud',
         provider: 'custom',
-        label: 'Matcha Cloud (7)',
+        label: 'Matcha Cloud',
         enabled: true,
         kind: 'chat',
         endpoint: 'https://gateway.example.com/v1',

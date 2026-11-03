@@ -19,7 +19,7 @@
  */
 
 const HEARTBEAT_INTERVAL_MS = 20_000
-const PORT_NAME = 'accio-keepalive'
+const PORT_NAME = 'matcha-keepalive'
 
 const activeKeepAlives = new Map()
 
@@ -30,20 +30,37 @@ export async function startKeepAlive(tabId) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: (portName, interval) => {
-        if (window._accioKeepAlive) return
+        if (window._matchaKeepAlive) return
+        const state = { port: null, timer: null, reconnectTimer: null }
+        window._matchaKeepAlive = state
+
+        function readRuntimeLastErrorMessage() {
+          try {
+            return chrome.runtime.lastError?.message
+          } catch {
+            return undefined
+          }
+        }
 
         function connect() {
+          if (window._matchaKeepAlive !== state) return
           try {
             const port = chrome.runtime.connect({ name: portName })
             const timer = setInterval(() => {
               try { port.postMessage({ type: 'ping' }) } catch { clearInterval(timer) }
             }, interval)
             port.onDisconnect.addListener(() => {
+              readRuntimeLastErrorMessage()
               clearInterval(timer)
-              setTimeout(connect, 1000)
+              if (window._matchaKeepAlive === state) {
+                state.reconnectTimer = setTimeout(connect, 1000)
+              }
             })
-            window._accioKeepAlive = { port, timer }
-          } catch { /* extension context invalidated */ }
+            state.port = port
+            state.timer = timer
+          } catch {
+            if (window._matchaKeepAlive === state) window._matchaKeepAlive = null
+          }
         }
 
         connect()
@@ -61,10 +78,10 @@ export async function stopKeepAlive(tabId) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: () => {
-        if (window._accioKeepAlive) {
-          clearInterval(window._accioKeepAlive.timer)
-          try { window._accioKeepAlive.port.disconnect() } catch { /* noop */ }
-          window._accioKeepAlive = null
+        if (window._matchaKeepAlive) {
+          clearInterval(window._matchaKeepAlive.timer)
+          try { window._matchaKeepAlive.port.disconnect() } catch { /* noop */ }
+          window._matchaKeepAlive = null
         }
       },
     })

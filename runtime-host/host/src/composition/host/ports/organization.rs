@@ -388,7 +388,7 @@ fn repair_send_command(
 const fn run_phase(phase: RunPhase) -> organization::OrganizationRunPhase {
     match phase {
         RunPhase::Queued => organization::OrganizationRunPhase::Queued,
-        RunPhase::Started => organization::OrganizationRunPhase::Started,
+        RunPhase::Started | RunPhase::Yielded => organization::OrganizationRunPhase::Started,
         RunPhase::WaitingForApproval => organization::OrganizationRunPhase::WaitingForApproval,
         RunPhase::CancellationRequested => {
             organization::OrganizationRunPhase::CancellationRequested
@@ -458,7 +458,7 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
                         },
                         phase: match record.phase {
                             RunPhase::Queued => TaskNativePhase::Queued,
-                            RunPhase::Started => TaskNativePhase::Started,
+                            RunPhase::Started | RunPhase::Yielded => TaskNativePhase::Started,
                             RunPhase::WaitingForApproval => TaskNativePhase::WaitingForApproval,
                             RunPhase::CancellationRequested => TaskNativePhase::CancellationRequested,
                             RunPhase::Cancelled => TaskNativePhase::Cancelled,

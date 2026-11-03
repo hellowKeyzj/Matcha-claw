@@ -98,7 +98,7 @@ function TextEditorSession({ documentId, layer, load, onSubmit, onClose }: Props
       await onSubmit({
         documentId,
         action: 'edit-text',
-        prompt: t('按文字修改列表编辑图片，保留其余画面内容。'),
+        prompt: '',
         sourceLayerIds: [scan.result.sourceLayerId],
         expectedSourceAssetId: scan.result.sourceAssetId,
         expectedSourceCrop: scan.result.sourceCrop,

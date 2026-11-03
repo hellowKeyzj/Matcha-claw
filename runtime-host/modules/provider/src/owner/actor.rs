@@ -598,7 +598,8 @@ impl ProviderOwner {
                 )
                 .await;
             }
-            ProviderQuery::TextGenerationModelLimits { .. }
+            ProviderQuery::DiscoverModelDraft { .. }
+            | ProviderQuery::TextGenerationModelLimits { .. }
             | ProviderQuery::GenerateText { .. }
             | ProviderQuery::GenerateMedia { .. }
             | ProviderQuery::ListMediaModels { .. }
@@ -856,6 +857,13 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                 list_provider_routing_for_snapshot(&shared.snapshot),
             )
             .await;
+        }
+        ProviderQuery::DiscoverModelDraft { request, cancellation, reply } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = snapshot.models.discover_draft(
+                shared.runtime_directory.as_ref(), &snapshot.accounts, request, cancellation,
+            ).await;
+            let _ = reply.send(outcome);
         }
         ProviderQuery::GenerateMedia {
             request,

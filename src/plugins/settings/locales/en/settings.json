@@ -170,6 +170,27 @@
     "avatarCleared": "User avatar cleared",
     "avatarUpdateFailed": "Failed to update user avatar: {{error}}"
   },
+  "graphicsAcceleration": {
+    "label": "GPU hardware acceleration",
+    "description": "Use the GPU to render the interface. Changing this setting requires an app restart.",
+    "automaticallyDisabled": "Automatically disabled due to graphics stability issues.",
+    "loading": "Loading…",
+    "readFailed": "Could not load GPU settings.",
+    "retry": "Retry",
+    "confirmTitle": "Change GPU hardware acceleration?",
+    "confirmEnable": "Enabling GPU hardware acceleration changes how the interface is rendered. The app will restart immediately after saving.",
+    "confirmDisable": "Disabling GPU hardware acceleration changes how the interface is rendered. The app will restart immediately after saving.",
+    "confirmAction": "Save and restart",
+    "cancel": "Cancel",
+    "pending": "Saving and restarting…",
+    "changeFailed": "Could not change GPU settings. Please try again.",
+    "blocked": {
+      "unsupported": "This setting is not supported on this system.",
+      "busy": "The app is busy. Please try again later.",
+      "save-failed": "Could not save the setting. Please try again.",
+      "quit-cancelled": "Restart was cancelled. Please try again."
+    }
+  },
   "providerRecovery": {
     "title": "Model configuration reset",
     "description": "Your old model configuration could not be converted and has been backed up. Please add your models again.",
@@ -246,13 +267,36 @@
       "endpointPreset": "Endpoint region",
       "cliReuseHelp": "Sign in to Claude Code first. MatchaClaw checks the local CLI credential before saving; no token needs to be pasted.",
       "replaceToken": "Replace token",
-      "tokenHelp": "Run claude setup-token and paste the resulting token. It is stored locally."
+      "tokenHelp": "Run claude setup-token and paste the resulting token. It is stored locally.",
+      "editTitle": "Edit provider",
+      "configureDescription": "Configure the connection and models, then save together.",
+      "providerType": "Provider type",
+      "nameRequired": "Enter a name.",
+      "keepCredential": "Leave blank to keep the current credential",
+      "showKey": "Show credential",
+      "hideKey": "Hide credential",
+      "authenticated": "Authorized",
+      "noSecretRequired": "No credential required.",
+      "authenticatedContinue": "Authorization complete. Configure models, then save.",
+      "authReadbackFailed": "Authorization completed, but the account could not be read. Retry reading it; do not sign in again.",
+      "loadingModels": "Loading models…",
+      "modelsUnavailable": "The model catalog is unavailable. Close and refresh before retrying.",
+      "savingAccount": "Saving account…",
+      "savingModels": "Saving models…",
+      "modelsSaveFailed": "Account saved; model save is not confirmed. Your draft is retained.",
+      "saveErrors": {
+        "rejected": "Not saved. Check the configuration and try again.",
+        "unknown": "Save is unconfirmed and may have completed. Close and refresh to check before saving again."
+      },
+      "vendorProtocol": "Use provider default protocol",
+      "projectionsUnavailable": "Configuration saved, but some lists could not be refreshed. Refresh to verify."
     },
     "protocols": {
       "openai": "OpenAI Compatible",
       "openaiCompletions": "OpenAI Completions",
       "openaiResponses": "OpenAI Responses",
-      "anthropic": "Anthropic Compatible"
+      "anthropic": "Anthropic Compatible",
+      "google": "Google Gemini"
     },
     "card": {
       "configured": "Configured",
@@ -260,7 +304,8 @@
       "credentialUnknown": "Credential status not confirmed",
       "none": "None",
       "editKey": "Edit API key",
-      "delete": "Delete provider"
+      "delete": "Delete provider",
+      "edit": "Edit"
     },
     "toast": {
       "added": "Provider added successfully",
@@ -271,7 +316,8 @@
       "failedUpdate": "Failed to update provider",
       "invalidKey": "Invalid API key",
       "minimaxConflict": "Cannot add both MiniMax (Global) and MiniMax (CN) providers.",
-      "zaiConflict": "Cannot add both Z.AI (CN) and Z.AI (Global) providers."
+      "zaiConflict": "Cannot add both Z.AI (CN) and Z.AI (Global) providers.",
+      "duplicateSingleProvider": "This provider supports only one account."
     },
     "oauth": {
       "loginMode": "OAuth Login",
@@ -295,7 +341,9 @@
       "completeLogin": "Complete login",
       "manualHelp": "Open the authorization page, sign in, then paste the callback URL or code below.",
       "callbackPlaceholder": "Paste callback URL or code",
-      "submitCode": "Submit code"
+      "submitCode": "Submit code",
+      "copyCode": "Copy authorization code",
+      "retryReadback": "Read account again"
     },
     "projectionErrors": {
       "providerProjectionPartial": "Some accounts are not available in this runtime. Check the account details below.",
@@ -717,11 +765,25 @@
       "loading": "Fetching models...",
       "empty": "No available models discovered",
       "error": "Failed to fetch models: {{error}}. Confirm this account can access the model list, then try again.",
-      "rejected": "Failed to fetch models: the backend rejected the model list request. Confirm this account's API key, permissions, group, and balance are available, then try again.",
+      "rejected": "The model list request was rejected. Check credentials and permissions.",
       "importSelected": "Import selected",
       "duplicate": "Already in catalog",
       "count_one": "· {{count}} model",
-      "count_other": "· {{count}} models"
+      "count_other": "· {{count}} models",
+      "chooseCapabilities": "Capabilities unknown; choose after import",
+      "reasons": {
+        "invalid-request": "Invalid configuration. Check the protocol and address.",
+        "unsupported": "This endpoint cannot list models. Add them manually.",
+        "credential-missing": "Enter a credential for this account.",
+        "credential-unavailable": "The stored credential is unavailable. Enter it again.",
+        "authentication": "Authentication failed. Check your credential.",
+        "permission-denied": "Model list access is not permitted. You can add models manually.",
+        "rate-limited": "Too many requests. Try again later.",
+        "deadline": "Fetching timed out. Retry manually later.",
+        "invalid-response": "The service returned an invalid model list.",
+        "unavailable": "Model listing is unavailable. You can add models manually.",
+        "outcome-unknown": "The fetch result is unconfirmed. It will not retry automatically."
+      }
     },
     "group": {
       "subtitle_one": "1 model registered",
@@ -740,7 +802,8 @@
       "qualityLabel": "Quality",
       "defaultOption": "Default",
       "advanced": "Advanced",
-      "remove": "Remove"
+      "remove": "Remove",
+      "modelIdPlaceholder": "Enter model ID"
     },
     "qualities": {
       "low": "Low",
@@ -758,11 +821,12 @@
       "transcribe": "Transcribe"
     },
     "errors": {
-      "invalidEntry": "Model \"{{id}}\" is invalid: context/maxTokens/timeoutMs must be positive integers",
+      "invalidEntry": "Model “{{id}}” is invalid: select supported capabilities and use positive integers.",
       "duplicate": "Model ID \"{{id}}\" appears twice",
       "emptyKey": "credentialId cannot be empty",
       "duplicateKey": "This credentialId already exists",
       "invalidKey": "credentialId only allows letters, digits, dot, underscore, hyphen"
-    }
+    },
+    "draftHelp": "Fetch or add models and select their actual capabilities. All changes are submitted on Save."
   }
 }

@@ -36,7 +36,11 @@ import {
 } from 'src/skills/sealed/catalog.js'
 import { sealedReadPermission } from 'src/skills/sealed/permissions.js'
 import { sealedReadTokenBudget } from 'src/skills/sealed/budget.js'
-import { currentInvestigation, InvestigationAdmissionError, trackInvestigationOperation } from 'src/world/investigation.js'
+import {
+  currentInvestigation,
+  InvestigationAdmissionError,
+  trackInvestigationOperation,
+} from 'src/world/investigation.js'
 import { rethrowInvestigationAdmission } from 'src/services/api/investigation.js'
 import type { ToolUseContext } from 'src/Tool.js'
 import { buildTool, type ToolDef } from 'src/Tool.js'
@@ -561,18 +565,38 @@ export const FileReadTool = buildTool({
     const { readFileState, fileReadingLimits } = context
     if (currentInvestigation()) {
       if (isSealedSkillPath(file_path) || pages !== undefined) {
-        throw new InvestigationAdmissionError('investigation_source_format_unbounded')
+        throw new InvestigationAdmissionError(
+          'investigation_source_format_unbounded',
+        )
       }
       const fullFilePath = expandPath(file_path)
       const ext = path.extname(fullFilePath).toLowerCase().slice(1)
-      if (ext === 'ipynb' || isPDFExtension(`.${ext}`) || IMAGE_EXTENSIONS.has(ext) || hasBinaryExtension(fullFilePath)) {
-        throw new InvestigationAdmissionError('investigation_source_format_unbounded')
+      if (
+        ext === 'ipynb' ||
+        isPDFExtension(`.${ext}`) ||
+        IMAGE_EXTENSIONS.has(ext) ||
+        hasBinaryExtension(fullFilePath)
+      ) {
+        throw new InvestigationAdmissionError(
+          'investigation_source_format_unbounded',
+        )
       }
       await discoverSkillsForRead(fullFilePath, context)
-      return callInner(file_path, fullFilePath, fullFilePath, ext, offset, limit, pages,
-        fileReadingLimits?.maxSizeBytes ?? getDefaultFileReadingLimits().maxSizeBytes,
+      return callInner(
+        file_path,
+        fullFilePath,
+        fullFilePath,
+        ext,
+        offset,
+        limit,
+        pages,
+        fileReadingLimits?.maxSizeBytes ??
+          getDefaultFileReadingLimits().maxSizeBytes,
         fileReadingLimits?.maxTokens ?? getDefaultFileReadingLimits().maxTokens,
-        readFileState, context, parentMessage?.message.id)
+        readFileState,
+        context,
+        parentMessage?.message.id,
+      )
     }
 
     const defaults = getDefaultFileReadingLimits()
@@ -825,7 +849,10 @@ export const FileReadTool = buildTool({
   },
 } satisfies ToolDef<InputSchema, Output>)
 
-async function discoverSkillsForRead(fullFilePath: string, context: ToolUseContext): Promise<void> {
+async function discoverSkillsForRead(
+  fullFilePath: string,
+  context: ToolUseContext,
+): Promise<void> {
   if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) return
   const cwd = getCwd()
   const newSkillDirs = await discoverSkillDirsForPaths([fullFilePath], cwd)

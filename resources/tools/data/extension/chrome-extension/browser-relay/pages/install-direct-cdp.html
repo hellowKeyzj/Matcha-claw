@@ -22,6 +22,27 @@
         Your Chrome supports direct connection — no extension needed!
       </p>
 
+      <!-- Permissions & privacy disclosure (collapsed by default) -->
+      <section class="permissions-note">
+        <button class="permissions-note-toggle" id="permissions-note-toggle" aria-expanded="false" aria-controls="permissions-note-content">
+          <svg class="perm-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 1.5l5.5 2v4c0 3.5-2.4 6.4-5.5 7.5C4.9 13.9 2.5 11 2.5 7.5v-4l5.5-2z"/>
+            <path d="M5.8 8.2l1.6 1.6 2.8-3.2"/>
+          </svg>
+          <span class="perm-label" data-i18n="perm_title">Permissions &amp; privacy</span>
+          <svg class="perm-chevron" viewBox="0 0 8 12" fill="currentColor" aria-hidden="true">
+            <path d="M1.5 0L7.5 6L1.5 12L0 10.5L4.5 6L0 1.5Z"/>
+          </svg>
+        </button>
+        <div class="permissions-note-content" id="permissions-note-content">
+          <ul class="permissions-note-list">
+            <li data-i18n="perm_active"><strong>Runs only when enabled</strong> — MatchaClaw can control Chrome only while the desktop app is connected and you have enabled remote debugging and allowed the connection in Chrome. Disconnect or disable remote debugging to stop new control requests.</li>
+            <li data-i18n="perm_capabilities"><strong>Capabilities</strong> — MatchaClaw reads and operates on relevant tabs only within the scope you authorize.</li>
+            <li data-i18n="perm_data"><strong>Data security</strong> — MatchaClaw connects to Chrome over a local loopback (127.0.0.1) channel controlled by Chrome's connection permission.</li>
+          </ul>
+        </div>
+      </section>
+
       <div id="browser-info" style="display:none;margin-bottom:24px;">
         <div class="note" style="margin-top:0">
           <div class="note-body" style="display:flex;align-items:center;gap:10px">
@@ -155,6 +176,10 @@
       InstallI18n.register('en', {
         title: 'Enable Browser Connection',
         subtitle: 'Your Chrome supports direct connection — no extension needed!',
+        perm_title: 'Permissions & privacy',
+        perm_active: '<strong>Runs only when enabled</strong> — MatchaClaw can control Chrome only while the desktop app is connected and you have enabled remote debugging and allowed the connection in Chrome. Disconnect or disable remote debugging to stop new control requests.',
+        perm_capabilities: '<strong>Capabilities</strong> — MatchaClaw reads and operates on relevant tabs only within the scope you authorize.',
+        perm_data: '<strong>Data security</strong> — MatchaClaw connects to Chrome over a local loopback (127.0.0.1) channel controlled by Chrome\'s connection permission.',
         step1_title: 'Enable Remote Debugging',
         step1_open: 'Open chrome://inspect/#remote-debugging',
         step1_more: 'Can\'t open? Copy URL instead',
@@ -182,6 +207,10 @@
       InstallI18n.register('zh', {
         title: '启用浏览器连接',
         subtitle: '您的 Chrome 支持直接连接 — 无需安装扩展！',
+        perm_title: '权限与隐私',
+        perm_active: '<strong>仅在启用时运行</strong> — 只有桌面端已连接，且您已开启远程调试并在 Chrome 中允许连接时，MatchaClaw 才能控制 Chrome。断开连接或关闭远程调试后不再接受新的控制请求。',
+        perm_capabilities: '<strong>能力范围</strong> — MatchaClaw 仅在您授权的范围内读取并操作相应标签页。',
+        perm_data: '<strong>数据安全</strong> — MatchaClaw 通过本地回环地址（127.0.0.1）通道连接 Chrome，连接由 Chrome 的权限确认控制。',
         step1_title: '启用远程调试',
         step1_open: '打开 chrome://inspect/#remote-debugging',
         step1_more: '无法打开？复制链接',
@@ -209,6 +238,10 @@
       InstallI18n.register('de', {
         title: 'Browserverbindung aktivieren',
         subtitle: 'Ihr Chrome unterstützt die direkte Verbindung — keine Erweiterung erforderlich!',
+        perm_title: 'Berechtigungen & Datenschutz',
+        perm_active: '<strong>Nur aktiv, wenn eingeschaltet</strong> — MatchaClaw kann Chrome nur steuern, wenn die Desktop-App verbunden ist und Sie Remote-Debugging aktiviert sowie die Verbindung in Chrome zugelassen haben. Trennen Sie die Verbindung oder deaktivieren Sie Remote-Debugging, um neue Steuerungsanfragen zu stoppen.',
+        perm_capabilities: '<strong>Funktionsumfang</strong> — MatchaClaw liest und bedient die betreffenden Tabs nur im Rahmen der von Ihnen erteilten Autorisierung.',
+        perm_data: '<strong>Datensicherheit</strong> — MatchaClaw verbindet sich über einen lokalen Loopback-Kanal (127.0.0.1) mit Chrome; die Verbindung wird durch die Verbindungsberechtigung von Chrome kontrolliert.',
         step1_title: 'Remote-Debugging aktivieren',
         step1_open: 'Öffnen Sie chrome://inspect/#remote-debugging',
         step1_more: 'Lässt sich nicht öffnen? URL kopieren',
@@ -236,6 +269,10 @@
       InstallI18n.register('es', {
         title: 'Activar conexión del navegador',
         subtitle: '¡Tu Chrome admite conexión directa — no se necesita extensión!',
+        perm_title: 'Permisos y privacidad',
+        perm_active: '<strong>Solo se ejecuta cuando está activada</strong> — MatchaClaw solo puede controlar Chrome mientras la aplicación de escritorio esté conectada y hayas activado la depuración remota y permitido la conexión en Chrome. Desconecta o desactiva la depuración remota para detener nuevas solicitudes de control.',
+        perm_capabilities: '<strong>Alcance de capacidades</strong> — MatchaClaw lee y opera sobre las pestañas correspondientes solo dentro del alcance que autorices.',
+        perm_data: '<strong>Seguridad de los datos</strong> — MatchaClaw se conecta a Chrome por un canal de bucle local (127.0.0.1), controlado por el permiso de conexión de Chrome.',
         step1_title: 'Activar depuración remota',
         step1_open: 'Abre chrome://inspect/#remote-debugging',
         step1_more: '¿No se abre? Copia la URL',
@@ -263,6 +300,10 @@
       InstallI18n.register('fr', {
         title: 'Activer la connexion au navigateur',
         subtitle: 'Votre Chrome prend en charge la connexion directe — aucune extension n\'est nécessaire !',
+        perm_title: 'Autorisations et confidentialité',
+        perm_active: "<strong>Active uniquement lorsqu’elle est activée</strong> — MatchaClaw ne peut contrôler Chrome que lorsque l’application de bureau est connectée et que vous avez activé le débogage à distance et autorisé la connexion dans Chrome. Déconnectez-vous ou désactivez le débogage à distance pour arrêter les nouvelles demandes de contrôle.",
+        perm_capabilities: "<strong>Étendue des capacités</strong> — MatchaClaw lit et agit sur les onglets concernés uniquement dans le cadre que vous autorisez.",
+        perm_data: "<strong>Sécurité des données</strong> — MatchaClaw se connecte à Chrome via un canal de boucle locale (127.0.0.1), contrôlé par l’autorisation de connexion de Chrome.",
         step1_title: 'Activer le débogage à distance',
         step1_open: 'Ouvrez chrome://inspect/#remote-debugging',
         step1_more: 'Impossible d\'ouvrir ? Copiez l\'URL',
@@ -290,6 +331,10 @@
       InstallI18n.register('pt', {
         title: 'Ativar conexão do navegador',
         subtitle: 'O seu Chrome suporta ligação direta — não é necessária nenhuma extensão!',
+        perm_title: 'Permissões e privacidade',
+        perm_active: '<strong>Ativa apenas quando ligada</strong> — o MatchaClaw só pode controlar o Chrome enquanto o aplicativo de desktop estiver conectado e você tiver ativado a depuração remota e permitido a conexão no Chrome. Desconecte ou desative a depuração remota para interromper novas solicitações de controle.',
+        perm_capabilities: '<strong>Alcance de capacidades</strong> — o MatchaClaw lê e opera nas abas relevantes apenas dentro do escopo que você autoriza.',
+        perm_data: '<strong>Segurança dos dados</strong> — o MatchaClaw se conecta ao Chrome por um canal de loopback local (127.0.0.1), controlado pela permissão de conexão do Chrome.',
         step1_title: 'Ativar depuração remota',
         step1_open: 'Abra chrome://inspect/#remote-debugging',
         step1_more: 'Não abre? Copie a URL',
@@ -315,9 +360,29 @@
         compare_methods: 'Comparar métodos de ligação',
       });
 
+      InstallI18n.register('ja', {
+        perm_title: '権限とプライバシー',
+        perm_active: '<strong>有効なときのみ動作</strong> — MatchaClaw が Chrome を操作できるのは、デスクトップアプリが接続され、リモートデバッグを有効にして Chrome で接続を許可している間だけです。接続を切断するかリモートデバッグを無効にすると、新しい操作リクエストは受け付けません。',
+        perm_capabilities: '<strong>機能の範囲</strong> — MatchaClaw は、許可された範囲内でのみ対象タブの読み取りと操作を行います。',
+        perm_data: '<strong>データの安全性</strong> — MatchaClaw は、Chrome の接続許可で制御されるローカルループバック（127.0.0.1）チャネルを通じて Chrome に接続します。',
+      });
+      InstallI18n.register('ru', {
+        perm_title: 'Разрешения и конфиденциальность',
+        perm_active: '<strong>Работает только при включении</strong> — MatchaClaw может управлять Chrome, только пока настольное приложение подключено, удалённая отладка включена и вы разрешили подключение в Chrome. Отключите соединение или удалённую отладку, чтобы остановить новые запросы управления.',
+        perm_capabilities: '<strong>Возможности</strong> — MatchaClaw читает и изменяет соответствующие вкладки только в пределах выданных вами разрешений.',
+        perm_data: '<strong>Безопасность данных</strong> — MatchaClaw подключается к Chrome по локальному петлевому каналу (127.0.0.1), доступ к которому регулируется разрешением на подключение в Chrome.',
+      });
+
       var lang = InstallI18n.apply();
 
       var params = new URLSearchParams(window.location.search);
+      var permissionsLang = (params.get('lang') || params.get('language') || navigator.language || '').toLowerCase().split('-')[0];
+      if (permissionsLang === 'ja' || permissionsLang === 'ru') {
+        document.querySelector('.permissions-note').lang = permissionsLang;
+        document.querySelectorAll('.permissions-note [data-i18n]').forEach(function (el) {
+          el.innerHTML = InstallI18n.t(el.getAttribute('data-i18n'), permissionsLang);
+        });
+      }
       var browserName = params.get('browser');
       var browserVersion = params.get('version');
       if (browserName && browserVersion) {
@@ -333,6 +398,7 @@
 
       setupCopyBlock('copy-url-block', 'chrome://inspect/#remote-debugging');
       setupAllStepExtras();
+      setupExtrasToggle('permissions-note-toggle', 'permissions-note-content');
     </script>
   </body>
 </html>

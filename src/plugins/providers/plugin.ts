@@ -1,4 +1,4 @@
-import { KeyRound } from 'lucide-react';
+import { ModelNavigationIcon } from '@/components/icons/navigation';
 import { applicationLifecycle, applicationNavigation, applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
 import { providerContributions } from './contributions';
@@ -14,7 +14,7 @@ export const providersPlugin = definePlugin({
   contributes: [
     ...providerContributions,
     contribute(applicationPages, { id: 'providers', path: '/providers', component: ProvidersPage, preload: ProvidersPage.preload }),
-    contribute(applicationNavigation, { id: 'providers', to: '/providers', label: 'settings:aiProviders.title', icon: KeyRound, order: 40, prefetch: ProvidersPage.preload }),
+    contribute(applicationNavigation, { id: 'providers', to: '/providers', label: 'settings:aiProviders.title', icon: ModelNavigationIcon, order: 40, prefetch: ProvidersPage.preload }),
     contribute(applicationLifecycle, { id: 'providers', order: 40, component: ProvidersLifecycle }),
   ],
 });

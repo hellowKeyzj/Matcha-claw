@@ -29,8 +29,10 @@ type HostEventName =
   | 'runtime-host:restart'
   | 'runtime-host:disconnected'
   | 'package:changed'
+  | 'providers:changed'
   | 'app-plugins:changed'
   | 'app-plugins:runtime'
+  | 'app-plugins:confirmation'
   | 'app-plugins:preview'
   | 'license:gate-changed'
   | 'iab:event'
@@ -80,7 +82,7 @@ export function registerMainEventBridge(deps: {
   hostEventBus: HostEventBus;
   getMainWindow: () => BrowserWindow | null;
 }): () => void {
-  const unsubscribers = (['package:changed', 'app-plugins:changed', 'app-plugins:runtime', 'app-plugins:preview', 'license:gate-changed', 'iab:event'] as const).map((eventName) =>
+  const unsubscribers = (['package:changed', 'providers:changed', 'app-plugins:changed', 'app-plugins:runtime', 'app-plugins:confirmation', 'app-plugins:preview', 'license:gate-changed', 'iab:event'] as const).map((eventName) =>
     deps.hostEventBus.on(eventName, (payload) => {
       sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
     }),

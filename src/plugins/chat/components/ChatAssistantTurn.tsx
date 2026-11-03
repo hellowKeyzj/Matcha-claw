@@ -13,7 +13,6 @@ import { ChatImageLightbox } from '@/plugins/message-rendering/ChatImageLightbox
 import { AssistantPendingIndicator } from '@/plugins/chat/components/AssistantPendingIndicator';
 import { getAssistantTurnPlainText } from '@/plugins/message-rendering/chat-message-view';
 import {
-  AssistantMessageMedia,
   AssistantMessageMetaBar,
   type MessageLightboxState,
 } from '@/plugins/message-rendering/chat-message-parts';
@@ -23,9 +22,9 @@ import { buildToolRuntimeSurface } from '@/plugins/message-rendering/tool-activi
 import { isOpenClawSurfaceSessionIdentity } from '@/types/openclaw-runtime-surface';
 import { openChatRuntimeSurface, type ChatRuntimeSurfaceDescriptor } from '@/plugins/surfaces/chat/runtime-surfaces';
 import { useArtifactRefExtractor } from '@/plugins/chat/artifact-paths';
+import { createAttachedMediaMatcher } from '@/plugins/message-rendering/md-link';
 import { getSessionTextModel, type SessionTextModel } from '@/plugins/chat/store/session-presentation';
-import { hostFileStat, hostWorkspaceMediaThumbnail, type WorkspaceFileContext } from '@/lib/host-api';
-import { DIRECTORY_MIME_TYPE, resolveWorkspaceRelativePath } from '@/plugins/files/types';
+import type { WorkspaceFileContext } from '@/lib/host-api';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeRenderItem, summarizeSessionIdentity, summarizeText } from '@/lib/session-trace';
 import { validateSessionIdentity, type SessionIdentity } from '@/types/desktop/runtime-address';
 import {
@@ -46,7 +45,7 @@ interface ChatAssistantTurnProps {
   sessionIdentity?: SessionIdentity;
   endpointSessionId?: string | null;
   workspaceContext?: WorkspaceFileContext;
-  onOpenAttachedArtifact?: (file: AttachedFileMeta) => void;
+  onOpenAttachedArtifact?: (file: AttachedFileMeta) => boolean | void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }
@@ -55,12 +54,6 @@ type MarkdownFenceState = {
   marker: '`' | '~';
   length: number;
 } | null;
-
-type DerivedGatewayPreview = {
-  preview: string | null;
-  fileSize: number;
-  previewStatus?: 'unavailable';
-};
 
 function readFenceMarker(line: string): { marker: '`' | '~'; length: number; closingOnly: boolean } | null {
   const match = /^(?: {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
@@ -246,7 +239,6 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   userAvatarImageUrl,
   sessionIdentity,
   endpointSessionId,
-  workspaceContext,
   onOpenAttachedArtifact,
   onRuntimeSendMessage,
   onRuntimeOpenLink,
@@ -260,8 +252,6 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     collapse();
   }, [collapse]);
   const [lightboxImg, setLightboxImg] = useState<(MessageLightboxState & { sessionIdentity?: SessionIdentity }) | null>(null);
-  const [validatedDerivedPaths, setValidatedDerivedPaths] = useState<Record<string, boolean>>({});
-  const [derivedGatewayPreviews, setDerivedGatewayPreviews] = useState<Record<string, DerivedGatewayPreview>>({});
 
   const isStreaming = isActiveReplyStatus(item.status);
 
@@ -294,170 +284,55 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     if (segment.kind === 'tool') {
       return resolvedToolSlots?.get(segment.key)?.kind !== 'covered';
     }
-    return segment.images.length > 0 || segment.attachedFiles.length > 0;
+    return segment.images.length > 0 || segment.attachedFiles.length > 0 || !!segment.contentNotices?.length;
   });
   const pendingMode = !coveredOnly && !hasContentSegments && isStreaming
     ? (item.pendingState ?? (item.status === 'waiting_tool' ? 'activity' : 'typing'))
     : null;
   const rawPlainText = getAssistantTurnPlainText(item);
   const plainText = textModel.assistant(rawPlainText);
-  const attachedByRef = useMemo(() => {
-    const next = new Set<string>();
-    for (const segment of item.segments) {
-      if (segment.kind !== 'media') {
-        continue;
-      }
-      for (const file of segment.attachedFiles as AttachedFileMeta[]) {
-        const ref = file.filePath || file.gatewayUrl;
-        if (ref) {
-          next.add(ref);
-        }
-      }
-    }
-    return next;
+  const mediaPresentation = useMemo(() => {
+    const seen = new Set<string>();
+    const attachedFiles: AttachedFileMeta[] = [];
+    const segments = item.segments.map((segment) => {
+      if (segment.kind !== 'media') return segment;
+      const files = segment.attachedFiles.filter((file) => {
+        const refs = [file.resourceId, file.filePath, file.gatewayUrl, file.mediaReference].filter((ref): ref is string => !!ref);
+        const duplicate = refs.some((ref) => seen.has(ref));
+        for (const ref of refs) seen.add(ref);
+        if (!duplicate) attachedFiles.push(file);
+        return !duplicate;
+      });
+      return { ...segment, attachedFiles: files };
+    });
+    const attached = createAttachedMediaMatcher(attachedFiles);
+    return {
+      attachedFiles,
+      segments: segments.map((segment) => segment.kind !== 'media' ? segment : {
+        ...segment,
+        images: segment.images.filter((image) => {
+          const source = image.url || (image.data ? `data:${image.mimeType};base64,${image.data}` : '');
+          if (!source || attached(source) || seen.has(source)) return false;
+          seen.add(source);
+          return true;
+        }),
+      }),
+    };
   }, [item.segments]);
   const extractArtifactRefs = useArtifactRefExtractor();
-  const derivedAttachedFiles = useMemo(() => (
-    extractArtifactRefs(rawPlainText).filter((file) => {
-      const ref = file.filePath || file.gatewayUrl;
-      return !ref || !attachedByRef.has(ref);
-    })
-  ), [attachedByRef, extractArtifactRefs, rawPlainText]);
-
-  useEffect(() => {
-    if (!sessionIdentity) {
-      return;
-    }
-    if (derivedAttachedFiles.length === 0) {
-      return;
-    }
-    const pendingPaths = derivedAttachedFiles
-      .map((file) => file.filePath)
-      .filter((filePath): filePath is string => !!filePath && validatedDerivedPaths[filePath] === undefined);
-    if (pendingPaths.length === 0) {
-      return;
-    }
-
-    let cancelled = false;
-    void Promise.all(pendingPaths.map(async (filePath) => {
-      try {
-        const relativePath = resolveWorkspaceRelativePath(filePath, workspaceContext?.workspaceRoot);
-        if (!relativePath) {
-          return { filePath, ok: false };
-        }
-        const stat = await hostFileStat({
-          endpoint: sessionIdentity.endpoint,
-          agentId: sessionIdentity.agentId,
-          relativePath,
-          ...workspaceContext,
-        });
-        const expectDir = derivedAttachedFiles.find((file) => file.filePath === filePath)?.mimeType === DIRECTORY_MIME_TYPE;
-        return {
-          filePath,
-          ok: !!stat.ok && (expectDir ? !!stat.isDirectory : !stat.isDirectory),
-        };
-      } catch {
-        return { filePath, ok: false };
-      }
-    })).then((results) => {
-      if (cancelled) {
-        return;
-      }
-      setValidatedDerivedPaths((current) => {
-        const next = { ...current };
-        for (const result of results) {
-          next[result.filePath] = result.ok;
-        }
-        return next;
-      });
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [derivedAttachedFiles, sessionIdentity, validatedDerivedPaths, workspaceContext]);
-
-  useEffect(() => {
-    if (!sessionIdentity) {
-      return;
-    }
-    const pendingGatewayFiles = derivedAttachedFiles.filter((file) => (
-      file.gatewayUrl && derivedGatewayPreviews[file.gatewayUrl] === undefined
-    ));
-    if (pendingGatewayFiles.length === 0) {
-      return;
-    }
-
-    let cancelled = false;
-    void Promise.all(pendingGatewayFiles.map(async (file) => {
-      const gatewayUrl = file.gatewayUrl!;
-      try {
-        const thumbnail = await hostWorkspaceMediaThumbnail({
-          gatewayUrl,
-          mimeType: file.mimeType,
-          agentId: sessionIdentity.agentId,
-          sessionIdentity,
-        });
-        return {
-          gatewayUrl,
-          preview: thumbnail.preview ?? null,
-          fileSize: thumbnail.fileSize || file.fileSize,
-          ...(thumbnail.preview ? {} : { previewStatus: 'unavailable' as const }),
-        };
-      } catch {
-        return {
-          gatewayUrl,
-          preview: null,
-          fileSize: file.fileSize,
-          previewStatus: 'unavailable' as const,
-        };
-      }
-    })).then((results) => {
-      if (cancelled) {
-        return;
-      }
-      setDerivedGatewayPreviews((current) => {
-        const next = { ...current };
-        for (const result of results) {
-          next[result.gatewayUrl] = {
-            preview: result.preview,
-            fileSize: result.fileSize,
-            ...(result.previewStatus ? { previewStatus: result.previewStatus } : {}),
-          };
-        }
-        return next;
-      });
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [derivedAttachedFiles, derivedGatewayPreviews, sessionIdentity]);
-
-  const visibleDerivedAttachedFiles = useMemo(() => (
-    derivedAttachedFiles
-      .filter((file) => !file.filePath || validatedDerivedPaths[file.filePath] === true)
-      .map((file) => {
-        if (!file.gatewayUrl) {
-          return file;
-        }
-        const preview = derivedGatewayPreviews[file.gatewayUrl];
-        if (!preview) {
-          return file;
-        }
-        return {
-          ...file,
-          preview: preview.preview,
-          fileSize: preview.fileSize,
-          ...(preview.previewStatus ? { previewStatus: preview.previewStatus } : {}),
-        };
-      })
-  ), [derivedAttachedFiles, derivedGatewayPreviews, validatedDerivedPaths]);
+  const messageFileRefs = useMemo(() => extractArtifactRefs(rawPlainText).filter((file) => file.filePath), [extractArtifactRefs, rawPlainText]);
+  const markdownAttachedFiles = useMemo(() => [
+    ...mediaPresentation.attachedFiles,
+    ...mediaPresentation.segments.flatMap((segment) => segment.kind === 'media'
+      ? segment.images.flatMap((image) => image.url ? [{ fileName: '', mimeType: image.mimeType, fileSize: 0, preview: null, gatewayUrl: image.url }] : [])
+      : []),
+    ...messageFileRefs,
+  ], [messageFileRefs, mediaPresentation]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
     logSessionTrace('session.assistant-turn.committed', 'session-assistant-turn-boundary', () => ({
       identity: summarizeSessionIdentity(sessionIdentity), item: summarizeRenderItem(item),
-      hasContentSegments, pendingMode, rendered: hasContentSegments || visibleDerivedAttachedFiles.length > 0 || !!pendingMode,
+      hasContentSegments, pendingMode, rendered: hasContentSegments || !!pendingMode,
       rawPlainText: summarizeText(rawPlainText), cleanedPlainText: summarizeText(plainText),
       segmentCount: item.segments.length, summarizedSegmentCount: Math.min(item.segments.length, 64), truncated: item.segments.length > 64,
       messageSegments: item.segments.slice(0, 64).flatMap((segment, segmentIndex) => {
@@ -469,10 +344,10 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           rendered: !!segment.largeText || !!renderText.trim() }];
       }),
     }));
-  }, [hasContentSegments, item, messageRenderTextByKey, pendingMode, plainText, rawPlainText, sessionIdentity, visibleDerivedAttachedFiles.length]);
-  const visible = hasContentSegments || visibleDerivedAttachedFiles.length > 0 || !!pendingMode;
+  }, [hasContentSegments, item, messageRenderTextByKey, pendingMode, plainText, rawPlainText, sessionIdentity]);
+  const visible = hasContentSegments || !!pendingMode;
 
-  const renderedSegments = visible ? item.segments.map((segment) => {
+  const renderedSegments = visible ? mediaPresentation.segments.map((segment) => {
     const Part = resolveMessagePartRenderer(segment.kind, partRenderers)?.component;
     return Part ? (
       <Suspense key={segment.key} fallback={null}>
@@ -481,6 +356,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           itemKey={item.key}
           createdAt={item.createdAt}
           renderText={messageRenderTextByKey.get(segment.key)}
+          attachedFiles={markdownAttachedFiles}
           isStreaming={isStreaming}
           showThinking={showThinking}
           collapseVersion={collapseVersion}
@@ -513,15 +389,6 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
       >
         {renderedSegments}
 
-        {visibleDerivedAttachedFiles.length > 0 ? (
-          <AssistantMessageMedia
-            images={[]}
-            attachedFiles={visibleDerivedAttachedFiles}
-            onPreview={(preview) => setLightboxImg({ ...preview, sessionIdentity })}
-            onOpenFile={onOpenAttachedArtifact}
-          />
-        ) : null}
-
         {pendingMode ? <AssistantPendingIndicator mode={pendingMode} /> : null}
       </AssistantTurnShell>
       {visible && lightboxImg && (
@@ -529,6 +396,8 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           src={lightboxImg.src}
           fileName={lightboxImg.fileName}
           filePath={lightboxImg.filePath}
+          mediaReference={lightboxImg.mediaReference}
+          mimeType={lightboxImg.mimeType}
           sessionIdentity={lightboxImg.sessionIdentity}
           onClose={() => setLightboxImg(null)}
         />

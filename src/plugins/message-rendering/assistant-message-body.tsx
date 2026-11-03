@@ -1,6 +1,7 @@
 import { useMarkdownExtensions } from './use-renderers';
 import { useCallback, useEffect, memo, useMemo } from 'react';
-import { invokeIpc } from '@/lib/api-client';
+import type { AttachedFileMeta } from './attachments';
+import { buildArtifactPreviewTargetFromPath } from '@/plugins/files/types';
 import { getOrBuildAssistantMarkdownBody, renderStreamingAssistantMarkdownBody } from '@/plugins/message-rendering/assistant-markdown-body';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity, summarizeText } from '@/lib/session-trace';
 import { cn } from '@/lib/utils';
@@ -15,11 +16,13 @@ interface AssistantMessageBodyProps {
   itemKey: string;
   createdAt?: number;
   text: string;
+  attachedFiles?: ReadonlyArray<AttachedFileMeta>;
   isStreaming: boolean;
   largeText?: SessionLargeTextMetadata;
   sessionIdentity?: SessionIdentity;
   endpointSessionId?: string | null;
   onBodyClick?: () => void;
+  onOpenFile?: (file: AttachedFileMeta) => boolean | void;
 }
 
 function getEventElement(target: EventTarget | null): Element | null {
@@ -36,11 +39,13 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
   itemKey,
   createdAt,
   text,
+  attachedFiles,
   isStreaming,
   largeText,
   sessionIdentity,
   endpointSessionId,
   onBodyClick,
+  onOpenFile,
 }: AssistantMessageBodyProps) {
   const extensions = useMarkdownExtensions();
   const largeTextContent = useLargeTextContent({ initialText: text, largeText, sessionIdentity, endpointSessionId });
@@ -54,9 +59,9 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
       role: 'assistant',
       createdAt,
       text: largeTextContent.text,
-      attachedFiles: [],
+      attachedFiles: attachedFiles ?? [],
     }, extensions)?.fullHtml ?? null;
-  }, [createdAt, extensions, isStreaming, itemKey, largeTextContent.text]);
+  }, [attachedFiles, createdAt, extensions, isStreaming, itemKey, largeTextContent.text]);
   const html = useMemo(() => ({ __html: markdownHtml ?? '' }), [markdownHtml]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
@@ -67,16 +72,10 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
       ...(largeText ? { loadedBytes: largeText.loadedBytes, totalBytes: largeText.totalBytes } : {}),
     }));
   }, [isStreaming, itemKey, largeText, largeTextContent.text, markdownHtml, sessionIdentity, text]);
-  const handleOpenFileHint = useCallback(async (hintPath: string) => {
-    if (!hintPath) {
-      return;
-    }
-    try {
-      await invokeIpc('shell:showItemInFolder', hintPath);
-    } catch {
-      // ignore open errors
-    }
-  }, []);
+  const handleOpenFileHint = useCallback((filePath: string) => {
+    const file = buildArtifactPreviewTargetFromPath(filePath);
+    onOpenFile?.({ fileName: file.fileName, filePath, mimeType: file.mimeType, fileSize: 0, preview: null, source: 'message-ref' });
+  }, [onOpenFile]);
 
   const handleMarkdownClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     if (handleMarkdownCodeBlockCopy(event)) {
@@ -92,13 +91,13 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
       return false;
     }
     const decodedHint = decodeFileHintHref(anchor.href);
-    if (!decodedHint) {
+    if (!decodedHint || !onOpenFile) {
       return false;
     }
     event.preventDefault();
     void handleOpenFileHint(decodedHint);
     return true;
-  }, [handleOpenFileHint]);
+  }, [handleOpenFileHint, onOpenFile]);
 
   const handleBodyClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     const target = getEventElement(event.target);

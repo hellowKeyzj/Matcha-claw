@@ -25,6 +25,8 @@ pub(crate) enum Operation {
     PrepareMedia,
     #[serde(rename = "media.resolve")]
     ResolveMedia,
+    #[serde(rename = "media.playback")]
+    PlaybackMedia,
     #[serde(rename = "media.thumbnail")]
     ThumbnailMedia,
     #[serde(rename = "media.thumbnails")]
@@ -50,6 +52,7 @@ impl Operation {
             Self::WriteBinary => "files.writeBinary",
             Self::PrepareMedia => "media.prepare",
             Self::ResolveMedia => "media.resolve",
+            Self::PlaybackMedia => "media.playback",
             Self::ThumbnailMedia => "media.thumbnail",
             Self::ThumbnailsMedia => "media.thumbnails",
             Self::StagePathsMedia => "media.stagePaths",

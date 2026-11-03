@@ -16,7 +16,10 @@ import path from 'node:path'
 import type { ToolUseContext } from '../Tool.js'
 import { getSessionId } from '../bootstrap/state.js'
 import { getCwd } from '../utils/cwd.js'
-import { currentInvestigation, type AcceptedCorrelation } from './investigation.js'
+import {
+  currentInvestigation,
+  type AcceptedCorrelation,
+} from './investigation.js'
 import { decodeResponse } from './schema.js'
 
 const ENDPOINT = '/api/world/peer'
@@ -217,7 +220,8 @@ export async function execute(
     admission.expiresAt <= Date.now() ||
     admission.investigation !== currentInvestigation() ||
     (admission.investigation !== undefined &&
-      admission.investigation.nativeInstanceId !== privateMaterial.context.instanceId) ||
+      admission.investigation.nativeInstanceId !==
+        privateMaterial.context.instanceId) ||
     digest(canonical(input)) !== admission.digest
   ) {
     throw new Error('World native execution admission is missing or changed')

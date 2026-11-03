@@ -1,11 +1,13 @@
 import type { SessionSendIntent } from '@/types/session-goal';
 import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
 import { cacheSendAttachments } from '@/plugins/chat/store/attachment-helpers';
+import { useComposerDraftStore } from '@/plugins/chat/composer-drafts';
 import { reconcileSessionDirectory } from '@/plugins/chat/store/session-directory';
 import { hasActiveStreamingRun } from '@/plugins/chat/store/runtime-stream-state';
 import type { StoreSessionRunCache } from '@/plugins/chat/store/session-run-cache';
 import {
   CHAT_SEND_RPC_TIMEOUT_MS,
+  isInlineChatAttachment,
   isReadableChatAttachment,
   isUnsupportedGoalStartAttachment,
   resolveChatSendTransportPayload,
@@ -15,7 +17,7 @@ import {
 import { selectCurrentChatSendGate } from '@/plugins/chat/store/selectors';
 import { resolveChatSendGateForPayload } from '@/plugins/chat/store/send-gate';
 import { currentSessionSend, linkSessionSend, markSessionSendUnknown } from '@/plugins/chat/store/send-state';
-import { startSessionSend, confirmSessionSend, removeSessionSend, getSessionInputIds } from '@/plugins/chat/store/session-presentation';
+import { buildPendingUserMessageItem, startSessionSend, confirmSessionSend, removeSessionSend, getSessionInputIds } from '@/plugins/chat/store/session-presentation';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -39,9 +41,8 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import { CHAT_INLINE_ATTACHMENT_MAX_BYTES, type ChatSendAttachment, type ChatSendResult, type ChatSessionSendState, type ChatStoreState } from '@/plugins/chat/store/types';
+import type { ChatSendAttachment, ChatSendResult, ChatSessionSendState, ChatStoreState } from '@/plugins/chat/store/types';
 import { isRunActive, isWaitingTool } from '@/plugins/chat/store/types';
-import type { SessionRenderUserMessageItem } from '@/types/session/render-item';
 
 export type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -169,25 +170,13 @@ interface FinalizeStoreSendFailureParams {
   error: string;
 }
 
-function readableAttachments(attachments: ChatSendAttachment[] | undefined): ChatSendAttachment[] | undefined {
-  const readable = attachments?.filter(isReadableChatAttachment);
+function readableAttachments(attachments: ChatSendAttachment[] | undefined, runtimeAdapterId?: string): ChatSendAttachment[] | undefined {
+  const readable = attachments?.filter((attachment) => isReadableChatAttachment(attachment, runtimeAdapterId));
   return readable && readable.length > 0 ? readable : undefined;
 }
 
-function attachmentReselectionRequired(attachments: ChatSendAttachment[] | undefined): true | undefined {
-  return readableAttachments(attachments)?.some((attachment) => attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES) ? true : undefined;
-}
-
-function cachedAttachmentReceiptFiles(attachments: ChatSendAttachment[]) {
-  return attachments
-    .filter((attachment) => !attachment.mimeType.startsWith('image/') || attachment.sourcePath || attachment.preview)
-    .map((attachment) => ({
-      fileName: attachment.fileName,
-      mimeType: attachment.mimeType,
-      fileSize: attachment.fileSize,
-      preview: !attachment.sourcePath && attachment.mimeType.startsWith('image/') ? attachment.preview : null,
-      ...(attachment.sourcePath ? { filePath: attachment.sourcePath, source: 'user-upload' as const } : {}),
-    }));
+function attachmentReselectionRequired(attachments: ChatSendAttachment[] | undefined, runtimeAdapterId?: string): true | undefined {
+  return attachments?.some((attachment) => isInlineChatAttachment(attachment, runtimeAdapterId)) ? true : undefined;
 }
 
 function appendOptimisticSendItems(params: {
@@ -199,24 +188,14 @@ function appendOptimisticSendItems(params: {
   text: string;
   attachments: ChatSendAttachment[] | undefined;
   createdAt: number;
-}): void {
+}): boolean {
   const { set, sessionKey, clientId, identityKey, generation, text, attachments, createdAt } = params;
+  let appended = false;
   set((state) => {
     const current = state.loadedSessions[sessionKey];
     if (!current) return state;
-    const userItem: SessionRenderUserMessageItem = {
-      key: `renderer-user:${clientId}`,
-      kind: 'user-message',
-      role: 'user',
-      sessionKey,
-      text,
-      clientId,
-      status: 'pending',
-      createdAt,
-      updatedAt: createdAt,
-      images: [],
-      attachedFiles: cachedAttachmentReceiptFiles(attachments ?? []),
-    };
+    appended = true;
+    const userItem = buildPendingUserMessageItem({ clientId, sessionKey, text, createdAt, attachments: attachments ?? [] });
     const send: ChatSessionSendState = {
       identityKey, generation, clientId, startedAt: createdAt,
       receipt: { phase: 'awaiting-receipt', terminalRunIds: [], terminalOverflow: false },
@@ -229,6 +208,7 @@ function appendOptimisticSendItems(params: {
       }),
     };
   });
+  return appended;
 }
 
 function confirmOptimisticSendItems(params: {
@@ -314,21 +294,25 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     attachments,
   } = params;
   const trimmed = params.intent ? text : text.trim();
+  const stateBeforeSend = get();
+  const sendGate = selectCurrentChatSendGate(stateBeforeSend);
+  const endpoint = sendGate.canSend ? sendGate.kind === 'session' ? sendGate.sessionIdentity.endpoint : sendGate.endpoint
+    : stateBeforeSend.currentConversation?.endpoint;
+  const runtimeAdapterId = endpoint?.kind === 'native-runtime' ? endpoint.runtimeAdapterId : undefined;
   if (params.intent && !text.trim()) return { accepted: false, reason: 'empty', dispatch: 'not-dispatched' };
-  if (params.intent && attachments?.some(isUnsupportedGoalStartAttachment)) {
+  if (params.intent && attachments?.some((attachment) => isUnsupportedGoalStartAttachment(attachment, runtimeAdapterId))) {
     return { accepted: false, reason: 'goal-attachments', dispatch: 'not-dispatched' };
   }
   const traceId = createSessionTraceId('send-boundary');
-  const readableSendAttachments = readableAttachments(attachments);
+  const readableSendAttachments = readableAttachments(attachments, runtimeAdapterId);
   const attachmentCount = readableSendAttachments?.length ?? 0;
   let transportPayload: ReturnType<typeof resolveChatSendTransportPayload>;
   try {
-    transportPayload = resolveChatSendTransportPayload(trimmed, readableSendAttachments ?? []);
+    transportPayload = resolveChatSendTransportPayload(trimmed, readableSendAttachments ?? [], runtimeAdapterId);
   } catch (error) {
     return { accepted: false, reason: 'error', error: String(error), dispatch: 'not-dispatched' };
   }
-  const stateBeforeSend = get();
-  const gate = resolveChatSendGateForPayload(selectCurrentChatSendGate(stateBeforeSend), {
+  const gate = resolveChatSendGateForPayload(sendGate, {
     text,
     attachmentCount,
   });
@@ -370,6 +354,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   });
   const nowMs = Date.now();
   const clientMessageId = params.operationId ?? crypto.randomUUID();
+  const submission = useComposerDraftStore.getState().submissions[currentSessionKey];
   const sendGeneration = sessionRunCache.nextSendGeneration(currentSessionKey);
   const identityKey = buildSessionIdentityKey(sessionIdentity);
   applyStoreSendStart({
@@ -377,7 +362,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     sessionKey: currentSessionKey,
     nowMs,
   });
-  appendOptimisticSendItems({
+  const appended = appendOptimisticSendItems({
     set,
     sessionKey: currentSessionKey,
     clientId: clientMessageId,
@@ -385,8 +370,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     generation: sendGeneration,
     text: transportPayload.message,
     attachments,
-    createdAt: nowMs,
+    createdAt: submission?.operationId === clientMessageId ? submission.createdAt : nowMs,
   });
+  if (appended) useComposerDraftStore.getState().markSubmissionSending(currentSessionKey, clientMessageId);
 
   startStoreSendWatchers({
     set,
@@ -410,12 +396,12 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       return { loadedSessions: patchSessionRecord(state, currentSessionKey, { send: markSessionSendUnknown(send, error) }) };
     });
     await get().syncPendingApprovals(currentSessionKey);
-    if (!isCurrent()) return { accepted: false, reason: 'error', error: 'Send result superseded', outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
+    if (!isCurrent()) return { accepted: false, reason: 'error', error: 'Send result superseded', outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments, runtimeAdapterId) };
     finalizeStoreSendFailure({ set, get, sessionKey: currentSessionKey, error });
     if (getSessionInputIds(get().loadedSessions[currentSessionKey]).length) {
       void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'send_receipt' });
     }
-    return { accepted: false, reason: 'error', error, outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
+    return { accepted: false, reason: 'error', error, outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments, runtimeAdapterId) };
   };
   beginMutating();
   try {
@@ -447,7 +433,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         error: 'Send result superseded',
         ...(!sendResult.ok && (sendResult.outcome === 'unknown'
           || !sendResult.outcome && isRecoverableChatSendTimeout(sendResult.error))
-          ? { outcome: 'unknown' as const, attachmentReselectionRequired: attachmentReselectionRequired(attachments) }
+          ? { outcome: 'unknown' as const, attachmentReselectionRequired: attachmentReselectionRequired(attachments, runtimeAdapterId) }
           : {}),
       };
     }
@@ -456,7 +442,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       const errorMsg = sendResult.error;
       logSessionTrace('send.result.error', traceId, () => ({
         category: isRecoverableChatSendTimeout(errorMsg) ? 'recoverable-timeout' : 'transport-error',
-        attachmentReselectionRequired: Boolean(attachmentReselectionRequired(attachments)),
+        attachmentReselectionRequired: Boolean(attachmentReselectionRequired(attachments, runtimeAdapterId)),
       }));
       if (sendResult.outcome === 'unknown' || !sendResult.outcome && isRecoverableChatSendTimeout(errorMsg)) return reconcileUnknown(errorMsg);
       removeOptimisticSendItems({
@@ -478,7 +464,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         reason: 'error',
         error: errorMsg,
         ...(sendResult.outcome ? { outcome: sendResult.outcome } : {}),
-        attachmentReselectionRequired: attachmentReselectionRequired(attachments),
+        attachmentReselectionRequired: attachmentReselectionRequired(attachments, runtimeAdapterId),
       };
     }
 
@@ -529,7 +515,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         reason: 'error',
         error: 'Send result superseded',
         outcome: 'unknown',
-        attachmentReselectionRequired: attachmentReselectionRequired(attachments),
+        attachmentReselectionRequired: attachmentReselectionRequired(attachments, runtimeAdapterId),
       };
     }
     const errorMsg = String(error);

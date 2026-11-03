@@ -71,6 +71,8 @@ publish:
 # macOS Configuration
 mac:
   extraResources:
+    - from: build/app-plugins/darwin-${arch}
+      to: app-plugins/bundled
     - from: build/searxng/wheels/darwin-${arch}
       to: searxng/wheels/darwin-${arch}
     - from: resources/bin/darwin-${arch}
@@ -88,9 +90,11 @@ mac:
   target:
     - target: dmg
       arch:
+        - x64
         - arm64
     - target: zip
       arch:
+        - x64
         - arm64
   darkModeSupport: true
   hardenedRuntime: true
@@ -124,6 +128,8 @@ dmg:
 
 linux:
   extraResources:
+    - from: build/app-plugins/linux-${arch}
+      to: app-plugins/bundled
     - from: build/searxng/wheels/linux-${arch}
       to: searxng/wheels/linux-${arch}
     - from: resources/bin/linux-${arch}
@@ -143,6 +149,8 @@ win:
   # certificate, so verifying would always fail on the updater.
   verifyUpdateCodeSignature: false
   extraResources:
+    - from: build/app-plugins/win32-${arch}
+      to: app-plugins/bundled
     - from: build/searxng/wheels/win32-${arch}
       to: searxng/wheels/win32-${arch}
     - from: resources/bin/win32-${arch}

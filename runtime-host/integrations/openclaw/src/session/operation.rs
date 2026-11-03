@@ -188,7 +188,14 @@ impl SessionOperation {
 
     async fn mutate_goal_cancellable<T>(&self, request: wire::RpcRequest, decode: impl FnOnce(GatewayResponse) -> Result<T, protocol::ProtocolError>, cancellation: &CancellationToken) -> Result<InvocationOutcome<T, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
         let request_id = request.request_id().to_owned();
-        Ok(match self.gateway.rpc_goal_mutation_cancellable(request, cancellation).await? {
+        let delivery = match self.gateway.rpc_goal_mutation_cancellable(request, cancellation).await {
+            Ok(delivery) => delivery,
+            Err(sessions_module::ports::RuntimeOperationFailure::TargetRejected) => {
+                return Ok(InvocationOutcome::TargetRejected(OperationError::Rejected));
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(match delivery {
             MutationDelivery::Response(response) if response.request_id() != request_id => InvocationOutcome::Unknown,
             MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
                 if super::trace::enabled() {
@@ -481,7 +488,18 @@ impl SessionOperation {
         cancellation: &CancellationToken,
     ) -> InvocationOutcome<T, OperationError> {
         let request_id = request.request_id().to_owned();
-        match self.gateway.rpc_mutation_cancellable(request, cancellation).await {
+        let delivery = if request.method() == protocol::CHAT_SEND_METHOD {
+            match self.gateway.rpc_chat_mutation_cancellable(request, cancellation).await {
+                Ok(delivery) => delivery,
+                Err(sessions_module::ports::RuntimeOperationFailure::TargetRejected) => {
+                    return InvocationOutcome::TargetRejected(OperationError::Rejected);
+                }
+                Err(_) => return InvocationOutcome::Unknown,
+            }
+        } else {
+            self.gateway.rpc_mutation_cancellable(request, cancellation).await
+        };
+        match delivery {
             MutationDelivery::Response(response) if response.request_id() != request_id => {
                 InvocationOutcome::Unknown
             }

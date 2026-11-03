@@ -59,6 +59,7 @@ export interface Asset {
 export interface DesignDocument {
   schemaVersion: 1;
   id: string;
+  /** Workspace binding is retained across undo/redo without changing the content revision. */
   sessionIdentity?: SessionIdentity;
   revision: number;
   name: string;

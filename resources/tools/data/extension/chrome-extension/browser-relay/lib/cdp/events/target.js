@@ -26,41 +26,34 @@ export function handleTargetEvent(method, tabId, params, ctx) {
     case 'Target.attachedToTarget':
       if (params?.sessionId) {
         const sid = String(params.sessionId)
-        ctx.childSession.set(sid, tabId)
-        let children = ctx.childSets.get(tabId)
-        if (!children) {
-          children = new Set()
-          ctx.childSets.set(tabId, children)
-        }
-        children.add(sid)
-        log.debug(() => [
+        ctx.addChildSession(sid)
+        log.debug(
           'child session attached:', tabId, sid,
           'type:', params.targetInfo?.type,
           'url:', truncate(params.targetInfo?.url || '', 80),
-        ])
+        )
       }
       break
 
     case 'Target.detachedFromTarget':
       if (params?.sessionId) {
         const sid = String(params.sessionId)
-        ctx.childSession.delete(sid)
-        ctx.childSets.get(tabId)?.delete(sid)
-        log.debug(() => ['child session detached:', tabId, sid])
+        ctx.removeChildSession(sid)
+        log.debug('child session detached:', tabId, sid)
       }
       break
 
     case 'Target.targetCreated':
-      log.info(() => [
+      log.info(
         'target created:', tabId,
         'targetId:', params?.targetInfo?.targetId,
         'type:', params?.targetInfo?.type,
         'url:', truncate(params?.targetInfo?.url || '', 80),
-      ])
+      )
       break
 
     case 'Target.targetDestroyed':
-      log.info(() => ['target destroyed:', tabId, 'targetId:', params?.targetId])
+      log.info('target destroyed:', tabId, 'targetId:', params?.targetId)
       break
 
     case 'Target.targetCrashed':
@@ -73,12 +66,12 @@ export function handleTargetEvent(method, tabId, params, ctx) {
       break
 
     case 'Target.targetInfoChanged':
-      log.debug(() => [
+      log.debug(
         'target info changed:', tabId,
         'targetId:', params?.targetInfo?.targetId,
         'title:', truncate(params?.targetInfo?.title || '', 60),
         'url:', truncate(params?.targetInfo?.url || '', 80),
-      ])
+      )
       break
   }
 }

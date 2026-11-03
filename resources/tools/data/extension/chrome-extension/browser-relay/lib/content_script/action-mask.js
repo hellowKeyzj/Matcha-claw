@@ -9,16 +9,25 @@
  */
 
 import { unwrapScriptResult } from './helpers.js'
+import { getRelayText } from '../../pages/scripts/relay-i18n.js'
 
 export async function extActionMask(tabId, params) {
   const state = (params?.state || 'idle').toLowerCase()
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (maskState) => {
+    func: (maskState, workingText) => {
       const MASK_ID = 'accio-action-mask'
       let host = document.getElementById(MASK_ID)
 
+      function clearBlockers(mask) {
+        for (const { evt, handler } of mask?._blockers || []) {
+          document.removeEventListener(evt, handler, { capture: true })
+        }
+        if (mask) mask._blockers = null
+      }
+
       if (maskState === 'idle' || maskState === 'remove') {
+        clearBlockers(host?.shadowRoot?.querySelector('.mask-layer'))
         if (host) host.remove()
         return { success: true, state: 'idle' }
       }
@@ -83,7 +92,9 @@ export async function extActionMask(tabId, params) {
 
         const bar = document.createElement('div')
         bar.className = 'status-bar'
-        bar.innerHTML = '<span class="status-dot"></span><span>MatchaClaw is working…</span>'
+        bar.setAttribute('role', 'status')
+        bar.setAttribute('aria-live', 'polite')
+        bar.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span class="status-text"></span>'
 
         shadow.append(style, mask, glow, bar)
         document.body.appendChild(host)
@@ -93,6 +104,7 @@ export async function extActionMask(tabId, params) {
       const mask = shadow.querySelector('.mask-layer')
       const glow = shadow.querySelector('.glow-border')
       const bar = shadow.querySelector('.status-bar')
+      bar.querySelector('.status-text').textContent = workingText
 
       mask.dataset.state = maskState
 
@@ -115,17 +127,12 @@ export async function extActionMask(tabId, params) {
       } else if (maskState === 'takeover') {
         glow.style.display = 'none'
         bar.style.display = 'none'
-        if (mask._blockers) {
-          for (const { evt, handler } of mask._blockers) {
-            document.removeEventListener(evt, handler, { capture: true })
-          }
-          mask._blockers = null
-        }
+        clearBlockers(mask)
       }
 
       return { success: true, state: maskState }
     },
-    args: [state],
+    args: [state, getRelayText().actionWorking],
   })
   return unwrapScriptResult(results, 'Extension.actionMask')
 }

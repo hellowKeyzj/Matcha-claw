@@ -1,4 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { isAbsolute } from 'node:path'
+import type { McpServerConfig } from './types.js'
+
+const inputs = new AsyncLocalStorage<string | undefined>()
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -59,6 +63,52 @@ const target = (() => {
   }
 })()
 
+function isIabStdioTarget(
+  name: string,
+  command: string,
+  args: readonly string[],
+): boolean {
+  return (
+    target !== undefined &&
+    name === 'matcha' &&
+    command === target.command &&
+    args.length === target.args.length &&
+    args.every((arg, index) => arg === target.args[index])
+  )
+}
+
+export function hasIabCapability(): boolean {
+  return target !== undefined
+}
+
+export function withIabInput<T>(
+  inputMessageId: string | undefined,
+  callback: () => Promise<T>,
+): Promise<T> {
+  return inputs.run(inputMessageId, callback)
+}
+
+export function iabInputMetadata(
+  serverName: string,
+  toolName: string,
+  serverConfig: McpServerConfig,
+): Record<string, string> | undefined {
+  if (
+    toolName !== 'browser' ||
+    (serverConfig.type !== 'stdio' && serverConfig.type !== undefined) ||
+    !isIabStdioTarget(serverName, serverConfig.command, serverConfig.args)
+  ) {
+    return undefined
+  }
+  const inputMessageId = inputs.getStore()
+  if (!uuid(inputMessageId)) {
+    throw new Error(
+      'Native browser tool requires an accepted input message UUID',
+    )
+  }
+  return { 'matcha/iabInputMessageId': inputMessageId }
+}
+
 export function iabStdioEnv(
   name: string,
   command: string,
@@ -72,13 +122,7 @@ export function iabStdioEnv(
       delete result[key]
     }
   }
-  if (
-    target &&
-    name === 'matcha' &&
-    command === target.command &&
-    args.length === target.args.length &&
-    args.every((arg, index) => arg === target.args[index])
-  ) {
+  if (target && isIabStdioTarget(name, command, args)) {
     result.MATCHA_IAB_CAPABILITY = target.capability
   }
   return result

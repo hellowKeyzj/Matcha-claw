@@ -41,18 +41,29 @@ export async function printEffortCapabilities(args: string[]): Promise<void> {
     }
     resetSettingsCache()
     enableConfigs()
-    const { applySafeConfigEnvironmentVariables, applyConfigEnvironmentVariables } =
-      await import('../utils/managedEnv.js')
+    const {
+      applySafeConfigEnvironmentVariables,
+      applyConfigEnvironmentVariables,
+    } = await import('../utils/managedEnv.js')
     applySafeConfigEnvironmentVariables()
     applyConfigEnvironmentVariables()
 
     const { getAPIProvider } = await import('../utils/model/providers.js')
-    const { getBuiltinModelStrings } = await import('../utils/model/modelStrings.js')
+    const { getBuiltinModelStrings } = await import(
+      '../utils/model/modelStrings.js'
+    )
     // Capability inspection must not start Bedrock inference-profile discovery.
     setModelStrings(getBuiltinModelStrings(getAPIProvider()))
-    const { getMainLoopModel, parseUserSpecifiedModel } = await import('../utils/model/model.js')
-    const { EFFORT_LEVELS, getInitialEffortSetting, getModelEffortCapabilities, isEffortLevel, resolveAdapterEffort } =
-      await import('../utils/effort.js')
+    const { getMainLoopModel, parseUserSpecifiedModel } = await import(
+      '../utils/model/model.js'
+    )
+    const {
+      EFFORT_LEVELS,
+      getInitialEffortSetting,
+      getModelEffortCapabilities,
+      isEffortLevel,
+      resolveAdapterEffort,
+    } = await import('../utils/effort.js')
     const effortArg = eagerParseCliFlag('--effort', args)?.toLowerCase()
     if (
       (args.includes('--effort') && effortArg === undefined) ||
@@ -60,16 +71,26 @@ export async function printEffortCapabilities(args: string[]): Promise<void> {
     ) {
       throw new Error(`--effort must be one of: ${EFFORT_LEVELS.join(', ')}`)
     }
-    const model = modelArg === 'default' ? getMainLoopModel() : parseUserSpecifiedModel(modelArg)
+    const model =
+      modelArg === 'default'
+        ? getMainLoopModel()
+        : parseUserSpecifiedModel(modelArg)
     const capabilities = getModelEffortCapabilities(model)
-    const effort = resolveAdapterEffort(model, effortArg ?? getInitialEffortSetting())
-    console.log(JSON.stringify({
+    const effort = resolveAdapterEffort(
       model,
-      ...capabilities,
-      effectiveLevel: typeof effort === 'string' ? effort : null,
-    }))
+      effortArg ?? getInitialEffortSetting(),
+    )
+    console.log(
+      JSON.stringify({
+        model,
+        ...capabilities,
+        effectiveLevel: typeof effort === 'string' ? effort : null,
+      }),
+    )
   } catch (error) {
-    console.error(`Error computing effort capabilities: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(
+      `Error computing effort capabilities: ${error instanceof Error ? error.message : String(error)}`,
+    )
     process.exitCode = 1
   }
 }

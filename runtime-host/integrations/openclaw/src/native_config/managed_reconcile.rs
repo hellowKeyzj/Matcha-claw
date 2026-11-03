@@ -32,7 +32,8 @@ pub(super) const MANAGED_CHANNEL_IDS: &[&str] = &[
     "openclaw-weixin",
 ];
 
-const RETIRED_MANAGED_TARGET_IDS: &[&str] = &["discord", "whatsapp", "opencode-go"];
+const RETIRED_MANAGED_TARGET_IDS: &[&str] =
+    &["discord", "whatsapp", "opencode-go", "matchaclaw-media"];
 
 const MANAGED_SOURCES: &[(&str, &[&str])] = &[
     ("qianfan", &["qianfan"]),
@@ -55,7 +56,6 @@ const MANAGED_SOURCES: &[(&str, &[&str])] = &[
     ("task-manager", &["task-manager"]),
     ("security-core", &["security-core"]),
     ("browser-relay", &["browser-relay"]),
-    ("matchaclaw-media", &["matchaclaw-media"]),
     ("world-tools", &["world-tools"]),
 ];
 

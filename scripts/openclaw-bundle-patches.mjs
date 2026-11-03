@@ -6,8 +6,10 @@ import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.
 import { patchOpenClawSearch } from './openclaw-search-patches.mjs';
 import { patchOpenClawBoard } from './openclaw-board-patches.mjs';
 import { patchOpenClawWorldInvestigation } from './openclaw-world-investigation-patches.mjs';
+import { patchOpenClawMedia } from './openclaw-media-patches.mjs';
+import { patchOpenClawImageTasks } from './openclaw-image-task-patches.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'owned-stdin-stop']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'native-account-media', 'native-image-task-cancellation', 'owned-stdin-stop']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -1610,6 +1612,8 @@ function patchOwnedStdinStop(openclawDir) {
 \tdelete process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN;
 \tif (ownedStdinStop) {
 \t\tconst input = process.stdin;
+\t\tconst stdinOwner = Symbol.for("matchaclaw.openclaw.ownedStdin");
+\t\tinput[stdinOwner] = true;
 \t\tconst frame = Buffer.from("matchaclaw.openclaw.stop.v1\\n");
 \t\tlet offset = 0;
 \t\tconst close = () => {
@@ -1617,6 +1621,7 @@ function patchOwnedStdinStop(openclawDir) {
 \t\t\tinput.removeListener("end", close);
 \t\t\tinput.removeListener("error", close);
 \t\t\tinput.pause();
+\t\t\tdelete input[stdinOwner];
 \t\t};
 \t\tconst onData = (chunk) => {
 \t\t\tconst bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
@@ -1636,16 +1641,32 @@ function patchOwnedStdinStop(openclawDir) {
 \t\tinput.resume();
 \t}
 \ttry {`;
-  if (source.includes(cleanup) && source.includes(binding)) {
+  const execFile = locateSingleJavaScriptFile(path.join(openclawDir, 'dist'), patchId, {
+    fileNamePrefix: 'exec-',
+    markers: ['async function runCommandWithOutputEncoding(', 'const hasInput = input !== void 0;'],
+  });
+  const execSource = readText(execFile);
+  // Only the active owner stop channel is private; ordinary CLI stdin keeps its native semantics.
+  const stdin = 'hasInput ? "pipe" : process.stdin[Symbol.for("matchaclaw.openclaw.ownedStdin")] === true ? "ignore" : "inherit"';
+  const nextExecSource = execSource.includes(stdin)
+    ? execSource
+    : replaceOnce(execSource, 'hasInput ? "pipe" : "inherit"', stdin, patchId);
+  if (source.includes(cleanup) && source.includes(binding) && execSource === nextExecSource) {
     return { status: 'clean', detail: 'already patched' };
   }
-  if (source.includes('cleanupOwnedStdin') || source.includes('MATCHACLAW_OPENCLAW_OWNED_STDIN')) {
-    throw new Error(`${patchId}: incomplete or changed owned stdin stop patch`);
+  if (source.includes(cleanup)) {
+    source = replaceBlockOnce(source, '\tprocess.on("SIGUSR1", onSigusr1);\n\tconst ownedStdinStop =', '\ttry {', binding, patchId).source;
+    if (!source.includes(binding)) throw new Error(`${patchId}: changed owned stdin stop binding`);
+  } else {
+    if (source.includes('cleanupOwnedStdin') || source.includes('MATCHACLAW_OPENCLAW_OWNED_STDIN')) {
+      throw new Error(`${patchId}: incomplete or changed owned stdin stop patch`);
+    }
+    source = replaceOnce(source, '\tconst cleanupSignals = () => {', cleanup, patchId);
+    source = replaceOnce(source, '\tprocess.on("SIGUSR1", onSigusr1);\n\ttry {', binding, patchId);
   }
-  source = replaceOnce(source, '\tconst cleanupSignals = () => {', cleanup, patchId);
-  source = replaceOnce(source, '\tprocess.on("SIGUSR1", onSigusr1);\n\ttry {', binding, patchId);
   writeText(targetFile, source);
-  return { status: 'applied', detail: path.basename(targetFile) };
+  if (execSource !== nextExecSource) writeText(execFile, nextExecSource);
+  return { status: 'applied', detail: `${path.basename(targetFile)}, ${path.basename(execFile)}` };
 }
 
 const OPENCLAW_PATCHES = Object.freeze([
@@ -1692,6 +1713,14 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'native-world-investigation',
     apply: patchOpenClawWorldInvestigation,
+  },
+  {
+    id: 'native-account-media',
+    apply: patchOpenClawMedia,
+  },
+  {
+    id: 'native-image-task-cancellation',
+    apply: patchOpenClawImageTasks,
   },
   {
     id: 'owned-stdin-stop',

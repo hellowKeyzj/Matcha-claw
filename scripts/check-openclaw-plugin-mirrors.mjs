@@ -61,11 +61,6 @@ const REQUIRED_PLUGIN_MIRRORS = [
     ],
   },
   {
-    pluginId: 'matchaclaw-media',
-    dir: 'matchaclaw-media',
-    scanSdkImports: true,
-  },
-  {
     pluginId: 'world-tools',
     dir: 'world-tools',
     scanSdkImports: true,

@@ -153,6 +153,9 @@ pub struct CanonicalMedia<'facts> {
     block_index: usize,
     media_type: Option<&'facts str>,
     reference: Option<&'facts str>,
+    file_name: Option<&'facts str>,
+    size_bytes: Option<u64>,
+    resource_id: Option<&'facts str>,
     bytes: Option<usize>,
     unsafe_content_omitted: bool,
 }
@@ -172,6 +175,18 @@ impl<'facts> CanonicalMedia<'facts> {
 
     pub fn reference(self) -> Option<&'facts str> {
         self.reference
+    }
+
+    pub fn file_name(self) -> Option<&'facts str> {
+        self.file_name
+    }
+
+    pub const fn size_bytes(self) -> Option<u64> {
+        self.size_bytes
+    }
+
+    pub fn resource_id(self) -> Option<&'facts str> {
+        self.resource_id
     }
 
     pub const fn bytes(self) -> Option<usize> {
@@ -536,6 +551,9 @@ impl<'facts> CanonicalSessionView<'facts> {
                 let MessageContent::Media {
                     media_type,
                     reference,
+                    file_name,
+                    size_bytes,
+                    resource_id,
                     bytes,
                 } = block
                 else {
@@ -555,6 +573,9 @@ impl<'facts> CanonicalSessionView<'facts> {
                     block_index,
                     media_type: media_type.as_deref(),
                     reference: reference.as_deref(),
+                    file_name: file_name.as_deref(),
+                    size_bytes: *size_bytes,
+                    resource_id: resource_id.as_deref(),
                     bytes: *bytes,
                     unsafe_content_omitted,
                 });

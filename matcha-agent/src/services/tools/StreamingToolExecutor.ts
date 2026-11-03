@@ -433,9 +433,11 @@ export class StreamingToolExecutor {
     tool.promise = promise
 
     // Process more queue when done
-    void trackInvestigationOperation(promise.finally(() => {
-      void trackInvestigationOperation(this.processQueue())
-    }))
+    void trackInvestigationOperation(
+      promise.finally(() => {
+        void trackInvestigationOperation(this.processQueue())
+      }),
+    )
   }
 
   /**

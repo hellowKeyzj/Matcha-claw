@@ -38,7 +38,7 @@ export function stabilizeRefs(input: {
 }): StabilizedResult {
   const { currentRefs, currentSnapshot, currentLineMeta, prevRefs, prevMaxCounter = 0 } = input
 
-  if (!prevRefs || Object.keys(prevRefs).length === 0) {
+  if (!prevRefs) {
     // No previous state — use current refs as-is
     const maxCounter = Math.max(0, ...Object.keys(currentRefs).map((r) => parseInt(r.slice(1), 10) || 0))
     return {

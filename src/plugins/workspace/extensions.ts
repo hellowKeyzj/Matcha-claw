@@ -11,8 +11,15 @@ export interface WorkspaceLayout {
 
 export type WorkspaceCloseHandler = (signal: AbortSignal) => boolean | Promise<boolean>;
 
+export interface WorkspaceSessionPromotion {
+  readonly draftId: string;
+  readonly fromScopeKey: string;
+  readonly toScopeKey: string;
+}
+
 export interface WorkspacePageProps {
   sessionIdentity?: SessionIdentity;
+  workspaceDraftId?: string;
   visible: boolean;
   width: number;
   layout: WorkspaceLayout;
@@ -32,12 +39,15 @@ export interface WorkspacePage {
   readonly render: (props: WorkspacePageProps) => ReactNode;
   readonly mount?: 'active';
   readonly lifetime?: 'workspace';
+  readonly promoteWithDraft?: boolean;
+  readonly workspaceDraftId?: string;
   readonly onSelect?: () => void | Promise<void>;
   readonly onClose?: () => void | Promise<void>;
 }
 
 export interface WorkspaceController {
   readonly scopeKey: string;
+  readonly draftId?: string;
   readonly sessionIdentity: SessionIdentity | null;
   readonly pages: readonly WorkspacePage[];
   readonly activePageId: string | null;

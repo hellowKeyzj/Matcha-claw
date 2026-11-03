@@ -54,6 +54,7 @@ pub async fn environment(
     );
     environment.insert("CLAUDE_CONFIG_DIR".into(), path_string(runtime)?);
     environment.insert("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS".into(), "1".into());
+    environment.insert("CLAUDE_CODE_EAGER_FLUSH".into(), "1".into());
     Ok(environment)
 }
 

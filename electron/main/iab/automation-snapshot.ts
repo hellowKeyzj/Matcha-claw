@@ -5,6 +5,7 @@ import type { Frame, IabAutomationPage, Operation } from './automation-page';
 
 type RawRequest = { kind: 'a11yTree' | 'domTree'; text?: string; max?: number; scope?: string; depth?: number; deepText?: boolean; includeHrefInFilter?: boolean };
 type Row = { line: string; frame: Frame; backendNodeId?: number; role?: string; name?: string };
+type RawRows = { groups: Row[][]; scopeNotFound?: boolean; fallback?: boolean; capped?: boolean };
 export type FusedRow = Row & { placeholder?: string; nth?: number; interactive: boolean };
 type AxNode = { ignored?: boolean; backendDOMNodeId?: number; role?: { value?: string }; name?: { value?: string }; value?: { value?: string | number | boolean }; properties?: { name: string; value: { value?: string | number | boolean } }[] };
 type CapturedDocument = { frameId: string | number; scrollOffsetX?: number; scrollOffsetY?: number; nodes: { nodeType: number[]; parentIndex: number[]; nodeName: number[]; nodeValue: number[]; backendNodeId: number[]; attributes: number[][]; contentDocumentIndex?: { index: number[]; value: number[] } }; layout: { nodeIndex: number[]; bounds: number[][]; styles: number[][]; text?: number[] } };
@@ -28,9 +29,12 @@ const clean = (value: unknown, max: number) => String(value ?? '').replace(/\s+/
 export async function captureFusedRows(page: IabAutomationPage, frames: Frame[], params: BrowserSnapshotAction, operation: Operation): Promise<FusedRow[]> {
   const ax = new Map<string, AxNode>(), hitNodes: { frame: Frame; node: AxNode }[] = [];
   for (const frame of frames) {
-    await page.evaluate(`(async () => {const finite=document.getAnimations().filter(animation=>{const timing=animation.effect?.getComputedTiming();return animation.playState==='running'&&Number.isFinite(timing?.endTime)&&timing.endTime<=250});if(finite.length)await Promise.race([Promise.allSettled(finite.map(animation=>animation.finished)),new Promise(resolve=>setTimeout(resolve,250))]);return true;})()`, operation, frame);
-    const result = await page.send<{ nodes: AxNode[] }>('Accessibility.getFullAXTree', { frameId: frame.id }, operation, frame.sessionId);
-    for (const node of result.nodes) {
+    try {
+      await page.evaluate(`(async () => {try{const finite=document.getAnimations().filter(animation=>{try{const timing=animation.effect?.getComputedTiming();return animation.playState==='running'&&Number.isFinite(timing?.endTime)&&timing.endTime<=250}catch{return false}});if(finite.length)await Promise.race([Promise.allSettled(finite.map(animation=>animation.finished)),new Promise(resolve=>setTimeout(resolve,250))])}catch{}return true;})()`, operation, frame);
+    } catch (error) { checkSnapshotFailure(page, operation, error); }
+  }
+  for (const { frame, nodes } of await readAccessibilityFrames(page, frames, operation)) {
+    for (const node of nodes) {
       hitNodes.push({ frame, node });
       if (!node.ignored && node.backendDOMNodeId && !ax.has(`${frame.id}:${node.backendDOMNodeId}`)) ax.set(`${frame.id}:${node.backendDOMNodeId}`, node);
     }
@@ -58,16 +62,21 @@ export async function captureFusedRows(page: IabAutomationPage, frames: Frame[],
         for (let offset = 0; offset + 1 < values.length; offset += 2) attrs[capture.strings[values[offset]]] = capture.strings[values[offset + 1]];
         const accessibility = ax.get(`${frame.id}:${backendNodeId}`);
         const state: Record<string, string | number | boolean> = {};
-        for (const property of accessibility?.properties ?? []) if (property.value.value !== undefined) state[property.name] = property.value.value;
+        for (const property of accessibility?.properties ?? []) {
+          if (!['checked', 'selected', 'expanded', 'pressed', 'disabled', 'required', 'readonly'].includes(property.name)) continue;
+          const value = property.value.value;
+          if (value === true || value === 'true') state[property.name] = true;
+          else if (value === false || value === 'false') state[property.name] = false;
+          else if ((property.name === 'checked' || property.name === 'pressed') && value === 'mixed') state[property.name] = value;
+        }
         if (accessibility?.value?.value !== undefined) state.value = String(accessibility.value.value);
-        if (attrs.disabled !== undefined || attrs['aria-disabled'] === 'true') state.disabled = true;
-        const inputType = attrs.type ?? 'text';
+        const inputType = (attrs.type ?? 'text').toLowerCase();
         const implicitRole = tag === 'button' ? 'button' : tag === 'a' && attrs.href !== undefined ? 'link' : tag === 'select' ? 'combobox' : tag === 'textarea' ? 'textbox' : tag === 'input' ? inputType === 'checkbox' || inputType === 'radio' ? inputType : ['button', 'submit', 'reset', 'image'].includes(inputType) ? 'button' : inputType === 'range' ? 'slider' : inputType === 'hidden' ? 'generic' : 'textbox' : 'generic';
-        const role = accessibility?.role?.value || (type === 3 ? 'StaticText' : attrs.role || implicitRole);
+        const role = accessibility?.role?.value || (type === 3 ? 'StaticText' : implicitRole);
         const position = positions.get(index), computed = position === undefined ? [] : (layout.styles[position] ?? []).map((value) => capture.strings[value]);
         const bounds = position === undefined ? undefined : layout.bounds[position];
         const text = type === 3 ? capture.strings[nodes.nodeValue[index]] : position === undefined ? '' : capture.strings[layout.text?.[position] ?? -1];
-        const name = clean(accessibility?.name?.value || (type === 3 ? text : attrs['aria-label'] || attrs.title || attrs.alt), 10000);
+        const name = accessibility?.name?.value?.trim() || (type === 3 ? String(text ?? '').replace(/\s+/gu, ' ').trim() : [attrs['aria-label'], attrs.title, attrs.alt].map((value) => value?.trim()).find(Boolean) || '');
         const opacity = Number.parseFloat(computed[2] ?? '1');
         const visible = !['script', 'style', 'noscript', 'template', 'head', 'title'].includes(tag) && (computed.some((value) => value !== undefined) || bounds !== undefined || type === 3) && computed[0] !== 'none' && computed[1] !== 'hidden' && computed[1] !== 'collapse' && !(Number.isFinite(opacity) && opacity <= 0) && !(bounds && (bounds[2] <= 0 || bounds[3] <= 0) && computed[6]?.split(/\s+/u).some((value) => value !== 'visible'));
         const node: FusedNode = { frame, backendNodeId, tag, role, name, placeholder: attrs.placeholder, state, styles: computed, bounds, children: [], interactive: interactiveRoles.has(role), visible };
@@ -151,12 +160,15 @@ export async function captureFusedRows(page: IabAutomationPage, frames: Frame[],
   let textBudget = 4000;
   const seenText = new Set<string>();
   const significant = (node: FusedNode) => node.interactive || contentRoles.has(node.role) && !!node.name;
-  const pruneText = (nodes: FusedNode[], parentName?: string): FusedNode[] => nodes.filter((node) => {
-    if (node.role !== 'StaticText') return true;
-    const text = clean(node.name, 10000);
-    if (text.length < 2 || text === parentName || seenText.has(text) || textBudget <= 0) return false;
-    node.name = text.slice(0, 300); textBudget -= node.name.length; seenText.add(text); return true;
-  }).map((node) => { node.children = pruneText(node.children, significant(node) ? node.name : parentName); return node; });
+  const pruneText = (nodes: FusedNode[], parentName?: string): FusedNode[] => nodes.flatMap((node) => {
+    if (node.role !== 'StaticText') {
+      node.children = pruneText(node.children, significant(node) ? node.name : parentName);
+      return [node];
+    }
+    const text = node.name.replace(/\s+/gu, ' ').trim();
+    if (text.length < 2 || !!parentName && text === parentName || seenText.has(text) || textBudget <= 0) return [];
+    node.name = text.slice(0, 300); textBudget -= node.name.length; seenText.add(text); return [node];
+  });
   tree = pruneText(tree);
   const compact = (nodes: FusedNode[], depth: number): FusedNode[] => nodes.flatMap((node) => {
     node.children = params.depth !== undefined && depth >= params.depth ? [] : compact(node.children, depth + 1);
@@ -165,14 +177,15 @@ export async function captureFusedRows(page: IabAutomationPage, frames: Frame[],
   });
   tree = compact(tree, 0);
   const rows: FusedRow[] = [], identities = new Map<string, number>();
+  const quote = (value: string) => `"${value.replace(/"/gu, '\\"')}"`;
   const render = (node: FusedNode, depth: number) => {
     const placeholder = node.placeholder?.trim() && node.placeholder.trim() !== node.name.trim() ? node.placeholder.trim() : undefined;
     const key = `${node.frame.id}\0${node.role}\0${node.name}\0${placeholder ?? ''}`, nth = identities.get(key) ?? 0;
     identities.set(key, nth + 1);
     const marks: string[] = [];
-    for (const key of ['checked', 'selected', 'expanded', 'pressed', 'disabled']) if (node.state[key] === true || node.state[key] === 'true') marks.push(key); else if (node.state[key] === 'mixed') marks.push(`${key}=mixed`);
-    if (node.state.value) marks.push(`value=${JSON.stringify(String(node.state.value))}`);
-    rows.push({ frame: node.frame, backendNodeId: significant(node) ? node.backendNodeId : undefined, role: node.role, name: node.name, placeholder, nth, interactive: node.interactive, line: `${'  '.repeat(depth)}- ${node.role === 'StaticText' ? 'text' : node.role}${node.name ? ` ${JSON.stringify(node.name)}` : ''}${placeholder ? ` [placeholder=${JSON.stringify(placeholder)}]` : ''}${marks.length ? ` [${marks.join(' ')}]` : ''}` });
+    for (const key of ['checked', 'selected', 'expanded', 'pressed', 'disabled']) if (node.state[key] === true) marks.push(key); else if (key === 'checked' && node.state[key] === 'mixed') marks.push(`${key}=mixed`);
+    if (node.state.value) marks.push(`value=${quote(String(node.state.value))}`);
+    rows.push({ frame: node.frame, backendNodeId: significant(node) ? node.backendNodeId : undefined, role: node.role, name: node.name, placeholder, nth, interactive: node.interactive, line: `${'  '.repeat(depth)}- ${node.role === 'StaticText' ? 'text' : node.role}${node.name ? ` ${quote(node.name)}` : ''}${placeholder ? ` [placeholder=${quote(placeholder)}]` : ''}${marks.length ? ` [${marks.join(' ')}]` : ''}` });
     for (const child of node.children) render(child, depth + 1);
   };
   for (const node of tree) render(node, 0);
@@ -282,25 +295,26 @@ function checkSnapshotFailure(page: IabAutomationPage, operation: Operation, err
 }
 
 export async function readRawTree(page: IabAutomationPage, request: RawRequest, operation: Operation): Promise<IabJsonObject> {
-  const maximum = request.max ?? (request.kind === 'a11yTree' ? 4000 : 2000);
-  if (!Number.isInteger(maximum) || maximum < 1 || (request.depth !== undefined && (!Number.isInteger(request.depth) || request.depth < 1))) throw iabError('IAB_TREE_LIMIT_INVALID', 'Tree max and depth must be positive integers');
+  const maximum = request.max && request.max > 0 ? Math.floor(request.max) : request.kind === 'a11yTree' ? 4000 : 2000;
+  request = { ...request, max: maximum, depth: request.depth && request.depth > 0 ? Math.floor(request.depth) : 24 };
   const frames = await page.refreshFrames(operation, false);
   const failures: string[] = [];
-  const groups = request.kind === 'a11yTree' ? await accessibilityRows(page, frames, request, operation) : await domRows(page, frames, request, operation, failures);
-  const count = groups.reduce((sum, group) => sum + group.length, 0);
-  const truncated = count > maximum;
-  const allRows = groups.flat();
-  const head = Math.ceil(maximum / 2), tail = Math.floor(maximum / 2);
-  const rows = truncated ? [...allRows.slice(0, head), ...(tail ? allRows.slice(-tail) : [])] : allRows;
+  const raw: RawRows = request.kind === 'a11yTree' ? { groups: await accessibilityRows(page, frames, request, operation) } : await domRows(page, frames, request, operation, failures);
+  const groups = raw.groups, count = groups.reduce((sum, group) => sum + group.length, 0);
+  const truncated = count > maximum || !!raw.capped;
+  let rows = groups.flat(), headCount = rows.length, tailCount = 0;
+  if (count > maximum) {
+    const head = Math.floor(maximum / 2), tail = maximum - head, first: Row[] = [], last: Row[] = [];
+    let start = 0, end = groups.length - 1;
+    while (start < groups.length && first.length + groups[start].length <= head) first.push(...groups[start++]);
+    while (end >= start && last.length + groups[end].length <= tail) last.unshift(...groups[end--]);
+    rows = [...first, ...last]; headCount = first.length; tailCount = last.length;
+  }
   const refs: IabJsonObject = {};
-  const lines = rows.map((row) => {
-    if (!row.backendNodeId) return row.line;
-    const ref = page.registerBackendRef(row.frame, row.backendNodeId);
-    refs[ref] = { backendNodeId: row.backendNodeId, frameId: row.frame.id, ...(row.role ? { role: row.role } : {}), ...(row.name ? { name: row.name } : {}) };
-    return `${row.line} [ref=${ref}] [frameId=${row.frame.id}]`;
-  });
-  if (truncated) lines.push(`(truncated: ${count} matched lines, showing first and last ${rows.length}; pass a larger max to widen)`);
-  return { tree: lines.join('\n'), count: rows.length, truncated, refs, ...(failures.length ? { degraded: true, degradedReason: failures.join('; ') } : {}) };
+  const lines = rows.map((row) => `${row.line}${row.backendNodeId ? ` [frameId=${row.frame.id}]` : ''}`);
+  if (count > maximum) lines.push(`(truncated: ${count}${raw.fallback ? '' : ' matched'} lines, showing first ${headCount} + last ${tailCount}; pass a larger max to widen)`);
+  if (raw.scopeNotFound) lines.push(`dom: scope not found: ${request.scope ?? null}`);
+  return { tree: lines.join('\n'), count: rows.length + (raw.fallback && count > maximum ? 1 : 0), truncated, refs, ...(failures.length ? { degraded: true, degradedReason: failures.join('; ') } : {}) };
 }
 
 export async function degradedSnapshot(page: IabAutomationPage, params: BrowserSnapshotAction, reason: string, operation: Operation): Promise<IabJsonObject> {
@@ -309,32 +323,53 @@ export async function degradedSnapshot(page: IabAutomationPage, params: BrowserS
     try {
       const tree = await readRawTree(page, { kind, max: params.limit ?? 500 }, operation);
       if (!tree.count || !String(tree.tree).trim()) { failures.push(`${kind} returned no nodes`); continue; }
-      const recovery = 'Use returned refs, or backendNodeId from [dom=N] with its frameId. Take a fresh snapshot after navigation.';
+      const recovery = 'Use backendNodeId from [dom=N] with its frameId. Take a fresh snapshot after navigation.';
       const notice = `[degraded snapshot: ${kind}; actionKey=backendNodeId]\nReason: ${reason}\n${recovery}\n\n`;
       const text = notice + String(tree.tree), snapshot = params.maxChars === undefined ? text : text.slice(0, params.maxChars);
       const refs = tree.refs as IabJsonObject;
-      const visible = new Set([...snapshot.matchAll(/\[ref=(e\d+)\]/gu)].map((match) => match[1]));
-      for (const ref of Object.keys(refs)) if (!visible.has(ref)) delete refs[ref];
       return { snapshot, refs, mode: 'degraded', degraded: true, degradedReason: reason, source: kind, actionKey: 'backendNodeId', count: tree.count, truncated: !!tree.truncated || text.length !== snapshot.length, recovery };
     } catch (error) {
-      operation.signal.throwIfAborted();
-      (operation.assertCurrent ?? page.assertCurrent)?.();
+      checkSnapshotFailure(page, operation, error);
       failures.push(`${kind}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   throw iabError('IAB_SNAPSHOT_FAILED', `Snapshot failed: ${reason}. Raw-tree recovery failed (${failures.join('; ')})`);
 }
 
+async function readAccessibilityFrames(page: IabAutomationPage, frames: Frame[], operation: Operation): Promise<{ frame: Frame; nodes: any[] }[]> {
+  const results: { frame: Frame; nodes: any[] }[] = [];
+  const captures = await Promise.allSettled(frames.map((frame) => page.send<any>('Accessibility.getFullAXTree', { frameId: frame.id }, operation, frame.sessionId)));
+  for (const [index, capture] of captures.entries()) {
+    if (capture.status === 'fulfilled') results.push({ frame: frames[index], nodes: capture.value.nodes ?? [] });
+    else { checkSnapshotFailure(page, operation, capture.reason); if (frames.length <= 1) throw capture.reason; }
+  }
+  if (!results.some((result) => result.nodes.length)) {
+    const frame = frames.find((candidate) => !candidate.parentId) ?? frames[0];
+    if (frame) {
+      const response = await page.send<any>('Accessibility.getFullAXTree', undefined, operation, frame.sessionId);
+      const nodes: any[] = response.nodes ?? [], byId = new Map(nodes.map((node) => [node.nodeId, node]));
+      const children = new Set(nodes.flatMap((node) => node.childIds ?? [])), resolved = new Map<Frame, any[]>();
+      const visit = (node: any, inherited: Frame) => {
+        const owner = frames.find((candidate) => candidate.id === node.frameId && candidate.sessionId === frame.sessionId) ?? inherited;
+        const entries = resolved.get(owner) ?? []; entries.push(node); resolved.set(owner, entries);
+        for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) visit(child, owner); }
+      };
+      for (const node of nodes) if (!children.has(node.nodeId)) visit(node, frame);
+      return [...resolved].map(([frame, nodes]) => ({ frame, nodes }));
+    }
+  }
+  return results;
+}
+
 async function accessibilityRows(page: IabAutomationPage, frames: Frame[], request: RawRequest, operation: Operation): Promise<Row[][]> {
   const groups: Row[][] = [], keyword = request.text?.toLowerCase();
-  for (const frame of frames) {
-    const response = await page.send<any>('Accessibility.getFullAXTree', { frameId: frame.id }, operation, frame.sessionId);
-    const nodes: any[] = response.nodes ?? [], byId = new Map(nodes.map((node) => [node.nodeId, node]));
+  for (const { frame, nodes } of await readAccessibilityFrames(page, frames, operation)) {
+    const byId = new Map(nodes.map((node) => [node.nodeId, node]));
     const children = new Set(nodes.flatMap((node) => node.childIds ?? []));
     const grouped = new Map<string, Row[]>();
     const visit = (node: any, depth: number, parent?: Row) => {
       let row: Row | undefined;
-      const role = clean(node.role?.value, 80), name = clean(node.name?.value, 80), value = clean(node.value?.value, 40);
+      const role = typeof node.role?.value === 'string' && node.role.value ? node.role.value : 'unknown', name = clean(node.name?.value, 80), value = typeof node.value?.value === 'string' ? clean(node.value.value, 40) : '';
       if (!node.ignored && role !== 'InlineTextBox' && role !== 'none' && (name || value || node.backendDOMNodeId)) {
         const marks: string[] = [];
         for (const property of node.properties ?? []) {
@@ -342,10 +377,17 @@ async function accessibilityRows(page: IabAutomationPage, frames: Frame[], reque
           if (['disabled', 'hidden', 'invisible', 'offscreen', 'focusable', 'focused', 'editable', 'readonly', 'required', 'modal', 'busy', 'selected'].includes(key) && value === true) marks.push(key);
           else if (['checked', 'pressed'].includes(key) && (value === true || value === 'mixed')) marks.push(value === true ? key : `${key}=mixed`);
           else if (key === 'expanded' && typeof value === 'boolean') marks.push(value ? 'expanded' : 'collapsed');
-          else if (['hasPopup', 'popup', 'current', 'invalid', 'level', 'placeholder', 'errorMessage'].includes(key) && value !== false && value !== 'false' && value !== 'none' && value !== undefined) marks.push(`${key}=${clean(value, 40)}`);
+          else if ((key === 'hasPopup' || key === 'popup') && !marks.some((mark) => mark.startsWith('hasPopup'))) {
+            if (value === true) marks.push('hasPopup');
+            else if (typeof value === 'string' && value && value !== 'false' && value !== 'none') marks.push(`hasPopup=${value}`);
+          } else if ((key === 'current' || key === 'invalid') && typeof value === 'string' && value && value !== 'false') marks.push(value === 'true' ? key : `${key}=${value}`);
+          else if (key === 'errorMessage' && typeof value === 'string' && value.trim()) marks.push(`error="${clean(value, 40)}"`);
+          else if (key === 'placeholder' && typeof value === 'string' && value.trim()) marks.push(`placeholder="${clean(value, 30)}"`);
+          else if (['level', 'valueNow', 'valueMin', 'valueMax', 'positionInSet', 'setSize'].includes(key) && typeof value === 'number') marks.push(`${key === 'positionInSet' ? 'pos' : key}=${value}`);
+          else if (key === 'orientation' && typeof value === 'string' && value) marks.push(`orientation=${value}`);
         }
         const backendNodeId = typeof node.backendDOMNodeId === 'number' && node.backendDOMNodeId > 0 ? node.backendDOMNodeId : undefined;
-        row = { frame, backendNodeId, role, name, line: `${'  '.repeat(depth)}- ${role || 'unknown'}${name ? ` ${JSON.stringify(name)}` : ''}${value ? ` value=${JSON.stringify(value)}` : ''}${backendNodeId ? ` [dom=${backendNodeId}]` : ''}${marks.length ? ` [${marks.join(' ')}]` : ''}` };
+        row = { frame, backendNodeId, role, name, line: `${'  '.repeat(depth)}- ${role}${name ? ` "${name}"` : ''}${value ? ` value="${value}"` : ''}${backendNodeId ? ` [dom=${backendNodeId}]` : ''}${marks.length ? ` [${marks.join(' ')}]` : ''}` };
         if (!keyword || row.line.toLowerCase().includes(keyword)) {
           if (keyword && parent) {
             let group = grouped.get(parent.line);
@@ -361,16 +403,19 @@ async function accessibilityRows(page: IabAutomationPage, frames: Frame[], reque
   return groups;
 }
 
-async function liveDomRows(page: IabAutomationPage, frame: Frame, request: RawRequest, operation: Operation): Promise<Row[][]> {
+async function liveDomRows(page: IabAutomationPage, frame: Frame, request: RawRequest, operation: Operation): Promise<RawRows> {
   const objectId = await page.evaluate(`(() => {
-    const root=${request.scope ? `document.querySelector(${JSON.stringify(request.scope)})` : 'document.body || document.documentElement'},elements=[];
-    const skip=new Set(['script','style','noscript','template','link','meta','path','defs']);
-    const walk=(element,depth)=>{if(!element||depth>${request.depth ?? 24}||elements.length>=${(request.max ?? 2000) * 4}||skip.has(element.localName))return;elements.push(element);for(const child of element.children)walk(child,depth+1)};
-    walk(root,0);return elements;
+    const root=${request.scope ? `document.querySelector(${JSON.stringify(request.scope)})` : 'document.body'},elements=[],depths=[];
+    const skip=new Set(['script','style','noscript','template','link','meta','path','defs']);let capped=false;
+    const walk=(element,depth)=>{if(capped)return;if(elements.length>=${(request.max ?? 2000) * 4}){capped=true;return}if(depth>${request.depth ?? 24}||skip.has(element.localName))return;elements.push(element);depths.push(depth);for(const child of element.children)walk(child,depth+1)};
+    if(root)walk(root,0);elements.depths=depths.join(',');elements.capped=capped;elements.scopeNotFound=!root;return elements;
   })()`, operation, frame, false);
-  if (!objectId) return [];
+  if (!objectId) return { groups: [], fallback: true };
   const properties = await page.send<any>('Runtime.getProperties', { objectId, ownProperties: true }, operation, frame.sessionId);
-  const groups: Row[][] = [], keyword = request.text?.toLowerCase();
+  const depths = String(properties.result?.find((property: any) => property.name === 'depths')?.value?.value ?? '').split(',').map(Number);
+  const capped = properties.result?.find((property: any) => property.name === 'capped')?.value?.value === true;
+  const scopeNotFound = properties.result?.find((property: any) => property.name === 'scopeNotFound')?.value?.value === true;
+  const groups: Row[][] = [];
   for (const property of properties.result ?? []) {
     if (!/^\d+$/u.test(property.name) || !property.value?.objectId) continue;
     const element = { frame, objectId: property.value.objectId };
@@ -383,109 +428,144 @@ async function liveDomRows(page: IabAutomationPage, frame: Frame, request: RawRe
       const clickable=(tag==='a'&&this.hasAttribute('href'))||['button','select','summary','label'].includes(tag)||(tag==='input'&&type!=='hidden')||this.hasAttribute('onclick')||style.cursor==='pointer';
       const editable=tag==='textarea'||this.isContentEditable||(tag==='input'&&!nonText.has(type));
       const hidden=rect.width<=0||rect.height<=0||style.visibility==='hidden'||style.display==='none',off=!hidden&&(rect.bottom<0||rect.top>innerHeight||rect.right<0||rect.left>innerWidth);
-      let depth=0,parent=this;while(parent.parentElement&&parent.parentElement!==document.body){depth++;parent=parent.parentElement;}
       let marks=hidden?' (hidden)':off?' (offscreen)':'';
       if(this.disabled||attrs['aria-disabled']==='true')marks+=' [disabled]';if(editable)marks+=' [edit]';if(clickable)marks+=' [click]';
-      if(tag==='input'&&type)marks+=' [type='+type+']';if(tag==='a'&&attrs.href)marks+=' href='+JSON.stringify(attrs.href.slice(0,80));if(attrs.target==='_blank')marks+=' [newtab]';
-      const line='  '.repeat(depth)+'<'+tag+(attrs.id?'#'+attrs.id.slice(0,40):'')+[...this.classList].slice(0,2).map(name=>'.'+name.slice(0,30)).join('')+'>'+(own?' '+JSON.stringify(own):'');
-      const values=[own,attrs['aria-label'],attrs.title,attrs.placeholder,attrs.value,attrs.alt,args[0]?clean(this.textContent,500):'',args[1]?attrs.href:''];
-      return {line,marks,name:own,role:attrs.role||tag,values};
-    `, [!!request.deepText, !!request.includeHrefInFilter], operation);
-    if (keyword && !data.values.some((value: unknown) => typeof value === 'string' && value.toLowerCase().includes(keyword))) continue;
+      if(tag==='input'&&type)marks+=' [type='+type+']';if(tag==='a'&&attrs.href)marks+=' href="'+attrs.href.slice(0,80)+'"';if(tag==='a'&&attrs.target==='_blank')marks+=' [newtab]';
+      const line='  '.repeat(args[0])+'<'+tag+(attrs.id?'#'+attrs.id.slice(0,40):'')+[...this.classList].slice(0,2).map(name=>'.'+name.slice(0,30)).join('')+'>'+(own?' "'+own+'"':'');
+      return {line,marks,name:own,role:attrs.role||tag};
+    `, [depths[Number(property.name)] ?? 0], operation);
     const description = await page.send<any>('DOM.describeNode', { objectId: element.objectId }, operation, frame.sessionId);
     const backendNodeId = description.node?.backendNodeId;
     groups.push([{ frame, backendNodeId, name: data.name, role: data.role, line: `${data.line}${backendNodeId ? ` [dom=${backendNodeId}]` : ''}${data.marks}` }]);
   }
-  return groups;
+  return { groups, fallback: true, capped, scopeNotFound };
 }
 
-async function domRows(page: IabAutomationPage, frames: Frame[], request: RawRequest, operation: Operation, failures: string[]): Promise<Row[][]> {
+async function domRows(page: IabAutomationPage, frames: Frame[], request: RawRequest, operation: Operation, failures: string[]): Promise<RawRows> {
+  type DomNode = { frame: Frame; backendNodeId: number; type: number; tag: string; attrs: Record<string, string>; text: string; styles: string[]; bounds?: number[]; parent?: DomNode; children: DomNode[] };
   const groups: Row[][] = [], keyword = request.text?.toLowerCase();
   const skip = new Set(['script', 'style', 'noscript', 'template', 'link', 'meta', 'base', 'head', 'title', 'path', 'defs']);
   const nonText = new Set(['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file', 'range', 'color', 'image']);
-  let scope = request.scope;
-  let scopedFrames = frames;
-  while (scope?.includes('>>>')) {
-    const split = scope.indexOf('>>>'), host = scope.slice(0, split).trim();
-    let child: Frame | undefined;
-    for (const frame of scopedFrames) {
-      const objectId = await page.evaluate(`document.querySelector(${JSON.stringify(host)})`, operation, frame, false);
-      if (!objectId) continue;
-      const description = await page.send<any>('DOM.describeNode', { objectId }, operation, frame.sessionId);
-      await page.send('Runtime.releaseObject', { objectId }, operation, frame.sessionId);
-      child = frames.find((candidate) => candidate.id === description.node?.frameId);
-      if (child) break;
-    }
-    if (!child) return [];
-    scopedFrames = [child]; scope = scope.slice(split + 3).trim();
-  }
-  for (const sessionId of new Set(scopedFrames.map((frame) => frame.sessionId))) {
-    let capture: any;
-    try { capture = await page.send<any>('DOMSnapshot.captureSnapshot', { computedStyles: ['display', 'visibility', 'cursor'], includeDOMRects: true, includePaintOrder: true, includeUserAgentShadowTree: true }, operation, sessionId); }
-    catch (error) { operation.signal.throwIfAborted(); (operation.assertCurrent ?? page.assertCurrent)?.(); failures.push(error instanceof Error ? error.message : String(error)); capture = undefined; }
-    if (!capture?.documents?.length || !capture.strings) {
-      for (const frame of scopedFrames.filter((candidate) => candidate.sessionId === sessionId)) groups.push(...await liveDomRows(page, frame, { ...request, scope }, operation));
-      continue;
-    }
-    const strings: string[] = capture.strings ?? [];
-    for (const document of capture.documents ?? []) {
-      const frame = scopedFrames.find((frame) => frame.id === (typeof document.frameId === 'number' ? strings[document.frameId] : document.frameId) && frame.sessionId === sessionId);
+  const nodes: DomNode[] = [], byBackend = new Map<string, DomNode>(), parents = new Map<DomNode, number>(), missing = new Set<string | undefined>();
+  const key = (sessionId: string | undefined, backendNodeId: number) => `${sessionId ?? ''}:${backendNodeId}`;
+  for (const sessionId of new Set(frames.map((frame) => frame.sessionId))) {
+    let capture: CapturedSnapshot | undefined;
+    try { capture = await page.send<CapturedSnapshot>('DOMSnapshot.captureSnapshot', { computedStyles: ['display', 'visibility', 'cursor'], includeDOMRects: true, includePaintOrder: true, includeUserAgentShadowTree: true }, operation, sessionId); }
+    catch (error) { checkSnapshotFailure(page, operation, error); failures.push(error instanceof Error ? error.message : String(error)); }
+    if (!capture?.documents?.some((document) => document.nodes?.nodeType?.length) || !capture.strings) { missing.add(sessionId); continue; }
+    const parentMap = await normalizeSnapshotDocuments(page, capture, operation, sessionId), strings = capture.strings;
+    for (const document of capture.documents) {
+      const frameId = typeof document.frameId === 'number' ? strings[document.frameId] : document.frameId;
+      const frame = frames.find((candidate) => candidate.id === frameId && candidate.sessionId === sessionId);
       if (!frame) continue;
-      const nodes = document.nodes, layout = document.layout;
-      if (!nodes?.nodeType) continue;
-      const children = new Map<number, number[]>(), attributes = new Map<number, Record<string, string>>();
-      for (let index = 0; index < nodes.nodeType.length; index++) {
-        const parent = nodes.parentIndex[index], siblings = children.get(parent) ?? [];
-        siblings.push(index); children.set(parent, siblings);
-        const values: number[] = nodes.attributes[index] ?? [], attrs: Record<string, string> = {};
+      const raw = document.nodes, layout = document.layout, positions = new Map((layout?.nodeIndex ?? []).map((index, offset) => [index, offset]));
+      for (let index = 0; index < raw.nodeType.length; index++) {
+        const backendNodeId = raw.backendNodeId[index];
+        if (typeof backendNodeId !== 'number') continue;
+        const attrs: Record<string, string> = {}, values = raw.attributes[index] ?? [];
         for (let offset = 0; offset + 1 < values.length; offset += 2) attrs[strings[values[offset]]] = strings[values[offset + 1]];
-        attributes.set(index, attrs);
+        const position = positions.get(index), type = raw.nodeType[index];
+        const textIndex = type === 3 ? raw.nodeValue[index] : position === undefined ? -1 : layout.text?.[position] ?? -1;
+        const node: DomNode = { frame, backendNodeId, type, tag: type === 1 ? (strings[raw.nodeName[index]] ?? '').toLowerCase() : '', attrs, text: strings[textIndex] ?? '', styles: position === undefined ? [] : (layout.styles[position] ?? []).map((value) => strings[value]), bounds: position === undefined ? undefined : layout.bounds[position], children: [] };
+        nodes.push(node); byBackend.set(key(sessionId, backendNodeId), node);
+        const parent = parentMap.get(backendNodeId);
+        if (parent !== undefined) parents.set(node, parent);
       }
-      const layoutIndex = new Map<number, number>((layout?.nodeIndex ?? []).map((node: number, index: number) => [node, index]));
-      const text = (index: number, deep: boolean): string => {
-        let value = '';
-        for (const child of children.get(index) ?? []) {
-          if (nodes.nodeType[child] === 3) value += strings[nodes.nodeValue[child]] ?? '';
-          else if (deep && value.length < 500) value += text(child, true);
-        }
-        return clean(value, deep ? 500 : 60);
-      };
-      let root = nodes.nodeName.findIndex((name: number) => strings[name]?.toLowerCase() === 'body');
-      if (scope) {
-        const selector = JSON.stringify(scope);
-        const objectId = await page.evaluate(`document.querySelector(${selector})`, operation, frame, false);
-        if (!objectId) continue;
-        const description = await page.send<any>('DOM.describeNode', { objectId }, operation, sessionId);
-        root = nodes.backendNodeId.indexOf(description.node?.backendNodeId);
-        await page.send('Runtime.releaseObject', { objectId }, operation, sessionId);
-      }
-      if (root < 0) continue;
-      const viewport = await page.evaluate('({width:innerWidth,height:innerHeight})', operation, frame);
-      const grouped = new Map<number, Row[]>();
-      const visit = (index: number, depth: number, parent?: Row) => {
-        const tag = strings[nodes.nodeName[index]]?.toLowerCase();
-        if (nodes.nodeType[index] !== 1 || !tag || skip.has(tag) || (!keyword && depth > (request.depth ?? 24))) return;
-        const attrs = attributes.get(index)!, type = (attrs.type ?? '').toLowerCase(), position = layoutIndex.get(index);
-        const bounds = position === undefined ? undefined : layout.bounds?.[position], style = position === undefined ? [] : (layout.styles?.[position] ?? []).map((value: number) => strings[value]);
-        const hidden = !bounds || bounds[2] <= 0 || bounds[3] <= 0 || style[0] === 'none' || style[1] === 'hidden';
-        const offscreen = !hidden && (bounds[0] + bounds[2] < (document.scrollOffsetX ?? 0) || bounds[1] + bounds[3] < (document.scrollOffsetY ?? 0) || bounds[0] > (document.scrollOffsetX ?? 0) + viewport.width || bounds[1] > (document.scrollOffsetY ?? 0) + viewport.height);
-        const clickable = (tag === 'a' && attrs.href !== undefined) || ['button', 'select', 'summary', 'label'].includes(tag) || (tag === 'input' && type !== 'hidden') || style[2] === 'pointer' || attrs.role === 'button';
-        const editable = tag === 'textarea' || (tag === 'input' && !nonText.has(type)) || (attrs.contenteditable !== undefined && attrs.contenteditable !== 'false');
-        const own = text(index, false), backendNodeId = nodes.backendNodeId[index];
-        const marks = ` [dom=${backendNodeId}]${hidden ? ' (hidden)' : offscreen ? ' (offscreen)' : ''}${attrs.disabled !== undefined || attrs['aria-disabled'] === 'true' ? ' [disabled]' : ''}${editable ? ' [edit]' : ''}${clickable ? ' [click]' : ''}${tag === 'input' && type ? ` [type=${type}]` : ''}${tag === 'a' && attrs.href ? ` href=${JSON.stringify(attrs.href.slice(0, 80))}` : ''}${attrs.target === '_blank' ? ' [newtab]' : ''}`;
-        const row: Row = { frame, backendNodeId, role: attrs.role || tag, name: own, line: `${'  '.repeat(depth)}<${tag}${attrs.id ? `#${attrs.id.slice(0, 40)}` : ''}${(attrs.class ?? '').split(/\s+/u).filter(Boolean).slice(0, 2).map((name) => `.${name.slice(0, 30)}`).join('')}>${own ? ` ${JSON.stringify(own)}` : ''}${marks}` };
-        const matches = !keyword || [own, attrs['aria-label'], attrs.title, attrs.placeholder, attrs.value, attrs.alt, request.deepText ? text(index, true) : '', request.includeHrefInFilter ? attrs.href : ''].some((value) => value?.toLowerCase().includes(keyword));
-        if (matches) {
-          if (keyword && parent && parent.backendNodeId !== backendNodeId) {
-            let group = grouped.get(parent.backendNodeId!);
-            if (!group) { group = [parent]; grouped.set(parent.backendNodeId!, group); groups.push(group); }
-            group.push(row);
-          } else groups.push([row]);
-        }
-        for (const child of children.get(index) ?? []) visit(child, depth + 1, clickable || editable ? row : parent);
-      };
-      visit(root, 0);
     }
   }
-  return groups;
+  for (const node of nodes) {
+    const parent = parents.get(node);
+    if (parent !== undefined) node.parent = byBackend.get(key(node.frame.sessionId, parent));
+    if (!node.parent && node.type === 1 && node.frame.parentId) {
+      const parentFrame = frames.find((frame) => frame.id === node.frame.parentId);
+      if (parentFrame && node.frame.sessionId !== parentFrame.sessionId) {
+        const owner = await page.send<{ backendNodeId: number }>('DOM.getFrameOwner', { frameId: node.frame.id }, operation, parentFrame.sessionId);
+        node.parent = byBackend.get(key(parentFrame.sessionId, owner.backendNodeId));
+        if (node.parent) {
+          const ownerBounds = node.parent.bounds, scroll = await page.evaluate('({x:scrollX,y:scrollY})', operation, node.frame);
+          for (const child of nodes.filter((candidate) => candidate.frame.sessionId === node.frame.sessionId)) if (child.bounds) child.bounds = [child.bounds[0] + (ownerBounds?.[0] ?? 0) - scroll.x, child.bounds[1] + (ownerBounds?.[1] ?? 0) - scroll.y, child.bounds[2], child.bounds[3]];
+        }
+      }
+    }
+    node.parent?.children.push(node);
+  }
+  let scope = request.scope, scopedFrames = frames;
+  try {
+    while (scope?.includes('>>>')) {
+      const split = scope.indexOf('>>>'), host = scope.slice(0, split).trim();
+      let child: Frame | undefined;
+      for (const frame of scopedFrames) {
+        const objectId = await page.evaluate(`document.querySelector(${JSON.stringify(host)})`, operation, frame, false);
+        if (!objectId) continue;
+        const description = await page.send<any>('DOM.describeNode', { objectId }, operation, frame.sessionId);
+        await page.send('Runtime.releaseObject', { objectId }, operation, frame.sessionId);
+        child = frames.find((candidate) => candidate.id === description.node?.frameId);
+        if (child) break;
+      }
+      if (!child) return { groups: [], scopeNotFound: true };
+      scopedFrames = [child]; scope = scope.slice(split + 3).trim();
+    }
+  } catch (error) { checkSnapshotFailure(page, operation, error); return { groups: [], scopeNotFound: true }; }
+  if (!nodes.length) {
+    const frame = scopedFrames.find((candidate) => !candidate.parentId) ?? scopedFrames[0];
+    return frame ? liveDomRows(page, frame, { ...request, scope }, operation) : { groups: [], fallback: true };
+  }
+  let roots = nodes.filter((node) => node.type === 1 && node.tag === 'body').slice(0, 1);
+  if (!roots.length) roots = nodes.filter((node) => node.type === 1 && !node.parent);
+  if (scope) {
+    roots = [];
+    for (const frame of scopedFrames) {
+      try {
+        const objectId = await page.evaluate(`document.querySelector(${JSON.stringify(scope)})`, operation, frame, false);
+        if (!objectId) continue;
+        const description = await page.send<any>('DOM.describeNode', { objectId }, operation, frame.sessionId);
+        await page.send('Runtime.releaseObject', { objectId }, operation, frame.sessionId);
+        const node = byBackend.get(key(frame.sessionId, description.node?.backendNodeId));
+        if (node) { roots = [node]; break; }
+      } catch (error) { checkSnapshotFailure(page, operation, error); }
+    }
+    if (!roots.length) return { groups: [], scopeNotFound: true };
+  } else if (request.scope?.includes('>>>')) roots = nodes.filter((node) => node.type === 1 && node.tag === 'body' && node.frame.id === scopedFrames[0]?.id).slice(0, 1);
+  let viewport: { width: number; height: number } | undefined;
+  try {
+    const metrics = await page.send<any>('Page.getLayoutMetrics', undefined, operation), current = metrics.cssVisualViewport ?? metrics.cssLayoutViewport;
+    if (current?.clientWidth > 0 && current?.clientHeight > 0) viewport = { width: current.clientWidth, height: current.clientHeight };
+  } catch (error) { checkSnapshotFailure(page, operation, error); }
+  const text = (node: DomNode, deep: boolean): string => {
+    let value = '';
+    const visit = (node: DomNode) => {
+      for (const child of node.children) {
+        if (deep && value.length >= 500) break;
+        if (child.type === 3) value += child.text;
+        else if (deep && child.type === 1) visit(child);
+      }
+    };
+    visit(node); return clean(value, deep ? 500 : 60);
+  };
+  const grouped = new Map<DomNode, Row[]>();
+  const visit = (node: DomNode, depth: number, parent?: { node: DomNode; row: Row }) => {
+    const { frame, tag, attrs, styles, bounds, backendNodeId } = node;
+    if (node.type !== 1 || !tag || skip.has(tag) || (!keyword && depth > (request.depth ?? 24))) return;
+    const type = (attrs.type ?? '').toLowerCase();
+    const hidden = !bounds || bounds[2] <= 0 || bounds[3] <= 0 || styles[0] === 'none' || styles[1] === 'hidden';
+    const offscreen = !hidden && !!viewport && (bounds![0] + bounds![2] < 0 || bounds![1] + bounds![3] < 0 || bounds![0] > viewport.width || bounds![1] > viewport.height);
+    const clickable = (tag === 'a' && attrs.href !== undefined) || ['button', 'select', 'summary', 'label'].includes(tag) || (tag === 'input' && type !== 'hidden') || styles[2] === 'pointer' || attrs.role === 'button';
+    const editable = tag === 'textarea' || (tag === 'input' && !nonText.has(type)) || (attrs.contenteditable !== undefined && attrs.contenteditable !== 'false');
+    const own = text(node, false);
+    const marks = ` [dom=${backendNodeId}]${hidden ? ' (hidden)' : offscreen ? ' (offscreen)' : ''}${attrs.disabled !== undefined || attrs['aria-disabled'] === 'true' ? ' [disabled]' : ''}${editable ? ' [edit]' : ''}${clickable ? ' [click]' : ''}${tag === 'input' && type ? ` [type=${type}]` : ''}${tag === 'a' && attrs.href ? ` href="${attrs.href.slice(0, 80)}"` : ''}${attrs.target === '_blank' ? ' [newtab]' : ''}`;
+    const row: Row = { frame, backendNodeId, role: attrs.role || tag, name: own, line: `${'  '.repeat(depth)}<${tag}${attrs.id ? `#${attrs.id.slice(0, 40)}` : ''}${(attrs.class ?? '').split(/\s+/u).filter(Boolean).slice(0, 2).map((name) => `.${name.slice(0, 30)}`).join('')}>${own ? ` "${own}"` : ''}${marks}` };
+    const matches = !keyword || [own, attrs['aria-label'], attrs.title, attrs.placeholder, attrs.value, attrs.alt, request.deepText ? text(node, true) : '', request.includeHrefInFilter ? attrs.href : ''].some((value) => value?.toLowerCase().includes(keyword));
+    if (matches) {
+      if (keyword && parent && parent.node !== node) {
+        let group = grouped.get(parent.node);
+        if (!group) { group = [parent.row]; grouped.set(parent.node, group); groups.push(group); }
+        group.push(row);
+      } else groups.push([row]);
+    }
+    for (const child of node.children) visit(child, depth + 1, clickable || editable ? { node, row } : parent);
+  };
+  for (const root of roots) visit(root, 0);
+  const missingRoot = scopedFrames.find((frame) => missing.has(frame.sessionId) && !frame.parentId);
+  if (missingRoot) return liveDomRows(page, missingRoot, { ...request, scope }, operation);
+  return { groups };
 }
