@@ -16,6 +16,7 @@ const MAX_BYTES: usize = 1024 * 1024;
 enum Family {
     Team,
     Wiki,
+    Maintenance,
 }
 
 impl Family {
@@ -23,6 +24,7 @@ impl Family {
         match self {
             Self::Team => "/internal/team/mcp",
             Self::Wiki => "/internal/wiki/mcp",
+            Self::Maintenance => "/internal/maintenance/mcp",
         }
     }
 
@@ -30,6 +32,7 @@ impl Family {
         match self {
             Self::Team => "team-mcp-local",
             Self::Wiki => "wiki-mcp-local",
+            Self::Maintenance => "maintenance-mcp-local",
         }
     }
 
@@ -37,6 +40,7 @@ impl Family {
         match self {
             Self::Team => "team.mcp",
             Self::Wiki => "wiki.mcp",
+            Self::Maintenance => "maintenance.mcp",
         }
     }
 }

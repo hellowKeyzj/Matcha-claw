@@ -1,4 +1,5 @@
 pub(crate) mod adapters;
+pub(crate) use operation::approval;
 pub mod assembler;
 pub(crate) mod event_router;
 pub mod events;

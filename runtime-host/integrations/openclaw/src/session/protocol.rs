@@ -378,6 +378,37 @@ impl SessionAbortParams {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct HistoryAnchor {
+    pub(crate) session_id: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) generation: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) leaf_entry_id: Option<String>,
+}
+
+impl HistoryAnchor {
+    pub(crate) fn valid(&self) -> bool {
+        let valid = |value: &str| !value.trim().is_empty() && value.len() <= 8192;
+        valid(&self.session_id) && self.generation.as_deref().is_none_or(valid)
+            && self.leaf_entry_id.as_deref().is_none_or(valid)
+            && (self.generation.is_some() || self.leaf_entry_id.is_none())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HistoryRelation { Exact, Ancestor, OffPath, Reset }
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct HistoryPath {
+    pub(crate) anchor: HistoryAnchor,
+    pub(crate) previous: Option<HistoryAnchor>,
+    pub(crate) relation: Option<HistoryRelation>,
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatHistoryParams {
@@ -386,6 +417,8 @@ pub struct ChatHistoryParams {
     agent_id: Option<AgentId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_anchor: Option<HistoryAnchor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,6 +446,7 @@ impl ChatHistoryParams {
             session_key,
             agent_id: None,
             cursor: None,
+            history_anchor: None,
             limit: None,
             offset: None,
             max_chars: None,
@@ -448,6 +482,11 @@ impl ChatHistoryParams {
     }
 
     pub(crate) fn input_run_ids(&self) -> &[String] { &self.input_run_ids }
+
+    pub(crate) fn with_history_anchor(mut self, anchor: Option<HistoryAnchor>) -> Self {
+        self.history_anchor = anchor;
+        self
+    }
 
     pub fn try_with_cursor(mut self, cursor: String) -> Result<Self, ValidationError> {
         if self.offset.is_some() || cursor.is_empty() || cursor.len() > 8192 {
@@ -492,6 +531,8 @@ impl<'de> Deserialize<'de> for ChatHistoryParams {
             #[serde(default)]
             cursor: Option<String>,
             #[serde(default)]
+            history_anchor: Option<HistoryAnchor>,
+            #[serde(default)]
             limit: OptionalHistoryBound,
             #[serde(default)]
             offset: OptionalHistoryBound,
@@ -504,6 +545,10 @@ impl<'de> Deserialize<'de> for ChatHistoryParams {
         let raw = RawParams::deserialize(deserializer)?;
         let mut params = Self::new(raw.session_key);
         params.agent_id = raw.agent_id;
+        if raw.history_anchor.as_ref().is_some_and(|anchor| !anchor.valid()) {
+            return Err(D::Error::custom("chat history anchor is invalid"));
+        }
+        params.history_anchor = raw.history_anchor;
         params = params.try_with_input_run_ids(raw.input_run_ids).map_err(D::Error::custom)?;
         if let Some(cursor) = raw.cursor { params = params.try_with_cursor(cursor).map_err(D::Error::custom)?; }
         let params = match raw.limit {
@@ -2823,13 +2868,10 @@ fn project_tool_activity(
 
 struct ProjectedAgentEvent {
     activity: Option<ProjectedSessionActivity>,
-    approval: Option<SessionApprovalEvent>,
 }
 
 fn project_agent_event(
     object: &Map<String, Value>,
-    session_key: SessionKey,
-    run_id: Option<RunId>,
 ) -> Result<ProjectedAgentEvent, ProtocolError> {
     let stream = object
         .get("stream")
@@ -2842,7 +2884,6 @@ fn project_agent_event(
     match stream {
         "tool" => Ok(ProjectedAgentEvent {
             activity: project_tool_activity(data)?,
-            approval: None,
         }),
         "thinking" => {
             let Some(text) = activity_text(
@@ -2853,7 +2894,6 @@ fn project_agent_event(
             else {
                 return Ok(ProjectedAgentEvent {
                     activity: None,
-                    approval: None,
                 });
             };
             Ok(ProjectedAgentEvent {
@@ -2861,28 +2901,19 @@ fn project_agent_event(
                     kind: SessionActivityKind::Thinking { text },
                     tool_payload: None,
                 }),
-                approval: None,
             })
         }
-        "approval" => Ok(ProjectedAgentEvent {
-            activity: None,
-            approval: project_agent_approval_event(data, session_key, run_id)?,
-        }),
         "compaction" => Ok(ProjectedAgentEvent {
             activity: project_compaction_activity(data)?,
-            approval: None,
         }),
         "lifecycle" | "fallback" => Ok(ProjectedAgentEvent {
             activity: project_lifecycle_activity(stream, data)?,
-            approval: None,
         }),
         "codex_app_server.guardian" => Ok(ProjectedAgentEvent {
             activity: project_guardian_activity(data)?,
-            approval: None,
         }),
         _ => Ok(ProjectedAgentEvent {
             activity: None,
-            approval: None,
         }),
     }
 }
@@ -3017,151 +3048,6 @@ fn runtime_detail_text(value: Option<&Value>) -> Result<Option<String>, Protocol
             bounded_text_value(text, MAX_SESSION_RUNTIME_DETAIL_TEXT_BYTES)
         })
         .transpose()
-}
-
-fn project_agent_approval_event(
-    data: &Map<String, Value>,
-    session_key: SessionKey,
-    run_id: Option<RunId>,
-) -> Result<Option<SessionApprovalEvent>, ProtocolError> {
-    if data.get("phase").and_then(Value::as_str) != Some("requested")
-        || data.get("kind").and_then(Value::as_str) != Some("exec")
-        || data.get("status").and_then(Value::as_str) != Some("pending")
-    {
-        return Ok(None);
-    }
-    Ok(Some(SessionApprovalEvent {
-        source: SessionApprovalSource::Exec,
-        lifecycle: SessionApprovalLifecycle::Requested,
-        approval_id: bounded_activity_id(
-            data.get("approvalId").or_else(|| data.get("id")),
-            ProtocolError::InvalidSessionEvent,
-        )?,
-        session_key,
-        run_id,
-        option_ids: approval_option_ids(data)?,
-    }))
-}
-
-fn project_approval_event(
-    source: SessionApprovalSource,
-    lifecycle: SessionApprovalLifecycle,
-    object: &Map<String, Value>,
-    session_key: SessionKey,
-    run_id: Option<RunId>,
-) -> Result<SessionApprovalEvent, ProtocolError> {
-    let request = object.get("request").and_then(Value::as_object);
-    Ok(SessionApprovalEvent {
-        source,
-        lifecycle,
-        approval_id: bounded_activity_id(
-            object
-                .get("id")
-                .or_else(|| object.get("approvalId"))
-                .or_else(|| object.get("requestId"))
-                .or_else(|| request.and_then(|request| request.get("approvalId")))
-                .or_else(|| request.and_then(|request| request.get("id"))),
-            ProtocolError::InvalidSessionEvent,
-        )?,
-        session_key,
-        run_id,
-        option_ids: approval_option_ids(object)?,
-    })
-}
-
-fn approval_option_ids(
-    object: &Map<String, Value>,
-) -> Result<Vec<ApprovalOptionId>, ProtocolError> {
-    let request = object.get("request").and_then(Value::as_object);
-    let mut option_ids = Vec::new();
-    for value in [
-        object.get("allowedDecisions"),
-        request.and_then(|request| request.get("allowedDecisions")),
-        object.get("options"),
-        request.and_then(|request| request.get("options")),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        collect_approval_option_ids(value, &mut option_ids)?;
-    }
-    if option_ids.is_empty() {
-        for option_id in ["allow-once", "deny"] {
-            option_ids.push(
-                ApprovalOptionId::try_new(option_id.to_owned())
-                    .map_err(|_| ProtocolError::InvalidSessionEvent)?,
-            );
-        }
-    }
-    Ok(option_ids)
-}
-
-fn collect_approval_option_ids(
-    value: &Value,
-    option_ids: &mut Vec<ApprovalOptionId>,
-) -> Result<(), ProtocolError> {
-    let options = value.as_array().ok_or(ProtocolError::InvalidSessionEvent)?;
-    for option in options {
-        let id = option.as_str().or_else(|| {
-            option
-                .as_object()
-                .and_then(|object| object.get("optionId").or_else(|| object.get("id")))
-                .and_then(Value::as_str)
-        });
-        let Some(id) = id else {
-            return Err(ProtocolError::InvalidSessionEvent);
-        };
-        if option_ids.iter().any(|option| option.as_str() == id) {
-            continue;
-        }
-        option_ids.push(
-            ApprovalOptionId::try_new(id.to_owned())
-                .map_err(|_| ProtocolError::InvalidSessionEvent)?,
-        );
-    }
-    Ok(())
-}
-
-fn session_key_for_event(
-    kind: SessionEventKind,
-    object: &Map<String, Value>,
-) -> Result<Option<SessionKey>, ProtocolError> {
-    if !matches!(
-        kind,
-        SessionEventKind::ApprovalRequested | SessionEventKind::ApprovalResolved
-    ) {
-        return required(object, "sessionKey").map(Some);
-    }
-    if let Some(session_key) = optional_value(object.get("sessionKey"))? {
-        return Ok(Some(session_key));
-    }
-    object
-        .get("request")
-        .and_then(Value::as_object)
-        .map(|request| optional_value(request.get("sessionKey")))
-        .transpose()
-        .map(Option::flatten)
-}
-
-fn run_id_for_event(
-    kind: SessionEventKind,
-    object: &Map<String, Value>,
-) -> Result<Option<RunId>, ProtocolError> {
-    let run_id = optional_value(object.get("runId"))?;
-    if run_id.is_some()
-        || !matches!(
-            kind,
-            SessionEventKind::ApprovalRequested | SessionEventKind::ApprovalResolved
-        )
-    {
-        return Ok(run_id);
-    }
-    object
-        .get("request")
-        .and_then(Value::as_object)
-        .map(|request| optional_value(request.get("runId")))
-        .transpose()
-        .map(Option::flatten)
 }
 
 fn project_changed_event(
@@ -3398,6 +3284,7 @@ pub struct SessionActivity {
     tool_payload: Option<ToolActivityPayload>,
     thinking_delta: Option<String>,
     is_reasoning_snapshot: Option<bool>,
+    stream_id: Option<String>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -3408,6 +3295,7 @@ pub struct SessionApprovalEvent {
     pub session_key: SessionKey,
     pub run_id: Option<RunId>,
     pub option_ids: Vec<ApprovalOptionId>,
+    pub details: sessions_module::state::ApprovalDetails,
 }
 
 impl ToolActivityPayload {
@@ -3459,6 +3347,7 @@ impl SessionActivity {
     }
     pub fn thinking_delta(&self) -> Option<&str> { self.thinking_delta.as_deref() }
     pub fn is_reasoning_snapshot(&self) -> Option<bool> { self.is_reasoning_snapshot }
+    pub(crate) fn stream_id(&self) -> Option<&str> { self.stream_id.as_deref() }
     pub fn tool_payload(&self) -> Option<&ToolActivityPayload> {
         self.tool_payload.as_ref()
     }
@@ -3617,6 +3506,60 @@ impl fmt::Debug for SessionActivityKind {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeRunTiming {
+    pub(crate) run_id: RunId,
+    pub(crate) started_at_ms: Option<u64>,
+    pub(crate) ended_at_ms: Option<u64>,
+}
+
+pub(crate) fn native_run_timing(
+    run_id: RunId,
+    object: &Map<String, Value>,
+) -> Result<NativeRunTiming, ProtocolError> {
+    let id = run_id.as_str();
+    if id.len() > sessions_module::state::MAX_ID_BYTES || id.trim() != id || id.chars().any(char::is_control) {
+        return Err(ProtocolError::InvalidSessionEvent);
+    }
+    Ok(NativeRunTiming {
+        run_id,
+        started_at_ms: native_timestamp(object, "startedAt")?,
+        ended_at_ms: native_timestamp(object, "endedAt")?,
+    })
+}
+
+fn native_timestamp(object: &Map<String, Value>, key: &str) -> Result<Option<u64>, ProtocolError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().filter(|value| *value <= MAX_SAFE_SEQUENCE)
+            .map(Some).ok_or(ProtocolError::InvalidSessionEvent),
+    }
+}
+
+fn event_run_timing(
+    kind: SessionEventKind,
+    object: &Map<String, Value>,
+    run_id: Option<&RunId>,
+) -> Result<Option<NativeRunTiming>, ProtocolError> {
+    if kind == SessionEventKind::Agent && object.get("stream").and_then(Value::as_str) == Some("lifecycle") {
+        let data = object.get("data").and_then(Value::as_object).ok_or(ProtocolError::InvalidSessionEvent)?;
+        let phase = data.get("phase").and_then(Value::as_str);
+        if !matches!(phase, Some("start" | "end" | "error")) { return Ok(None); }
+        let Some(run_id) = run_id else { return Ok(None); };
+        let mut timing = native_run_timing(run_id.clone(), data)?;
+        if phase == Some("start") {
+            timing.started_at_ms = timing.started_at_ms.or(native_timestamp(object, "ts")?);
+            timing.ended_at_ms = None;
+        } else if data.get("stopReason").and_then(Value::as_str) != Some("restart") {
+            timing.ended_at_ms = timing.ended_at_ms.or(native_timestamp(object, "ts")?);
+        } else {
+            timing.ended_at_ms = None;
+        }
+        return Ok(Some(timing));
+    }
+    Ok(None)
+}
+
 #[derive(Clone, PartialEq)]
 pub struct SessionEventEnvelope {
     pub gateway_sequence: Option<u64>,
@@ -3631,6 +3574,7 @@ pub struct SessionEventEnvelope {
     pub changed: Option<SessionChangedEvent>,
     pub(crate) transcript_message: Option<super::window::Message>,
     pub(crate) commentary: Option<(String, String)>,
+    pub(crate) run_timing: Option<NativeRunTiming>,
 }
 impl fmt::Debug for SessionEventEnvelope {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3646,33 +3590,11 @@ impl fmt::Debug for SessionEventEnvelope {
 pub fn decode_session_event(
     event: GatewayEvent,
 ) -> Result<Option<SessionEventEnvelope>, ProtocolError> {
-    let mut approval_source = None;
-    let mut approval_lifecycle = None;
     let mut kind = match event.name.as_str() {
         "chat" => SessionEventKind::Chat,
         "session.message" => SessionEventKind::Message,
         "session.tool" => SessionEventKind::Tool,
         "agent" => SessionEventKind::Agent,
-        "exec.approval.requested" => {
-            approval_source = Some(SessionApprovalSource::Exec);
-            approval_lifecycle = Some(SessionApprovalLifecycle::Requested);
-            SessionEventKind::ApprovalRequested
-        }
-        "exec.approval.resolved" => {
-            approval_source = Some(SessionApprovalSource::Exec);
-            approval_lifecycle = Some(SessionApprovalLifecycle::Resolved);
-            SessionEventKind::ApprovalResolved
-        }
-        "plugin.approval.requested" => {
-            approval_source = Some(SessionApprovalSource::Plugin);
-            approval_lifecycle = Some(SessionApprovalLifecycle::Requested);
-            SessionEventKind::ApprovalRequested
-        }
-        "plugin.approval.resolved" => {
-            approval_source = Some(SessionApprovalSource::Plugin);
-            approval_lifecycle = Some(SessionApprovalLifecycle::Resolved);
-            SessionEventKind::ApprovalResolved
-        }
         "session.approval" => SessionEventKind::ApprovalRequested,
         "sessions.changed" => SessionEventKind::Changed,
         _ => return Ok(None),
@@ -3693,40 +3615,22 @@ pub fn decode_session_event(
         optional(object, "messageId")?
     };
     let embedded_message_id = embedded_message_id(object)?;
-    let Some(session_key) = session_key_for_event(kind, object)? else {
-        return Ok(None);
-    };
-    let run_id = run_id_for_event(kind, object)?;
-    let mut approval = match (approval_source, approval_lifecycle) {
-        (Some(source), Some(lifecycle)) => Some(project_approval_event(
-            source,
-            lifecycle,
-            object,
-            session_key.clone(),
-            run_id.clone(),
-        )?),
-        _ => None,
-    };
+    let session_key: SessionKey = required(object, "sessionKey")?;
+    let run_id: Option<RunId> = optional_value(object.get("runId"))?;
+    let mut approval = None;
     let activity = match kind {
         SessionEventKind::Message if run_id.is_some() && object.get("lifecycle").is_some() => {
             project_message_activity(object, message_id.as_ref(), embedded_message_id.as_ref())?
         }
         SessionEventKind::Tool if run_id.is_some() => {
             if object.get("stream").and_then(Value::as_str) == Some("tool") {
-                project_agent_event(object, session_key.clone(), run_id.clone())?.activity
+                project_agent_event(object)?.activity
             } else {
                 project_tool_activity(object)?
             }
         },
         SessionEventKind::Agent => {
-            let agent = project_agent_event(object, session_key.clone(), run_id.clone())?;
-            if let Some(agent_approval) = agent.approval {
-                kind = match agent_approval.lifecycle {
-                    SessionApprovalLifecycle::Requested => SessionEventKind::ApprovalRequested,
-                    SessionApprovalLifecycle::Resolved => SessionEventKind::ApprovalResolved,
-                };
-                approval = Some(agent_approval);
-            }
+            let agent = project_agent_event(object)?;
             agent.activity
         }
         SessionEventKind::Message
@@ -3753,6 +3657,13 @@ pub fn decode_session_event(
                 } else { None },
                 is_reasoning_snapshot: if matches!(activity.kind, SessionActivityKind::Thinking { .. }) {
                     object.get("data").and_then(Value::as_object).map(|data| optional_bool(data, "isReasoningSnapshot")).transpose()?.flatten()
+                } else { None },
+                stream_id: if matches!(activity.kind, SessionActivityKind::Thinking { .. }) {
+                    bounded_text(object.get("data").and_then(|data| data.get("streamId")).filter(|value| !value.is_null()), MAX_SESSION_ACTIVITY_ID_BYTES)?
+                        .map(|text| {
+                            if text.contains('\0') { return Err(ProtocolError::InvalidSessionEvent); }
+                            Ok(text.trim().to_owned())
+                        }).transpose()?.filter(|id| !id.is_empty())
                 } else { None },
                 kind: activity.kind,
                 tool_payload: activity.tool_payload,
@@ -3790,6 +3701,7 @@ pub fn decode_session_event(
             }
         } else { None }
     } else { None };
+    let run_timing = event_run_timing(kind, object, run_id.as_ref())?;
     let envelope = SessionEventEnvelope {
         gateway_sequence: event.sequence,
         kind,
@@ -3803,31 +3715,13 @@ pub fn decode_session_event(
         changed,
         transcript_message,
         commentary,
+        run_timing,
     };
     Ok(Some(envelope))
 }
 
 pub(crate) fn decode_session_approval(snapshot: Value, session_key: SessionKey) -> Result<SessionApprovalEvent, ProtocolError> {
-    let object = snapshot.as_object().ok_or(ProtocolError::InvalidSessionEvent)?;
-    let presentation = object.get("presentation").and_then(Value::as_object).ok_or(ProtocolError::InvalidSessionEvent)?;
-    let source = match presentation.get("kind").and_then(Value::as_str) {
-        Some("exec") => SessionApprovalSource::Exec,
-        Some("plugin") => SessionApprovalSource::Plugin,
-        Some("system-agent") => SessionApprovalSource::SystemAgent,
-        _ => return Err(ProtocolError::InvalidSessionEvent),
-    };
-    let lifecycle = match object.get("status").and_then(Value::as_str) {
-        Some("pending") => SessionApprovalLifecycle::Requested,
-        Some("allowed" | "denied" | "expired" | "cancelled") => SessionApprovalLifecycle::Resolved,
-        _ => return Err(ProtocolError::InvalidSessionEvent),
-    };
-    let options = presentation.get("allowedDecisions").and_then(Value::as_array).ok_or(ProtocolError::InvalidSessionEvent)?;
-    if options.is_empty() || options.len() > 3 { return Err(ProtocolError::InvalidSessionEvent); }
-    let option_ids = options.iter().map(|value| match value.as_str() {
-        Some("allow-once" | "allow-always" | "deny") => ApprovalOptionId::try_new(value.as_str().unwrap().to_owned()).map_err(|_| ProtocolError::InvalidSessionEvent),
-        _ => Err(ProtocolError::InvalidSessionEvent),
-    }).collect::<Result<Vec<_>, _>>()?;
-    Ok(SessionApprovalEvent { source, lifecycle, approval_id: required(object, "id")?, session_key, run_id: optional(object, "runId")?, option_ids })
+    super::approval::decode_snapshot(snapshot, session_key)
 }
 
 fn embedded_message_id(object: &Map<String, Value>) -> Result<Option<MessageId>, ProtocolError> {
@@ -5198,6 +5092,7 @@ mod tests {
                 activity: None,
                 approval: None,
                 changed: None,
+                run_timing: None,
             },
             CANARIES,
         );

@@ -114,6 +114,7 @@ where
             runtime.handles.organization.clone(),
             runtime.handles.runtime_directory.clone(),
             runtime.handles.wiki.handle().clone(),
+            crate::composition::host::ports::maintenance::from_handles(&runtime.handles),
         ),
     });
     let route_snapshot = install_plan.route_snapshot();

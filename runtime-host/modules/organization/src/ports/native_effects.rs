@@ -29,6 +29,19 @@ pub enum RuntimeReceiptOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoleSessionSubmission {
+    /// No create was sent, or its native response is terminal.
+    Settled,
+    Unknown,
+}
+
+pub struct RoleSessionCreationOutcome {
+    pub outcome: RuntimeReceiptOutcome,
+    pub failure: Option<TeamCreationFailure>,
+    pub submission: RoleSessionSubmission,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoleSessionRetirementOutcome {
     Confirmed,
     OutcomeUnknown,
@@ -109,6 +122,19 @@ pub trait OrganizationNativeRuntime: Send + Sync {
         &self,
         receipt: RunRuntimeReceipt,
     ) -> OwnedRuntimeFuture<RuntimeReceiptOutcome>;
+
+    fn create_team_role_session_cancellable(
+        &self,
+        binding: RoleSessionReceipt,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<RoleSessionCreationOutcome>;
+
+    /// Reads the exact reserved session without creating, renaming or sending to it.
+    fn readback_team_role_session_cancellable(
+        &self,
+        binding: RoleSessionReceipt,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)>;
 
     fn abort_role_sessions(
         &self,

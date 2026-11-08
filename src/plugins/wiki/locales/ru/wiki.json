@@ -1,4 +1,12 @@
 {
+  "Add credentials to the selected provider account": "Добавьте учётные данные для выбранного аккаунта провайдера",
+  "Provider credentials could not be read; check the provider account credentials": "Не удалось прочитать учётные данные провайдера. Проверьте их в настройках аккаунта",
+  "The text provider rejected its credentials; update the provider account credentials": "Провайдер генерации текста отклонил учётные данные. Обновите их в настройках аккаунта",
+  "The text provider denied this request; check account and model permissions": "Провайдер генерации текста отклонил запрос. Проверьте права доступа аккаунта и модели",
+  "The text provider rate limit was reached; wait before retrying": "Достигнут лимит запросов к провайдеру генерации текста. Подождите перед повторной попыткой",
+  "Text generation exceeded its time limit; the provider request may already have occurred. Check the provider service before retrying": "Время ожидания генерации текста истекло. Провайдер мог уже выполнить запрос. Проверьте состояние сервиса перед повторной попыткой",
+  "The text provider returned an invalid response; check the model and provider configuration": "Провайдер генерации текста вернул некорректный ответ. Проверьте настройки модели и провайдера",
+  "The text provider is unavailable; check the provider service and connection": "Провайдер генерации текста недоступен. Проверьте состояние сервиса и сетевое подключение",
   "selection": {
     "title": "Помощник по выделенному тексту",
     "close": "Закрыть помощника",
@@ -85,6 +93,7 @@
   "home": {
     "title": "Библиотека",
     "search": "Поиск",
+    "noResults": "Библиотеки не найдены",
     "myLibraries": "Мои материалы",
     "recent": "Недавние",
     "newLibrary": "Создать библиотеку",
@@ -133,6 +142,7 @@
   },
   "content": {
     "selectPage": "Выберите страницу",
+    "loading": "Загрузка содержимого…",
     "history": "История версий",
     "previewUnavailable": "Предпросмотр недоступен",
     "inlineUnsupported": "Встроенный предпросмотр не поддерживается",
@@ -339,7 +349,7 @@
     "cancelling": "Запрос отмены…",
     "cancelRequested": "Отмена запрошена; ожидание остановки",
     "cancelFailed": "Отмена не подтверждена. Обновите состояние задачи перед повторной попыткой.",
-    "readFailed": "Обновление прогресса приостановлено; фоновое состояние не изменено. Обновите записи, чтобы продолжить наблюдение.",
+    "readFailed": "Пока не удалось прочитать прогресс. Фоновые задачи продолжают работу.",
     "status": {
       "pending": "Ожидание",
       "running": "Обработка",

@@ -10,6 +10,7 @@ mod identity;
 mod placement;
 mod reconciliation;
 mod terminal;
+mod thinking;
 
 use identity::Provisional;
 
@@ -52,7 +53,7 @@ struct TerminalMarker {
 #[derive(Clone, Default)]
 struct Stream {
     text: Option<String>,
-    thinking: String,
+    thinking: Vec<Thinking>,
     latest_boundary_run_id: Option<String>,
     latest_tool: Option<String>,
     parts: Vec<Part>,
@@ -64,6 +65,14 @@ struct Stream {
     final_content: Option<([u8; 32], [u8; 32])>,
     terminal_observed: bool,
     inferred: Option<identity::InferredTerminal>,
+}
+
+#[derive(Clone)]
+struct Thinking {
+    stream_id: Option<String>,
+    text: String,
+    items: Vec<String>,
+    replacement: Option<String>,
 }
 
 #[derive(Clone)]
@@ -126,6 +135,10 @@ impl Stream {
     fn text_bytes(&self) -> usize {
         self.text.as_ref().map_or(0, String::len) + self.closed.iter().map(|closed| closed.text.len()).sum::<usize>()
     }
+
+    fn thinking_bytes(&self) -> usize {
+        self.thinking.iter().map(|thinking| thinking.text.len()).sum()
+    }
 }
 
 impl Body {
@@ -138,11 +151,16 @@ impl Body {
                     "runHash": trace::fingerprint(run), "acceptedBaseline": stream.text().map(trace::text_shape),
                     "currentBaseline": stream.text.as_deref().map(trace::text_shape), "closedBaseline": stream.accumulated_text().map(trace::text_shape),
                     "closedCount": stream.closed.len(), "currentPartCount": stream.parts.len(),
-                    "thinkingBaseline": trace::text_shape(&stream.thinking), "boundary": stream.boundary,
+                    "thinking": stream.thinking.iter().map(|thinking| serde_json::json!({
+                        "streamHash": thinking.stream_id.as_deref().map(trace::fingerprint), "baseline": trace::text_shape(&thinking.text),
+                        "replacementItemHash": thinking.replacement.as_deref().map(trace::fingerprint), "itemHashes": thinking.items.iter().map(|id| trace::fingerprint(id)).collect::<Vec<_>>() })).collect::<Vec<_>>(), "boundary": stream.boundary,
                     "partsTotal": stream.part_count(), "partsSummarized": stream.part_count().min(200), "partsTruncated": stream.part_count() > 200,
                     "parts": stream.parts.iter().take(200).map(|part| serde_json::json!({
                         "itemHash": part.id.as_deref().map(trace::fingerprint), "startUtf8": part.start, "endUtf8": part.end })).collect::<Vec<_>>(),
-                    "anchorsCount": stream.anchors.len(),
+                    "anchorsCount": stream.anchors.len(), "anchorsTruncated": stream.anchors.len() > 200,
+                    "anchorHashes": stream.anchors.iter().take(200).map(|id| trace::fingerprint(id)).collect::<Vec<_>>(),
+                    "provisionalCount": stream.provisional.len(), "provisionalTruncated": stream.provisional.len() > 200,
+                    "provisionalHashes": stream.provisional.iter().take(200).map(|entry| trace::fingerprint(&entry.id)).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
                 "terminalMarkerPresence": self.terminal_marker.is_some(),
                 "markerRunHash": self.terminal_marker.as_ref().map(|marker| trace::fingerprint(&marker.run_id)),
@@ -301,16 +319,29 @@ impl Body {
                 && producer.map_or_else(|| self.items.iter().any(|item| matches!(item,
                     SessionItem::AssistantTurn { run_id: Some(owner), text, .. }
                         if owner == *run && !text.trim().is_empty() && text.trim() == message.text().trim())), |producer| producer == *run)));
+        let thinking_owner = message.identity_message_id().is_some() && self.owns_thinking(message);
         let owner = message.role() == MessageRole::Assistant && message.identity_message_id().is_some() && !message.is_imported()
             && (producer.is_some() || (message.identity_run_id().is_none() && message.has_active_run() != Some(true)))
             && finishing.is_some();
-        if (message.role() != MessageRole::User && !previous && !owner)
+        if trace::enabled() {
+            trace::log_unscoped("oc.body.live_message.admission", || serde_json::json!({ "commitState": "candidate_only",
+                "role": format!("{:?}", message.role()), "sdkMessageHash": message.identity_message_id().map(trace::fingerprint),
+                "runHash": message.identity_run_id().map(trace::fingerprint), "eventRunHash": message.event_run_id().map(trace::fingerprint),
+                "sdkSequence": message.identity_sequence(), "activeRunHash": self.live_run().map(trace::fingerprint),
+                "producerRunHash": producer.map(trace::fingerprint), "finishingRunHash": finishing.map(trace::fingerprint),
+                "previous": previous, "owner": owner, "thinkingOwner": thinking_owner, "imported": message.is_imported(),
+                "importSequenceProven": message.import_sequence_proven(), "hasSendIdentity": message.has_send_identity(),
+                "hasActiveRun": message.has_active_run() }));
+        }
+        if (message.role() != MessageRole::User && !previous && !owner && !thinking_owner)
             || (message.is_imported() && !message.import_sequence_proven())
             || (message.identity_message_id().is_none() && message.identity_sequence().is_none() && !message.has_send_identity())
         {
             if trace::enabled() {
                 trace::log_unscoped("oc.body.live_message.rejected", || serde_json::json!({
-                    "reason": "missing_sdk_identity", "sdkSequencePresent": message.identity_sequence().is_some(),
+                    "reason": if message.role() != MessageRole::User && !previous && !owner && !thinking_owner { "no_message_owner" }
+                        else if message.is_imported() && !message.import_sequence_proven() { "unproven_import_sequence" }
+                        else { "missing_sdk_or_send_identity" }, "sdkSequencePresent": message.identity_sequence().is_some(),
                     "runHash": message.identity_run_id().map(trace::fingerprint), "activeRunHash": self.live_run().map(trace::fingerprint),
                     "compatMessageIdPresent": message.message_id().is_some(), "text": trace::text_shape(message.text()) }));
             }
@@ -376,7 +407,7 @@ impl Body {
                 "role": format!("{:?}", message.role()), "text": trace::text_shape(message.text()),
                 "messageHash": message.message_id().map(trace::fingerprint), "displayItemHash": message.display_item_id().map(trace::fingerprint),
                 "runHash": message.run_id().map(trace::fingerprint), "sequence": message.sequence(), "hasOrigin": message.origin().is_some(),
-                "contentCount": message.content().len(), "itemsCount": self.items.len(),
+                "contentCount": message.content().len(), "itemsCount": self.items.len(), "live": live,
                 "persistedAdmission": message.role() == MessageRole::Assistant && message.display_item_id().is_none()
                     && message.message_id().is_some() && message.sequence().is_some() && message.run_id().is_some() && message.origin().is_none(),
                 "persistedUpdateExisting": self.persisted.iter().any(|row| row.message_id() == message.message_id()),
@@ -390,11 +421,22 @@ impl Body {
                 ].into_iter().flatten().collect::<Vec<_>>()) }));
         }
         let mut item = transcript_session_item(message, self.items.len(), cache);
-        let existing = live.then(|| self.live_identity(message)).flatten();
+        let mut existing = self.message_identity(message, live);
         if message.identity_message_id().is_none() && existing.as_ref().is_some_and(|id|
             self.persisted.iter().any(|row| &row.id == id && row.identity_message_id().is_some()))
         { return Some(existing); }
         let mut insert = None;
+        let adoption = message.identity_message_id().and_then(|_| {
+            let id = existing.as_ref().filter(|id| item.as_ref().is_some_and(|item| item.item_id() != id.as_str()))?;
+            self.persisted.iter().find(|row| &row.id == id && row.identity_message_id().is_none())
+                .map(|row| Provisional::new(row.id.clone(), row))
+                .or_else(|| self.streams.values().flat_map(|stream| &stream.provisional)
+                    .find(|entry| &entry.id == id && entry.native_id.is_none()).cloned())
+        });
+        if let Some(entry) = &adoption {
+            insert = self.items.iter().position(|item| item.item_id() == entry.id);
+            existing = None;
+        }
         if let Some(id) = &existing
             && let Some(run) = self.streams.iter().find(|(_, stream)| stream.provisional.iter().any(|entry| &entry.id == id))
                 .map(|(run, _)| run.clone())
@@ -424,7 +466,9 @@ impl Body {
         let projected_id = item.as_ref().map(|item| item.item_id().to_owned());
         if trace::enabled() {
             trace::log_unscoped("oc.body.message.projection", || serde_json::json!({ "commitState": "candidate_only",
-                "item": item.as_ref().map(trace::item_shape), "projected": item.is_some(),
+                "item": item.as_ref().map(trace::item_shape), "projected": item.is_some(), "live": live,
+                "existingItemHash": existing.as_deref().map(trace::fingerprint),
+                "adoptedItemHash": adoption.as_ref().map(|entry| trace::fingerprint(&entry.id)),
                 "existingIndex": item.as_ref().and_then(|item| self.items.iter().position(|old| old.item_id() == item.item_id())),
                 "reason": if item.is_some() { "projected" } else if message.role() == MessageRole::ToolResult { "tool_result_no_display" } else { "content_segment_budget" } }));
         }
@@ -439,6 +483,8 @@ impl Body {
             for stream in self.streams.values_mut() {
                 stream.provisional.retain(|entry| entry.id != id);
             }
+            if let Some(entry) = adoption { self.adopt_entry(entry, &Provisional::new(id.clone(), message), false)?; }
+            self.adopt_thinking(message, &id);
             if let Some(SessionItem::AssistantTurn { message_id: Some(_), segments, .. }) = self.items.iter().find(|item| item.item_id() == id) {
                 let tool_ids = segments.iter().filter_map(|segment| match segment {
                     SessionContent::ToolUse { tool_call_id, .. } => Some(format!("oc:tool:{tool_call_id}")),
@@ -475,7 +521,7 @@ impl Body {
         // Physical sequence orders native slots; display replacement never changes the producer baseline.
         let slot = projected_id.clone().or(existing).or_else(|| message.display_item_id().or(message.message_id()).map(str::to_owned));
         if let Some(mut id) = slot {
-            if projected_id.is_none() && (!live || !self.persisted.iter().any(|row| row.id == id && identity::exact(row, message))) {
+            if projected_id.is_none() && !self.persisted.iter().any(|row| row.id == id && identity::exact(row, message)) {
                 while self.persisted.iter().any(|row| row.id == id) || self.items.iter().any(|item| item.item_id() == id) {
                     self.next_id = self.next_id.checked_add(1)?;
                     id = format!("oc:live:{}", self.next_id);
@@ -549,6 +595,7 @@ impl Body {
     }
 
     fn chunk_at(&mut self, run: &str, kind: AssistantTurnChunkKind, text: &str, replace: bool, history_end: Option<usize>) -> Option<()> {
+        if kind == AssistantTurnChunkKind::Thinking { return self.thinking_chunk(run, None, text, replace); }
         let status = self.status(run);
         if trace::enabled() {
             let stream = self.streams.get(run);
@@ -616,44 +663,7 @@ impl Body {
             stream.body_closed = false;
             return self.reconcile_mode(run, history_end.is_none() && self.live_run() == Some(run), history_end);
         }
-        let tail = if replace { text.strip_prefix(&stream.thinking) } else { Some(text) };
-        if let Some(tail) = tail {
-            if tail.is_empty() { return Some(()); }
-            stream.thinking.push_str(tail);
-            if let Some(SessionItem::AssistantTurn { item_id, segments, .. }) = self.items.last_mut()
-                && stream.anchors.contains(item_id)
-                && let [SessionContent::Thinking { text }] = segments.as_mut_slice()
-            {
-                text.push_str(tail);
-                return Some(());
-            }
-            self.next_id = self.next_id.checked_add(1)?;
-            let id = format!("oc:live:{}", self.next_id);
-            self.items.push(SessionItem::AssistantTurn { item_id: id.clone(), run_id: Some(run.to_owned()), message_id: None,
-                status, text: String::new(), segments: vec![SessionContent::Thinking { text: tail.to_owned() }] });
-            stream.anchors.push(id);
-        } else {
-            let open = self.items.last().filter(|item| matches!(item,
-                SessionItem::AssistantTurn { item_id, run_id: Some(owner), segments, .. }
-                    if owner == run && stream.anchors.contains(item_id)
-                        && matches!(segments.as_slice(), [SessionContent::Thinking { .. }])))
-                .map(|item| item.item_id().to_owned());
-            if let Some(id) = &open {
-                self.items.pop();
-                stream.anchors.retain(|anchor| anchor != id);
-            }
-            stream.thinking = text.to_owned();
-            if !text.is_empty() {
-                let id = if let Some(id) = open { id } else {
-                    self.next_id = self.next_id.checked_add(1)?;
-                    format!("oc:live:{}", self.next_id)
-                };
-                self.items.push(SessionItem::AssistantTurn { item_id: id.clone(), run_id: Some(run.to_owned()), message_id: None,
-                    status, text: String::new(), segments: vec![SessionContent::Thinking { text: text.to_owned() }] });
-                stream.anchors.push(id);
-            }
-        }
-        self.reconcile(run)
+        Some(())
     }
 
     fn keyed_chunk(&mut self, run: &str, id: &str, kind: AssistantTurnChunkKind, text: &str, replace: bool,
@@ -733,19 +743,27 @@ impl Body {
         Some(())
     }
 
-    pub fn preamble_activity(&mut self, run: &str, id: &str) -> Option<CanonicalSessionChange> {
-        let persisted = self.persisted.iter().any(|message| message.display_item_id().or_else(|| message.message_id()) == Some(id)
+    pub fn preamble_activity(&mut self, run: &str, id: &str, text: &str) -> Option<CanonicalSessionChange> {
+        let persisted = self.persisted.iter().any(|message| message.display_item_id() == Some(id)
             && message.run_id() == Some(run) && message.identity_message_id().is_some());
         let old = self.items.clone();
         let status = self.status(run);
         if status != ItemStatus::Streaming || self.retired.iter().any(|retired| retired == id) { return Some(self.replacement(old)); }
         if persisted { return Some(self.replacement(old)); }
         self.accept_live(run);
-        let index = self.items.iter().position(|item| item.item_id() == id);
-        if let Some(index) = index
-            && !matches!(&self.items[index], SessionItem::AssistantTurn { run_id: Some(owner), .. } if owner == run)
-        { return None; }
-        self.streams.entry(run.to_owned()).or_default();
+        if let Some(item) = self.items.iter_mut().find(|item| item.item_id() == id) {
+            let SessionItem::AssistantTurn { run_id: Some(owner), message_id: None, text: current, segments, .. } = item else { return None; };
+            if owner != run { return None; }
+            if current != text {
+                *current = text.to_owned();
+                segments.retain(|segment| !matches!(segment, SessionContent::Text { .. }));
+                segments.push(SessionContent::Text { text: text.to_owned() });
+            }
+        } else if !text.is_empty() {
+            self.items.push(SessionItem::AssistantTurn { item_id: id.to_owned(), run_id: Some(run.to_owned()), message_id: None,
+                text: text.to_owned(), status, segments: vec![SessionContent::Text { text: text.to_owned() }] });
+            self.streams.entry(run.to_owned()).or_default().provisional.push(Provisional::commentary(id, run));
+        }
         self.reconcile(run)?;
         self.check()?;
         Some(self.replacement(old))
@@ -782,20 +800,6 @@ impl Body {
             self.live_run = Some(run.to_owned());
             if let Some(stream) = self.streams.get_mut(run) { stream.terminal_observed = false; }
         }
-    }
-
-    pub(super) fn thinking(&mut self, run: &str, activity: &SessionActivity) -> Option<CanonicalSessionChange> {
-        let old = self.items.clone();
-        self.accept_live(run);
-        let super::protocol::SessionActivityKind::Thinking { text } = activity.kind() else { return None; };
-        let (text, replace) = if activity.is_reasoning_snapshot() == Some(true) {
-            (text.as_str(), true)
-        } else if let Some(delta) = activity.thinking_delta() {
-            (delta, false)
-        } else { (text.as_str(), true) };
-        self.chunk(run, AssistantTurnChunkKind::Thinking, text, replace)?;
-        self.check()?;
-        Some(self.replacement(old))
     }
 
     fn status(&self, run: &str) -> ItemStatus {
@@ -841,8 +845,21 @@ impl Body {
         let visible = &self.items;
         for stream in self.streams.values_mut() {
             stream.provisional.retain(|entry| visible.iter().any(|item| item.item_id() == entry.id));
+            if !self.history_rebuilding {
+                for thinking in &mut stream.thinking {
+                    let replaced = thinking.replacement.as_ref().is_some_and(|id| visible.iter().any(|item| item.item_id() == id));
+                    thinking.items.retain(|id| {
+                        if visible.iter().any(|item| item.item_id() == id) || replaced { return true; }
+                        stream.anchors.retain(|anchor| anchor != id);
+                        false
+                    });
+                }
+                stream.thinking.retain(|thinking| !thinking.items.is_empty()
+                    || thinking.replacement.as_ref().is_some_and(|id| visible.iter().any(|item| item.item_id() == id)));
+            }
         }
         self.streams.retain(|run, stream| visible.iter().any(|item| matches!(item, SessionItem::AssistantTurn { run_id: Some(id), .. } if id == run))
+            || stream.thinking.iter().any(|thinking| thinking.replacement.as_ref().is_some_and(|id| visible.iter().any(|item| item.item_id() == id)))
             || stream.inferred.is_some()
             || !self.terminal.iter().any(|(id, _)| id == run)
             || (self.terminal_marker.as_ref().is_some_and(|marker| &marker.run_id == run)
@@ -861,25 +878,25 @@ impl Body {
         if trace::enabled() {
             let valid = self.items.len() + self.streams.values().filter(|stream| stream.inferred.is_some()).count() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
                 && self.terminal.len() <= 200 && self.retired.len() <= 200
-                && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                    && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 1_000_000);
+                && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                    && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 200 && stream.thinking_bytes() <= 1_000_000);
             trace::log_unscoped(if valid { "oc.body.check.accepted" } else { "oc.body.check.failed" }, || serde_json::json!({ "commitState": "candidate_only",
                 "reason": if valid { "within_budget" } else { "budget_exceeded" }, "itemsCount": self.items.len(),
                 "persistedCount": self.persisted.len(), "streamsCount": self.streams.len(), "terminalCount": self.terminal.len(), "retiredCount": self.retired.len(),
                 "itemsExceeded": self.items.len() > 200, "persistedExceeded": self.persisted.len() > 200, "streamsExceeded": self.streams.len() > 200,
                 "terminalExceeded": self.terminal.len() > 200, "retiredExceeded": self.retired.len() > 200,
                 "streamBudgetExceeded": self.streams.values().any(|stream| stream.part_count() > 200 || stream.anchors.len() > 200
-                    || stream.text_bytes() > 1_000_000 || stream.thinking.len() > 1_000_000),
+                    || stream.text_bytes() > 1_000_000 || stream.thinking.len() > 200 || stream.thinking_bytes() > 1_000_000),
                 "streamsTotal": self.streams.len(), "streamsSummarized": self.streams.len().min(200), "streamsTruncated": self.streams.len() > 200,
                 "streams": self.streams.iter().take(200).map(|(run, stream)| serde_json::json!({
                     "runHash": trace::fingerprint(run), "partsCount": stream.part_count(), "anchorsCount": stream.anchors.len(),
-                    "textUtf8Bytes": stream.text_bytes(), "thinkingUtf8Bytes": stream.thinking.len(),
+                    "textUtf8Bytes": stream.text_bytes(), "thinkingUtf8Bytes": stream.thinking_bytes(), "thinkingCount": stream.thinking.len(),
                     "partsExceeded": stream.part_count() > 200, "anchorsExceeded": stream.anchors.len() > 200,
-                    "textExceeded": stream.text_bytes() > 1_000_000, "thinkingExceeded": stream.thinking.len() > 1_000_000,
+                    "textExceeded": stream.text_bytes() > 1_000_000, "thinkingExceeded": stream.thinking.len() > 200 || stream.thinking_bytes() > 1_000_000,
                 })).collect::<Vec<_>>() }));
         }
         (self.items.len() + self.streams.values().filter(|stream| stream.inferred.is_some()).count() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
             && self.terminal.len() <= 200 && self.retired.len() <= 200
-            && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 1_000_000))
+            && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 200 && stream.thinking_bytes() <= 1_000_000))
             .then_some(())
     }
 

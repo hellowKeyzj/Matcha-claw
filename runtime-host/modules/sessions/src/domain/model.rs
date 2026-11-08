@@ -10,6 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::Value;
 
 use super::goal::SessionGoalView;
+pub use super::timing::RunTiming;
+use super::timing::{merge_run_timings, update_run_timing, valid_run_timing, valid_run_timings};
 
 pub const MAX_SESSION_KEY_BYTES: usize = 4096;
 pub const MAX_ID_BYTES: usize = 256;
@@ -310,12 +312,30 @@ pub enum SessionContent {
     },
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PendingTerminal {
+    pub(crate) snapshot: crate::terminal_hook::SessionRunTerminalSnapshot,
+    pub(crate) bodies: TerminalBodies,
+}
+
+#[derive(Clone, Debug)]
+pub enum TerminalBodies {
+    Complete(Vec<String>),
+    Items { endpoint_session_id: Option<String>, items: Vec<SessionItem> },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OmissionReason {
     Thinking,
     UnsafeMedia,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SessionNotice {
+    #[serde(rename = "restart-recovery")]
+    RestartRecovery,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -331,6 +351,8 @@ pub enum SessionItem {
         message_id: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         input_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice: Option<SessionNotice>,
         text: String,
         content: Vec<SessionContent>,
         status: ItemStatus,
@@ -391,6 +413,9 @@ pub struct ToolView {
     pub is_error: Option<bool>,
 }
 
+pub use super::approval::*;
+use super::approval::valid_approval_details;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApprovalView {
@@ -398,6 +423,8 @@ pub struct ApprovalView {
     pub run_id: Option<String>,
     pub phase: ApprovalPhase,
     pub option_ids: Vec<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub details: Option<ApprovalDetails>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -564,6 +591,8 @@ impl<T> SessionFact<T> {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionFacts {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_timings: Vec<RunTiming>,
     pub items: SessionFact<Vec<SessionItem>>,
     pub tools: SessionFact<Vec<ToolView>>,
     pub approvals: SessionFact<Vec<ApprovalView>>,
@@ -575,6 +604,7 @@ pub struct SessionFacts {
 impl SessionFacts {
     pub fn unknown() -> Self {
         Self {
+            run_timings: Vec::new(),
             items: SessionFact::Unknown,
             tools: SessionFact::Unknown,
             approvals: SessionFact::Unknown,
@@ -639,6 +669,7 @@ pub struct SessionView {
     pub epoch: u64,
     pub seq: u64,
     pub cursor: u64,
+    pub run_timings: Vec<RunTiming>,
     pub items: SessionFact<Vec<SessionItem>>,
     pub tools: SessionFact<Vec<ToolView>>,
     pub approvals: SessionFact<Vec<ApprovalView>>,
@@ -666,6 +697,8 @@ impl Serialize for SessionView {
             epoch: u64,
             seq: u64,
             cursor: u64,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            run_timings: &'a Vec<RunTiming>,
             items: SessionFact<Vec<SessionItem>>,
             tools: SessionFact<Vec<ToolView>>,
             approvals: &'a SessionFact<Vec<ApprovalView>>,
@@ -685,6 +718,7 @@ impl Serialize for SessionView {
             epoch: self.epoch,
             seq: self.seq,
             cursor: self.cursor,
+            run_timings: &self.run_timings,
             items: public_items_fact(&self.items),
             tools: public_tools_fact(&self.tools),
             approvals: &self.approvals,
@@ -714,6 +748,8 @@ impl<'de> Deserialize<'de> for SessionView {
             epoch: u64,
             seq: u64,
             cursor: u64,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            run_timings: Vec<RunTiming>,
             items: SessionFact<Vec<SessionItem>>,
             tools: SessionFact<Vec<ToolView>>,
             approvals: SessionFact<Vec<ApprovalView>>,
@@ -734,6 +770,7 @@ impl<'de> Deserialize<'de> for SessionView {
             epoch: wire.epoch,
             seq: wire.seq,
             cursor: wire.cursor,
+            run_timings: wire.run_timings,
             items: wire.items,
             tools: wire.tools,
             approvals: wire.approvals,
@@ -788,6 +825,7 @@ impl SessionView {
             || self.seq > MAX_SAFE_INTEGER
             || self.cursor > MAX_SAFE_INTEGER
             || !valid_facts(&SessionFacts {
+                run_timings: self.run_timings.clone(),
                 items: self.items.clone(),
                 tools: self.tools.clone(),
                 approvals: self.approvals.clone(),
@@ -810,6 +848,9 @@ impl SessionView {
     deny_unknown_fields
 )]
 pub enum SessionChange {
+    RunTimingUpdated {
+        timing: RunTiming,
+    },
     RunPhaseChanged {
         run_id: String,
         phase: RunPhase,
@@ -1026,7 +1067,8 @@ fn public_delta_change(change: &SessionChange) -> SessionChange {
         SessionChange::RuntimeNoticeUpdated { notice } => SessionChange::RuntimeNoticeUpdated {
             notice: public_delta_runtime_notice(notice),
         },
-        SessionChange::RunPhaseChanged { .. }
+        SessionChange::RunTimingUpdated { .. }
+        | SessionChange::RunPhaseChanged { .. }
         | SessionChange::MessageDelta { .. }
         | SessionChange::ApprovalUpdated { .. }
         | SessionChange::GoalChanged { .. }
@@ -1041,6 +1083,7 @@ fn public_delta_item(item: &SessionItem) -> SessionItem {
             item_id,
             message_id,
             input_ids,
+            notice,
             text,
             content,
             status,
@@ -1048,6 +1091,7 @@ fn public_delta_item(item: &SessionItem) -> SessionItem {
             item_id: item_id.clone(),
             message_id: message_id.clone(),
             input_ids: input_ids.clone(),
+            notice: *notice,
             text: text.clone(),
             content: content.iter().map(public_delta_content).collect(),
             status: *status,
@@ -1438,6 +1482,7 @@ pub struct SessionState {
     epoch: u64,
     seq: u64,
     cursor: u64,
+    run_timings: Vec<RunTiming>,
     items: SessionFact<Vec<SessionItem>>,
     tools: SessionFact<Vec<ToolView>>,
     approvals: SessionFact<Vec<ApprovalView>>,
@@ -1447,7 +1492,7 @@ pub struct SessionState {
     terminal_run_ids: HashSet<String>,
     pub(crate) run_delivery_contexts: HashMap<String, SessionDeliveryContext>,
     pub(crate) run_execution_contexts: HashMap<String, (String, crate::execution::SessionExecutionContext)>,
-    pub(crate) pending_terminals: Vec<crate::terminal_hook::SessionRunTerminalSnapshot>,
+    pub(crate) pending_terminals: Vec<PendingTerminal>,
     pub(crate) terminal_permit: Option<crate::owner::terminal::TerminalPermit>,
     host_source_epoch: Option<u64>,
     native_source_epoch: Option<u64>,
@@ -1498,6 +1543,7 @@ impl SessionState {
             epoch,
             seq,
             cursor,
+            run_timings: facts.run_timings,
             items: facts.items,
             tools: facts.tools,
             approvals: facts.approvals,
@@ -1642,6 +1688,7 @@ impl SessionState {
             epoch: self.epoch,
             seq: self.seq,
             cursor: self.cursor,
+            run_timings: self.run_timings.clone(),
             items: self.items.clone(),
             tools: self.tools.clone(),
             approvals: self.approvals.clone(),
@@ -1662,8 +1709,12 @@ impl SessionState {
         changes: &[SessionChange],
     ) -> Vec<SessionChange> {
         changes.iter().filter(|change| {
-            !binding.replay || !change_run_id(change).or(run_id)
-                .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+            !binding.replay
+                || matches!(change, SessionChange::RunTimingUpdated { .. })
+                || matches!(change, SessionChange::ApprovalUpdated { approval }
+                    if approval.phase == ApprovalPhase::Resolved)
+                || !change_run_id(change).or(run_id)
+                    .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
         }).cloned().collect()
     }
 
@@ -1872,6 +1923,7 @@ impl SessionState {
             }
         }
         let mut next = self.clone();
+        merge_run_timings(&mut next.run_timings, &sync.view.run_timings);
         let bounded_latest = matches!(
             &sync.view.window,
             SessionFact::Complete(window) | SessionFact::Incomplete { facts: window, .. }
@@ -2510,6 +2562,10 @@ impl SessionState {
             _ => false,
         };
         let applied = match change {
+            SessionChange::RunTimingUpdated { timing } => {
+                update_run_timing(&mut self.run_timings, timing);
+                true
+            }
             SessionChange::RunPhaseChanged { run_id, phase } => {
                 if self.terminal_run_ids.contains(run_id) {
                     return false;
@@ -2608,10 +2664,11 @@ impl SessionState {
                 update_tools(&mut self.tools, &tool)
             }
             SessionChange::ApprovalUpdated { approval } => {
-                if approval
-                    .run_id
-                    .as_deref()
-                    .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+                if approval.phase == ApprovalPhase::Requested
+                    && approval
+                        .run_id
+                        .as_deref()
+                        .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
                 {
                     return false;
                 }
@@ -3449,6 +3506,11 @@ fn project_delta_changes(
     let mut projected = Vec::with_capacity(changes.len());
     for change in changes {
         match change {
+            SessionChange::RunTimingUpdated { timing } => {
+                projected.push(SessionChange::RunTimingUpdated {
+                    timing: state.run_timings.iter().find(|current| current.run_id == timing.run_id)?.clone(),
+                });
+            }
             SessionChange::MessageDelta {
                 item_id,
                 run_id,
@@ -3784,7 +3846,8 @@ fn terminal_run_ids_from_facts(facts: &SessionFacts) -> HashSet<String> {
 }
 
 fn valid_facts(facts: &SessionFacts) -> bool {
-    valid_items_fact(&facts.items)
+    valid_run_timings(&facts.run_timings)
+        && valid_items_fact(&facts.items)
         && valid_tools_fact(&facts.tools)
         && valid_approvals_fact(&facts.approvals)
         && valid_runtime_fact(&facts.runtime)
@@ -4028,6 +4091,7 @@ fn valid_approval(approval: &ApprovalView) -> bool {
         && approval.run_id.as_deref().is_none_or(valid_id)
         && approval.option_ids.len() <= MAX_APPROVALS
         && approval.option_ids.iter().all(|value| valid_id(value))
+        && approval.details.as_ref().is_none_or(valid_approval_details)
 }
 
 fn valid_runtime(runtime: &RuntimeView) -> bool {
@@ -4118,7 +4182,7 @@ fn valid_opaque_media_reference(value: &str) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b':' | b'.'))
 }
 
-fn valid_id(value: &str) -> bool {
+pub(super) fn valid_id(value: &str) -> bool {
     valid_id_with_limit(value, MAX_ID_BYTES)
 }
 
@@ -4129,16 +4193,16 @@ fn valid_id_with_limit(value: &str, max_bytes: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn valid_payload_text(value: &str, max_bytes: usize) -> bool {
+pub(super) fn valid_payload_text(value: &str, max_bytes: usize) -> bool {
     value.len() <= max_bytes && !value.chars().any(|character| character == '\0')
 }
 
-fn valid_payload(value: &Value, max_bytes: usize) -> bool {
+pub(super) fn valid_payload(value: &Value, max_bytes: usize) -> bool {
     serde_json::to_string(value).is_ok_and(|text| text.len() <= max_bytes)
         && !payload_contains_nul(value)
 }
 
-fn payload_contains_nul(value: &Value) -> bool {
+pub(super) fn payload_contains_nul(value: &Value) -> bool {
     match value {
         Value::String(text) => text.contains('\0'),
         Value::Array(values) => values.iter().any(payload_contains_nul),
@@ -4178,6 +4242,7 @@ fn sole_change_run_id(changes: &[SessionChange]) -> Option<&str> {
 
 fn change_run_id(change: &SessionChange) -> Option<&str> {
     match change {
+        SessionChange::RunTimingUpdated { timing } => Some(timing.run_id.as_str()),
         SessionChange::RunPhaseChanged { run_id, .. } => Some(run_id.as_str()),
         SessionChange::MessageDelta { run_id, .. } => run_id.as_deref(),
         SessionChange::MessageUpdated { item } => item.run_id(),
@@ -4202,6 +4267,7 @@ fn valid_change(change: &SessionChange, outer_run_id: Option<&str>) -> bool {
         return false;
     }
     match change {
+        SessionChange::RunTimingUpdated { timing } => valid_run_timing(timing),
         SessionChange::RunPhaseChanged { run_id, .. } => valid_id(run_id),
         SessionChange::MessageDelta {
             item_id,
@@ -4434,15 +4500,18 @@ mod tests {
             endpoint_session_id: Some("endpoint-session-1".to_owned()),
             ownership: None,
             model_state: None,
+            input_receipts: None,
             goal: SessionGoalView::Unknown,
             identity: identity(),
             epoch: 1,
             seq: 1,
             cursor: 1,
+            run_timings: Vec::new(),
             items: SessionFact::Complete(vec![SessionItem::UserMessage {
                 item_id: "item-1".to_owned(),
                 message_id: Some("message-1".to_owned()),
                 input_ids: Vec::new(),
+                notice: None,
                 text: "hello".to_owned(),
                 content: vec![
                     SessionContent::ToolUse {
@@ -4860,6 +4929,7 @@ mod tests {
     #[test]
     fn event_changes_degrade_global_completeness() {
         let facts = SessionFacts {
+            run_timings: Vec::new(),
             items: SessionFact::Complete(Vec::new()),
             tools: SessionFact::Complete(Vec::new()),
             approvals: SessionFact::Complete(Vec::new()),
@@ -5018,6 +5088,7 @@ mod tests {
                         run_id: Some("run-1".to_owned()),
                         phase: ApprovalPhase::Requested,
                         option_ids: Vec::new(),
+                        details: None,
                     },
                 }],
             ),
@@ -5902,6 +5973,7 @@ mod tests {
     #[test]
     fn from_facts_rebuilds_terminal_run_fence_from_hydrated_items() {
         let facts = SessionFacts {
+            run_timings: Vec::new(),
             items: SessionFact::Complete(vec![SessionItem::AssistantTurn {
                 item_id: "item-1".to_owned(),
                 run_id: Some("run-1".to_owned()),

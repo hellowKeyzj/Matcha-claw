@@ -17,7 +17,7 @@ import {
   extractFirstPromptFromHead,
   extractJsonStringField,
   extractLastJsonStringField,
-  findProjectDir,
+  findProjectDirs,
   getProjectsDir,
   MAX_SANITIZED_LENGTH,
   readSessionLite,
@@ -326,9 +326,13 @@ async function gatherProjectCandidates(
 
   // No worktrees (or git not available / scanning disabled) — just scan the single project dir
   if (worktreePaths.length <= 1) {
-    const projectDir = await findProjectDir(canonicalDir)
-    if (!projectDir) return []
-    return listCandidates(projectDir, doStat, canonicalDir)
+    const projectDirs = await findProjectDirs(canonicalDir)
+    const candidates = await Promise.all(
+      projectDirs.map(projectDir =>
+        listCandidates(projectDir, doStat, canonicalDir),
+      ),
+    )
+    return candidates.flat()
   }
 
   // Worktree-aware scanning: find all project dirs matching any worktree
@@ -351,9 +355,13 @@ async function gatherProjectCandidates(
     allDirents = await readdir(projectsDir, { withFileTypes: true })
   } catch {
     // Fall back to single project dir
-    const projectDir = await findProjectDir(canonicalDir)
-    if (!projectDir) return []
-    return listCandidates(projectDir, doStat, canonicalDir)
+    const projectDirs = await findProjectDirs(canonicalDir)
+    const candidates = await Promise.all(
+      projectDirs.map(projectDir =>
+        listCandidates(projectDir, doStat, canonicalDir),
+      ),
+    )
+    return candidates.flat()
   }
 
   const all: Candidate[] = []
@@ -361,8 +369,7 @@ async function gatherProjectCandidates(
 
   // Always include the user's actual directory (handles subdirectories
   // like /repo/packages/my-app that won't match worktree root prefixes)
-  const canonicalProjectDir = await findProjectDir(canonicalDir)
-  if (canonicalProjectDir) {
+  for (const canonicalProjectDir of await findProjectDirs(canonicalDir)) {
     const dirBase = basename(canonicalProjectDir)
     seenDirs.add(caseInsensitive ? dirBase.toLowerCase() : dirBase)
     all.push(

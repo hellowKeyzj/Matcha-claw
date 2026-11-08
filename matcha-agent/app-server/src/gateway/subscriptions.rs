@@ -49,6 +49,11 @@ pub(super) async fn replay(connection: &Connection, params: Value) -> rpc::Resul
         .events
         .replay(&params.session_id, params.after_seq, params.limit)
         .await?;
+    let events = connection
+        .gateway
+        .interactions
+        .hydrate_events(events)
+        .await?;
     let next_seq = events.last().map_or(params.after_seq, |event| event.seq);
     Ok(json!({
         "sessionId": params.session_id,
@@ -331,7 +336,10 @@ async fn stream(
         let events = tokio::select! {
             biased;
             _ = stopped.cancelled() => return Ok(()),
-            events = connection.gateway.events.replay(session_id, cursor, REPLAY_PAGE) => events?,
+            events = async {
+                let events = connection.gateway.events.replay(session_id, cursor, REPLAY_PAGE).await?;
+                connection.gateway.interactions.hydrate_events(events).await
+            } => events?,
         };
         if events.is_empty() {
             tokio::select! {

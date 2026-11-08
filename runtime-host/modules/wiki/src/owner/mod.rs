@@ -1,4 +1,5 @@
 pub(crate) mod actor;
+pub(crate) mod artifacts;
 pub(crate) mod blocking;
 pub(crate) mod dedup;
 pub(crate) mod page_links;

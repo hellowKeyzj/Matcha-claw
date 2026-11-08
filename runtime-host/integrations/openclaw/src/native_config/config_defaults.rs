@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde_json::{Map, Value};
 
 use super::config_store::OpenClawConfigDocument;
@@ -17,13 +19,57 @@ const STARTUP_TOOL_DENY: &[&str] = &[
     "dismiss_task",
 ];
 
-pub(crate) fn apply_gateway_startup_defaults(document: &mut OpenClawConfigDocument) -> bool {
-    let mut changed = false;
+pub(crate) fn apply_gateway_startup_defaults(
+    document: &mut OpenClawConfigDocument,
+    state_dir: &Path,
+) -> bool {
+    let mut changed = apply_logging_defaults(document, state_dir);
     if cfg!(windows) {
         changed |= apply_agent_defaults(document);
         changed |= apply_tool_defaults(document);
     }
     changed |= apply_workshop_defaults(document);
+    changed
+}
+
+pub(crate) fn needs_logging_defaults(document: &OpenClawConfigDocument) -> bool {
+    if document.get("$include").is_some() {
+        return false;
+    }
+    match document.get("logging") {
+        Some(Value::Object(logging)) => {
+            !logging.contains_key("$include")
+                && (!logging.contains_key("file") || !logging.contains_key("maxFileBytes"))
+        }
+        Some(_) => false,
+        None => true,
+    }
+}
+
+pub(crate) fn apply_logging_defaults(
+    document: &mut OpenClawConfigDocument,
+    state_dir: &Path,
+) -> bool {
+    if !needs_logging_defaults(document) {
+        return false;
+    }
+    let mut logging = object(document.get("logging"));
+    let mut changed = ensure_string_if_missing(
+        &mut logging,
+        "file",
+        state_dir
+            .join("logs")
+            .join("openclaw.log")
+            .to_string_lossy()
+            .as_ref(),
+    );
+    if !logging.contains_key("maxFileBytes") {
+        logging.insert("maxFileBytes".into(), Value::from(10_485_760));
+        changed = true;
+    }
+    if changed {
+        document.insert("logging".into(), Value::Object(logging));
+    }
     changed
 }
 

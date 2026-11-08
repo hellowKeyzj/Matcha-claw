@@ -8,13 +8,14 @@ import { subscribeBrowserRecovery } from '@/lib/host-events';
 import { lazyWithPreload } from '@/plugin-host/core';
 import { useWorkspace } from '@/plugins/workspace/context';
 import type { WorkspaceController, WorkspacePage, WorkspacePageProps } from '@/plugins/workspace/extensions';
+import type { AppApplicationManifest } from '@/types/desktop/app-plugin';
 import type { PluginDevelopmentSummary } from './development';
 import { readDevelopmentStatus, useDevelopmentStatus } from './development-status';
 import type { DevelopmentPreviewContentProps } from './DevelopmentPreview';
 
 const DevelopmentPreviewContent = lazyWithPreload<DevelopmentPreviewContentProps>(() => import('./DevelopmentPreview').then((module) => ({ default: module.DevelopmentPreviewContent })));
 
-function DevelopmentEntryPage({ developmentId, entry, pageId, ...props }: WorkspacePageProps & { developmentId: string; entry?: string; pageId: string }) {
+function DevelopmentEntryPage({ developmentId, applicationId, entry, pageId, ...props }: WorkspacePageProps & { developmentId: string; applicationId?: string; entry?: string; pageId: string }) {
   const { pages, activatePage, removePage, openPage } = useWorkspace();
   const { status } = useDevelopmentStatus(developmentId);
   const page = pages.find((candidate) => candidate.id === pageId);
@@ -25,13 +26,14 @@ function DevelopmentEntryPage({ developmentId, entry, pageId, ...props }: Worksp
     commandSeen.current = command.id;
     activatePage(pageId);
   }, [command, pageId, activatePage]);
-  const application = status?.manifest?.contributes.applications?.find((candidate) => candidate.entry === entry);
+  const application = status?.manifest?.contributes.applications?.find((candidate) => candidate.id === applicationId);
   const title = application?.name ?? status?.manifest?.name;
-  const removed = status?.state === 'active' && !!status.manifest && entry !== undefined && !application;
+  const lifetime = application?.scope === 'workspace' ? 'workspace' : undefined;
+  const removed = status?.state === 'active' && !!status.manifest && applicationId !== undefined && (!application || application.entry !== entry);
   useEffect(() => {
     if (removed) removePage(pageId);
-    else if (page && title && page.title !== title) openPage({ ...page, title }, { activate: false });
-  }, [removed, title, page, pageId, removePage, openPage]);
+    else if (page && title && (page.title !== title || page.lifetime !== lifetime)) openPage({ ...page, title, lifetime }, { activate: false });
+  }, [removed, title, lifetime, page, pageId, removePage, openPage]);
   return removed ? null : <DevelopmentPreviewContent developmentId={developmentId} entry={entry} embedded visible={props.visible} registerCloseHandler={props.registerCloseHandler} />;
 }
 
@@ -42,18 +44,18 @@ export async function openDevelopmentPages(workspace: WorkspaceController, devel
   const providerId = `application-development:${developmentId}`;
   const applications = status.manifest.contributes.applications ?? [];
   const pages = applications.length
-    ? applications.map((application) => developmentPage(developmentId, application.entry, application.name))
-    : [developmentPage(developmentId, undefined, status.manifest.name)];
+    ? applications.map((application) => developmentPage(developmentId, application.name, application))
+    : [developmentPage(developmentId, status.manifest.name)];
   workspace.syncPages(providerId, pages);
   workspace.openPage(pages[0]);
 }
 
-function developmentPage(developmentId: string, entry: string | undefined, title: string): WorkspacePage {
+function developmentPage(developmentId: string, title: string, application?: AppApplicationManifest): WorkspacePage {
   const providerId = `application-development:${developmentId}`;
-  const id = JSON.stringify([providerId, entry ?? null]);
+  const id = JSON.stringify([providerId, application?.id ?? null]);
   return {
-    id, providerId, title, icon: Puzzle, badge: 'preview',
-    render: (props) => createElement(DevelopmentEntryPage, { ...props, developmentId, entry, pageId: id }),
+    id, providerId, title, icon: Puzzle, badge: 'preview', lifetime: application?.scope === 'workspace' ? 'workspace' : undefined,
+    render: (props) => createElement(DevelopmentEntryPage, { ...props, developmentId, applicationId: application?.id, entry: application?.entry, pageId: id }),
   };
 }
 

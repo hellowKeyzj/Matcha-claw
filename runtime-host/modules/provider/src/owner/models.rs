@@ -40,6 +40,7 @@ const DEEPSEEK_DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
 const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
 const GENERATION_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_TEXT_GENERATION_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Clone)]
 pub(crate) struct ProviderModelOwner {
@@ -54,7 +55,6 @@ impl ProviderModelOwner {
             private_resolver: Resolver::disabled(),
             llm_client: reqwest::Client::builder()
                 .connect_timeout(GENERATION_IO_TIMEOUT)
-                .read_timeout(GENERATION_IO_TIMEOUT)
                 .build()
                 .ok()
                 .map(LlmClient::new),
@@ -165,6 +165,7 @@ impl ProviderModelOwner {
         let mut response_sink = GenerationStreamSink::new(stream);
         let is_streaming = response_sink.sink.is_some();
         for (candidate_index, (account, model, timeout_ms)) in candidates.into_iter().enumerate() {
+            let timeout_ms = text_generation_timeout_ms(timeout_ms);
             let candidate_started = platform::trace::enabled().then(std::time::Instant::now);
             let candidate_trace = |mut payload: serde_json::Value| {
                 if let Some(fields) = payload.as_object_mut() {
@@ -240,18 +241,14 @@ impl ProviderModelOwner {
                     session_trace("provider-generation.cancelled", || candidate_trace(json!({ "category": "Cancelled" })));
                     return Ok(ProviderTextGenerationOutcome::Cancelled);
                 }
-                response = async {
-                    match timeout_ms {
-                        Some(timeout_ms) => tokio::time::timeout(Duration::from_millis(timeout_ms), generation)
-                            .await.unwrap_or_else(|_| {
-                                session_trace("provider-generation.timeout", || candidate_trace(json!({
-                                    "reason": "provider_timeout", "timeoutMs": timeout_ms,
-                                })));
-                                Err(LlmClientError::Deadline)
-                            }),
-                        None => generation.await,
-                    }
-                } => response,
+                response = tokio::time::timeout(Duration::from_millis(timeout_ms), generation) => {
+                    response.unwrap_or_else(|_| {
+                        session_trace("provider-generation.timeout", || candidate_trace(json!({
+                            "reason": "provider_timeout", "timeoutMs": timeout_ms,
+                        })));
+                        Err(LlmClientError::Deadline)
+                    })
+                },
             };
             match response {
                 Ok(response) => {
@@ -269,7 +266,7 @@ impl ProviderModelOwner {
                     })));
                     return Ok(ProviderTextGenerationOutcome::Generated {
                         response,
-                        model_limits: text_generation_model_limits(model, timeout_ms),
+                        model_limits: text_generation_model_limits(model, Some(timeout_ms)),
                     });
                 }
                 Err(error) => {
@@ -306,7 +303,7 @@ impl ProviderModelOwner {
                     {
                         return Err(error);
                     }
-                    unavailable = Some(text_generation_unavailable_reason(&error));
+                    unavailable = Some(ProviderTextGenerationUnavailableReason::from(&error));
                     if is_streaming {
                         stream_error = Some(error);
                     }
@@ -350,19 +347,41 @@ impl ProviderModelOwner {
         cascade: &ProviderCascade,
         session_key: String,
         endpoint_session_id: Option<String>,
-        model_id: String,
+        model_id: Option<String>,
         model_selection_id: Option<String>,
         provider_fingerprint: Option<String>,
         trace_id: Option<String>,
     ) -> ProviderSessionModelSelectionOutcome {
-        match self.resolve_matcha_runtime(
-            runtime,
-            cascade,
-            ProviderModelCapability::Chat,
-            &model_id,
-            model_selection_id.as_deref(),
-            provider_fingerprint.as_deref(),
-        ) {
+        let selection = match model_id {
+            Some(model_id) => self.resolve_matcha_runtime(
+                runtime,
+                cascade,
+                ProviderModelCapability::Chat,
+                &model_id,
+                model_selection_id.as_deref(),
+                provider_fingerprint.as_deref(),
+            ),
+            None => {
+                if model_selection_id.is_some() || provider_fingerprint.is_some() {
+                    return ProviderSessionModelSelectionOutcome::Rejected;
+                }
+                let Some(primary) = cascade.routing()
+                    .and_then(|routing| routing.route(ProviderRoutingCapability::Chat))
+                    .map(|route| route.primary()) else {
+                    return ProviderSessionModelSelectionOutcome::Rejected;
+                };
+                self.resolve_matching(
+                    runtime,
+                    cascade,
+                    ProviderSessionEndpoint::MatchaAgentLocal,
+                    ProviderModelCapability::Chat,
+                    |model, _account| provider_model_matches_routing_reference(
+                        model, ProviderRoutingCapability::Chat, primary,
+                    ),
+                )
+            }
+        };
+        match selection {
             Ok(Some(selection)) => {
                 ProviderSessionModelSelectionOutcome::Selected(selection.into_receipt(
                     ProviderSessionEndpoint::MatchaAgentLocal,
@@ -559,34 +578,6 @@ impl ProviderModelOwner {
                 ProviderCommitOutcome::CommitOutcomeUnknown
             },
         }
-    }
-}
-
-pub(super) fn text_generation_unavailable_reason(
-    error: &LlmClientError,
-) -> ProviderTextGenerationUnavailableReason {
-    use ProviderTextGenerationUnavailableReason::{
-        Authentication, Deadline, InvalidResponse, PermissionDenied, ProviderUnavailable, RateLimited,
-    };
-    let status = match error {
-        LlmClientError::Http(error) => error.status().map(|status| status.as_u16()),
-        LlmClientError::HttpStatus { status, .. } => Some(*status),
-        _ => None,
-    };
-    match status {
-        Some(401) => Authentication,
-        Some(403) => PermissionDenied,
-        Some(429) => RateLimited,
-        _ => match error {
-            LlmClientError::Deadline => Deadline,
-            LlmClientError::Http(error) if error.is_timeout() => Deadline,
-            LlmClientError::Http(error) if error.is_decode() => InvalidResponse,
-            LlmClientError::Protocol(_) => InvalidResponse,
-            LlmClientError::UnsupportedProtocol
-            | LlmClientError::Http(_)
-            | LlmClientError::HttpStatus { .. }
-            | LlmClientError::StreamSink(_) => ProviderUnavailable,
-        },
     }
 }
 
@@ -820,6 +811,10 @@ fn runtime_default_provider_endpoint(provider: &str) -> Option<&'static str> {
     })
 }
 
+pub(super) fn text_generation_timeout_ms(timeout_ms: Option<u64>) -> u64 {
+    timeout_ms.unwrap_or(DEFAULT_TEXT_GENERATION_TIMEOUT_MS)
+}
+
 pub(super) fn text_generation_model_limits(
     model: &ProviderModel,
     timeout_ms: Option<u64>,
@@ -827,7 +822,7 @@ pub(super) fn text_generation_model_limits(
     ProviderTextGenerationModelLimits {
         context_window: model.context_window(),
         max_tokens: model.max_tokens(),
-        timeout_ms,
+        timeout_ms: Some(text_generation_timeout_ms(timeout_ms)),
     }
 }
 

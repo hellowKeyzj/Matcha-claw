@@ -36,7 +36,8 @@ fn gateway_event_trace_payload(event: &GatewayEvent, epoch: GatewayEpoch) -> ser
     let message_content = message.and_then(|message| message.get("content")).and_then(serde_json::Value::as_array).map(|content| content.iter().take(64).map(|block| {
         match block.get("type").and_then(serde_json::Value::as_str) {
             Some("text") => serde_json::json!({ "kind": "text", "text": block.get("text").and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape) }),
-            Some("thinking") => serde_json::json!({ "kind": "thinking", "text": block.get("thinking").and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape) }),
+            Some("thinking") => serde_json::json!({ "kind": "thinking", "text": block.get("thinking").and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape),
+                "alternateText": block.get("text").and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape) }),
             _ => serde_json::json!({ "kind": "other" }),
         }
     }).collect::<Vec<_>>());
@@ -151,14 +152,17 @@ fn trace_decoded_event(stage: &'static str, envelope: &SessionEventEnvelope, epo
             "messageThinking": chat.and_then(|chat| chat.message_thinking.as_deref()).map(sessions_module::trace::text_shape),
             "activity": envelope.activity.as_ref().map(|activity| match activity.kind() {
                 super::protocol::SessionActivityKind::Message { message_id, lifecycle, text } => serde_json::json!({ "kind": "message", "messageHash": sessions_module::trace::fingerprint(message_id.as_str()), "lifecycle": format!("{:?}", lifecycle), "text": text.as_deref().map(sessions_module::trace::text_shape) }),
-                super::protocol::SessionActivityKind::Thinking { text } => serde_json::json!({ "kind": "thinking", "text": sessions_module::trace::text_shape(text) }),
+                super::protocol::SessionActivityKind::Thinking { text } => serde_json::json!({ "kind": "thinking", "text": sessions_module::trace::text_shape(text),
+                    "delta": activity.thinking_delta().map(sessions_module::trace::text_shape), "isReasoningSnapshot": activity.is_reasoning_snapshot(),
+                    "streamHash": activity.stream_id().map(sessions_module::trace::fingerprint) }),
                 super::protocol::SessionActivityKind::Tool { tool_id, phase, .. } => serde_json::json!({ "kind": "tool", "toolHash": sessions_module::trace::fingerprint(tool_id.as_str()), "phase": format!("{:?}", phase) }),
                 _ => serde_json::json!({ "kind": "other" }),
             }),
             "persistedMessage": envelope.transcript_message.as_ref().map(|message| serde_json::json!({
                 "role": format!("{:?}", message.role()), "runHash": message.run_id().map(sessions_module::trace::fingerprint),
                 "messageHash": message.message_id().map(sessions_module::trace::fingerprint), "displayItemHash": message.display_item_id().map(sessions_module::trace::fingerprint),
-                "sequence": message.sequence(), "text": sessions_module::trace::text_shape(message.text()) })),
+                "sequence": message.sequence(), "streamHash": message.identity_stream_id().map(sessions_module::trace::fingerprint),
+                "text": sessions_module::trace::text_shape(message.text()) })),
             "commentary": envelope.commentary.as_ref().map(|(id, text)| serde_json::json!({ "itemHash": sessions_module::trace::fingerprint(id), "text": sessions_module::trace::text_shape(text) })),
         }),
     );
@@ -207,8 +211,10 @@ pub(crate) enum IngestFrame {
     Socket { epoch: GatewayEpoch, frame: crate::gateway::connection::GatewayFrame, observations: Arc<crate::gateway::observation::Observations>, failure: tokio::sync::watch::Receiver<Option<crate::gateway::delivery::DispatcherError>> },
     SocketClosed { epoch: GatewayEpoch },
     HistoryContent { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: GatewayEpoch, window: super::window::SessionWindow, page: super::window::PageRequest, host_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Option<sessions_module::ports::SessionSync>, sessions_module::ports::RuntimeOperationFailure>> },
+    HistoryAnchor { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Option<super::protocol::HistoryAnchor>, sessions_module::ports::RuntimeOperationFailure>> },
     HistoryStarted { identity: sessions_module::state::SessionIdentity, generation: u64, page: super::window::PageRequest, reply: tokio::sync::oneshot::Sender<u64> },
     HistoryFinished { identity: sessions_module::state::SessionIdentity, generation: u64, read: u64, reply: tokio::sync::oneshot::Sender<bool> },
+    PendingApprovals { identity: sessions_module::state::SessionIdentity, session_id: String, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Vec<sessions_module::state::ApprovalView>, sessions_module::ports::RuntimeOperationFailure>> },
     ImageTaskTools { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Vec<sessions_module::state::ToolView>, sessions_module::ports::RuntimeOperationFailure>> },
     Close { identity: sessions_module::state::SessionIdentity, generation: u64, reply: tokio::sync::oneshot::Sender<()> },
     Restart { identity: sessions_module::state::SessionIdentity, generation: u64, next_generation: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<(), sessions_module::ports::RuntimeOperationFailure>> },
@@ -298,6 +304,13 @@ impl SessionEventIngest {
         receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
     }
 
+    pub(crate) async fn pending_approvals(&self, identity: sessions_module::state::SessionIdentity, session_id: String, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<Vec<sessions_module::state::ApprovalView>, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.sender.send(IngestFrame::PendingApprovals { identity, session_id, generation, source_epoch, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
+    }
+
     pub(crate) async fn image_task_tools(&self, identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<Vec<sessions_module::state::ToolView>, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         let (reply, receiver) = tokio::sync::oneshot::channel();
@@ -309,6 +322,13 @@ impl SessionEventIngest {
         use sessions_module::ports::RuntimeOperationFailure;
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.sender.send(IngestFrame::HistoryContent { identity, generation, source_epoch, window, page, host_epoch, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
+    }
+
+    pub(crate) async fn history_anchor(&self, identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<Option<super::protocol::HistoryAnchor>, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.sender.send(IngestFrame::HistoryAnchor { identity, generation, source_epoch, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
         receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
     }
 
@@ -356,6 +376,13 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
             }
         };
         let (epoch, frame, observations, failure) = match frame {
+            IngestFrame::HistoryAnchor { identity, generation, source_epoch, observations, reply } => {
+                let result = if source_epoch == active_epoch && observations.is_active(&identity, generation, source_epoch) {
+                    Ok(router.history_anchor(&identity, generation))
+                } else { Err(RuntimeOperationFailure::Unavailable) };
+                let _ = reply.send(result);
+                continue;
+            }
             IngestFrame::HistoryStarted { identity, generation, page, reply } => {
                 let _ = reply.send(router.history_started(&identity, generation, page));
                 continue;
@@ -383,6 +410,13 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                     update_history_cursor(&observations, &identity, generation, page, cursor, &result, source_epoch.as_u64(), history_kind);
                     result
                 };
+                let _ = reply.send(result);
+                continue;
+            }
+            IngestFrame::PendingApprovals { identity, session_id, generation, source_epoch, observations, reply } => {
+                let result = if source_epoch == active_epoch && observations.is_active(&identity, generation, source_epoch) {
+                    router.pending_approvals(&identity, generation, &session_id)
+                } else { Err(RuntimeOperationFailure::Unavailable) };
                 let _ = reply.send(result);
                 continue;
             }
@@ -858,6 +892,7 @@ mod tests {
             activity: None,
             approval: None,
             changed: None,
+            run_timing: None,
         }
     }
 

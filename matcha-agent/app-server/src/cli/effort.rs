@@ -39,6 +39,7 @@ pub(crate) struct Capabilities {
     pub(crate) model: String,
     pub(crate) supports_effort: bool,
     pub(crate) supported_effort_levels: Vec<Level>,
+    #[serde(deserialize_with = "Option::<Level>::deserialize")]
     pub(crate) effective_level: Option<Level>,
 }
 
@@ -200,6 +201,12 @@ pub(crate) async fn inspect(launch: &super::process::Launch) -> rpc::Result<Capa
         .validate()
 }
 
+pub(crate) fn decode(response: &Value) -> rpc::Result<Capabilities> {
+    serde_json::from_value::<Capabilities>(response.clone())
+        .map_err(|source| response_error().with_source(source))?
+        .validate()
+}
+
 pub(crate) fn readback(response: &Value) -> rpc::Result<Capabilities> {
     let applied = response
         .get("applied")
@@ -236,14 +243,12 @@ fn decode_fields(response: &Value, effective: &str) -> rpc::Result<Capabilities>
             return Err(response_error());
         }
     }
-    serde_json::from_value::<Capabilities>(json!({
+    decode(&json!({
         "model": response["model"],
         "supportsEffort": response["supportsEffort"],
         "supportedEffortLevels": response["supportedEffortLevels"],
         "effectiveLevel": response[effective],
     }))
-    .map_err(|source| response_error().with_source(source))?
-    .validate()
 }
 
 fn response_error() -> rpc::Error {

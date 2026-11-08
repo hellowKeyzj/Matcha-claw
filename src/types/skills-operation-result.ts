@@ -4,11 +4,20 @@ export type SkillBundle = {
   skillKey: string;
   files: { path: string; content: string }[];
 };
+export type SkillsConfigApplication = {
+  persisted: true;
+  sessions: {
+    sessionId: string;
+    instanceId: string;
+    status: 'acknowledged' | 'unconfirmed';
+  }[];
+};
 export type SkillsConfigResult = {
   kind: 'config';
   outcome: 'accepted' | 'partial' | 'rejected' | 'unknown';
   skillKey: string;
   invalidKeys: string[];
+  application?: SkillsConfigApplication;
 };
 export type SkillsBatchStateResult = {
   kind: 'batchState';
@@ -41,8 +50,11 @@ export function decodeSkillsOperationResult(value: unknown): SkillsOperationResu
   const result = value.result;
   let valid = false;
   if (['skills.config', 'skills.updateConfig', 'skills.updateState'].includes(value.command)) {
-    valid = keys(result, ['kind', 'outcome', 'skillKey', 'invalidKeys']) && result.kind === 'config'
-      && outcome(result.outcome, true) && skillKey(result.skillKey) && Array.isArray(result.invalidKeys) && result.invalidKeys.every(skillKey);
+    valid = keys(result, ['kind', 'outcome', 'skillKey', 'invalidKeys', ...(Object.hasOwn(result, 'application') ? ['application'] : [])])
+      && result.kind === 'config' && outcome(result.outcome, true) && skillKey(result.skillKey)
+      && Array.isArray(result.invalidKeys) && result.invalidKeys.every(skillKey)
+      && (!Object.hasOwn(result, 'application') || (configApplication(result.application)
+        && result.outcome === (result.application.sessions.some((session) => session.status === 'unconfirmed') ? 'partial' : 'accepted')));
   } else if (value.command === 'skills.updateBatchState') {
     valid = keys(result, ['kind', 'success', 'outcome', 'enabled', 'requested', 'updated', 'invalidKeys', 'failed'])
       && result.kind === 'batchState' && typeof result.success === 'boolean' && outcome(result.outcome, true)
@@ -75,6 +87,15 @@ export function isSkillBundle(value: unknown): value is SkillBundle {
       && !file.path.includes('\\') && !file.path.includes('\0')
       && file.path.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..')
       && typeof file.content === 'string');
+}
+
+function configApplication(value: unknown): value is SkillsConfigApplication {
+  if (!record(value) || !keys(value, ['persisted', 'sessions']) || value.persisted !== true || !Array.isArray(value.sessions)) return false;
+  return value.sessions.every((session) => record(session) && keys(session, ['sessionId', 'instanceId', 'status'])
+    && typeof session.sessionId === 'string' && session.sessionId.trim().length > 0 && !session.sessionId.includes('\0')
+    && typeof session.instanceId === 'string' && session.instanceId.trim().length > 0 && !session.instanceId.includes('\0')
+    && ['acknowledged', 'unconfirmed'].includes(session.status as string))
+    && new Set(value.sessions.map((session) => session.sessionId)).size === value.sessions.length;
 }
 
 function record(value: unknown): value is Record<string, unknown> {

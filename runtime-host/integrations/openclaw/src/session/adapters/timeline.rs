@@ -376,6 +376,7 @@ fn project_openclaw_replay_view(
         items,
         tools,
         approvals,
+        run_timings: projection.run_timings,
         runtime: SessionFact::Incomplete {
             facts: projection.runtime,
             gaps: vec![MissingFact::PartialRuntime],
@@ -396,6 +397,7 @@ pub(crate) struct OpenClawReplayProjection {
     tool_sources: HashMap<(Option<String>, String), ToolSources>,
     pub(crate) approvals: Vec<ApprovalView>,
     pub(crate) runtime: RuntimeView,
+    pub(crate) run_timings: Vec<sessions_module::state::RunTiming>,
     pub(crate) partial: bool,
 }
 
@@ -410,7 +412,7 @@ impl OpenClawReplayProjection {
     pub(crate) fn empty() -> Self {
         Self { items: Vec::new(), tools: Vec::new(), tool_sources: HashMap::new(), approvals: Vec::new(),
             runtime: RuntimeView { phase: RunPhase::Completed, active_run_id: None, issue: None,
-                run_progress: None, runtime_activity: None, error_detail: None }, partial: false }
+                run_progress: None, runtime_activity: None, error_detail: None }, run_timings: Vec::new(), partial: false }
     }
 
     fn from_replay(replay: &crate::port::CanonicalSessionReplay) -> Option<Self> {
@@ -423,7 +425,7 @@ impl OpenClawReplayProjection {
         projection.prepare_transcript_tools(&messages);
         for result in replay.ingress_results() {
             let crate::port::CanonicalIngressResult::Produced(delta) = result else {
-                continue;
+                return None;
             };
             for change in delta.changes() {
                 projection.apply_change(change)?;
@@ -432,11 +434,41 @@ impl OpenClawReplayProjection {
         Some(projection)
     }
 
+    pub(crate) fn observe_run_timing(
+        &mut self,
+        native: &crate::session::protocol::NativeRunTiming,
+        history: bool,
+    ) -> Option<sessions_module::state::RunTiming> {
+        let existing = self.run_timings.iter().find(|timing| timing.run_id == native.run_id.as_str());
+        if existing.is_some_and(|timing| timing.ended_at_ms.is_some())
+            && (history || native.ended_at_ms.is_none()) { return None; }
+        let existing_start = existing.map(|timing| timing.started_at_ms);
+        let started_at_ms = existing_start.into_iter().chain(native.started_at_ms).min()?;
+        let ended_at_ms = native.ended_at_ms.or_else(|| existing.and_then(|timing| timing.ended_at_ms));
+        if ended_at_ms.is_some_and(|ended| ended < started_at_ms) { return None; }
+        let timing = sessions_module::state::RunTiming {
+            run_id: native.run_id.as_str().to_owned(), started_at_ms, ended_at_ms,
+            input_message_id: existing.and_then(|timing| timing.input_message_id.clone()),
+        };
+        if existing == Some(&timing) { return None; }
+        self.apply_change(&crate::session::projection::CanonicalSessionChange::RunTimingUpdated { timing: timing.clone() })?;
+        Some(timing)
+    }
+
     pub(crate) fn apply_change(
         &mut self,
         change: &crate::session::projection::CanonicalSessionChange,
     ) -> Option<()> {
         match change {
+            crate::session::projection::CanonicalSessionChange::RunTimingUpdated { timing } => {
+                if let Some(existing) = self.run_timings.iter_mut().find(|existing| existing.run_id == timing.run_id) {
+                    if existing.ended_at_ms.is_none() || timing.ended_at_ms.is_some() { *existing = timing.clone(); }
+                } else {
+                    if self.run_timings.len() == sessions_module::state::MAX_ITEMS { self.run_timings.remove(0); }
+                    self.run_timings.push(timing.clone());
+                }
+                Some(())
+            }
             crate::session::projection::CanonicalSessionChange::RunStarted { run_id } => {
                 self.apply_run_started(run_id.as_str())
             }
@@ -486,25 +518,11 @@ impl OpenClawReplayProjection {
                 ..
             } => self.apply_runtime_fallback_cleared(),
             crate::session::projection::CanonicalSessionChange::GuardianNotice { .. } => Some(()),
-            crate::session::projection::CanonicalSessionChange::ApprovalRequested {
-                run_id,
-                approval_id,
-                option_ids,
-            } => self.upsert_approval(
-                approval_id.as_str(),
-                Some(run_id.as_str()),
-                ApprovalPhase::Requested,
-                option_ids.iter().map(|id| id.as_str()).collect(),
+            crate::session::projection::CanonicalSessionChange::ApprovalRequested { run_id, approval_id, option_ids, details } => self.upsert_approval(
+                crate::session::approval::view(approval_id, run_id.as_ref(), ApprovalPhase::Requested, option_ids, details),
             ),
-            crate::session::projection::CanonicalSessionChange::ApprovalResolved {
-                run_id,
-                approval_id,
-                option_ids,
-            } => self.upsert_approval(
-                approval_id.as_str(),
-                Some(run_id.as_str()),
-                ApprovalPhase::Resolved,
-                option_ids.iter().map(|id| id.as_str()).collect(),
+            crate::session::projection::CanonicalSessionChange::ApprovalResolved { run_id, approval_id, option_ids, details } => self.upsert_approval(
+                crate::session::approval::view(approval_id, run_id.as_ref(), ApprovalPhase::Resolved, option_ids, details),
             ),
             crate::session::projection::CanonicalSessionChange::Terminal {
                 run_id,
@@ -778,33 +796,28 @@ impl OpenClawReplayProjection {
         }
     }
 
-    fn upsert_approval(
-        &mut self,
-        approval_id: &str,
-        run_id: Option<&str>,
-        phase: ApprovalPhase,
-        option_ids: Vec<&str>,
-    ) -> Option<()> {
-        if let Some(approval) = self
-            .approvals
-            .iter_mut()
-            .find(|approval| approval.approval_id == approval_id)
+    fn upsert_approval(&mut self, approval: ApprovalView) -> Option<()> {
+        if self.approvals.len() >= sessions_module::state::MAX_APPROVALS
+            && !self
+                .approvals
+                .iter()
+                .any(|existing| existing.approval_id == approval.approval_id)
         {
-            approval.run_id = run_id.map(str::to_owned);
-            approval.phase = phase;
-            approval.option_ids = option_ids.into_iter().map(str::to_owned).collect();
-        } else {
-            self.approvals.push(ApprovalView {
-                approval_id: approval_id.to_owned(),
-                run_id: run_id.map(str::to_owned),
-                phase,
-                option_ids: option_ids.into_iter().map(str::to_owned).collect(),
-            });
+            let retired = self
+                .approvals
+                .iter()
+                .position(|existing| existing.phase == ApprovalPhase::Resolved)?;
+            self.approvals.remove(retired);
         }
-        if phase == ApprovalPhase::Requested {
+        if approval.phase == ApprovalPhase::Requested && let Some(run_id) = &approval.run_id {
             self.runtime.phase = RunPhase::WaitingForApproval;
-            self.runtime.active_run_id = run_id.map(str::to_owned);
+            self.runtime.active_run_id = Some(run_id.clone());
             self.runtime.run_progress = None;
+        }
+        if let Some(existing) = self.approvals.iter_mut().find(|existing| existing.approval_id == approval.approval_id) {
+            *existing = approval;
+        } else {
+            self.approvals.push(approval);
         }
         Some(())
     }
@@ -1059,6 +1072,7 @@ pub(crate) fn transcript_session_item(
             item_id,
             input_ids: message.input_id().filter(|_| message.identity_message_id().is_some())
                 .map(str::to_owned).into_iter().collect(),
+            notice: message.notice(),
             message_id,
             text,
             content: transcript_content(message, TranscriptContentMode::User, cache)?,
@@ -1068,7 +1082,11 @@ pub(crate) fn transcript_session_item(
             item_id,
             run_id: message.run_id().map(str::to_owned),
             message_id,
-            status: ItemStatus::Final,
+            status: match message.stop_reason() {
+                Some("error") => ItemStatus::Error,
+                Some("aborted") => ItemStatus::Aborted,
+                _ => ItemStatus::Final,
+            },
             segments: transcript_content(message, TranscriptContentMode::Assistant, cache)?,
             text,
         }),
@@ -2338,6 +2356,7 @@ mod tests {
                 run_id: Some(run_id),
                 phase: ApprovalPhase::Resolved,
                 option_ids,
+                ..
             }] if approval_id == "approval-1"
                 && run_id == "run-1"
                 && option_ids == &vec!["allow-once".to_owned(), "deny".to_owned()]

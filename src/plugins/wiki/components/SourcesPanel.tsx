@@ -578,7 +578,7 @@ export function SourcesPanel(props: SourcesPanelProps): JSX.Element {
                       <SourceTaskProgress task={task} />
                       {isActiveSourceTask(task) && task.cancelRequestedAtMs === null ? <Button size="sm" variant="ghost" className="ml-auto h-6 px-2" disabled={cancellingSourcePaths.has(task.sourcePath)} onClick={() => onCancelSourceTask(task.sourcePath)}>{t(cancellingSourcePaths.has(task.sourcePath) ? 'sourceProgress.cancelling' : 'common.cancel')}</Button> : null}
                     </div>
-                    {task.error ? <div className="mt-2 rounded-lg bg-destructive/10 px-2 py-1 text-xs text-destructive">{task.error}</div> : null}
+                    {task.error ? <div className="mt-2 rounded-lg bg-destructive/10 px-2 py-1 text-xs text-destructive">{t(task.error, { defaultValue: task.error, keySeparator: false, nsSeparator: false })}</div> : null}
                   </div>
                 ))}
               </div>

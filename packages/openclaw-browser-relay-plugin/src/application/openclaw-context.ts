@@ -44,10 +44,12 @@ export function resolveBrowserContext(context: BrowserActionContext, config: Ope
         || entry.parentSessionId !== undefined && !identifier(entry.parentSessionId)) {
         throw new Error('The OpenClaw browser session has inconsistent parent receipts.')
       }
-      // Native parent keys identify a logical group; a missing parentSessionId is not generation proof.
-      sessionKey = parentKey
-      expectedSessionId = entry.parentSessionId
-      continue
+      // Key-only dashboard grouping is navigation, not browser execution ancestry.
+      if (entry.spawnedBy !== undefined || entry.parentSessionId !== undefined || isSubagentSessionKey(sessionKey)) {
+        sessionKey = parentKey
+        expectedSessionId = entry.parentSessionId
+        continue
+      }
     }
     if (entry.parentSessionId !== undefined || isSubagentSessionKey(sessionKey)) {
       throw new Error('The OpenClaw browser child session has no trusted parent receipt.')

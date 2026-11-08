@@ -1,15 +1,39 @@
 import { useMemo } from 'react';
-import { useShallow } from 'zustand/react/shallow';
-import { isSessionRuntimeEndpointReady, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
+import { isSessionRuntimeEndpointReady, supportsSessionChat, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { buildRuntimeEndpointKey } from '@/types/desktop/runtime-address';
-import type { AgentAvatarStyle } from '@/types/subagent';
+import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
+import type { AgentAvatarStyle, SubagentSummary } from '@/types/subagent';
 import type { ResourceStateMeta } from '@/lib/resource-state';
+import { selectAgentsResource } from '@/plugins/agents/stores/subagents';
 import { findAgentScope } from '@/plugins/chat/store/session-identity';
 import { inferUntitledSessionLabel, normalizeAutomaticSessionTitle } from '@/plugins/chat/session-catalog';
-import type { AgentSessionsPaneSessionEntry } from '@/plugins/chat/store/selectors';
-import type { ChatSessionRuntimeEndpointNode, ChatSessionRuntimeEndpointTarget } from '@/plugins/chat/store/types';
+import type { AgentSessionsPaneRuntimeEndpoint, AgentSessionsPaneRuntimeTarget, AgentSessionsPaneSessionEntry } from '@/plugins/chat/store/selectors';
 import type { AgentScope } from '@/types/desktop/runtime-address';
 import { buildAgentSessionSwitchboardModel } from '@/plugins/chat/agent-session-switchboard-model';
+
+const LOCAL_RUNTIME_ENDPOINTS = ([
+  { endpoint: { kind: 'native-runtime', runtimeAdapterId: 'matcha-agent', runtimeInstanceId: 'local' }, displayName: 'Matcha Agent' },
+  { endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }, displayName: 'OpenClaw' },
+] as const).map((local) => ({ ...local, runtimeScopeKey: buildRuntimeEndpointKey(local.endpoint) }));
+const LOCAL_RUNTIME_SCOPE_KEYS = new Set(LOCAL_RUNTIME_ENDPOINTS.map((local) => local.runtimeScopeKey));
+
+type RuntimeSidebarStatus = 'loading' | 'starting' | 'failed' | 'stopped' | 'unavailable' | null;
+
+function runtimeSidebarStatus(endpoint: RuntimeEndpointSummary | undefined, directoryStatus: ReturnType<typeof useRuntimeEndpointsStore.getState>['status']): RuntimeSidebarStatus {
+  if (!endpoint) return directoryStatus === 'ready' || directoryStatus === 'error' ? 'unavailable' : 'loading';
+  switch (endpoint.lifecycle.phase) {
+    case 'ready': return null;
+    case 'connecting': return 'starting';
+    case 'declared':
+    case 'disconnected': return 'stopped';
+    case 'unavailable': return 'failed';
+  }
+}
+
+function usesManagementAgents(endpoint: AgentSessionsPaneRuntimeEndpoint): boolean {
+  return endpoint.agentCatalogSource === 'subagent-management'
+    || (endpoint.agentCatalogSource === null && LOCAL_RUNTIME_SCOPE_KEYS.has(endpoint.runtimeScopeKey));
+}
 
 interface SidebarAgentSummary {
   id: string;
@@ -19,16 +43,16 @@ interface SidebarAgentSummary {
 }
 
 export function resolveRuntimeAgentSummary(
-  endpoint: ChatSessionRuntimeEndpointNode,
+  endpoint: AgentSessionsPaneRuntimeEndpoint,
   agentId: string,
   managementAgents: readonly SidebarAgentSummary[],
 ): SidebarAgentSummary {
   const graphAgent = endpoint.agents.find((agent) => agent.agentId === agentId);
-  if (endpoint.target?.agentCatalog.source !== 'subagent-management') {
+  if (!usesManagementAgents(endpoint)) {
     return { id: agentId, name: graphAgent?.catalogEntry?.name?.trim() || agentId };
   }
   const metadata = managementAgents.find((agent) => agent.id === agentId);
-  const seed = endpoint.target.agentCatalog.seedAgents.find((agent) => agent.id === agentId);
+  const seed = graphAgent?.catalogEntry;
   return {
     id: agentId,
     name: metadata?.name?.trim() || seed?.name?.trim() || agentId,
@@ -37,7 +61,7 @@ export function resolveRuntimeAgentSummary(
   };
 }
 
-export function resolveAgentScopeForRuntimeEndpoint(endpoint: ChatSessionRuntimeEndpointTarget, agentId: string): AgentScope | null {
+export function resolveAgentScopeForRuntimeEndpoint(endpoint: AgentSessionsPaneRuntimeTarget, agentId: string): AgentScope | null {
   const normalizedAgentId = agentId.trim();
   if (!normalizedAgentId) return null;
   const existingScope = findAgentScope(endpoint.sessionPromptScopes, normalizedAgentId);
@@ -56,30 +80,43 @@ export function resolveSessionTitle(entry: AgentSessionsPaneSessionEntry, t: (ke
 }
 
 interface UseAgentSessionsPaneViewModelInput {
-  subagentManagementAgents: readonly SidebarAgentSummary[];
-  subagentManagementAgentsResource: ResourceStateMeta;
-  subagentManagementRuntimeScopeKey: string | null;
+  agentsByRuntime: Record<string, ResourceStateMeta<SubagentSummary[]>>;
   sessionEntries: readonly AgentSessionsPaneSessionEntry[];
-  sessionsLoadedOnce: boolean;
   sessionsError: string | null;
-  runtimeEndpoints: readonly ChatSessionRuntimeEndpointNode[];
+  runtimeEndpoints: readonly AgentSessionsPaneRuntimeEndpoint[];
 }
 
 export function useAgentSessionsPaneViewModel(input: UseAgentSessionsPaneViewModelInput) {
-  const { subagentManagementAgents, subagentManagementAgentsResource, subagentManagementRuntimeScopeKey, sessionEntries,
-    sessionsLoadedOnce, sessionsError, runtimeEndpoints } = input;
-  const readyOpenClawScopes = useRuntimeEndpointsStore(useShallow((state) => state.endpoints
-    .filter((endpoint) => endpoint.endpointRef.kind === 'native-runtime'
-      && endpoint.endpointRef.runtimeAdapterId === 'openclaw' && isSessionRuntimeEndpointReady(endpoint))
-    .map((endpoint) => buildRuntimeEndpointKey(endpoint.endpointRef))));
-  const visibleRuntimeEndpoints = useMemo(() => runtimeEndpoints.filter((endpoint) => endpoint.endpoint.kind !== 'native-runtime'
-    || endpoint.endpoint.runtimeAdapterId !== 'openclaw'
-    || (endpoint.target !== null && readyOpenClawScopes.includes(endpoint.runtimeScopeKey))), [readyOpenClawScopes, runtimeEndpoints]);
+  const { agentsByRuntime, sessionEntries, sessionsError, runtimeEndpoints } = input;
+  const directoryEndpoints = useRuntimeEndpointsStore((state) => state.endpoints);
+  const directoryStatus = useRuntimeEndpointsStore((state) => state.status);
+  const visibleRuntimeEndpoints = useMemo(() => {
+    const endpoints = new Map(runtimeEndpoints.map((endpoint) => [endpoint.runtimeScopeKey, endpoint]));
+    const localEndpoints = LOCAL_RUNTIME_ENDPOINTS.map((local): AgentSessionsPaneRuntimeEndpoint => {
+      const { runtimeScopeKey } = local;
+      const existing = endpoints.get(runtimeScopeKey);
+      endpoints.delete(runtimeScopeKey);
+      if (existing?.target) return existing;
+      const declared = directoryEndpoints.find((endpoint) => buildRuntimeEndpointKey(endpoint.endpointRef) === runtimeScopeKey);
+      return {
+        runtimeScopeKey, endpoint: local.endpoint, target: null, agentCatalogSource: null, agents: [],
+        ...existing, displayName: declared?.displayName ?? local.displayName,
+      };
+    });
+    return [...localEndpoints, ...endpoints.values()];
+  }, [directoryEndpoints, runtimeEndpoints]);
+  const matchaDiagnosticScope = useMemo<AgentScope | null>(() => {
+    const endpoint = directoryEndpoints.find((entry) => entry.endpointRef.kind === 'native-runtime'
+      && entry.endpointRef.runtimeAdapterId === 'matcha-agent' && entry.endpointRef.runtimeInstanceId === 'local');
+    return endpoint && isSessionRuntimeEndpointReady(endpoint) && endpoint.defaultAgentId
+      && supportsSessionChat(endpoint, endpoint.defaultAgentId)
+      ? { kind: 'agent', endpoint: endpoint.endpointRef, agentId: endpoint.defaultAgentId } : null;
+  }, [directoryEndpoints]);
   const ordinaryEntries = useMemo(() => sessionEntries.filter((entry) => entry.session.ownership?.kind === 'ordinary'), [sessionEntries]);
   const runtimeInputs = useMemo(() => visibleRuntimeEndpoints.map((endpoint) => {
-    const managementAgents = endpoint.runtimeScopeKey === subagentManagementRuntimeScopeKey ? subagentManagementAgents : [];
+    const managementAgents = selectAgentsResource({ agentsByRuntime }, endpoint.endpoint).data;
     const agentIds = new Set(endpoint.agents.map((agent) => agent.agentId));
-    if (endpoint.target?.agentCatalog.source === 'subagent-management') {
+    if (usesManagementAgents(endpoint)) {
       for (const agent of managementAgents) if (agent.id.trim()) agentIds.add(agent.id.trim());
     }
     return {
@@ -90,21 +127,18 @@ export function useAgentSessionsPaneViewModel(input: UseAgentSessionsPaneViewMod
         return { agentId, agentName: agent.name || agentId, avatarSeed: agent.avatarSeed, avatarStyle: agent.avatarStyle };
       }),
     };
-  }), [visibleRuntimeEndpoints, subagentManagementAgents, subagentManagementRuntimeScopeKey]);
+  }), [visibleRuntimeEndpoints, agentsByRuntime]);
   const agentResults = useMemo(() => buildAgentSessionSwitchboardModel({
     runtimeResults: runtimeInputs, sessionEntries: ordinaryEntries,
-  }), [ordinaryEntries, runtimeInputs]);
-  const requiresManagement = visibleRuntimeEndpoints.some((endpoint) => endpoint.runtimeScopeKey === subagentManagementRuntimeScopeKey
-    && endpoint.target?.agentCatalog.source === 'subagent-management');
-  const agentListState = requiresManagement && !subagentManagementAgentsResource.hasLoadedOnce
-    ? subagentManagementAgentsResource.status === 'error' ? 'error' : 'loading'
-    : 'ready';
-  const hasSessions = agentResults.some((runtime) => runtime.agents.some((agent) => agent.sessionCount > 0));
-  return {
-    agentResults,
-    agentListState: agentListState as 'loading' | 'error' | 'ready',
-    agentErrorMessage: requiresManagement ? subagentManagementAgentsResource.error : null,
-    sessionListState: (!sessionsLoadedOnce && !hasSessions ? sessionsError ? 'error' : 'loading' : 'ready') as 'loading' | 'error' | 'ready',
-    sessionErrorMessage: sessionsError,
-  };
+  }).map((runtime, index) => {
+    const endpoint = visibleRuntimeEndpoints[index];
+    const resource = usesManagementAgents(endpoint) ? selectAgentsResource({ agentsByRuntime }, endpoint.endpoint) : null;
+    return { ...runtime,
+      endpoint,
+      runtimeStatus: LOCAL_RUNTIME_SCOPE_KEYS.has(endpoint.runtimeScopeKey) ? runtimeSidebarStatus(directoryEndpoints.find((entry) =>
+        buildRuntimeEndpointKey(entry.endpointRef) === endpoint.runtimeScopeKey), directoryStatus) : null,
+      isLoading: runtime.agents.length === 0 && resource !== null && !resource.hasLoadedOnce && resource.status !== 'error',
+      errorMessage: resource?.error ?? null };
+  }), [ordinaryEntries, runtimeInputs, visibleRuntimeEndpoints, agentsByRuntime, directoryEndpoints, directoryStatus]);
+  return { agentResults, matchaDiagnosticScope, sessionErrorMessage: sessionsError };
 }

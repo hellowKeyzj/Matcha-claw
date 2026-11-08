@@ -2,8 +2,23 @@ import { isTraceEnabled, traceLog } from './trace-logger';
 import type { RuntimeEndpointRef } from '../types/desktop/runtime-address';
 import type { SessionDelta, SessionWireItem } from '../types/session/snapshot';
 import type { SessionRenderItem } from '../types/session/render-item';
+import { adoptSessionProjectionFact, isSessionProjectionFact } from '@/plugins/chat/store/session-projection-facts';
 
 const SESSION_TRACE_PREFIX = 'session-trace';
+const textEncoder = new TextEncoder();
+const wireItemSummaries = new WeakMap<SessionWireItem, ReturnType<typeof buildWireItemSummary>>();
+const renderItemSummaries = new WeakMap<SessionRenderItem, ReturnType<typeof buildRenderItemSummary>>();
+const identitySummaries = new WeakMap<SessionIdentityLike, ReturnType<typeof buildIdentitySummary>>();
+
+// Only owner-certified immutable facts can reuse diagnostic work across events.
+function summarizeFact<T extends object, S>(value: T, cache: WeakMap<T, S>, build: () => S): S {
+  if (!isSessionProjectionFact(value)) return build();
+  const previous = cache.get(value);
+  if (previous !== undefined) return previous;
+  const summary = adoptSessionProjectionFact(build());
+  cache.set(value, summary);
+  return summary;
+}
 
 type TracePayload = Record<string, unknown>;
 
@@ -44,7 +59,7 @@ export function summarizeText(value: string) {
   }
   return {
     hash: (hash >>> 0).toString(16).padStart(8, '0'),
-    utf8Bytes: new TextEncoder().encode(value).length,
+    utf8Bytes: textEncoder.encode(value).length,
     utf16Length: value.length,
   };
 }
@@ -92,6 +107,10 @@ export function summarizeEndpoint(endpoint: RuntimeEndpointRef | null | undefine
 }
 
 export function summarizeWireItem(item: SessionWireItem) {
+  return summarizeFact(item, wireItemSummaries, () => buildWireItemSummary(item));
+}
+
+function buildWireItemSummary(item: SessionWireItem) {
   const segments = item.kind === 'assistantTurn' ? item.segments : item.kind === 'userMessage' ? item.content : [];
   return {
     kind: item.kind,
@@ -116,6 +135,10 @@ export function summarizeRenderItems(items: readonly SessionRenderItem[]) {
 }
 
 export function summarizeRenderItem(item: SessionRenderItem) {
+  return summarizeFact(item, renderItemSummaries, () => buildRenderItemSummary(item));
+}
+
+function buildRenderItemSummary(item: SessionRenderItem) {
   return {
     kind: item.kind,
     renderKeyHash: summarizeIdentifier(item.key).hash,
@@ -160,6 +183,10 @@ export function summarizeSessionIdentity(identity: SessionIdentityLike | null | 
   if (!identity) {
     return null;
   }
+  return summarizeFact(identity, identitySummaries, () => buildIdentitySummary(identity));
+}
+
+function buildIdentitySummary(identity: SessionIdentityLike) {
   return {
     ...(identity.endpoint.kind === 'native-runtime' ? { provider: identity.endpoint.runtimeAdapterId,
       instanceHash: summarizeIdentifier(identity.endpoint.runtimeInstanceId).hash } : {}),

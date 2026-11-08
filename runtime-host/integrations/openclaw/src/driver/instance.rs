@@ -134,6 +134,24 @@ impl OpenClawDriver {
         )
     }
 
+    pub async fn log_directory(
+        &self,
+    ) -> Result<String, crate::native_config::runtime_paths::RuntimePathsError> {
+        use crate::native_config::runtime_paths::{self, RuntimePathsError};
+
+        if self.supervisor_handle().snapshot().phase()
+            == foundation::process::supervision::SupervisorPhase::Running
+        {
+            let file = self
+                .gateway
+                .log_file()
+                .await
+                .map_err(|_| RuntimePathsError::Unavailable)?;
+            return runtime_paths::log_file_directory(&file, &self.openclaw_dir);
+        }
+        runtime_paths::log_directory(&self.state_dir, &self.openclaw_dir)
+    }
+
     pub fn cli_command(
         &self,
     ) -> Result<
@@ -377,7 +395,7 @@ impl PreparedOpenClaw {
         let session_gateway = gateway.session_gateway();
         let usage = gateway.usage_projection();
         let gateway = Arc::new(gateway);
-        let lifecycle_logs = LifecycleLogBuffer::new();
+        let lifecycle_logs = LifecycleLogBuffer::with_journal(self.state_dir.clone());
         let diagnostic_state = LifecycleDiagnosticState::new();
         let report_diagnostic = self.report_diagnostic;
         let diagnostic_reporter = {
@@ -413,7 +431,10 @@ impl PreparedOpenClaw {
             stdio_activation,
             readiness,
             graceful_stop,
-            OpenClawStartRecovery::with_diagnostics(diagnostic_state.clone()),
+            OpenClawStartRecovery::with_log_buffer(
+                diagnostic_state.clone(),
+                lifecycle_logs.clone(),
+            ),
             OpenClawRestartPolicy,
         );
 
@@ -424,7 +445,11 @@ impl PreparedOpenClaw {
         );
         let control_ui_url = self.control_ui_url;
         Ok(OpenClawDriver {
-            owner: StdMutex::new(Some(SupervisorOwner::new(supervisor, mcp_oauth.clone()))),
+            owner: StdMutex::new(Some(SupervisorOwner::new(
+                supervisor,
+                mcp_oauth.clone(),
+                lifecycle_logs.clone(),
+            ))),
             lifecycle_gate: Arc::new(Mutex::new(())),
             repair_state: StdMutex::new(runtime_directory::RuntimeRepairSnapshot {
                 phase: runtime_directory::RuntimeRepairPhase::Idle,

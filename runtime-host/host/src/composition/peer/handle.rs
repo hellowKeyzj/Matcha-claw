@@ -20,7 +20,10 @@ use crate::{
     },
 };
 
-use super::{PeerCommand, PeerQuery, RuntimeStopCommandError, command::RuntimeLifecycleCall};
+use super::{
+    PeerCommand, PeerQuery, PeerStartupState, RuntimeStopCommandError,
+    command::RuntimeLifecycleCall,
+};
 
 #[derive(Clone)]
 pub(crate) struct PeerHandle {
@@ -29,6 +32,7 @@ pub(crate) struct PeerHandle {
     open_claw: Arc<openclaw::driver::OpenClawDriver>,
     matcha_agent: Arc<matcha_agent::driver::MatchaRuntimeDriver>,
     runtime_directory: Arc<crate::composition::runtime_ports::RuntimeDriverDirectory>,
+    startup: PeerStartupState,
 }
 
 impl runtime_directory::RuntimeEndpointDirectorySource for PeerHandle {
@@ -61,8 +65,16 @@ impl PeerHandle {
         runtime_directory: Arc<crate::composition::runtime_ports::RuntimeDriverDirectory>,
         open_claw: Arc<openclaw::driver::OpenClawDriver>,
         matcha_agent: Arc<matcha_agent::driver::MatchaRuntimeDriver>,
+        startup: PeerStartupState,
     ) -> Self {
-        Self { owner, admission, runtime_directory, open_claw, matcha_agent }
+        Self {
+            owner,
+            admission,
+            runtime_directory,
+            open_claw,
+            matcha_agent,
+            startup,
+        }
     }
 
     pub(crate) fn matcha_client(&self) -> matcha_agent::client::Client {
@@ -118,23 +130,42 @@ impl PeerHandle {
         Ok(directory)
     }
 
+    pub(crate) fn prepare_peer_autostart(&self, open_claw_auto_start: bool) -> PeerAutostart {
+        self.startup.begin_matcha();
+        let open_claw_reservation = open_claw_auto_start
+            .then(|| self.open_claw.try_reserve_lifecycle())
+            .flatten()
+            .map(Arc::new);
+        if open_claw_reservation.is_some() {
+            self.startup.begin_open_claw();
+        }
+        PeerAutostart {
+            peer: self.clone(),
+            matcha_pending: true,
+            open_claw_pending: open_claw_auto_start,
+            open_claw_reservation,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) async fn request_peer_autostart(
         &self,
         open_claw_auto_start: bool,
     ) -> Result<(), super::AutostartOpenClawError> {
-        self.owner
-            .send_command(PeerCommand::AutostartMatcha)
+        self.prepare_peer_autostart(open_claw_auto_start)
+            .run()
             .await
-            .map_err(|_| super::AutostartOpenClawError::PeerUnavailable)?;
+    }
 
-        if !open_claw_auto_start {
-            return Ok(());
-        }
+    pub(crate) fn matcha_state(&self) -> RuntimeState {
+        self.startup.matcha_state(self.admission.state().phase(), || {
+            let snapshot = super::status::matcha_lifecycle_snapshot(&self.runtime_directory);
+            (RuntimeState::from_snapshot(&snapshot), snapshot.process())
+        })
+    }
 
-        self.request_command(|reply| PeerCommand::AutostartOpenClaw { reply, reservation: None })
-            .await
-            .map_err(|_| super::AutostartOpenClawError::PeerUnavailable)?
-            .map(|_| ())
+    pub(crate) fn subscribe_matcha_startup(&self) -> tokio::sync::watch::Receiver<()> {
+        self.startup.subscribe_matcha()
     }
 
     pub(crate) async fn matcha_ready(
@@ -582,6 +613,67 @@ impl PeerHandle {
             return Err(());
         }
         response.await.map_err(|_| ())
+    }
+}
+
+pub(crate) struct PeerAutostart {
+    peer: PeerHandle,
+    matcha_pending: bool,
+    open_claw_pending: bool,
+    open_claw_reservation: Option<Arc<tokio::sync::OwnedMutexGuard<()>>>,
+}
+
+impl PeerAutostart {
+    pub(crate) async fn run(mut self) -> Result<(), super::AutostartOpenClawError> {
+        self.peer
+            .owner
+            .send_command(PeerCommand::AutostartMatcha)
+            .await
+            .map_err(|_| super::AutostartOpenClawError::PeerUnavailable)?;
+        self.matcha_pending = false;
+        if !self.open_claw_pending {
+            return Ok(());
+        }
+        let (reply, response) = oneshot::channel();
+        let Some(reservation) = self.open_claw_reservation.as_ref() else {
+            self.open_claw_pending = false;
+            return Err(super::AutostartOpenClawError::PeerUnavailable);
+        };
+        // Retain the permit until dispatch failure or the reply is settled.
+        let command = PeerCommand::AutostartOpenClaw {
+            reply,
+            reservation: Arc::clone(reservation),
+        };
+        self.peer
+            .owner
+            .send_command(command)
+            .await
+            .map_err(|_| super::AutostartOpenClawError::PeerUnavailable)?;
+        self.open_claw_pending = false;
+        match response.await {
+            Ok(result) => result.map(|_| ()),
+            Err(_) => {
+                self.peer.startup.fail_open_claw_pending();
+                Err(super::AutostartOpenClawError::PeerUnavailable)
+            }
+        }
+    }
+}
+
+impl Drop for PeerAutostart {
+    fn drop(&mut self) {
+        if self.matcha_pending {
+            self.peer.startup.record_matcha(
+                Err(runtime_directory::RuntimeStartFailure::SupervisorStopped),
+                None,
+            );
+        }
+        if self.open_claw_pending && self.open_claw_reservation.is_some() {
+            self.peer.startup.record_open_claw(
+                Err(runtime_directory::RuntimeStartFailure::SupervisorStopped),
+                None,
+            );
+        }
     }
 }
 

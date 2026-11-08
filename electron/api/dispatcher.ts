@@ -3,6 +3,9 @@ import { type HostApiDispatcher, type HostApiRequest, type HostApiRouteResult, j
 import { getHostApiRequestDependency, isMainOwnedRoute } from './route-boundary';
 import { logger } from '../utils/logger';
 import { handleAccountRoutes } from './routes/account';
+import { handleAccessRoutes } from './routes/access';
+import { handleAccessNetworkRoutes } from './routes/access-network';
+import { handleInterconnectRoutes } from './routes/interconnect';
 import { handleBillingRoutes } from './routes/billing';
 import { handleBoardRoutes } from './routes/board';
 import { handleCapabilityRoutes } from './routes/capabilities';
@@ -84,6 +87,11 @@ const mainRouteFamilies: Readonly<Record<string, readonly RouteHandler<MainHostA
   app: [handleMainAppRoutes],
   'app-plugins': [handleAppPluginRoutes],
   account: [handleAccountRoutes],
+  access: [(req, url, deps) => handleAccessRoutes(req, url, deps.access,
+    async (sourceId) => (await deps.interconnect).hasCapability(sourceId),
+    async () => (await deps.networkAccess).refreshHostName())],
+  'access-network': [async (req, url, deps) => handleAccessNetworkRoutes(req, url, await deps.networkAccess)],
+  interconnect: [async (req, url, deps) => handleInterconnectRoutes(req, url, await deps.interconnect)],
   billing: [handleBillingRoutes],
   license: [handleLicenseRoutes],
   logs: [handleMainLogRoutes],

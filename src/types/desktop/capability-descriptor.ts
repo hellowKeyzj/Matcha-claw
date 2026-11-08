@@ -9,6 +9,7 @@ export interface CapabilityOperationDescriptor {
   title: string;
   targetKind: CapabilityTargetKind;
   targetRequired?: boolean;
+  inputSchema?: Record<string, unknown>;
 }
 
 export interface CapabilityDescriptor {

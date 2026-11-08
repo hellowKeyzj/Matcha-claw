@@ -260,6 +260,7 @@ function computeItemSignature(item: SessionRenderItem, purpose: SignaturePurpose
       'images' in item ? buildImageSignature(item.images ?? []) : '',
       'attachedFiles' in item ? buildAttachedFilesSignature(item.attachedFiles ?? [], purpose) : '',
       'contentNotices' in item ? (item.contentNotices ?? []).join(',') : '',
+      ...(item.kind === 'system' ? [item.notice ?? ''] : []),
     ].join('|'));
   }
   if (item.kind === 'user-message') {
@@ -286,6 +287,7 @@ function computeItemSignature(item: SessionRenderItem, purpose: SignaturePurpose
     systemItem.role,
     systemItem.createdAt ?? '',
     systemItem.level,
+    systemItem.notice ?? '',
     hashText(systemItem.text),
   ].join('|'));
 }

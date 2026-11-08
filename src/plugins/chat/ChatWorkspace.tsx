@@ -1,4 +1,4 @@
-import { memo, Suspense, useCallback, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { memo, Suspense, useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useContributions } from '@/plugin-host/react';
@@ -14,7 +14,7 @@ import { useChatWindowDockController } from '@/plugins/chat/useChatWindowDockCon
 import { isChatRuntimePreparing, selectChatSessionRecordKey, useChatRuntime } from '@/plugins/chat/chat-session';
 import { useWorkspace } from '@/plugins/workspace/context';
 import { workspacePanels } from '@/plugins/workspace/extensions';
-import { chatWorkspaceContent } from './extensions';
+import { chatThreadHeader, chatWorkspaceContent } from './extensions';
 import type { ChatMessageSlots } from '@/plugins/chat/ChatMessages';
 
 function readPanelWidth(): number {
@@ -41,6 +41,8 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
   const panels = useContributions(workspacePanels);
   const contributions = useContributions(chatWorkspaceContent);
   const content = useMemo(() => [...contributions].sort((a, b) => a.order - b.order), [contributions]);
+  const headerContributions = useContributions(chatThreadHeader);
+  const threadHeader = useMemo(() => [...headerContributions].sort((a, b) => a.order - b.order), [headerContributions]);
   const { hasItems, ownership, catalogStatus, catalogError, sessionRuntimeInitializing } = useChatStore(useShallow((state) => {
     const record = state.loadedSessions[selectChatSessionRecordKey(state)];
     return {
@@ -103,10 +105,22 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
         ? <ChatOffline title={t('runtimeUnavailable.title')}
           description={(runtime.state === 'unavailable' ? runtime.error : catalogError) || t('runtimeUnavailable.description')} />
         : null;
+  const workspaceVisible = !offline;
+  const workspaceContent = useMemo(() => content.map(({ id, component: Content }) => <Suspense key={id} fallback={null}>
+    <Content isActive={isActive} enabled={enabled} visible={workspaceVisible} sessionIdentity={sessionIdentity} ownership={ownership} />
+  </Suspense>), [content, enabled, isActive, ownership, sessionIdentity, workspaceVisible]);
+  const threadHeaderContent = useMemo(() => threadHeader.map(({ id, component: Content }) => <Suspense key={id} fallback={null}>
+    <Content isActive={isActive} enabled={enabled} visible={workspaceVisible} sessionIdentity={sessionIdentity} ownership={ownership} />
+  </Suspense>), [threadHeader, enabled, isActive, ownership, sessionIdentity, workspaceVisible]);
+  const header = useMemo(() => <ChatHeaderBar {...slots.headerProps} sidePanelOpen={chatWindowDock.sidePanelExpanded} onToggleSidePanel={chatWindowDock.toggleSidePanel} />,
+    [chatWindowDock.sidePanelExpanded, chatWindowDock.toggleSidePanel, slots.headerProps]);
+  const renderWorkspace = useCallback<ComponentProps<typeof ChatShell>['renderWorkspace']>((metrics) => panels.map(({ id, component: Panel }) => <Suspense key={id} fallback={null}>
+    <Panel {...metrics} visible={isActive && metrics.visible} mainVisible={isActive && metrics.mainVisible}
+      mode={chatWindowDock.sidePanelMode}
+      onHide={chatWindowDock.closeSidePanel} onSendMessage={onRuntimeSendMessage} onOpenLink={onRuntimeOpenLink} />
+  </Suspense>), [chatWindowDock.closeSidePanel, chatWindowDock.sidePanelMode, isActive, onRuntimeOpenLink, onRuntimeSendMessage, panels]);
   return <>
-    {content.map(({ id, component: Content }) => <Suspense key={id} fallback={null}>
-      <Content isActive={isActive} enabled={enabled} visible={!offline} sessionIdentity={sessionIdentity} ownership={ownership} />
-    </Suspense>)}
+    {workspaceContent}
     <ChatShell
       chatLayoutRef={chatLayoutRef}
       sidePanelPhase={chatWindowDock.phase}
@@ -115,6 +129,8 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
       sidePanelMainWidth={chatWindowDock.sidePanelMainWidth}
       sidePanelVisible={chatWindowDock.sidePanelVisible}
       panelLayout={layout}
+      containerWidth={containerWidth}
+      mainPageActive={workspace.activePageIds.main !== null}
       onSidePanelResize={chatWindowDock.resizeSidePanelWidth}
       onSidePanelResizeCommit={chatWindowDock.commitSidePanelWidth}
       onComposerWheel={handleComposerWheel}
@@ -123,13 +139,10 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
       isEmptyState={slots.isEmptyState}
       emptyState={slots.emptyState}
       offline={offline}
-      header={<ChatHeaderBar {...slots.headerProps} sidePanelOpen={chatWindowDock.sidePanelExpanded} onToggleSidePanel={chatWindowDock.toggleSidePanel} />}
+      header={header}
+      threadHeader={threadHeaderContent}
       viewportPane={slots.viewportPane()}
-      sidePanel={panels.map(({ id, component: Panel }) => <Suspense key={id} fallback={null}>
-        <Panel visible={isActive && chatWindowDock.sidePanelVisible}
-          mode={chatWindowDock.sidePanelMode} width={layout.fullscreen ? containerWidth : chatWindowDock.sidePanelWidth}
-          onHide={chatWindowDock.closeSidePanel} onSendMessage={onRuntimeSendMessage} onOpenLink={onRuntimeOpenLink} />
-      </Suspense>)}
+      renderWorkspace={renderWorkspace}
     />
   </>;
 });

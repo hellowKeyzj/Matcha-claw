@@ -1,14 +1,17 @@
+use std::collections::HashMap;
+
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
+    events::Event,
     persistence::Database,
     rpc::{self, Error},
 };
 
-use super::{Delivery, Failure, Pending, Target, native::Request};
+use super::{Category, Delivery, Failure, Pending, Target, native::Request};
 
 #[derive(Clone)]
 pub(super) struct Store {
@@ -338,10 +341,35 @@ impl Store {
                 [session_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             ).optional().map_err(|source| storage("interaction_fact_read", source))?;
             row.map(|(id, session_id, run_id, kind, payload)| {
-                let payload = serde_json::from_str(&payload).map_err(|source| storage("interaction_fact_decode", source))?;
+                let mut payload = serde_json::from_str(&payload).map_err(|source| storage("interaction_fact_decode", source))?;
+                hydrate_requests(connection, std::iter::once((session_id.as_str(), kind.as_str(), &mut payload)))?;
                 Ok(Fact { id, session_id, run_id, kind, payload })
             }).transpose()
         }).await
+    }
+
+    pub(super) async fn hydrate_events(&self, mut events: Vec<Event>) -> rpc::Result<Vec<Event>> {
+        if !events
+            .iter()
+            .any(|event| needs_request(&event.kind, &event.payload))
+        {
+            return Ok(events);
+        }
+        self.database
+            .call(move |connection| {
+                hydrate_requests(
+                    connection,
+                    events.iter_mut().map(|event| {
+                        (
+                            event.session_id.as_str(),
+                            event.kind.as_str(),
+                            &mut event.payload,
+                        )
+                    }),
+                )?;
+                Ok(events)
+            })
+            .await
     }
 
     pub(super) async fn acknowledge_fact(&self, id: i64) -> rpc::Result<()> {
@@ -354,6 +382,72 @@ impl Store {
             })
             .await
     }
+}
+
+fn needs_request(kind: &str, payload: &Value) -> bool {
+    kind.starts_with("interaction.")
+        && payload["category"] == "permission"
+        && payload.get("request").is_none()
+}
+
+fn hydrate_requests<'a>(
+    connection: &Connection,
+    payloads: impl Iterator<Item = (&'a str, &'a str, &'a mut Value)>,
+) -> rpc::Result<()> {
+    let mut missing = Vec::new();
+    for (session_id, kind, payload) in payloads {
+        if !needs_request(kind, payload) {
+            continue;
+        }
+        let target: Target = serde_json::from_value(json!({
+            "sessionId": payload["sessionId"], "instanceId": payload["instanceId"],
+            "nativeRequestId": payload["nativeRequestId"],
+        }))
+        .map_err(|source| storage("interaction_event_target_decode", source))?;
+        target.validate()?;
+        if target.session_id != session_id {
+            return Err(Error::internal("interaction_event_session_mismatch"));
+        }
+        missing.push((target, payload));
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let targets =
+        serde_json::to_string(&missing.iter().map(|(target, _)| target).collect::<Vec<_>>())
+            .map_err(|source| storage("interaction_event_targets_encode", source))?;
+    let pending = records(
+        connection,
+        "SELECT record_json FROM interactions WHERE (session_id,instance_id,native_request_id) IN (
+            SELECT json_extract(value,'$.sessionId'),json_extract(value,'$.instanceId'),
+                json_extract(value,'$.nativeRequestId') FROM json_each(?1))",
+        [targets],
+    )?;
+    let mut requests = HashMap::new();
+    for record in pending {
+        if record.category != Category::Permission
+            || record.request.category() != Category::Permission
+        {
+            return Err(Error::internal(
+                "interaction_event_request_category_mismatch",
+            ));
+        }
+        requests.insert(
+            Target {
+                session_id: record.session_id,
+                instance_id: record.instance_id,
+                native_request_id: record.native_request_id,
+            },
+            rpc::value(record.request)?,
+        );
+    }
+    for (target, payload) in missing {
+        payload["request"] = requests
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| Error::internal("interaction_event_request_missing"))?;
+    }
+    Ok(())
 }
 
 fn live_session(connection: &Connection, session_id: &str) -> rpc::Result<bool> {
@@ -419,7 +513,7 @@ fn save(transaction: &Transaction<'_>, pending: &Pending, kind: &str) -> rpc::Re
         &pending.session_id,
         pending.run_id.as_deref(),
         kind,
-        pending.receipt(),
+        pending.event_payload(),
     )
 }
 

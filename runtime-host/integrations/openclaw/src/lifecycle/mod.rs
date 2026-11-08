@@ -1,5 +1,6 @@
 mod channel_bootstrap;
 pub mod doctor;
+pub(crate) mod journal;
 pub mod launch;
 pub mod logs;
 pub mod port_guard;

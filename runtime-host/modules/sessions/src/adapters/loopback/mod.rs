@@ -36,6 +36,7 @@ pub(crate) mod permission;
 mod question;
 pub(crate) mod presenter;
 mod rename;
+mod run;
 pub(crate) mod send;
 mod timeline;
 mod thinking;
@@ -69,6 +70,7 @@ const PATHS: &[RoutePath] = &[
     RoutePath::ExactWithQuery(CREATE_PATH),
     RoutePath::ExactWithQuery(DELETE_PATH),
     RoutePath::ExactWithQuery(RENAME_PATH),
+    RoutePath::ExactWithQuery(run::PATH),
     RoutePath::ExactWithQuery(PERMISSION_PATH),
     RoutePath::ExactWithQuery(thinking::PATH),
     RoutePath::ExactWithQuery(SEND_PATH),
@@ -144,6 +146,13 @@ pub async fn handle_events(
 
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
+    if path == run::PATH {
+        return Some(RouteHeadPlan::new(
+            body_policy_for_method(head.method.as_str(), DEFAULT_REQUEST_BYTES),
+            DEFAULT_DEADLINE,
+            run::unavailable,
+        ));
+    }
     is_session_route(path).then(|| {
         RouteHeadPlan::new(
             body_policy_for_method(head.method.as_str(), SESSIONS_REQUEST_BYTES),
@@ -155,6 +164,9 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
+        if request.method() == "POST" && request.path() == run::PATH {
+            return run::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
+        }
         if request.method() == "POST" && matches!(request.path(), OBSERVE_PATH | RELEASE_PATH) {
             return observation::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
         }
@@ -228,6 +240,7 @@ fn is_session_route(path: &str) -> bool {
         CREATE_PATH
             | DELETE_PATH
             | RENAME_PATH
+            | run::PATH
             | PERMISSION_PATH
             | thinking::PATH
             | SEND_PATH

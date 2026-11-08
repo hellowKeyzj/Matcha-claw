@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Mutex};
+use std::future::Future;
 
 use foundation::process::supervision::StartOutcome;
 use openclaw::driver::{OpenClawDriver, StartupEffects};
@@ -33,28 +33,16 @@ async fn start_workflow(
     shared: &PeerShared,
     await_receipt_recovery: bool,
 ) -> Result<RuntimeState, crate::RuntimeStartFailure> {
+    shared.startup().begin_open_claw();
     let effects = OpenClawStartupEffects::new(shared, await_receipt_recovery);
-    let result = super::status::runtime_start_result(
-        shared.open_claw().start_with_effects(&effects).await,
-    );
-    if let Err(error) = &result {
-        let failure = match error {
-            crate::RuntimeStartFailure::Busy => runtime_directory::RuntimeStartFailure::Busy,
-            crate::RuntimeStartFailure::ShuttingDown => {
-                runtime_directory::RuntimeStartFailure::ShuttingDown
-            }
-            crate::RuntimeStartFailure::SupervisorStopped => {
-                runtime_directory::RuntimeStartFailure::SupervisorStopped
-            }
-            _ => runtime_directory::RuntimeStartFailure::CompletionFailed,
-        };
-        shared.record_open_claw_start(Err(failure));
-    }
-    shared.notify_open_claw_runtime();
-    result.map(|()| {
+    let result = shared.open_claw().start_with_effects(&effects).await;
+    shared.record_open_claw_start(result.clone());
+    super::status::runtime_start_result(result).map(|()| {
         super::status::open_claw_state(
             shared.runtime_directory(),
             shared.openclaw_startup_diagnostics(),
+            shared.admission(),
+            shared.startup(),
         )
     })
 }
@@ -66,12 +54,17 @@ pub(super) async fn stop(
         return Err(RuntimeStopCommandError::AdmissionClosed);
     }
     let result = confirm_stopped(shared.open_claw()).await;
+    if result.is_ok() {
+        shared.startup().clear_open_claw();
+    }
     shared.notify_open_claw_runtime();
     result
         .map(|()| {
             super::status::open_claw_state(
                 shared.runtime_directory(),
                 shared.openclaw_startup_diagnostics(),
+                shared.admission(),
+                shared.startup(),
             )
         })
         .map_err(RuntimeStopCommandError::RuntimeStop)
@@ -93,9 +86,11 @@ async fn restart_workflow(
     shared: &PeerShared,
     await_receipt_recovery: bool,
 ) -> Result<RuntimeState, RuntimeRestartCommandError> {
-    confirm_stopped(shared.open_claw())
-        .await
-        .map_err(RuntimeRestartCommandError::RuntimeRestart)?;
+    shared.startup().begin_open_claw();
+    if let Err(error) = confirm_stopped(shared.open_claw()).await {
+        shared.record_open_claw_start(Err(runtime_directory::RuntimeStartFailure::CompletionFailed));
+        return Err(RuntimeRestartCommandError::RuntimeRestart(error));
+    }
     start_workflow(shared, await_receipt_recovery)
         .await
         .map_err(|error| {
@@ -119,17 +114,24 @@ async fn restart_workflow(
 pub(super) async fn repair_manual(
     shared: &PeerShared,
 ) -> Result<RuntimeState, RuntimeRestartCommandError> {
+    shared.startup().begin_open_claw();
     let effects = OpenClawStartupEffects::new(shared, true);
     let result = shared
         .open_claw()
         .repair(RuntimeRepairTrigger::Manual, &effects)
         .await;
-    shared.notify_open_claw_runtime();
+    shared.record_open_claw_start(
+        result
+            .map(|()| StartOutcome::Started)
+            .map_err(|_| runtime_directory::RuntimeStartFailure::CompletionFailed),
+    );
     result
         .map(|()| {
             super::status::open_claw_state(
                 shared.runtime_directory(),
                 shared.openclaw_startup_diagnostics(),
+                shared.admission(),
+                shared.startup(),
             )
         })
         .map_err(|_| {
@@ -148,7 +150,6 @@ struct OpenClawStartupEffects<'a> {
     security: &'a security::SecurityModule,
     organization: &'a OrganizationHandle,
     team_run: &'a TeamRunCoordinatorHandle,
-    start_result: &'a Mutex<Option<Result<StartOutcome, runtime_directory::RuntimeStartFailure>>>,
     runtime_events: Option<&'a tokio::sync::mpsc::Sender<()>>,
     await_receipt_recovery: bool,
 }
@@ -164,7 +165,6 @@ impl<'a> OpenClawStartupEffects<'a> {
             security: shared.security(),
             organization: shared.organization(),
             team_run: shared.team_run(),
-            start_result: shared.open_claw_start_result(),
             runtime_events: shared.open_claw_runtime_events(),
             await_receipt_recovery,
         }
@@ -217,13 +217,6 @@ impl StartupEffects for OpenClawStartupEffects<'_> {
                 }
             }
         }
-    }
-
-    fn record_start(&self, result: Result<StartOutcome, runtime_directory::RuntimeStartFailure>) {
-        *self
-            .start_result
-            .lock()
-            .expect("OpenClaw peer start result lock poisoned") = Some(result);
     }
 
     fn notify(&self) {

@@ -1,17 +1,19 @@
 import Ajv, { type ValidateFunction } from 'ajv';
-import { AppConfirmationUnavailableError, isAppConfirmationRequest } from '../../../src/types/desktop/app-plugin-sdk';
+import { APP_SERVICE_MAX_BYTES, APP_SERVICE_OPERATIONS, AppServiceError, AppConfirmationUnavailableError, isAppConfirmationRequest, isAppExecutionOperation } from '../../../src/types/desktop/app-plugin-sdk';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { join } from 'node:path';
 import type { AppMediaModelListRequest, AppModelRequest, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppVideoTaskRequest, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
-import { isJson, isModelErrorCode, isToolResult, toolError, type PluginLoad } from './protocol';
+import { isExecutionPayload, parseExecutionRequest, isServicePayload, parseServiceRequest, serviceError, isJson, isModelErrorCode, isToolResult, toolError, type PluginLoad } from './protocol';
 import { preparePluginPython, pluginProcessEnvironment } from './python-runtime';
 import { AppPluginProcess } from './runtime-process';
-import { AppPluginRuntimeStartupError, capturePluginLog, type AppPluginDevelopmentRuntime, type AppPluginModels, type AppPluginRuntimeCallbacks } from './runtime';
+import { AppPluginRuntimeStartupError, capturePluginLog, within, type AppPluginDevelopmentRuntime, type AppPluginModels, type AppPluginRuntimeCallbacks } from './runtime';
 import { preparePluginBackend } from './loader';
 
 const MAX_FRAME_BYTES = 128 * 1024 * 1024;
 const PROTOCOL_VERSION = '2025-11-25';
+const SERVICE_METHODS = new Map<string, { service: string; operation: string }>(Object.entries(APP_SERVICE_OPERATIONS).flatMap(([service, operations]) =>
+  operations.map((operation) => [`matcha/${service}/${operation}`, { service, operation }] as const)));
 type RequestId = string | number;
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const isRequestId = (value: unknown): value is RequestId => typeof value === 'string' || (typeof value === 'number' && Number.isSafeInteger(value));
@@ -24,7 +26,7 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
   private state: 'starting' | 'active' | 'closing' | 'exited' = 'starting';
   private readonly controller = new AbortController();
   private readonly pending = new Map<string, { name?: string; resolve(value: unknown): void; reject(error: unknown): void }>();
-  private readonly models = new Map<RequestId, AbortController>();
+  private readonly hostRequests = new Map<RequestId, { callId?: string; controller: AbortController; done: Promise<void> }>();
   private readonly confirmations = new Map<RequestId, { callId: string; controller: AbortController }>();
   private readonly schemas = new Map<string, { input: ValidateFunction; output?: ValidateFunction }>();
   private chunks: Buffer[] = [];
@@ -117,7 +119,7 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
       this.stopping = (async () => {
         await this.starting?.catch(() => undefined);
         await this.failedPreparation?.close();
-        await this.process?.close();
+        await Promise.all([this.process?.close(), this.joinHostRequests()]);
       })().catch((error) => { this.stopping = undefined; throw error; });
     }
     return this.stopping;
@@ -133,7 +135,11 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
     this.state = 'closing';
     this.fail(new Error('App plugin was terminated; external effects may already have occurred.'));
     await this.failedPreparation?.forceClose();
-    await this.process?.forceClose();
+    await Promise.all([this.process?.forceClose(), this.joinHostRequests()]);
+  }
+
+  private async joinHostRequests(): Promise<void> {
+    await within(Promise.all([...this.hostRequests.values()].map((request) => request.done)), 5000, 'App plugin host request cleanup was not confirmed; retain its execution directory.');
   }
 
   private request(method: string, params: Record<string, unknown>, signal: AbortSignal, name?: string): Promise<unknown> {
@@ -144,6 +150,7 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
       const finish = () => {
         signal.removeEventListener('abort', cancel);
         this.pending.delete(id);
+        for (const request of this.hostRequests.values()) if (request.callId === id) request.controller.abort();
         for (const confirmation of this.confirmations.values()) if (confirmation.callId === id) confirmation.controller.abort();
       };
       const cancel = () => {
@@ -158,12 +165,16 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
     });
   }
 
-  private send(value: Record<string, unknown>): void {
+  private send(value: Record<string, unknown>, maximum = MAX_FRAME_BYTES): void {
     const input = this.process?.child.stdin;
     if (!input || input.destroyed || input.writableEnded) throw new Error('App plugin stdio is closed; the operation was not retried.');
     const frame = JSON.stringify(value) + '\n';
     const bytes = Buffer.byteLength(frame);
-    if (bytes > MAX_FRAME_BYTES || input.writableLength + bytes > MAX_FRAME_BYTES) throw new Error('App plugin stdio write exceeds its bounded frame/queue limit.');
+    if (bytes > maximum) {
+      if (maximum === APP_SERVICE_MAX_BYTES) throw new AppServiceError('response-too-large', 'App service response envelope exceeds 8 MiB.');
+      throw new Error('App plugin stdio write exceeds its bounded frame limit.');
+    }
+    if (input.writableLength + bytes > MAX_FRAME_BYTES) throw new Error('App plugin stdio write exceeds its bounded queue limit.');
     input.write(frame);
   }
 
@@ -178,9 +189,15 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
         if (this.frameBytes > MAX_FRAME_BYTES) throw new Error('App plugin stdio frame exceeds 128 MiB.');
         if (part.length) this.chunks.push(part);
         if (newline === -1) return;
+        const bytes = this.frameBytes + 1;
         const text = Buffer.concat(this.chunks, this.frameBytes).toString('utf8');
         this.chunks = []; this.frameBytes = 0;
-        if (text.trim()) this.receive(JSON.parse(text) as unknown);
+        if (text.trim()) {
+          let value: unknown;
+          try { value = JSON.parse(text) as unknown; }
+          catch { throw new Error('Invalid app plugin JSON frame.'); }
+          this.receive(value, bytes);
+        }
         start = newline + 1;
         if (start === chunk.length) return;
       }
@@ -196,12 +213,17 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
     void this.forceClose().catch((cleanupError) => this.callbacks.log('error', String(cleanupError).slice(0, 2000)));
   }
 
-  private receive(value: unknown): void {
+  private receive(value: unknown, bytes: number): void {
     if (!isRecord(value) || value.jsonrpc !== '2.0') throw new Error('Invalid app plugin JSON-RPC envelope.');
     if (typeof value.method === 'string') {
       if (('result' in value) || ('error' in value)) throw new Error('Invalid app plugin JSON-RPC request or notification.');
       if (value.id !== undefined) {
         if (!isRequestId(value.id)) throw new Error('Invalid app plugin JSON-RPC request.');
+        if (SERVICE_METHODS.has(value.method) && typeof value.id === 'string' && (!value.id.length || value.id.length > 128)) throw new Error('Invalid app service request identifier.');
+        if (SERVICE_METHODS.has(value.method) && (bytes > APP_SERVICE_MAX_BYTES || Object.keys(value).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key)))) {
+          this.send({ jsonrpc: '2.0', id: value.id, error: { code: -32602, message: 'App service request must use a closed JSON-RPC envelope within 8 MiB.', data: { code: 'invalid-request' } } }, APP_SERVICE_MAX_BYTES);
+          return;
+        }
         void this.receiveRequest(value.id, value.method, value.params);
       } else this.receiveNotification(value.method, value.params);
       return;
@@ -218,7 +240,7 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
   private receiveNotification(method: string, value: unknown): void {
     if (method === 'notifications/cancelled') {
       if (isRecord(value) && isRequestId(value.requestId)) {
-        this.models.get(value.requestId)?.abort(new Error('Plugin cancelled the model request; external effects may already have occurred.'));
+        this.hostRequests.get(value.requestId)?.controller.abort(new Error('Plugin cancelled the host request; native execution or external effects may already have occurred.'));
         this.confirmations.get(value.requestId)?.controller.abort(new Error('Plugin cancelled the confirmation request.'));
       }
       return;
@@ -246,12 +268,14 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
 
   private async receiveRequest(id: RequestId, method: string, request: unknown): Promise<void> {
     let controller: AbortController | undefined;
+    let finish = () => undefined as void;
+    const service = SERVICE_METHODS.get(method);
     try {
       if (method === 'ping') { this.send({ jsonrpc: '2.0', id, result: {} }); return; }
       if (method === 'matcha/requestConfirmation') {
         if (this.state !== 'active' || !isRecord(request) || Object.keys(request).some((key) => key !== 'request' && key !== 'callId')
           || typeof request.callId !== 'string' || !this.pending.get(request.callId)?.name || !isAppConfirmationRequest(request.request)
-          || !this.callbacks.requestConfirmation || this.confirmations.has(id) || this.confirmations.size >= 128) throw new AppConfirmationUnavailableError('Approval unavailable: confirmation requires an active tool call and foreground owner.');
+          || !this.callbacks.requestConfirmation || this.confirmations.has(id) || this.hostRequests.has(id) || this.confirmations.size >= 128) throw new AppConfirmationUnavailableError('Approval unavailable: confirmation requires an active tool call and foreground owner.');
         const confirmation = { callId: request.callId, controller: new AbortController() };
         this.confirmations.set(id, confirmation);
         try {
@@ -261,16 +285,44 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
         } finally { if (this.confirmations.get(id) === confirmation) this.confirmations.delete(id); }
         return;
       }
-      if (!method.startsWith('matcha/models/') || !['list', 'generate', 'generateText', 'generateSpeech', 'transcribe', 'generateMusic', 'submitVideo', 'queryVideo', 'collectVideo'].includes(method.slice('matcha/models/'.length))) {
+      const execution = method.startsWith('matcha/execution/');
+      const operation = method.slice('matcha/execution/'.length);
+      if (!service && (execution ? !isAppExecutionOperation(operation)
+        : !method.startsWith('matcha/models/') || !['list', 'generate', 'generateText', 'generateSpeech', 'transcribe', 'generateMusic', 'submitVideo', 'queryVideo', 'collectVideo'].includes(method.slice('matcha/models/'.length)))) {
         this.send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found.' } }); return;
       }
-      if (!isRecord(request) || !isJson(request)) { this.send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'Model params must contain the original request object.' } }); return; }
-      if (this.controller.signal.aborted || this.models.size >= 128 || this.models.has(id)) throw new Error('App plugin model request is inactive, duplicate or exceeds the concurrency limit.');
+      let callId: string | undefined;
+      let executionInput = request;
+      if (execution && operation === 'resolveTeamApproval') {
+        if (this.state !== 'active' || !isRecord(request) || typeof request.callId !== 'string' || !request.callId.length || request.callId.length > 128
+          || !this.pending.get(request.callId)?.name) throw new AppConfirmationUnavailableError('Approval unavailable: resolving team approval requires an active tool call.');
+        const { callId: activeCallId, ...input } = request;
+        callId = activeCallId;
+        executionInput = input;
+      }
+      const serviceRequest = service ? parseServiceRequest({ ...service, input: request }) : undefined;
+      if (!isRecord(request) || !isJson(request)) { this.send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'Host params must contain the original JSON request object.' } }); return; }
+      if (service && (this.state !== 'active' || this.controller.signal.aborted || this.hostRequests.size >= 128 || this.hostRequests.has(id) || this.confirmations.has(id))) throw new AppServiceError('unavailable', 'App service request is inactive, duplicate or exceeds the concurrency limit.');
+      if (this.controller.signal.aborted || this.hostRequests.size >= 128 || this.hostRequests.has(id) || this.confirmations.has(id)) throw new Error('App plugin host request is inactive, duplicate or exceeds the concurrency limit.');
       controller = new AbortController();
-      this.models.set(id, controller);
+      const done = new Promise<void>((resolve) => { finish = resolve; });
+      this.hostRequests.set(id, { ...(callId === undefined ? {} : { callId }), controller, done });
       const signal = AbortSignal.any([controller.signal, this.controller.signal]);
       let result: unknown;
-      switch (method.slice('matcha/models/'.length)) {
+      if (serviceRequest) {
+        if (!isServicePayload({ jsonrpc: '2.0', id, method, params: request })) throw new AppServiceError('invalid-request', 'App service request envelope exceeds 8 MiB.');
+        if (!this.callbacks.service) throw new AppServiceError('unavailable', 'App service unavailable: this plugin runtime has no service owner.');
+        result = await this.callbacks.service(serviceRequest, signal);
+        if (signal.aborted || this.state !== 'active') throw new AppServiceError('outcome-unknown', 'App service observation ended; external effects may already have occurred.');
+        if (!isServicePayload(result)) throw new AppServiceError('response-too-large', 'App service result must be a JSON object within 8 MiB.');
+      } else if (execution) {
+        if (!isExecutionPayload({ jsonrpc: '2.0', id, method, params: request })) throw new Error('Execution request exceeds 1 MiB.');
+        const input = parseExecutionRequest({ operation, input: executionInput });
+        if (!this.callbacks.execute) throw Object.assign(new Error('Execution unavailable: this plugin runtime has no execution owner.'), { code: 'unavailable' });
+        result = await this.callbacks.execute(input, signal);
+        signal.throwIfAborted();
+        if (!isExecutionPayload(result) || !isExecutionPayload({ jsonrpc: '2.0', id, result })) throw new Error('Execution result must be a JSON object within 1 MiB.');
+      } else switch (method.slice('matcha/models/'.length)) {
         case 'list': result = await this.modelApi.list(request as unknown as AppMediaModelListRequest, signal); break;
         case 'generate': result = await this.modelApi.generate(request as unknown as AppModelRequest, signal); break;
         case 'generateText': result = await this.modelApi.generateText(request as unknown as AppTextModelRequest, signal); break;
@@ -281,19 +333,28 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
         case 'queryVideo': result = await this.modelApi.queryVideo(request as unknown as AppVideoTaskRequest, signal); break;
         case 'collectVideo': result = await this.modelApi.collectVideo(request as unknown as AppVideoTaskRequest, signal); break;
       }
-      this.send({ jsonrpc: '2.0', id, result });
+      this.send({ jsonrpc: '2.0', id, result }, service ? APP_SERVICE_MAX_BYTES : MAX_FRAME_BYTES);
     } catch (error) {
-      const code = error instanceof Error && 'code' in error && (isModelErrorCode(error.code) || error.code === 'approval_unavailable') ? error.code : undefined;
+      if (service) {
+        const safeError = serviceError(error, controller?.signal);
+        try { this.send({ jsonrpc: '2.0', id, error: { code: -32603, message: safeError.message, data: { code: safeError.code } } }, APP_SERVICE_MAX_BYTES); }
+        catch { /* Never replay a reverse service request or expose its input/result after process exit. */ }
+        return;
+      }
+      const code = method.startsWith('matcha/execution/') && controller?.signal.aborted ? 'cancelled' : error instanceof Error && 'code' in error && (isModelErrorCode(error.code) || error.code === 'approval_unavailable' || error.code === 'unavailable') ? error.code : undefined;
       try { this.send({ jsonrpc: '2.0', id, error: { code: -32603, message: error instanceof Error ? error.message.slice(0, 2000) : 'Model request failed; external effects may already have occurred.',
         ...(code === undefined ? {} : { data: { code } }) } }); }
       catch { /* Never replay a reverse request after process exit. */ }
-    } finally { if (controller && this.models.get(id) === controller) this.models.delete(id); }
+    } finally {
+      if (controller && this.hostRequests.get(id)?.controller === controller) this.hostRequests.delete(id);
+      finish();
+    }
   }
 
   private fail(error: unknown): void {
     this.controller.abort(error);
     for (const pending of this.pending.values()) pending.reject(error);
-    for (const model of this.models.values()) model.abort(error);
+    for (const request of this.hostRequests.values()) request.controller.abort(error);
     for (const confirmation of this.confirmations.values()) confirmation.controller.abort(error);
   }
 }

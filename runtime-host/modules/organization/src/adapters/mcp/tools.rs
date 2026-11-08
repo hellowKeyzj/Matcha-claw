@@ -51,7 +51,7 @@ fn identifier() -> Value {
 }
 
 fn graph_patch_tool() -> Value {
-    let description = r#"保存 TeamRun 图；不启动 Run、不触发调度、不执行节点任务。设计操作与运行中 set_node_prompt 不能混批。
+    let description = r#"保存 TeamRun 图，或在设计期单独为已有角色创建独立会话；不启动 Run、不触发调度、不执行节点任务。create_role_session 必须单独调用，不能与任何图或正文操作混批；其余设计操作与运行中 set_node_prompt 不能混批。
 
 运行中修改：
 1. 外层 teamId/runId/nodeId/nodeExecutionId 全部取本次 <team_run_context> 原值；先用相同四项调用 team_graph_context（view=run_prompts）读取原任务、角色与连线。不能用待修改的目标节点替换外层 nodeId，也不能借用其他节点或旧尝试的执行标识。
@@ -64,6 +64,13 @@ fn graph_patch_tool() -> Value {
 ```json
 {"teamId":"{{teamId}}","runId":"{{runId}}","nodeId":"{{当前调用节点nodeId}}","nodeExecutionId":"{{当前调用节点nodeExecutionId}}","expectedGraphVersion":"{{graphVersion}}","commandId":"{{新命令标识}}","idempotencyKey":"{{新幂等键}}","operations":[{"op":"set_node_prompt","nodeId":"{{目标nodeId}}","prompt":"{{完整任务正文}}"}]}
 ```
+
+设计期独立会话（仅需隔离任务上下文时，不必每节点新建）：
+- 仅 active、未删除且仍处于 Designing 的 Run 可创建，designEpoch/promptGeneration 必须为当前有效值。先用本次 <team_design_context> 原值调用 team_graph_context，从 roles 选择已有角色的真实 roleId；endpoint 由程序从持久化角色绑定派生，不接受原生身份参数。
+- 单独调用本工具，外层仅传 teamId/runId/designEpoch/promptGeneration/idempotencyKey/operations；operations 恰为 [{"op":"create_role_session","roleId":"当前真实roleId"}]，op/roleId 同层。不传 commandId、expectedGraphVersion、baseGraphId、baseWorkflowPlanId、nodeId 或 nodeExecutionId，也不传 endpoint、agentId、原生 session ID/key 或自造 sessionRef。
+- 同一次创建重试保持全部参数及 idempotencyKey 不变；unknown 或超时不代表创建失败，不能换键盲建，另建独立会话才用新键。设计上下文失效时停止，等待系统注入最新设计上下文后再重读图，不能伪造或递增 generation。
+- 成功返回 {"success":true,"roleId":"…","sessionRef":"…"} 表示原生会话已确认且绑定已持久化。随后重读 team_graph_context，核对返回的 roleId/sessionRef，再单独调用本工具的 add_node/replace_node，将该配对写入 work/review 的 roleId/config.sessionRef；图版本及基图标识取最新读取结果。
+- 创建不自动绑定节点、不执行任务、不复制历史，闲置会话保留；创建成功不代表图修改已保存。以下建图顺序与保存核验适用于图修改，不适用于独立会话创建。
 
 启动前设计（仅当前有效设计轮次）：
 调用顺序：
@@ -108,12 +115,12 @@ fn graph_patch_tool() -> Value {
             "promptGeneration": { "type": "string", "minLength": 1, "description": "系统注入的本次设计对话代次原值；失效时等待新上下文，不可猜测或递增。" },
             "expectedGraphVersion": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "最近一次成功 context/patch 返回的 graphVersion，原样传入这段 64 位小写十六进制字符串；版本陈旧时重读图。" },
             "commandId": { "type": "string", "minLength": 1, "description": "本次修改的唯一命令标识；原请求重试时保持不变，修改内容后使用新标识。" },
-            "idempotencyKey": { "type": "string", "minLength": 1, "description": "本次修改的幂等键；同一请求重试复用原键与 commandId，不同修改不能复用同一键。" },
+            "idempotencyKey": { "type": "string", "minLength": 1, "description": "本次修改或会话创建的幂等键；同一请求重试保持原键和全部参数，图修改同时保持 commandId。unknown 或超时不能换键盲建，不同修改或独立会话使用新键。" },
             "baseGraphId": { "type": "string", "minLength": 1, "description": "最近 context 返回的 graph.graphId 原值，不是 runId 或 graphVersion。" },
             "baseWorkflowPlanId": { "type": "string", "minLength": 1, "description": "最近 context 返回的 graph.workflowPlanId 原值，不可另造计划 ID。" },
             "operations": {
                 "type": "array", "minItems": 1,
-                "description": "非空、有顺序的修改列表：设计时先创建节点，再引用节点连线，replace 是完整替换而非局部合并；运行时全部操作必须为 set_node_prompt，不能混入设计操作。整份修改通过校验后才保存。",
+                "description": "非空操作列表：create_role_session 单次只能一项，不能与任何图或正文操作混批；设计改图时先创建节点，再引用节点连线，replace 是完整替换而非局部合并；运行时全部操作必须为 set_node_prompt。图修改整批校验后保存；会话创建须等待原生确认及绑定持久化。",
                 "items": { "oneOf": [
                     schema(json!({
                         "op": { "enum": ["add_node", "replace_node"], "description": "add_node 使用未占用的 nodeId；replace_node 完整替换已有节点，保留原 kind 和仍需使用的配置。" },
@@ -133,10 +140,14 @@ fn graph_patch_tool() -> Value {
                         "op": { "const": "set_node_prompt", "description": "运行中仅替换已有 work/review 的任务正文，不修改拓扑、角色或绑定。" },
                         "nodeId": { "type": "string", "minLength": 1, "description": "要修改正文的目标 work/review 节点 ID，从本 Run 上下文选取；不是外层当前调用节点的标识。" },
                         "prompt": { "type": "string", "minLength": 1, "description": "替换目标 work/review 的完整任务正文，必须含非空白内容。" }
-                    }), &["op", "nodeId", "prompt"])
+                    }), &["op", "nodeId", "prompt"]),
+                    schema(json!({
+                        "op": { "const": "create_role_session", "description": "设计期为已有角色创建独立会话，必须单项单独调用，不与图或正文操作混批。" },
+                        "roleId": { "type": "string", "minLength": 1, "description": "从当前设计 context.roles 选取已有角色的真实 roleId；不是显示名称或原生 agentId，不能借用其他团队或 Run 的角色。" }
+                    }), &["op", "roleId"])
                 ] }
             }
-        }), &["teamId", "runId", "expectedGraphVersion", "commandId", "idempotencyKey", "operations"]);
+        }), &["teamId", "runId", "idempotencyKey", "operations"]);
     input_schema["if"] = json!({
         "properties": { "operations": { "contains": {
             "type": "object", "properties": { "op": { "const": "set_node_prompt" } }, "required": ["op"]
@@ -144,7 +155,7 @@ fn graph_patch_tool() -> Value {
         "required": ["operations"]
     });
     input_schema["then"] = json!({
-        "required": ["nodeId", "nodeExecutionId"],
+        "required": ["expectedGraphVersion", "commandId", "nodeId", "nodeExecutionId"],
         "properties": {
             "designEpoch": false, "promptGeneration": false,
             "baseGraphId": false, "baseWorkflowPlanId": false,
@@ -152,8 +163,25 @@ fn graph_patch_tool() -> Value {
         }
     });
     input_schema["else"] = json!({
-        "required": ["designEpoch", "promptGeneration", "baseGraphId", "baseWorkflowPlanId"],
-        "properties": { "nodeId": false, "nodeExecutionId": false }
+        "required": ["designEpoch", "promptGeneration"],
+        "properties": { "nodeId": false, "nodeExecutionId": false },
+        "if": {
+            "properties": { "operations": { "contains": {
+                "type": "object", "properties": { "op": { "const": "create_role_session" } }, "required": ["op"]
+            } } },
+            "required": ["operations"]
+        },
+        "then": {
+            "properties": {
+                "expectedGraphVersion": false, "commandId": false,
+                "baseGraphId": false, "baseWorkflowPlanId": false,
+                "operations": {
+                    "maxItems": 1,
+                    "items": { "properties": { "op": { "const": "create_role_session" } } }
+                }
+            }
+        },
+        "else": { "required": ["expectedGraphVersion", "commandId", "baseGraphId", "baseWorkflowPlanId"] }
     });
     json!({
         "name": "team_graph_patch",
@@ -164,7 +192,7 @@ fn graph_patch_tool() -> Value {
 
 fn node_schema() -> Value {
     let prompt = json!({ "type": "string", "minLength": 1, "description": "work/review 的任务正文，必须包含非空白内容，写清目标、输入和完成或审核标准；不能只写 title。" });
-    let session_ref = json!({ "type": "string", "minLength": 1, "pattern": "^rs[0-9]+$", "description": "该 roleId 在当前 Run 恰有一个绑定时省略，由保存事务解析；多候选必须从 context.roles 显式选择匹配值，零候选应选择有效角色。显式值必须与当前绑定完全一致，不能用 null、空串或错值代替省略。这是 rsN 形式的 RoleSessionRef，不是原生 session ID/key；不猜 rs0/rs1，不借用其他角色或 Run 的值。" });
+    let session_ref = json!({ "type": "string", "minLength": 1, "pattern": "^rs[0-9]+$", "description": "该 roleId 在当前 Run 恰有一个绑定时省略，由保存事务解析；多候选必须从 context.roles 显式选择匹配值，零候选应选择有效角色。显式值必须与当前绑定完全一致，不能用 null、空串或错值代替省略。这是 rsN 形式的 RoleSessionRef，不是原生 session ID/key；不猜 rs0/rs1，不借用其他角色或 Run 的值。仅需独立会话时先单独调用 team_graph_patch 的 create_role_session，成功后重读 context.roles，再用 add_node/replace_node 绑定，不必每个节点新建会话。" });
     let mut node = schema(
         json!({
             "nodeId": { "type": "string", "minLength": 1, "description": "图内唯一节点 ID；新增用未占用值，替换用 context 中的原值。" },

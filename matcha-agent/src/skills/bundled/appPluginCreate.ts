@@ -1,13 +1,12 @@
-import skillMarkdown from '../../../../resources/skills/preinstalled-skill-sources/app-plugin-create/SKILL.md'
-import { parseFrontmatter } from '../../utils/frontmatterParser.js'
 import { registerBundledSkill } from '../bundledSkills.js'
+import { appPluginCreateSkill } from './appCatalogSkills.js'
 
-const { frontmatter, content } = parseFrontmatter(skillMarkdown)
+const { name, description, content } = appPluginCreateSkill
 
 export function registerAppPluginCreateSkill(): void {
   registerBundledSkill({
-    name: 'app-plugin-create',
-    description: frontmatter.description!,
+    name,
+    description,
     async getPromptForCommand(args) {
       return [
         {

@@ -17,7 +17,8 @@ import {
 import type { AppPluginPackageWorker } from './package-client';
 import type { PackageRequest, PackageResults } from './package-contract';
 import { compareAppPluginVersions, readBundledAppPlugins } from './bundled';
-import { AppPluginStorage, MAX_INSTALLED_APP_PLUGINS, readBoundedFile, type StoredAppPluginCatalog } from './storage';
+import { AppPluginStorage, MAX_INSTALLED_APP_PLUGINS, type StoredAppPluginCatalog } from './storage';
+import { readBoundedFile } from '../../utils/private-file';
 
 export interface ApplicationPluginOwnerOptions {
   readonly rootDir: string;

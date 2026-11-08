@@ -660,10 +660,17 @@ impl Host {
         &mut self,
         open_claw_auto_start: bool,
     ) -> Result<(), HostTransitionError> {
+        let phase = self.admission.state().phase();
+        if !matches!(
+            phase,
+            super::admission::HostPhase::Created | super::admission::HostPhase::Starting
+        ) {
+            return Err(HostTransitionError::StartFrom(phase));
+        }
+        let autostart = self.peer_handle.prepare_peer_autostart(open_claw_auto_start);
         self.start_admission_only().await?;
-        let peer = self.peer_handle.clone();
         tokio::spawn(async move {
-            let _ = peer.request_peer_autostart(open_claw_auto_start).await;
+            let _ = autostart.run().await;
         });
         Ok(())
     }

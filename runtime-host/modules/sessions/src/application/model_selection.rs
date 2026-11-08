@@ -43,7 +43,7 @@ impl ResolvedSessionModelSelection {
 pub struct MatchaSessionModelRuntimeCommand {
     pub session_key: String,
     pub endpoint_session_id: Option<String>,
-    pub model: String,
+    pub model: Option<String>,
     pub model_selection_id: Option<String>,
     pub provider_fingerprint: Option<String>,
     pub trace_id: Option<String>,
@@ -145,7 +145,7 @@ impl MatchaSessionModelRuntimeCommand {
     pub fn try_new(
         session_key: String,
         endpoint_session_id: Option<String>,
-        model: String,
+        model: Option<String>,
         model_selection_id: Option<String>,
         provider_fingerprint: Option<String>,
     ) -> Result<Self, InvalidCommand> {
@@ -155,7 +155,8 @@ impl MatchaSessionModelRuntimeCommand {
             || endpoint_session_id
                 .as_deref()
                 .is_some_and(|endpoint_session_id| !valid_endpoint_session_id(endpoint_session_id))
-            || !valid_model_value(&model, MAX_MATCHA_MODEL_BYTES)
+            || model.as_deref().is_some_and(|model| !valid_model_value(model, MAX_MATCHA_MODEL_BYTES))
+            || (model.is_none() && (model_selection_id.is_some() || provider_fingerprint.is_some()))
             || model_selection_id
                 .as_deref()
                 .is_some_and(|value| !valid_model_value(value, MAX_MODEL_SELECTION_ID_BYTES))

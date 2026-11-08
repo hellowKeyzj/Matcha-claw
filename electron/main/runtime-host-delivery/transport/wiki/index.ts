@@ -18,6 +18,11 @@ type WikiCallTransportResponse = Readonly<
   { status: 202; body: CallReceipt } | { status: 400 | 404 | 409 | 422 | 503; body: unknown }
 >;
 
+type WikiArtifactTransportResponse = Readonly<{
+  status: 202 | Exclude<WikiTransportResponse['status'], 200>;
+  body: unknown;
+}>;
+
 export interface WikiTransport {
   status(): Promise<WikiTransportResponse>;
   projects(): Promise<WikiTransportResponse>;
@@ -29,6 +34,8 @@ export interface WikiTransport {
   navigation(projectId?: string): Promise<WikiTransportResponse>;
   deletePage(request: unknown): Promise<WikiCallTransportResponse>;
   readFile(request: unknown): Promise<WikiTransportResponse>;
+  archive(request: unknown, signal?: AbortSignal): Promise<WikiArtifactTransportResponse>;
+  artifactStatus(request: unknown, signal?: AbortSignal): Promise<WikiTransportResponse>;
   readBinaryFile(request: unknown): Promise<WikiTransportResponse>;
   readSourcePreview(request: unknown): Promise<WikiTransportResponse>;
   writeFile(request: unknown): Promise<WikiTransportResponse>;
@@ -112,6 +119,8 @@ export function createWikiTransport(
     navigation: (projectId) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/navigation', 'GET', 'wiki:read', undefined, projectQuery(projectId)),
     deletePage: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/delete-page', request),
     readFile: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/read-file', 'POST', 'wiki:read', request),
+    archive: (request, signal) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/artifacts', 'POST', 'wiki:write', request, undefined, 202, signal),
+    artifactStatus: (request, signal) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/artifacts/status', 'POST', 'wiki:read', request, undefined, 200, signal),
     readBinaryFile: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/read-binary-file', 'POST', 'wiki:read', request),
     readSourcePreview: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/read-source-preview', 'POST', 'wiki:read', request),
     writeFile: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/write-file', 'POST', 'wiki:write', request),
@@ -241,7 +250,7 @@ async function sendCall(
   return { status: 503, body: WIKI_UNAVAILABLE };
 }
 
-async function send(
+async function send<S extends 200 | 202 = 200>(
   runtimeHostTransportPort: number,
   issuer: RuntimeHostDeliveryIssuer,
   fetcher: typeof fetch,
@@ -250,7 +259,9 @@ async function send(
   scope: 'wiki:read' | 'wiki:write',
   body?: unknown,
   query?: URLSearchParams,
-): Promise<WikiTransportResponse> {
+  successStatus: S = 200 as S,
+  signal?: AbortSignal,
+): Promise<Readonly<{ status: S | Exclude<WikiTransportResponse['status'], 200>; body: unknown }>> {
   const response = await sendLoopbackJson({
     port: runtimeHostTransportPort,
     path,
@@ -266,9 +277,11 @@ async function send(
     ...(query === undefined ? {} : { query }),
     ...(method === 'GET' ? { emptyContentLength: true } : {}),
     ...(body === undefined ? {} : { body }),
+    ...(signal === undefined ? {} : { signal }),
   });
   if (response === null) return { status: 503, body: WIKI_UNAVAILABLE };
-  if (!isWikiStatus(response.status)) return { status: 503, body: WIKI_UNAVAILABLE };
+  if (response.status === successStatus) return { status: successStatus, body: response.body };
+  if (!isWikiStatus(response.status) || response.status === 200) return { status: 503, body: WIKI_UNAVAILABLE };
   return { status: response.status, body: response.body };
 }
 

@@ -379,6 +379,15 @@ fn team_runtime_outcome_with_context(
     resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> TeamRuntimeProjectionOutcome {
     match outcome {
+        TeamRuntimeCommandOutcome::RoleSessionCreate(result) => match result {
+            Ok(binding) => TeamRuntimeProjectionOutcome::succeeded(json!({
+                "outcome": "created",
+                "roleSession": { "roleId": binding.role().as_str(), "sessionRef": binding.session_ref().as_str() },
+            })),
+            Err(TeamRuntimeStatus::Rejected) => TeamRuntimeProjectionOutcome::InvalidInput(None),
+            Err(TeamRuntimeStatus::Unavailable) => TeamRuntimeProjectionOutcome::Unavailable(None),
+            Err(TeamRuntimeStatus::OutcomeUnknown) => TeamRuntimeProjectionOutcome::unknown(json!({"outcome":"outcome-unknown"})),
+        },
         TeamRuntimeCommandOutcome::RunStart(result) => match result {
             Ok(()) => {
                 runtime_trace("runtime.team_run.run_start.result", || json!({
@@ -930,7 +939,8 @@ pub(crate) fn team_run_public_snapshot_legacy_json(
         "artifacts": snapshot.artifacts().iter().map(team_public_artifact_legacy_json).collect::<Vec<_>>(),
         "dispatches": [],
         "dispatchExecutions": [],
-        "messages": [],
+        "messages": snapshot.messages(),
+        "messagePage": snapshot.message_page(),
         "nodePromptDeliveries": [],
         "gates": [],
         "kickbacks": [],
@@ -976,6 +986,7 @@ pub(super) fn team_public_run_legacy_json(
 ) -> Value {
     let run = snapshot.run();
     json!({
+        "teamId": run.team_id(),
         "runId": run.run_id(),
         "status": team_run_status_from_public_snapshot(snapshot),
         "revision": run.team_revision(),
@@ -1075,6 +1086,7 @@ fn team_public_attempt_legacy_json(
         "nodeExecutionId": attempt.node_execution_id(),
         "attemptId": attempt.attempt_id(),
         "attemptNumber": attempt.number(),
+        "currentAttempt": attempt.current_attempt(),
         "reason": team_public_attempt_reason_name(attempt.reason()),
         "status": team_public_attempt_status_name(attempt.status()),
         "createdAt": attempt.created_at(),
@@ -1118,9 +1130,13 @@ fn team_public_artifact_legacy_json(
         "roleId": artifact.role_id(),
         "kind": artifact.kind(),
         "title": artifact.title(),
-        "contentRef": "",
+        "contentRef": artifact.content_ref(),
         "summary": artifact.summary(),
-        "evidenceRefs": [],
+        "evidenceRefs": artifact.evidence_refs(),
+        "nodeId": artifact.node_id(),
+        "nodeExecutionId": artifact.node_execution_id(),
+        "attemptId": artifact.attempt_id(),
+        "currentAttempt": artifact.current_attempt(),
         "idempotencyKey": "",
         "createdAt": artifact.created_at(),
         "updatedAt": artifact.updated_at(),

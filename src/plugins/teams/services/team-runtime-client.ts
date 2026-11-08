@@ -52,6 +52,7 @@ export type TeamRuntimeOperationId =
   | 'team.triggerList'
   | 'team.webhookTriggerFire'
   | 'team.runSnapshot'
+  | 'team.roleSessionCreate'
   | 'team.designStart'
   | 'team.runStart'
   | 'team.designExit'
@@ -1171,6 +1172,23 @@ export async function patchTeamDesignGraph(payload: TeamDesignTarget & TeamRunti
       operations: payload.operations,
     },
   }, (value) => decodeTeamDesignSnapshot(value, payload));
+}
+
+export async function createTeamRoleSession(payload: TeamDesignTarget & TeamRuntimeSelection & {
+  roleId: string;
+  idempotencyKey: string;
+}): Promise<CallReceipt> {
+  return await teamRuntimeApi({
+    scope: payload.scope,
+    operationId: 'team.roleSessionCreate',
+    target: { kind: 'team-run', runId: payload.runId },
+    input: {
+      teamId: payload.teamId,
+      runId: payload.runId,
+      roleId: payload.roleId,
+      idempotencyKey: payload.idempotencyKey,
+    },
+  }, decodeCallReceipt);
 }
 
 export async function readTeamRunSnapshot(payload: {

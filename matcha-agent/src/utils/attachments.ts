@@ -2251,8 +2251,18 @@ export async function getChangedFiles(
         }
 
         const result = await FileReadTool.call(fileInput, toolUseContext)
+        if (fileState.isPartialView) {
+          const updatedState = toolUseContext.readFileState.get(filePath)
+          if (updatedState) {
+            toolUseContext.readFileState.set(filePath, {
+              ...updatedState,
+              isPartialView: true,
+            })
+          }
+        }
         // Extract only the changed section
         if (result.data.type === 'text') {
+          if (result.data.file.truncatedByTokenCap) return null
           const snippet = getSnippetForTwoFileDiff(
             fileState.content,
             result.data.file.content,
@@ -3314,7 +3324,11 @@ export async function generateFileAttachment(
 
   // Check if file is already in context with latest version
   const existingFileState = toolUseContext.readFileState.get(filename)
-  if (existingFileState && mode === 'at-mention') {
+  if (
+    existingFileState &&
+    !existingFileState.isPartialView &&
+    mode === 'at-mention'
+  ) {
     try {
       // Check if the file has been modified since we last read it
       const mtimeMs = await getFileModificationTimeAsync(filename)
@@ -3423,6 +3437,9 @@ export async function generateFileAttachment(
 
     try {
       const result = await FileReadTool.call(fileInput, toolUseContext)
+      if (result.data.type === 'text' && result.data.file.truncatedByTokenCap) {
+        return await readTruncatedFile()
+      }
       logEvent(successEventName, {})
       return {
         type: 'file',

@@ -1,3 +1,5 @@
+#[path = "api/artifacts.rs"]
+mod artifacts_api;
 #[path = "api/dedup.rs"]
 mod dedup_api;
 #[path = "api/history.rs"]
@@ -419,7 +421,7 @@ impl WikiHandle {
                     Err(error) => {
                         skipped.push(crate::domain::WikiSourceSkip::new(
                             staged.source_relative_path,
-                            format!("{error:?}"),
+                            error.to_string(),
                         ));
                     }
                 }
@@ -649,7 +651,7 @@ impl WikiHandle {
                     Err(error) => {
                         skipped.push(crate::domain::WikiSourceSkip::new(
                             staged.source_relative_path,
-                            format!("{error:?}"),
+                            error.to_string(),
                         ));
                     }
                 }

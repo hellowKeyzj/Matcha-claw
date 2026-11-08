@@ -1,30 +1,39 @@
 use serde::Serialize;
 
-use super::endpoint::NativeEndpoint;
+use crate::{
+    endpoint::NativeEndpoint,
+    state::{ApprovalDetails, SessionIdentity},
+};
 
 const MAX_IDENTIFIER_BYTES: usize = 4096;
 
-/// Session approval is a matcha-agent-only operation.
-///
-/// Any other native endpoint is reported to the renderer as unsupported rather than routed to a
-/// runtime that does not implement approvals, so the outcome does not depend on that runtime's
-/// lifecycle.
+/// Approvals are owned by either fixed native peer, never by an unknown endpoint.
 pub const fn endpoint_supports_approval(endpoint: NativeEndpoint) -> bool {
-    matches!(endpoint, NativeEndpoint::MatchaAgentLocal)
+    matches!(
+        endpoint,
+        NativeEndpoint::MatchaAgentLocal | NativeEndpoint::OpenClawLocal
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingApprovalsCommand {
     pub endpoint: NativeEndpoint,
     pub session_id: String,
+    pub identity: SessionIdentity,
 }
 
 impl PendingApprovalsCommand {
-    pub fn try_new(endpoint: NativeEndpoint, session_id: String) -> Result<Self, InvalidCommand> {
+    pub fn try_new(
+        endpoint: NativeEndpoint,
+        session_id: String,
+        identity: SessionIdentity,
+    ) -> Result<Self, InvalidCommand> {
         valid_identifier(&session_id)?;
+        valid_identity(endpoint, &identity)?;
         Ok(Self {
             endpoint,
             session_id,
+            identity,
         })
     }
 }
@@ -35,6 +44,7 @@ pub struct SessionApprovalCommand {
     pub session_id: String,
     pub approval_id: String,
     pub option_id: String,
+    pub identity: SessionIdentity,
 }
 
 impl SessionApprovalCommand {
@@ -43,17 +53,36 @@ impl SessionApprovalCommand {
         session_id: String,
         approval_id: String,
         option_id: String,
+        identity: SessionIdentity,
     ) -> Result<Self, InvalidCommand> {
         for value in [&session_id, &approval_id, &option_id] {
             valid_identifier(value)?;
         }
+        valid_identity(endpoint, &identity)?;
         Ok(Self {
             endpoint,
             session_id,
             approval_id,
             option_id,
+            identity,
         })
     }
+}
+
+fn valid_identity(
+    endpoint: NativeEndpoint,
+    identity: &SessionIdentity,
+) -> Result<(), InvalidCommand> {
+    identity.validate().map_err(|_| InvalidCommand)?;
+    let native_endpoint = NativeEndpoint::parse(
+        &identity.endpoint.kind,
+        identity.provider().as_str(),
+        &identity.endpoint.runtime_instance_id,
+    )
+    .ok_or(InvalidCommand)?;
+    (native_endpoint == endpoint)
+        .then_some(())
+        .ok_or(InvalidCommand)
 }
 
 fn valid_identifier(value: &str) -> Result<(), InvalidCommand> {
@@ -71,6 +100,7 @@ fn valid_identifier(value: &str) -> Result<(), InvalidCommand> {
 pub struct PendingApproval {
     pub approval_id: String,
     pub option_ids: Vec<String>,
+    pub details: Option<ApprovalDetails>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { Check, Copy, ExternalLink, Loader2, RefreshCw, X } from 'lucide-react';
+import { ArrowRight, Check, Copy, ExternalLink, Loader2, RefreshCw, Wallet, X } from 'lucide-react';
 import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -351,10 +351,6 @@ function balanceRows(user: CloudUser | null, t: Translate): BalanceDisplayRow[] 
   ];
 }
 
-function primarySubscriptionQuota(rows: readonly QuotaDisplayRow[]): QuotaDisplayRow | null {
-  return rows.find((row) => row.id.endsWith(':monthly')) ?? rows[0] ?? null;
-}
-
 function quotaAmountLabel(quota: QuotaDisplayRow, locale: string, t: Translate): string {
   return quota.limitKind === 'amount' && quota.limit !== null
     ? t('subscriptionDialog.quota.usedOfLimit', {
@@ -683,27 +679,27 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/55 data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <DialogPrimitive.Content className="fixed left-1/2 top-1/2 z-50 flex h-[min(calc(100vh-2rem),760px)] w-[min(calc(100vw-2rem),960px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[1.5rem] border border-border bg-background shadow-2xl data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
-          <div className="flex items-start justify-between gap-4 border-b border-border/70 px-6 py-5">
-            <DialogPrimitive.Title className="text-lg font-semibold tracking-[-0.02em]">
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-[hsl(var(--shell-scrim))] data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 motion-reduce:animate-none" />
+        <DialogPrimitive.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[min(calc(100vw-2rem),820px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border bg-[hsl(var(--shell-surface))] shadow-[var(--shell-shadow-overlay)] [border-color:hsl(var(--shell-border))] data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 motion-reduce:animate-none">
+          <div className="flex shrink-0 items-center justify-between gap-4 px-5 pb-2 pt-5 sm:px-7 sm:pt-6">
+            <DialogPrimitive.Title className="text-lg font-semibold tracking-tight">
               {t('subscriptionDialog.title')}
             </DialogPrimitive.Title>
-            <DialogPrimitive.Close className="rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring/15">
+            <DialogPrimitive.Close className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none">
               <X className="h-4 w-4" />
               <span className="sr-only">{t('actions.close')}</span>
             </DialogPrimitive.Close>
           </div>
 
-          <Tabs value={activeDialogTab} onValueChange={updateDialogTab} className="flex min-h-0 flex-1 flex-col">
-            <div className="border-b border-border/70 px-6 py-3">
-              <TabsList>
+          <Tabs value={activeDialogTab} onValueChange={updateDialogTab} className="flex min-h-0 flex-col">
+            <div className="shrink-0 border-b px-5 [border-color:hsl(var(--shell-border))] sm:px-7">
+              <TabsList variant="line">
                 <TabsTrigger value="current">{t('subscriptionDialog.tabs.current')}</TabsTrigger>
                 <TabsTrigger value="checkout">{t('subscriptionDialog.tabs.checkout')}</TabsTrigger>
               </TabsList>
             </div>
 
-            <TabsContent value="current" className="mt-0 min-h-0 flex-1 overflow-y-auto p-6">
+            <TabsContent value="current" className="mt-0 min-h-0 overflow-y-auto overscroll-contain p-5 sm:p-7">
               <CurrentSubscriptionPanel
                 balanceRows={balanceDisplayRows}
                 currentQuotaRows={subscriptionQuotaRows}
@@ -716,19 +712,20 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
                 locale={i18n.language}
                 t={t}
                 onRefresh={refreshSubscriptions}
+                onChoosePlan={() => updateDialogTab('checkout')}
               />
             </TabsContent>
 
-            <TabsContent value="checkout" className="mt-0 min-h-0 flex-1 overflow-y-auto p-6">
+            <TabsContent value="checkout" className="mt-0 min-h-0 overflow-y-auto overscroll-contain p-5 sm:p-7">
               {loadStatus === 'idle' || loadStatus === 'loading' ? (
-                <div className="flex min-h-80 items-center justify-center gap-2 rounded-[1.35rem] border border-border/70 bg-card text-sm text-muted-foreground">
+                <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   {t('subscriptionDialog.loading')}
                 </div>
               ) : null}
 
               {loadStatus === 'error' ? (
-                <div className="rounded-[1.35rem] border border-destructive/40 bg-card p-5">
+                <div className="rounded-xl border border-destructive/40 p-5">
                   <p className="font-medium text-foreground">{t('subscriptionDialog.errors.loadPlansFailed')}</p>
                   <p className="mt-2 text-sm text-muted-foreground">{loadErrorMessage}</p>
                   <Button className="mt-4" onClick={() => { void loadBillingData(); }}>
@@ -739,15 +736,15 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
               ) : null}
 
               {loadStatus === 'ready' ? (
-                <div className="grid min-h-0 gap-5 lg:grid-cols-[minmax(0,1.25fr)_390px] lg:items-start">
+                <div className="grid min-h-0 gap-5 min-[760px]:grid-cols-[minmax(0,1fr)_300px] min-[760px]:items-start">
                   <section className="min-h-0">
                     {visibleSalePlans.length === 0 ? (
-                      <div className="rounded-[1.35rem] border border-border/70 bg-card py-14 text-center text-sm text-muted-foreground">
+                      <div className="rounded-xl border border-border/70 py-12 text-center text-sm text-muted-foreground">
                         {t('subscriptionDialog.plan.empty')}
                       </div>
                     ) : (
                       <Tabs value={activePlanTab} onValueChange={updatePlanTab}>
-                        <TabsList className="mb-4">
+                        <TabsList className="mb-4 gap-0.5 [&>button]:shrink-0 [&>button]:px-3 [&>button]:text-xs">
                           {tabs.map((tab) => (
                             <TabsTrigger key={tab.key} value={tab.key}>{tab.label}</TabsTrigger>
                           ))}
@@ -817,6 +814,7 @@ function CurrentSubscriptionPanel({
   locale,
   t,
   onRefresh,
+  onChoosePlan,
 }: {
   balanceRows: BalanceDisplayRow[];
   currentQuotaRows: QuotaDisplayRow[];
@@ -829,18 +827,22 @@ function CurrentSubscriptionPanel({
   locale: string;
   t: Translate;
   onRefresh: () => Promise<void>;
+  onChoosePlan: () => void;
 }) {
   const hasSubscription = currentSubscription !== null;
-  const primaryQuota = primarySubscriptionQuota(currentQuotaRows);
+  const primaryQuota = currentQuotaRows.find((row) => row.id.endsWith(':monthly')) ?? currentQuotaRows[0];
   const availableBalance = balanceRows.find((row) => row.id === 'available') ?? balanceRows[0] ?? null;
   const subscriptionExpiresAt = currentProgress?.expiresAt ?? currentSubscription?.expiresAt ?? null;
+  const balanceParts = availableBalance
+    ? new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD' }).formatToParts(availableBalance.value)
+    : [];
 
   return (
-    <section className="rounded-[1.35rem] border border-border/70 bg-card p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-xl font-semibold tracking-[-0.03em] text-foreground">
+    <section>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0 flex-1 basis-60">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h3 className="break-words text-2xl font-semibold tracking-tight text-foreground">
               {hasSubscription ? subscriptionPlanName : t('subscriptionDialog.current.freePlan')}
             </h3>
             <Badge variant={subscriptionStatusVariant(subscriptionDisplayStatus)}>
@@ -857,110 +859,93 @@ function CurrentSubscriptionPanel({
             <p className="mt-2 text-sm text-muted-foreground">{t('subscriptionDialog.current.noActiveSubscription')}</p>
           )}
         </div>
-        <Button variant="outline" size="sm" onClick={() => { void onRefresh(); }} disabled={subscriptionStatus === 'loading'}>
-          {subscriptionStatus === 'loading' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          {t('actions.refresh')}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={() => { void onRefresh(); }} disabled={subscriptionStatus === 'loading'}>
+            {subscriptionStatus === 'loading' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {t('actions.refresh')}
+          </Button>
+          <Button size="sm" onClick={onChoosePlan}>
+            {t('subscriptionDialog.tabs.checkout')}
+            <ArrowRight className="h-3.5 w-3.5 shrink-0" />
+          </Button>
+        </div>
       </div>
 
       {subscriptionErrorMessage ? (
-        <p className="mt-4 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p className="mt-4 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {subscriptionErrorMessage}
         </p>
       ) : null}
 
       {hasSubscription ? (
-        <div className="mt-6 grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
-          <div className="rounded-2xl border border-border/70 bg-background/70 p-5">
-            {primaryQuota ? (
-              <>
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-medium text-muted-foreground">{primaryQuota.label}</p>
-                    <p className="mt-3 text-3xl font-semibold tracking-[-0.05em] text-foreground">
-                      {quotaAmountLabel(primaryQuota, locale, t)}
-                    </p>
-                  </div>
-                  {primaryQuota.percentage === null ? null : (
-                    <span className="rounded-full border border-border/70 bg-card px-2.5 py-1 text-xs font-medium text-muted-foreground">
-                      {primaryQuota.percentage}%
-                    </span>
-                  )}
-                </div>
-                {primaryQuota.percentage === null ? null : <Progress className="mt-5 h-2" value={primaryQuota.percentage} />}
-                {primaryQuota.remaining !== undefined ? (
-                  <p className="mt-3 text-sm text-muted-foreground">
-                    {t('subscriptionDialog.quota.remaining', { amount: primaryQuota.remaining === null ? '-' : formatQuotaUsageValue(primaryQuota.remaining, locale) })}
-                  </p>
-                ) : null}
-              </>
-            ) : (
-              <div className="flex min-h-36 items-center justify-center text-center text-sm text-muted-foreground">
-                {t('subscriptionDialog.current.emptyQuota')}
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
-            <p className="text-sm font-semibold text-foreground">{t('subscriptionDialog.current.quotaTitle')}</p>
-            {currentQuotaRows.length > 0 ? (
-              <div className="mt-3 space-y-2">
-                {currentQuotaRows.map((quota) => (
-                  <QuotaLine key={quota.id} quota={quota} locale={locale} t={t} />
-                ))}
-              </div>
-            ) : null}
-            {availableBalance ? (
-              <div className="mt-4 flex items-center justify-between gap-3 border-t border-border/70 pt-3 text-sm">
-                <span className="text-muted-foreground">{t('subscriptionDialog.current.balanceTitle')}</span>
-                <span className="font-medium text-foreground">{formatBillingAmount(availableBalance.value, 'USD', locale)}</span>
-              </div>
-            ) : null}
-          </div>
+        <div className="mt-6 border-t pt-5 [border-color:hsl(var(--shell-border))]">
+          <h4 className="text-sm font-medium text-foreground">{t('subscriptionDialog.current.quotaTitle')}</h4>
+          {currentQuotaRows.length > 0 ? (
+            <div className="mt-4 grid gap-5 sm:grid-cols-3">
+              {currentQuotaRows.map((quota) => (
+                <QuotaLine key={quota.id} quota={quota} showRemaining={quota === primaryQuota} locale={locale} t={t} />
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-muted-foreground">{t('subscriptionDialog.current.emptyQuota')}</p>
+          )}
         </div>
-      ) : balanceRows.length > 0 && availableBalance ? (
-        <div className="mt-6 grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
-          <div className="rounded-2xl border border-border/70 bg-background/70 p-5">
-            <p className="text-sm font-medium text-muted-foreground">{t('subscriptionDialog.current.balanceTitle')}</p>
-            <p className="mt-3 text-4xl font-semibold tracking-[-0.06em] text-foreground">
-              {formatBillingAmount(availableBalance.value, 'USD', locale)}
-            </p>
-          </div>
-          <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
-            <p className="text-sm font-semibold text-foreground">{t('subscriptionDialog.balance.details')}</p>
-            <div className="mt-3 space-y-2">
-              {balanceRows.map((row) => (
+      ) : null}
+
+      {availableBalance ? (
+        <div className="mt-6 border-t pt-5 [border-color:hsl(var(--shell-border))]">
+          <h4 className="flex items-center gap-2 text-sm font-medium text-foreground">
+            <Wallet className="h-4 w-4 text-muted-foreground" />
+            {t('subscriptionDialog.current.balanceTitle')}
+          </h4>
+          <div className="mt-5 grid items-center gap-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)] sm:gap-8">
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">{availableBalance.label}</p>
+              <p className="mt-2 break-all text-[2.75rem] font-semibold leading-tight tracking-[-0.04em] text-foreground tabular-nums">
+                {balanceParts.map((part, index) => (
+                  <span key={index} className={part.type === 'currency' ? 'text-2xl font-normal tracking-normal text-muted-foreground' : undefined}>{part.value}</span>
+                ))}
+              </p>
+            </div>
+            <div className="border-t pt-2 [border-color:hsl(var(--shell-border))] sm:border-l sm:border-t-0 sm:pl-7 sm:pt-0">
+              {balanceRows.filter((row) => row.id !== availableBalance.id).map((row) => (
                 <BalanceLine key={row.id} row={row} locale={locale} />
               ))}
             </div>
           </div>
         </div>
-      ) : (
-        <div className="mt-6 flex min-h-36 items-center justify-center rounded-2xl border border-dashed border-border/80 bg-background/70 px-4 text-center text-sm text-muted-foreground">
+      ) : !hasSubscription ? (
+        <p className="mt-6 border-t pt-5 text-sm text-muted-foreground [border-color:hsl(var(--shell-border))]">
           {t('subscriptionDialog.current.emptyQuota')}
-        </div>
-      )}
+        </p>
+      ) : null}
     </section>
   );
 }
 
 const BalanceLine = memo(function BalanceLine({ row, locale }: { row: BalanceDisplayRow; locale: string }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-sm">
+    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 py-2 text-sm">
       <span className="text-muted-foreground">{row.label}</span>
-      <span className="font-medium text-foreground">{formatBillingAmount(row.value, 'USD', locale)}</span>
+      <span className="break-all font-medium text-foreground tabular-nums">{formatBillingAmount(row.value, 'USD', locale)}</span>
     </div>
   );
 });
 
-const QuotaLine = memo(function QuotaLine({ quota, locale, t }: { quota: QuotaDisplayRow; locale: string; t: Translate }) {
+const QuotaLine = memo(function QuotaLine({ quota, showRemaining, locale, t }: { quota: QuotaDisplayRow; showRemaining: boolean; locale: string; t: Translate }) {
   return (
-    <div className="rounded-xl border border-border/70 bg-card px-3 py-2.5">
-      <div className="flex items-center justify-between gap-3 text-sm">
-        <span className="text-muted-foreground">{quota.label}</span>
-        <span className="font-medium text-foreground">{quotaAmountLabel(quota, locale, t)}</span>
+    <div className="min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span>{quota.label}</span>
+        {quota.percentage === null ? null : <span className="tabular-nums">{quota.percentage}%</span>}
       </div>
-      {quota.percentage === null ? null : <Progress className="mt-2 h-1.5" value={quota.percentage} />}
+      <p className="mt-2 break-words text-sm font-medium text-foreground tabular-nums">{quotaAmountLabel(quota, locale, t)}</p>
+      {quota.percentage === null ? null : <Progress aria-label={quota.label} className="mt-3 h-1.5 motion-reduce:[&>div]:transition-none" value={quota.percentage} />}
+      {showRemaining && quota.remaining !== undefined ? (
+        <p className="mt-2 text-xs text-muted-foreground tabular-nums">
+          {t('subscriptionDialog.quota.remaining', { amount: quota.remaining === null ? '-' : formatQuotaUsageValue(quota.remaining, locale) })}
+        </p>
+      ) : null}
     </div>
   );
 });
@@ -1015,14 +1000,14 @@ function PaymentSummaryPanel({
   onVerifyOrder: (order: ActiveBillingOrder, manual: boolean) => Promise<void>;
 }) {
   return (
-    <aside className="rounded-[1.35rem] border border-border/70 bg-card p-4 lg:sticky lg:top-0">
+    <aside className="min-w-0 rounded-xl border bg-[hsl(var(--shell-surface-muted))] p-4 [border-color:hsl(var(--shell-border))]">
       <div className="flex items-start justify-between gap-3">
         <p className="text-sm font-semibold text-foreground">{t('subscriptionDialog.payment.title')}</p>
         {selectedPlan?.groupPlatform ? <Badge variant="outline">{selectedPlan.groupPlatform}</Badge> : null}
       </div>
 
       <div className="mt-5">
-        <p className="text-3xl font-bold tracking-[-0.05em]">
+        <p className="break-all text-3xl font-semibold tracking-tight tabular-nums">
           {selectedPlan ? formatBillingAmount(selectedPlan.price, selectedPlan.currency, locale) : '-'}
         </p>
         {selectedPlan?.originalPrice && selectedPlan.originalPrice > selectedPlan.price ? (
@@ -1033,11 +1018,11 @@ function PaymentSummaryPanel({
       </div>
 
       {selectedPlanQuotaRows.length > 0 ? (
-        <div className="mt-5 grid gap-2 text-sm">
+        <div className="mt-5 grid gap-2 border-y py-3 text-sm [border-color:hsl(var(--shell-border))]">
           {selectedPlanQuotaRows.map((quota) => (
-            <div key={quota.label} className="flex items-center justify-between rounded-xl border border-border/70 px-3 py-2">
+            <div key={quota.label} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
               <span className="text-muted-foreground">{quota.label}</span>
-              <span className="font-medium text-foreground">{formatQuotaValue(quota.limit, t, locale)}</span>
+              <span className="break-all font-medium text-foreground tabular-nums">{formatQuotaValue(quota.limit, t, locale)}</span>
             </div>
           ))}
         </div>
@@ -1066,9 +1051,10 @@ function PaymentSummaryPanel({
                   key={method.id}
                   type="button"
                   className={cn(
-                    'rounded-xl border px-3 py-2 text-left text-sm transition-colors',
-                    selected ? 'border-primary bg-primary/5 text-foreground' : 'border-border/70 text-muted-foreground hover:border-primary/50 hover:text-foreground',
+                    'rounded-lg border px-3 py-2.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 motion-reduce:transition-none',
+                    selected ? 'border-foreground bg-[hsl(var(--shell-surface))] text-foreground' : 'border-border text-muted-foreground hover:border-foreground/40 hover:text-foreground',
                   )}
+                  aria-pressed={selected}
                   disabled={hasPendingOrder}
                   onClick={() => onMethodChange(method.id)}
                 >
@@ -1106,7 +1092,7 @@ function PaymentSummaryPanel({
         onVerifyOrder={onVerifyOrder}
       />
 
-      <label className="mt-4 flex gap-3 rounded-xl border border-border/70 p-3 text-xs leading-5 text-muted-foreground">
+      <label className="mt-4 flex gap-2.5 text-xs leading-5 text-muted-foreground">
         <input
           type="checkbox"
           className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
@@ -1154,9 +1140,10 @@ const PlanOption = memo(function PlanOption({
     <button
       type="button"
       className={cn(
-        'rounded-[1.35rem] border bg-card p-4 text-left transition-[background-color,border-color,box-shadow] hover:border-foreground/30',
-        selected ? 'border-foreground shadow-whisper' : 'border-border/70',
+        'min-w-0 rounded-xl border p-4 text-left transition-colors hover:border-foreground/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none',
+        selected ? 'border-foreground bg-[hsl(var(--shell-surface-muted))]' : 'border-border',
       )}
+      aria-pressed={selected}
       onClick={() => onSelect(plan.id)}
     >
       <div className="flex items-start justify-between gap-3">
@@ -1173,7 +1160,7 @@ const PlanOption = memo(function PlanOption({
       </div>
 
       <div className="mt-4 flex flex-wrap items-baseline gap-2">
-        <span className="text-2xl font-bold tracking-tight text-foreground">
+        <span className="break-all text-2xl font-semibold tracking-tight text-foreground tabular-nums">
           {formatBillingAmount(plan.price, plan.currency, locale)}
         </span>
         <span className="text-sm text-muted-foreground">/ {planDurationLabel(plan, t)}</span>
@@ -1195,12 +1182,12 @@ const PlanOption = memo(function PlanOption({
       <ul className="mt-4 space-y-2 text-sm text-muted-foreground">
         {plan.features.length > 0 ? plan.features.map((feature) => (
           <li key={feature} className="flex gap-2">
-            <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+            <Check className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <span>{feature}</span>
           </li>
         )) : (
           <li className="flex gap-2">
-            <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+            <Check className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <span>{t('subscriptionDialog.plan.defaultFeature')}</span>
           </li>
         )}
@@ -1239,7 +1226,7 @@ function OrderPaymentPanel({
   }
 
   return (
-    <div className="mt-5 rounded-2xl border border-border/80 p-4">
+    <div className="mt-5 border-t pt-4 [border-color:hsl(var(--shell-border))]">
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm font-medium text-foreground">{t('subscriptionDialog.order.statusLabel')}</p>
         <Badge variant={orderStatusVariant(currentOrder.status)}>{orderStatusLabel(currentOrder.status, t)}</Badge>
@@ -1266,7 +1253,7 @@ function OrderPaymentPanel({
       ) : null}
 
       {currentOrder.qrCode ? (
-        <div className="mt-4 rounded-xl border border-border/70 p-3">
+        <div className="mt-4">
           <div className="mb-3 flex items-center justify-between gap-3">
             <p className="text-sm font-medium">{t('subscriptionDialog.order.qrCode')}</p>
             <Button variant="outline" size="sm" onClick={() => { void onCopy(currentOrder.qrCode!); }}>

@@ -1,6 +1,12 @@
 {
   "title": "工作区",
   "tabs": "工作区页签",
+  "mainTabs": "主区页签",
+  "sideTabs": "侧区页签",
+  "chat": "聊天",
+  "dragTabHint": "拖动到另一区域，或按 Alt+Shift+方向键移动",
+  "dropToMain": "松开以移到主区",
+  "dropToSide": "松开以移到右侧",
   "addPage": "打开页面",
   "allTabs": "全部已打开页签（{{count}}）",
   "closePage": "关闭{{title}}",

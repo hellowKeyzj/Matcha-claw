@@ -1,6 +1,9 @@
 {
   "allowedRouteFiles": [
     "account.ts",
+    "access.ts",
+    "access-network.ts",
+    "interconnect.ts",
     "agents.ts",
     "app.ts",
     "app-plugins.ts",
@@ -60,7 +63,6 @@
     "team-task-board.ts",
     "toolchain.ts",
     "team-role-sessions.ts",
-    "team-runtime-capability.ts",
     "team-skill.ts",
     "team-trigger.ts",
     "team-webhook-auth.ts",
@@ -73,6 +75,15 @@
   ],
   "mainOwnedExactRoutes": [
     "/api/events",
+    "/api/access",
+    "/api/access/command",
+    "/api/access-network",
+    "/api/access-network/command",
+    "/api/interconnect",
+    "/api/interconnect/command",
+    "/api/interconnect/discover",
+    "/api/interconnect/invoke",
+    "/api/interconnect/result",
     "/api/account/public-settings",
     "/api/account/session",
     "/api/account/login",
@@ -81,6 +92,7 @@
     "/api/account/send-verify-code",
     "/api/account/refresh",
     "/api/account/logout",
+    "/api/account/console/open",
     "/api/app/browser-relay-info",
     "/api/app-plugins",
     "/api/app-plugins/inspect",
@@ -384,6 +396,27 @@
     ],
     [
       "GET",
+      "/api/access"
+    ],
+    [
+      "POST",
+      "/api/access/command"
+    ],
+    [
+      "GET",
+      "/api/access-network"
+    ],
+    [
+      "POST",
+      "/api/access-network/command"
+    ],
+    ["GET", "/api/interconnect"],
+    ["POST", "/api/interconnect/command"],
+    ["POST", "/api/interconnect/discover"],
+    ["POST", "/api/interconnect/invoke"],
+    ["POST", "/api/interconnect/result"],
+    [
+      "GET",
       "/api/account/public-settings"
     ],
     [
@@ -413,6 +446,10 @@
     [
       "POST",
       "/api/account/logout"
+    ],
+    [
+      "POST",
+      "/api/account/console/open"
     ],
     [
       "GET",

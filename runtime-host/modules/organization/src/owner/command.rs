@@ -104,6 +104,14 @@ pub(crate) enum OrganizationCommand {
         created_at: u64,
         reply: crate::call::CallReply<Result<CreateGraphRunOutcome, StoreFault>>,
     },
+    RoleSessionCreate {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        role_id: crate::RoleId,
+        idempotency_key: IdempotencyKey,
+        scope: crate::application::team_runtime::RoleSessionCreateScope,
+        reply: crate::call::CallReply<Result<crate::RoleSessionReceipt, crate::application::team_runtime::RoleSessionCreateError>>,
+    },
     RunCreateFromTeamTemplate {
         team_id: TeamId,
         run_id: GraphRunId,
@@ -292,6 +300,7 @@ impl OrganizationCommand {
             Self::TeamDelete { reply, .. } => reply.running().await,
             Self::RunCreate { reply, .. } => reply.running().await,
             Self::RunCreateFromTeamTemplate { reply, .. } => reply.running().await,
+            Self::RoleSessionCreate { reply, .. } => reply.running().await,
             Self::TaskCreate { reply, .. } => reply.running().await,
             Self::TaskCancel { reply, .. } => reply.running().await,
             Self::RunCancel { reply, .. } => reply.running().await,

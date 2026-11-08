@@ -26,6 +26,11 @@ pub(crate) enum IngestMode {
 }
 
 pub(crate) enum WikiCommand {
+    StageArtifacts {
+        upload: crate::owner::artifacts::ArtifactUpload,
+        call_id: platform::call::CallId,
+        reply: CallReply<crate::owner::artifacts::ArtifactPlan>,
+    },
     ApplySelection {
         input: crate::WikiSelectionApplyInput,
         reply: CallReply<crate::WikiSelectionApplyReceipt>,
@@ -476,6 +481,9 @@ pub(crate) enum WikiOwnerKey {
 impl WikiCommand {
     pub(crate) async fn reject(self, error: WikiFailure) {
         match self {
+            Self::StageArtifacts { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
             Self::BeginSourceWork { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -670,6 +678,7 @@ impl WikiCommand {
 
     pub(crate) fn call(&self) -> Option<&CallContext<WikiCallDetail>> {
         match self {
+            Self::StageArtifacts { reply, .. } => reply.call.as_ref(),
             Self::BeginSourceWork { reply, .. } => reply.call.as_ref(),
             Self::StageReviewSweep { reply, .. } => reply.call.as_ref(),
             Self::CompleteReviewSweep { reply, .. } => reply.call.as_ref(),
@@ -732,6 +741,7 @@ impl WikiCommand {
 
     pub(crate) fn set_call(&mut self, call: Option<CallContext<WikiCallDetail>>) {
         match self {
+            Self::StageArtifacts { reply, .. } => reply.call = call,
             Self::BeginSourceWork { reply, .. } => reply.call = call,
             Self::StageReviewSweep { reply, .. } => reply.call = call,
             Self::CompleteReviewSweep { reply, .. } => reply.call = call,
@@ -839,6 +849,7 @@ impl WikiCommand {
     pub(crate) fn route(&self) -> foundation::execution::CommandRoute<WikiOwnerKey> {
         use foundation::execution::CommandRoute;
         match self {
+            Self::StageArtifacts { upload, .. } => CommandRoute::Keyed(WikiOwnerKey::Commit(upload.selector.project_id.clone())),
             Self::BeginSourceWork { project_id, .. }
             | Self::StageReviewSweep { project_id, .. } => {
                 CommandRoute::Keyed(WikiOwnerKey::Commit(project_id.clone()))

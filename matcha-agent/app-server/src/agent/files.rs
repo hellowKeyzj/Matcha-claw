@@ -1,4 +1,8 @@
-use crate::{config::ConfigStore, memory::files::Root, rpc};
+use crate::{
+    config::{ConfigStore, DEFAULT_AGENT_ID},
+    memory::files::Root,
+    rpc,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -70,23 +74,67 @@ pub(super) async fn initialize(
     for (name, content) in files {
         root.write(name, content).await?;
     }
-    ensure_instructions(&root).await
+    ensure_instructions(&root, agent_id).await
 }
 
 const IMPORTS: &str = "<!-- matcha:agent-files -->\n@AGENTS.md\n@SOUL.md\n@USER.md\n@MEMORY.md\n@IDENTITY.md\n<!-- /matcha:agent-files -->\n";
+const IMPORTS_START: &str = "<!-- matcha:agent-files -->\n";
+const IMPORTS_END: &str = "<!-- /matcha:agent-files -->\n";
 
-async fn ensure_instructions(root: &Root) -> rpc::Result<()> {
+async fn managed_imports(root: &Root, agent_id: &str) -> rpc::Result<String> {
+    if agent_id != DEFAULT_AGENT_ID {
+        return Ok(IMPORTS.to_owned());
+    }
+    let mut imports = String::new();
+    for name in &NAMES[..5] {
+        if root.entry(name).await?.is_some() {
+            imports.push_str(&format!("@{name}\n"));
+        }
+    }
+    Ok(if imports.is_empty() {
+        imports
+    } else {
+        format!("{IMPORTS_START}{imports}{IMPORTS_END}")
+    })
+}
+
+async fn ensure_instructions(root: &Root, agent_id: &str) -> rpc::Result<()> {
     // CLI loads CLAUDE.md, not OpenClaw's AGENTS.md. Preserve existing native instructions.
-    let mut text = if root.entry("CLAUDE.md").await?.is_some() {
+    let previous = if root.entry("CLAUDE.md").await?.is_some() {
         root.read("CLAUDE.md").await?
     } else {
         String::new()
     };
-    if !text.contains(IMPORTS) {
+    let instructions = managed_imports(root, agent_id).await?;
+    let mut text = previous.clone();
+    if agent_id == DEFAULT_AGENT_ID {
+        // Only replace generated ordered imports, never user-authored marker contents.
+        let ranges: Vec<_> = text
+            .match_indices(IMPORTS_START)
+            .filter_map(|(start, _)| {
+                let mut end = start + IMPORTS_START.len();
+                for name in &NAMES[..5] {
+                    let import = format!("@{name}\n");
+                    if text[end..].starts_with(&import) {
+                        end += import.len();
+                    }
+                }
+                text[end..]
+                    .starts_with(IMPORTS_END)
+                    .then_some(start..end + IMPORTS_END.len())
+            })
+            .collect();
+        for range in ranges.into_iter().rev() {
+            text.replace_range(range, "");
+        }
+    }
+    if !text.contains(&instructions) {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(IMPORTS);
+        text.push_str(&instructions);
+    }
+    if text != previous {
         root.write("CLAUDE.md", &text).await?;
     }
     Ok(())
@@ -135,15 +183,19 @@ pub(super) async fn dispatch(
                     .content
                     .ok_or_else(|| rpc::Error::invalid("content is required"))?;
                 root.write(&name, &content).await?;
-                ensure_instructions(&root).await.map_err(|error| {
-                    error.with_data(json!({"fileWritten":true,"instructionsApplied":false}))
-                })?;
+                ensure_instructions(&root, &params.agent_id)
+                    .await
+                    .map_err(|error| {
+                        error.with_data(json!({"fileWritten":true,"instructionsApplied":false}))
+                    })?;
             } else if params.content.is_some() || params.expected_revision.is_some() {
                 return Err(rpc::Error::invalid("File reads do not accept content"));
             }
             let mut result = file(&root, &name, true).await?;
-            let imports_present = root.entry("CLAUDE.md").await?.is_some()
-                && root.read("CLAUDE.md").await?.contains(IMPORTS);
+            let instructions = managed_imports(&root, &params.agent_id).await?;
+            let imports_present = !instructions.is_empty()
+                && root.entry("CLAUDE.md").await?.is_some()
+                && root.read("CLAUDE.md").await?.contains(&instructions);
             result["instructions"] = json!({
                 "managedImportsPresent": imports_present,
                 "execution": "notObserved",

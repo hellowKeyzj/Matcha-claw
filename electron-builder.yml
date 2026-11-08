@@ -19,7 +19,7 @@ files:
 extraResources:
   - from: build/iab-guard-extension/
     to: iab-guard-extension/
-  - from: sdk/app-plugins/matcha-app-plugins-sdk-1.0.0.tgz
+  - from: sdk/app-plugins/matcha-app-plugins-sdk-1.2.0.tgz
     to: app-plugins/sdk.tgz
   - from: resources/
     to: resources/
@@ -77,6 +77,16 @@ mac:
       to: searxng/wheels/darwin-${arch}
     - from: resources/bin/darwin-${arch}
       to: bin
+      filter:
+        - "**/*"
+        - "!easytier/**"
+        - "!.matcha-network-*/**"
+    - from: resources/bin/darwin-${arch}/easytier
+      to: bin/easytier
+      filter:
+        - matcha-network
+        - LICENSE
+        - manifest.json
     - from: runtime-host/dist/darwin-${arch}
       to: bin/darwin-${arch}
     - from: matcha-agent/app-server/dist/darwin-${arch}
@@ -134,6 +144,16 @@ linux:
       to: searxng/wheels/linux-${arch}
     - from: resources/bin/linux-${arch}
       to: bin
+      filter:
+        - "**/*"
+        - "!easytier/**"
+        - "!.matcha-network-*/**"
+    - from: resources/bin/linux-${arch}/easytier
+      to: bin/easytier
+      filter:
+        - matcha-network
+        - LICENSE
+        - manifest.json
     - from: runtime-host/dist/linux-${arch}
       to: bin/linux-${arch}
     - from: matcha-agent/app-server/dist/linux-${arch}
@@ -155,6 +175,17 @@ win:
       to: searxng/wheels/win32-${arch}
     - from: resources/bin/win32-${arch}
       to: bin
+      filter:
+        - "**/*"
+        - "!easytier/**"
+        - "!.matcha-network-*/**"
+    - from: resources/bin/win32-${arch}/easytier
+      to: bin/easytier
+      filter:
+        - matcha-network.exe
+        - Packet.dll
+        - LICENSE
+        - manifest.json
     - from: runtime-host/dist/win32-${arch}
       to: bin/win32-${arch}
       filter:

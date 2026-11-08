@@ -35,6 +35,8 @@ export interface ChatScrollController {
   scrollViewportByWheelDelta: (deltaY: number) => void;
   /** 用户触发的局部展开/收起：保持触发元素在视口内的位置不变 */
   prepareElementAnchorRestore: (anchorElement: HTMLElement) => boolean;
+  /** 内容隐藏前采样 detached 阅读位置；不改变 follow 意图 */
+  prepareContentAnchorRestore: () => void;
   /** 同 scope 替页到位后恢复 exact 锚点；跨 scope 在切换前采样 */
   prepareScopeAnchorRestore: (nextScopeKey: string, anchor?: ViewportAnchor | null) => void;
   /** 显式让某 scope 进入 follow 并立即贴底（发送消息 / 跳到底部按钮） */
@@ -212,6 +214,14 @@ export function createChatScrollController(): ChatScrollController {
       return false;
     }
     state.pendingElementAnchorRestore = null;
+    if (pending.anchorElement.closest('[hidden]')) {
+      const workKey = pending.anchorElement.closest<HTMLElement>('[data-chat-work-key]')?.dataset.chatWorkKey;
+      const summaries = workKey && geometry.viewport?.querySelectorAll<HTMLElement>('[data-chat-work-summary="true"]');
+      const summary = summaries && Array.from(summaries).find((element) => (
+        element.dataset.chatWorkKey === workKey && element.getBoundingClientRect().height > 0
+      ));
+      return !!summary && geometry.restoreElement(summary, Math.max(0, pending.offsetWithinViewport));
+    }
     return geometry.restoreElement(pending.anchorElement, pending.offsetWithinViewport);
   };
 
@@ -321,6 +331,39 @@ export function createChatScrollController(): ChatScrollController {
     };
     setPhase('detached');
     return true;
+  };
+
+  const prepareContentAnchorRestore = () => {
+    const config = getConfig();
+    const viewport = config.viewportRef.current;
+    if (!config.enabled || !viewport || getScope(config.scrollScopeKey).phase !== 'detached'
+      || state.pendingElementAnchorRestore || state.pendingTransition?.scopeKey === config.scrollScopeKey) {
+      return;
+    }
+    const viewportRect = viewport.getBoundingClientRect();
+    const intersectsViewport = (element: HTMLElement) => {
+      const rect = element.getBoundingClientRect();
+      return rect.height > 0 && rect.bottom > viewportRect.top && rect.top < viewportRect.bottom;
+    };
+    const itemElement = Array.from(viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]'))
+      .find(intersectsViewport);
+    if (!itemElement) {
+      return;
+    }
+    // 同一 item 内也可能同时有过程和正文；下钻到首个可见内容，不能只保 item 顶部。
+    let anchorElement: HTMLElement = itemElement;
+    for (;;) {
+      const child: HTMLElement | undefined = Array.from(anchorElement.children).find((element): element is HTMLElement => (
+        element instanceof HTMLElement && intersectsViewport(element)
+      ));
+      if (!child) break;
+      anchorElement = child;
+    }
+    state.pendingElementAnchorRestore = {
+      scopeKey: config.scrollScopeKey,
+      anchorElement,
+      offsetWithinViewport: anchorElement.getBoundingClientRect().top - viewportRect.top,
+    };
   };
 
   const handleViewportClickCapture: MouseEventHandler<HTMLDivElement> = (event) => {
@@ -512,6 +555,7 @@ export function createChatScrollController(): ChatScrollController {
     handleViewportClickCapture,
     scrollViewportByWheelDelta,
     prepareElementAnchorRestore,
+    prepareContentAnchorRestore,
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
     jumpToBottom,

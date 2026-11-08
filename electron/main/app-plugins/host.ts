@@ -1,6 +1,7 @@
 import { rm } from 'node:fs/promises';
 import type { AppPluginCatalog, InstalledAppPlugin } from '../../../src/types/desktop/app-plugin';
-import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginCall, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import { APP_SERVICE_VERSION, AppServiceError } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppServiceRequest, AppServiceResult, AppExecutionRequest, AppExecutionResult, AppPluginContext, AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginCall, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
 import { logger } from '../../utils/logger';
 import { materializePlugin } from './loader';
 import type { ApplicationPluginOwner } from './owner';
@@ -21,6 +22,7 @@ interface ActivePlugin {
   ready: Promise<void>;
   load?: PluginLoad;
   runtime?: AppPluginDevelopmentRuntime;
+  failed?: Error;
   retiring?: PluginRetirement;
 }
 
@@ -30,6 +32,8 @@ export interface AppPluginHostOptions {
   packageWorker: AppPluginPackageWorker;
   publish(event: AppRuntimeEvent): void;
   publishConfirmation?(event: AppPluginConfirmationEvent): void;
+  execute?(request: AppExecutionRequest, signal: AbortSignal, requestConfirmation?: AppPluginContext['requestConfirmation']): Promise<AppExecutionResult>;
+  service?(pluginId: string, request: AppServiceRequest, signal: AbortSignal): Promise<AppServiceResult>;
   list(request: AppMediaModelListRequest, signal: AbortSignal): Promise<AppMediaModelList>;
   generate(request: AppModelRequest, signal: AbortSignal): Promise<AppModelResult>;
   submitVideo(request: AppModelRequest & { readonly kind: 'video' }, signal: AbortSignal): Promise<AppVideoTaskResult>;
@@ -43,6 +47,8 @@ export interface AppPluginHostOptions {
 
 export class AppPluginHost {
   private closed = false;
+  private started = false;
+  private catalog?: AppPluginCatalog;
   private stopping?: Promise<void>;
   private tail: Promise<void> = Promise.resolve();
   private readonly active = new Map<string, ActivePlugin>();
@@ -71,6 +77,12 @@ export class AppPluginHost {
     this.worker = new NodePluginWorker(this.models, (level, message) => logger[level](`[AppPlugins:worker] ${message}`));
   }
 
+  start(catalog: AppPluginCatalog): Promise<void> {
+    if (this.closed) return Promise.reject(new AppPluginError('closed', 'App plugin host is closing.'));
+    this.started = true;
+    return this.changed(this.catalog && this.catalog.revision > catalog.revision ? this.catalog : catalog);
+  }
+
   async call(value: AppPluginCall, signal: AbortSignal): Promise<AppToolResult> {
     const input = requireObject(value, ['id', 'digest', 'name', 'arguments']);
     requirePluginId(input.id);
@@ -87,14 +99,16 @@ export class AppPluginHost {
     await entry.ready;
     await this.requireEnabled(input.id, input.digest);
     signal.throwIfAborted();
+    if (entry.failed) throw entry.failed;
     if (entry.retiring || !entry.runtime) throw new AppPluginError('conflict', 'App plugin is retiring. Refresh before calling.');
     return entry.runtime.call(input.name, input.arguments as Record<string, unknown>, signal);
   }
 
   async createDevelopment(load: PluginLoad, callbacks: AppPluginRuntimeCallbacks): Promise<AppPluginDevelopmentRuntime> {
     if (this.closed) throw new AppPluginError('closed', 'App plugin host is closing.');
+    const developmentCallbacks: AppPluginRuntimeCallbacks = { ...callbacks, execute: undefined, service: undefined };
     const node = load.manifest.backend ? undefined : new NodePluginWorker(this.models, callbacks.log);
-    const stdio = load.manifest.backend ? new StdioPluginRuntime(load, this.models, callbacks) : undefined;
+    const stdio = load.manifest.backend ? new StdioPluginRuntime(load, this.models, developmentCallbacks) : undefined;
     let runtime: AppPluginDevelopmentRuntime | undefined;
     const handle: AppPluginDevelopmentRuntime = {
       call: (name, args, signal) => {
@@ -114,7 +128,7 @@ export class AppPluginHost {
     const launch = (async () => {
       try {
         if (stdio) { await stdio.start(); runtime = stdio; }
-        else runtime = await node!.activate(load, callbacks);
+        else runtime = await node!.activate(load, developmentCallbacks);
         if (this.closed) { await handle.forceClose(); throw new AppPluginError('closed', 'App plugin host is closing.'); }
       } catch (error) {
         if (error instanceof AppPluginRuntimeStartupError) {
@@ -135,10 +149,15 @@ export class AppPluginHost {
   }
 
   async changed(catalog: AppPluginCatalog): Promise<void> {
+    if (!this.closed) {
+      if (this.catalog && catalog.revision < this.catalog.revision) return;
+      this.catalog = catalog;
+    }
+    const plugins = this.closed ? [] : catalog.plugins;
     const retirements: Promise<void>[] = [];
     for (const [id, entry] of this.active) {
       if (entry.retiring?.state === 'failed') continue;
-      if (!entry.retiring && catalog.plugins.some((plugin) => plugin.manifest.id === id && plugin.enabled && plugin.digest === entry.digest)) continue;
+      if (!entry.retiring && plugins.some((plugin) => plugin.manifest.id === id && plugin.enabled && plugin.digest === entry.digest)) continue;
       if (!entry.retiring) {
         this.confirmations.invalidate(id, entry.digest);
         const done = this.serialize(async () => {
@@ -158,9 +177,20 @@ export class AppPluginHost {
       }
       if (entry.retiring.state === 'pending') retirements.push(entry.retiring.done);
     }
-    const failures = (await Promise.allSettled(retirements)).filter((result) => result.status === 'rejected');
-    if (failures.length === 1) throw failures[0].reason;
-    if (failures.length > 1) throw new AggregateError(failures.map((result) => result.reason), 'App plugin cleanup failed.');
+    const failures: unknown[] = (await Promise.allSettled(retirements)).flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (!this.closed && this.started && this.catalog?.revision === catalog.revision) {
+      const activations: Promise<void>[] = [];
+      for (const plugin of plugins) {
+        if (!plugin.enabled || !plugin.manifest.background) continue;
+        const existing = this.active.get(plugin.manifest.id);
+        if (existing?.digest === plugin.digest && existing.failed && !existing.retiring) continue;
+        try { activations.push(this.activate(plugin).ready); }
+        catch (error) { failures.push(error); }
+      }
+      for (const result of await Promise.allSettled(activations)) if (result.status === 'rejected') failures.push(result.reason);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, 'App plugin lifecycle reconciliation failed.');
   }
 
   async close(): Promise<void> {
@@ -203,11 +233,27 @@ export class AppPluginHost {
   }
 
   private activate(plugin: InstalledAppPlugin): ActivePlugin {
+    if (this.closed) throw new AppPluginError('closed', 'App plugin host is closing.');
+    if (plugin.manifest.minSdkVersion) {
+      const required = plugin.manifest.minSdkVersion.split('.').map(Number);
+      const current = APP_SERVICE_VERSION.split('.').map(Number);
+      const different = required.findIndex((part, index) => part !== current[index]);
+      if (different >= 0 && required[different] > current[different]) throw new AppPluginError('conflict', `This plugin requires Matcha SDK ${plugin.manifest.minSdkVersion} or newer. Update the application before using it.`);
+    }
     const existing = this.active.get(plugin.manifest.id);
     if (existing?.retiring) throw existing.retiring.state === 'failed' ? existing.retiring.error : new AppPluginError('conflict', 'App plugin is retiring. Wait before activating the new version.');
+    if (existing?.failed) throw existing.failed;
     if (existing?.digest === plugin.digest) return existing;
     if (existing) throw new AppPluginError('conflict', 'The previous app plugin version has not retired.');
     const entry: ActivePlugin = { digest: plugin.digest, ready: Promise.resolve() };
+    const failed = (cause: unknown) => {
+      if (entry.failed) return;
+      const error = new AppPluginError('conflict', `App plugin ${plugin.manifest.id} failed; the operation was not retried. Restart the application before using it again.`);
+      error.cause = cause;
+      entry.failed = error;
+      this.confirmations.invalidate(plugin.manifest.id, plugin.digest);
+      logger.error(`[AppPlugins:${plugin.manifest.id}] ${error.message} ${cause instanceof Error ? cause.message.slice(0, 2000) : ''}`);
+    };
     entry.ready = this.serialize(async () => {
       try {
         await this.requireEnabled(plugin.manifest.id, plugin.digest);
@@ -215,16 +261,36 @@ export class AppPluginHost {
         entry.load = load;
         this.materializedPaths.add(load.packagePath);
         await this.requireEnabled(plugin.manifest.id, plugin.digest);
+        const requestConfirmation: AppPluginContext['requestConfirmation'] = async (request, signal = new AbortController().signal) => {
+          await this.requireEnabled(plugin.manifest.id, plugin.digest);
+          signal.throwIfAborted();
+          if (entry.failed) throw entry.failed;
+          if (entry.retiring) throw new Error('Approval unavailable: the application is retiring.');
+          const allowed = await this.confirmations.request(plugin.manifest.id, plugin.digest, plugin.manifest.name, request, signal);
+          await this.requireEnabled(plugin.manifest.id, plugin.digest);
+          signal.throwIfAborted();
+          if (entry.failed) throw entry.failed;
+          if (entry.retiring) throw new Error('Approval unavailable: the application is retiring.');
+          return allowed;
+        };
         const callbacks: AppPluginRuntimeCallbacks = {
-          publish: (event) => { if (!entry.retiring && !this.closed) this.options.publish(event); },
-          requestConfirmation: async (request, signal) => {
+          publish: (event) => { if (!entry.retiring && !entry.failed && !this.closed) this.options.publish(event); },
+          failed,
+          execute: async (request, signal) => {
             await this.requireEnabled(plugin.manifest.id, plugin.digest);
-            if (entry.retiring) throw new Error('Approval unavailable: the application is retiring.');
-            const allowed = await this.confirmations.request(plugin.manifest.id, plugin.digest, plugin.manifest.name, request, signal);
-            await this.requireEnabled(plugin.manifest.id, plugin.digest);
+            if (entry.failed) throw entry.failed;
+            if (entry.retiring || !this.options.execute) throw new AppPluginError('busy', 'Application execution is unavailable.');
             signal.throwIfAborted();
-            return allowed;
+            return this.options.execute(request, signal, requestConfirmation);
           },
+          service: async (request, signal) => {
+            await this.requireEnabled(plugin.manifest.id, plugin.digest);
+            if (entry.failed) throw entry.failed;
+            if (entry.retiring || !this.options.service) throw new AppServiceError('unavailable', 'Application services are unavailable.');
+            signal.throwIfAborted();
+            return this.options.service(plugin.manifest.id, request, signal);
+          },
+          requestConfirmation,
           log: (level, message) => logger[level](`[AppPlugins:${plugin.manifest.id}] ${message.slice(0, 2000)}`),
         };
         if (load.manifest.backend) {
@@ -237,8 +303,10 @@ export class AppPluginHost {
         }
       } catch (error) {
         if (error instanceof AppPluginRuntimeStartupError) entry.runtime = error.runtime;
-        throw error;
+        failed(error);
+        throw entry.failed;
       }
+      if (entry.failed) throw entry.failed;
     });
     this.active.set(plugin.manifest.id, entry);
     return entry;

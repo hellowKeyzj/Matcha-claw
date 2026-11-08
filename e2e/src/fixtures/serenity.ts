@@ -37,6 +37,13 @@ import { WorldPackageTrust } from '../abilities/world-package-trust.ability.js';
 import { WorldMaterialsSetup } from '../abilities/world-materials-setup.ability.js';
 import { WorldStorage } from '../abilities/world-storage.ability.js';
 import { WorldArchive } from '../abilities/world-archive.ability.js';
+import { IabTestSite } from '../abilities/iab-test-site.ability.js';
+import { IabBrowserTools } from '../abilities/iab-browser-tools.ability.js';
+import { IabDesktop } from '../abilities/iab-desktop.ability.js';
+import { IabBrowser } from '../abilities/iab-browser.ability.js';
+import { IabAgent } from '../abilities/iab-agent.ability.js';
+import { IabWorkspace } from '../abilities/iab-workspace.ability.js';
+import { IabWorkspaceRaces } from '../abilities/iab-workspace-races.ability.js';
 
 type ElectronWorkerFixtures = { sharedElectron: UseElectron };
 type ElectronTestFixtures = { electronEvidence: void };
@@ -77,7 +84,11 @@ export const test = serenityTest.extend<ElectronTestFixtures, ElectronWorkerFixt
   }, { scope: 'worker' }],
 
   actors: async ({ sharedElectron }, use) => {
-    await use(Cast.where(actor => actor.whoCan(
+    const iabSite = new IabTestSite(sharedElectron.outputDirectory, sharedElectron.profileRoot);
+    const iabTools = new IabBrowserTools(sharedElectron);
+    const iabDesktop = new IabDesktop(sharedElectron);
+    try {
+      await use(Cast.where(actor => actor.whoCan(
       sharedElectron, sharedElectron.browsing,
       new UseChat(sharedElectron), new UseSessionCapabilities(sharedElectron),
       new ExternalConnectors(sharedElectron), new ProviderValidation(sharedElectron),
@@ -91,8 +102,15 @@ export const test = serenityTest.extend<ElectronTestFixtures, ElectronWorkerFixt
       new WorldPackageSetup(sharedElectron), new WorldOrderSetup(sharedElectron), new WorldOrderAccess(sharedElectron),
       new WorldSources(sharedElectron), new WorldActions(sharedElectron), new WorldViews(sharedElectron),
       new WorldRules(sharedElectron), new WorldPackageTrust(sharedElectron), new WorldMaterialsSetup(sharedElectron),
-      new WorldStorage(sharedElectron), new WorldArchive(sharedElectron), TakeNotes.usingAnEmptyNotepad(),
-    )));
+      new WorldStorage(sharedElectron), new WorldArchive(sharedElectron),
+      iabSite, iabTools, iabDesktop, new IabBrowser(sharedElectron, iabSite, iabTools, iabDesktop), new IabAgent(sharedElectron, iabSite),
+      new IabWorkspace(sharedElectron, iabSite, iabTools, iabDesktop),
+      new IabWorkspaceRaces(sharedElectron, iabSite, iabTools, iabDesktop),
+      TakeNotes.usingAnEmptyNotepad(),
+      )));
+    } finally {
+      await iabSite.close();
+    }
   },
 
   electronEvidence: [async ({ sharedElectron }, use, info) => {

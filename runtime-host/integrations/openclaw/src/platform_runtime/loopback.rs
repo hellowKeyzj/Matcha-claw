@@ -30,6 +30,7 @@ const EVENTS: &[&str] = &[];
 const STATUS_ENDPOINT: &str = "/api/openclaw/status";
 const RUNTIME_PATHS_ENDPOINT: &str = "/api/openclaw/runtime/paths";
 const CLI_COMMAND_ENDPOINT: &str = "/api/openclaw/cli-command";
+const LOG_DIRECTORY_ENDPOINT: &str = "/api/openclaw/logs/dir";
 const TOOL_PERMISSION_ENDPOINT: &str = "/api/openclaw/tool-permission-mode";
 const SUBAGENT_TEMPLATES_ENDPOINT: &str = "/api/openclaw/subagent-templates";
 const SUBAGENT_TEMPLATE_DETAIL_ENDPOINT: &str = "/api/openclaw/subagent-template/detail";
@@ -37,6 +38,7 @@ const PATHS: &[RoutePath] = &[
     RoutePath::ExactWithQuery(STATUS_ENDPOINT),
     RoutePath::ExactWithQuery(RUNTIME_PATHS_ENDPOINT),
     RoutePath::ExactWithQuery(CLI_COMMAND_ENDPOINT),
+    RoutePath::ExactWithQuery(LOG_DIRECTORY_ENDPOINT),
     RoutePath::ExactWithQuery(TOOL_PERMISSION_ENDPOINT),
     RoutePath::ExactWithQuery(SUBAGENT_TEMPLATES_ENDPOINT),
     RoutePath::ExactWithQuery(SUBAGENT_TEMPLATE_DETAIL_ENDPOINT),
@@ -176,6 +178,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
         Operation::Status => status_response(&dependencies.driver),
         Operation::RuntimePaths => runtime_paths_response(&dependencies.driver),
         Operation::CliCommand => cli_command_response(&dependencies.driver),
+        Operation::LogDirectory => log_directory_response(&dependencies.driver).await,
         Operation::ToolPermissionGet => tool_permission_get_response(&dependencies.driver),
         Operation::ToolPermissionSet => {
             tool_permission_set_response(&dependencies.driver, &request.body)
@@ -206,6 +209,7 @@ enum Operation {
     Status,
     RuntimePaths,
     CliCommand,
+    LogDirectory,
     ToolPermissionGet,
     ToolPermissionSet,
     SubagentTemplateCatalog,
@@ -229,6 +233,11 @@ impl Operation {
                 CLI_COMMAND_ENDPOINT,
                 "openclaw.cli.command",
                 "openclaw-cli-command",
+            ),
+            Self::LogDirectory => RouteAuthorization::read(
+                LOG_DIRECTORY_ENDPOINT,
+                "openclaw.logs.directory",
+                "openclaw-log-directory",
             ),
             Self::ToolPermissionGet => RouteAuthorization::read(
                 TOOL_PERMISSION_ENDPOINT,
@@ -290,6 +299,7 @@ fn operation_for(method: &str, path: &str) -> Option<Operation> {
         ("GET", STATUS_ENDPOINT) => Some(Operation::Status),
         ("GET", RUNTIME_PATHS_ENDPOINT) => Some(Operation::RuntimePaths),
         ("GET", CLI_COMMAND_ENDPOINT) => Some(Operation::CliCommand),
+        ("GET", LOG_DIRECTORY_ENDPOINT) => Some(Operation::LogDirectory),
         ("GET", TOOL_PERMISSION_ENDPOINT) => Some(Operation::ToolPermissionGet),
         ("POST", TOOL_PERMISSION_ENDPOINT) => Some(Operation::ToolPermissionSet),
         ("GET", SUBAGENT_TEMPLATES_ENDPOINT) => Some(Operation::SubagentTemplateCatalog),
@@ -324,6 +334,13 @@ fn runtime_paths_response(driver: &OpenClawDriver) -> Response {
             project_runtime_paths(crate::platform_runtime::RuntimePaths::from(paths)),
         ),
         Err(_) => unavailable(),
+    }
+}
+
+async fn log_directory_response(driver: &OpenClawDriver) -> Response {
+    match tokio::time::timeout(DEFAULT_DEADLINE, driver.log_directory()).await {
+        Ok(Ok(dir)) => Response::json(200, serde_json::json!({ "dir": dir })),
+        _ => unavailable(),
     }
 }
 

@@ -1,12 +1,18 @@
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
+import { BASH_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/BashTool/toolName.js'
 import { constants as fsConstants } from 'fs'
 import { mkdir, open } from 'fs/promises'
 import { dirname, isAbsolute, join, normalize, sep as pathSep } from 'path'
+import { quote } from 'shell-quote'
 import type { ToolUseContext } from '../Tool.js'
 import type { Command } from '../types/command.js'
 import { logForDebugging } from '../utils/debug.js'
 import { getBundledSkillsRoot } from '../utils/permissions/filesystem.js'
 import type { HooksSettings } from '../utils/settings/types.js'
+import {
+  BASH_MAX_OUTPUT_DEFAULT,
+  getMaxOutputLength,
+} from '../utils/shell/outputLimits.js'
 
 /**
  * Definition for a bundled skill that ships with the CLI.
@@ -68,7 +74,13 @@ export function registerBundledSkill(definition: BundledSkillDefinition): void {
       const extractedDir = await extractionPromise
       const blocks = await inner(args, ctx)
       if (extractedDir === null) return blocks
-      return prependBaseDir(blocks, extractedDir)
+      return prependBaseDir(
+        blocks,
+        extractedDir,
+        ctx.options.tools.some(tool => tool.name === BASH_TOOL_NAME)
+          ? getReferenceReadingInstructions(extractedDir, files)
+          : [],
+      )
     }
   }
 
@@ -205,11 +217,55 @@ function resolveSkillFilePath(baseDir: string, relPath: string): string {
   return join(baseDir, normalized)
 }
 
+function getReferenceReadingInstructions(
+  baseDir: string,
+  files: Record<string, string>,
+): string[] {
+  const budget = Math.min(BASH_MAX_OUTPUT_DEFAULT, getMaxOutputLength()) - 2000
+  const first: string[] = []
+  const second: string[] = []
+  const rest: string[] = []
+  let firstSize = 0
+  let secondSize = 0
+  for (const [file, content] of Object.entries(files)) {
+    const path = resolveSkillFilePath(baseDir, file)
+    const cost = Buffer.byteLength(content) + path.length + 16
+    if (firstSize + cost <= budget) {
+      first.push(path)
+      firstSize += cost
+    } else if (secondSize + cost <= budget) {
+      second.push(path)
+      secondSize += cost
+    } else {
+      rest.push(path)
+    }
+  }
+  if (first.length === 0) return []
+  return [
+    `Print the other pages with ONE Bash call, copied character for character (do not retype the folder): tail -n +1 ${quote(first)}`,
+    ...(second.length > 0
+      ? [
+          `One Bash output cannot hold all of it, so IN THE SAME MESSAGE make a second Bash call, copied character for character too: tail -n +1 ${quote(second)}`,
+        ]
+      : []),
+    ...(rest.length > 0
+      ? [
+          `Also on disk, not printed by the above because of their size; read one with the Read tool only if you need it: ${rest.join(', ')}`,
+        ]
+      : []),
+  ]
+}
+
 function prependBaseDir(
   blocks: ContentBlockParam[],
   baseDir: string,
+  readingInstructions: string[],
 ): ContentBlockParam[] {
-  const prefix = `Base directory for this skill: ${baseDir}\n\n`
+  const prefix =
+    `Base directory for this skill: ${baseDir}\n\n` +
+    (readingInstructions.length > 0
+      ? `${readingInstructions.join('\n')}\n\n`
+      : '')
   if (blocks.length > 0 && blocks[0]!.type === 'text') {
     return [
       { type: 'text', text: prefix + blocks[0]!.text },

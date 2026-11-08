@@ -1,8 +1,10 @@
 mod changes;
 mod refresh;
+mod role_sessions;
 mod transaction;
 
 use transaction::{DeliveryIndexes, FactsJournal};
+pub(crate) use role_sessions::RoleSessionIntent;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -433,6 +435,7 @@ pub(crate) struct GraphRunFacts {
     frozen_team_revision: TeamRevision,
     graph: GraphState,
     runtime: Option<RunRuntimeReceipt>,
+    role_session_intents: BTreeMap<String, RoleSessionIntent>,
     lifecycle: GraphRunLifecycle,
     pub(super) start_gate: RunStartGate,
     pub(super) retired_executions: BTreeSet<(NodeId, ExecutionFence)>,
@@ -498,6 +501,7 @@ impl GraphRunFacts {
             frozen_team_revision,
             graph,
             runtime,
+            role_session_intents: BTreeMap::new(),
             lifecycle,
             start_gate,
             retired_executions: BTreeSet::new(),
@@ -888,6 +892,7 @@ impl OrganizationFacts {
         }
 
         for run in run_facts.values() {
+            run.validate_role_session_intents()?;
             if let Some(receipt) = run.runtime() {
                 let materialization = materialization_facts
                     .get(run.team().as_str())
@@ -2350,6 +2355,7 @@ impl OrganizationFacts {
                 .runs
                 .get(run_id)
                 .ok_or(OrganizationFactsError::RemovedRun)?;
+            current.validate_session_transition(previous_run.runtime(), &previous_run.role_session_intents)?;
             if current.team() != previous_run.team()
                 || current.frozen_team_revision() != previous_run.frozen_team_revision()
                 || current.task_execution_context != previous_run.task_execution_context
@@ -4422,7 +4428,7 @@ fn validate_runtime_receipt_alignment(
     if receipt.team_run() != run.run_id() {
         return Err(OrganizationFactsError::RuntimeRunMismatch);
     }
-    for binding in receipt.bindings() {
+    for binding in receipt.bindings().iter().chain(run.role_session_intents.values().map(|intent| &intent.binding)) {
         if binding.team() != run.team() {
             return Err(OrganizationFactsError::RuntimeBindingTeamMismatch);
         }
@@ -4433,6 +4439,11 @@ fn validate_runtime_receipt_alignment(
         {
             return Err(OrganizationFactsError::RuntimeRoleBindingSetMismatch);
         }
+    }
+    if run.role_session_intents.values().any(|intent| !materialization.roles().iter().any(|role| {
+        role.role() == intent.binding.role() && role.agent() == intent.binding.agent() && role.endpoint() == intent.binding.endpoint()
+    })) {
+        return Err(OrganizationFactsError::RuntimeRoleBindingSetMismatch);
     }
 
     Ok(())

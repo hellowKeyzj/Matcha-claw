@@ -28,7 +28,7 @@ export { UserMessageMedia, AssistantMessageMedia, type MessageLightboxState } fr
 
 const COMPACT_SIDE_RAIL_EXPANDED_WIDTH = 'w-full max-w-[46rem]';
 const COMPACT_SIDE_RAIL_TRACK = `${COMPACT_SIDE_RAIL_EXPANDED_WIDTH} flex max-w-full flex-col self-start`;
-const COMPACT_SIDE_RAIL_HEADER = 'inline-flex max-w-full self-start items-center gap-1.5 py-1 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border/50';
+const COMPACT_SIDE_RAIL_HEADER = 'inline-flex max-w-full self-start items-center gap-1.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border/50';
 const COMPACT_TEXT_BLOCK = 'w-full overflow-hidden rounded-[16px] border border-border/45 bg-muted/55';
 const COMPACT_OUTPUT_SCROLL_AREA = 'max-h-72 overflow-auto overscroll-contain whitespace-pre-wrap break-words outline-none';
 const COMPACT_ICON_TOGGLE = 'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] text-muted-foreground transition-colors hover:text-foreground';
@@ -651,10 +651,10 @@ export const ThinkingSection = memo(function ThinkingSection({
         className={`${COMPACT_SIDE_RAIL_HEADER} group/tool`}
         onClick={toggleExpanded}
       >
+        <span className="truncate text-[14px] leading-6">思考过程</span>
         <span className={COMPACT_ICON_TOGGLE}>
           {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </span>
-        <span className="truncate text-[14px] leading-6">思考过程</span>
       </button>
       {expanded && (
         <div className="mt-1 pl-7">
@@ -683,7 +683,7 @@ export const UserMessageMetaBar = memo(function UserMessageMetaBar({
   }
 
   return (
-    <div className={`mt-0.5 flex w-full items-center justify-end ${loading ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200 select-none group-hover:opacity-100 group-focus-within:opacity-100 motion-reduce:transition-none`}>
+    <div className={`absolute right-0 top-full flex h-6 max-w-full items-center justify-end ${loading ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200 select-none group-hover:opacity-100 group-focus-within:opacity-100 motion-reduce:transition-none`}>
       {timestamp ? (
         <span className="px-1 text-[11px] leading-5 text-muted-foreground/80">
           {formatTimestamp(timestamp)}
@@ -696,7 +696,7 @@ export const UserMessageMetaBar = memo(function UserMessageMetaBar({
           title={t('reuseMessage')}
           aria-busy={loading}
           disabled={loading}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-muted-foreground/75 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20 disabled:cursor-wait motion-reduce:transition-none"
+          className="inline-flex h-6 w-7 shrink-0 items-center justify-center text-muted-foreground/75 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20 disabled:cursor-wait motion-reduce:transition-none"
           onClick={onReuse}
         >
           {loading ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <CornerDownLeft aria-hidden="true" className="h-4 w-4" />}
@@ -708,13 +708,12 @@ export const UserMessageMetaBar = memo(function UserMessageMetaBar({
 
 export const AssistantMessageMetaBar = memo(function AssistantMessageMetaBar({
   text,
-  timestamp,
   statusLabel,
 }: {
   text: string;
-  timestamp?: number;
   statusLabel?: string;
 }) {
+  const { t } = useTranslation('chat');
   const [copied, setCopied] = useState(false);
   const canCopy = text.trim().length > 0;
 
@@ -728,21 +727,23 @@ export const AssistantMessageMetaBar = memo(function AssistantMessageMetaBar({
   }, [canCopy, text]);
 
   return (
-    <div className="mt-0.5 flex w-full justify-start opacity-0 transition-opacity duration-200 select-none group-hover:opacity-100">
-      <div className="inline-flex items-center gap-1.5 px-1 text-[11px] leading-5 text-muted-foreground/80">
-        <span>{statusLabel ?? (timestamp ? formatTimestamp(timestamp) : '')}</span>
-        {canCopy ? (
+    <div className="relative flex w-fit max-w-full select-none">
+      {statusLabel ? (
+        <p data-chat-reply-duration="true" className="mt-1 px-1 text-[11px] leading-5 text-muted-foreground/80">{statusLabel}</p>
+      ) : null}
+      {canCopy ? (
+        <div className="absolute left-full top-1 flex h-5 items-center pl-1.5 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100 motion-reduce:transition-none">
           <button
             type="button"
-            aria-label={copied ? 'Copied reply' : 'Copy reply'}
-            title={copied ? 'Copied' : 'Copy'}
+            aria-label={t(copied ? 'replyTiming.copied' : 'replyTiming.copy')}
+            title={t(copied ? 'replyTiming.copied' : 'replyTiming.copy')}
             className="inline-flex h-4 w-4 items-center justify-center text-muted-foreground/75 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border/60"
             onClick={copyContent}
           >
             {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 });

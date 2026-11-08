@@ -106,7 +106,10 @@ import {
   isPersistError,
   persistToolResult,
 } from '../../utils/toolResultStorage.js'
-import { checkStatsigFeatureGate_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
+import {
+  checkStatsigFeatureGate_CACHED_MAY_BE_STALE,
+  getFeatureValue_CACHED_MAY_BE_STALE,
+} from '../analytics/growthbook.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -2847,7 +2850,7 @@ export async function processMCPResult(
   // Generate a unique ID for the persisted file (server__tool-timestamp)
   const timestamp = Date.now()
   const persistId = `mcp-${normalizeNameForMCP(name)}-${normalizeNameForMCP(tool)}-${timestamp}`
-  // When the large-string format gate is on, unwrap a single bare text block
+  // Unwrap a single bare text block when either output-format gate enables it
   // (no annotations, no _meta) into raw text so the model gets plain text in
   // the persisted file instead of a JSON-wrapped block. The `_meta` check is
   // why transformResultContent preserves _meta on text blocks.
@@ -2884,6 +2887,10 @@ export async function processMCPResult(
     persistResult.filepath,
     persistResult.originalSize,
     formatDescription,
+    undefined,
+    type === 'toolResult' || unwrappedText !== undefined
+      ? persistResult.lineStats
+      : undefined,
   )
 }
 
@@ -2905,14 +2912,19 @@ function isLargeStringFormatEnabled(): boolean {
 }
 
 /**
- * Unwraps a single bare text content block to its raw text when the
- * large-string format gate is on. Returns undefined when the gate is off,
+ * Unwraps a single bare text content block to its raw text when either
+ * output-format gate enables it. Returns undefined when both gates are off,
  * the content is not an array, the array doesn't contain exactly one text
  * block, or the block carries annotations or _meta. Matches binary mg5's
  * `M=...` computation.
  */
 function unwrapSingleTextBlock(content: MCPToolResult): string | undefined {
-  if (!isLargeStringFormatEnabled()) return undefined
+  if (
+    !isLargeStringFormatEnabled() &&
+    !getFeatureValue_CACHED_MAY_BE_STALE('tengu_mcp_singleton_unwrap', true)
+  ) {
+    return undefined
+  }
   if (!Array.isArray(content) || content.length !== 1) return undefined
   const block = content[0]
   if (!block || block.type !== 'text') return undefined

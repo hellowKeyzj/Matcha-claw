@@ -195,7 +195,7 @@ export async function startIabAgentBridge(input: {
           const runtime = await waitForCaller(input.runtime(), signal);
           const lease = await acquireIabMatchaContext({ ...decoded, runtime, signal, runs: matchaRuns });
           try {
-            lease.context.assertCurrent();
+            await lease.context.assertCurrent();
             const result = await input.automation.handleRequest(decoded.params, lease.context, lease.signal);
             lease.signal.throwIfAborted();
             await lease.release();
@@ -207,10 +207,7 @@ export async function startIabAgentBridge(input: {
           }
         } else {
           const decoded = decode(payload);
-          const result = await openclawRuns.execute(decoded.context, signal, (context, current) => {
-            context.assertCurrent();
-            return input.automation.handleRequest(decoded.params, context, current);
-          });
+          const result = await openclawRuns.execute(decoded.context, signal, (context, current) => input.automation.handleRequest(decoded.params, context, current));
           signal.throwIfAborted();
           json(response, 200, { result });
         }

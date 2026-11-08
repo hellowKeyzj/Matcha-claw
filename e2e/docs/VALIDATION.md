@@ -1,5 +1,23 @@
 # 本地验证记录
 
+## 2026-11-07：邀请自动入网与名称统一
+
+- 未新增测试源码；沿既有 UseElectron、专用 licensed Profile 和真实 UI 的有限 inline 验收同次7项通过：四语短窗、异网预览/取消零写、确认自动配置启动并配对、途中改名、邀请复用网络、已配对保持当前网及reload。整轮停止trace，不截邀请码；最终无动画截图已查看。Electron52824/launcher49704 exit0，Job60124 active0、无强杀/清理错误，原Access/网络secret等值/设置恢复、锁释放已核。[完整记录](../../.scratch/automatic-network-20261107-xpe4fola/validation.md)
+- 独立 unlicensed Electron 中自有异网中继加三个正式native客户端同次13项通过，不冒充四完整GUI；含首次自动建网/加入、版本拒绝、hash绑定、丢确认重试、切网/已配对例外及旧配置升级。双端类型、限定lint、四语键、check:e2e（48scenarios/135lint/64edges/17structure）及cache构建通过；24source/5artifact无漂移。[native日志](../../.scratch/automatic-network-20261107-xpe4fola/native-reviewed-branches.log)／[UI日志](../../.scratch/automatic-network-20261107-xpe4fola/ui-converged-name.log)
+- 额外全局Main API boundary检查仍因范围外`electron/main/index.ts → ../api/ipc/graphics-ipc`依赖方向失败，未放宽或接管；前序carrier失败全部保留。未连接公共bootstrap，跨机/NAT、其他平台、百人负载、真实业务invoke/result与性能基准未验，不沿用历史成绩。
+
+## 2026-11-06：TeamRun 多会话接线后的既有团队边界验证
+
+- 未改测试，运行既有 `licensed/team-boundaries.spec.ts`：**3 pass／runner exit0／worker errors=[]**，46.9秒；同一专用 licensed Profile／Electron／worker。非法 TeamSkill UI、Electron target 与 Rust 私有字段拒绝通过；截图已查看，结束返回 Chat，不代表新增会话流程通过。[原始结果](../../.scratch/team-role-sessions-20261105-xWJYZt/test-results/results.json)
+- 独立桌面构建与最终 Windows x64 Host build 通过，实际加载 Host SHA256 `2ffbe7eede203373166579375f91c60c1b49a9f0338b8e43202284be2492c82e`。未覆盖日常 dist；Electron exit0，6GiB整树硬限、峰1.616GiB、Job0、无强停，Profile锁正常释放。[工件](../../.scratch/team-role-sessions-20261105-xWJYZt/test-results/shared-electron-0/artifacts.json)／[运行日志](../../.scratch/team-role-sessions-20261105-xWJYZt/team-boundaries.log)
+- `check:e2e` 通过。新建会话、节点保存、恢复及清理的真实闭环未运行；既有生命周期场景所需审核 TeamSkill 未提供。Teams store 13通过/21失败、Rust测试编译失败分别保留，不用边界三例代替功能验收。[完整结果与限制](../../.scratch/team-role-sessions-20261105-xWJYZt/validation.md)
+
+## 2026-11-05：OpenClaw 诊断日志链实机验证（导出未达）
+
+- 使用既有 diagnostics-archive 与 runtime-lifecycle 两场景，同一专用 licensed Profile／Electron／worker，未改测试。整轮 **exit1／0 pass／1 fail／1未执行**：fixture 等待 Gateway 和公开 session catalog 180秒未就绪，首场景0ms，未点击导出，无本轮新归档。原始 maxFailures worker error 保留。[运行日志](../../.scratch/openclaw-logs-real-e2e-20261105.log)／[核验回执](../../.scratch/openclaw-logs-real-e2e-receipt-20261105.json)
+- 新 journal 实际追加20行／2975字节，含时间、Gateway PID、stderr、真实退出码78；明确保留“数据库schema20，当前OpenClaw2026.9.3只支持16”，私有数据库路径已脱敏。本轮只证明启动失败诊断落盘，不证明诊断包正文、文件夹按钮、轮转或故障恢复通过。
+- 实际加载Host SHA256 `83c85017da927f51bbccb8e69b0bfb0e95194406b11e9abd01c1c67aa68d5934`，六份日志冻结源码前后匹配。6GiB整树硬限，峰1.273GiB、Job最终0、无强杀；Electron exit0／signal null，Profile锁正常释放。未降级／清空数据库、未切换OpenClaw工件、未放宽fixture，不扩展调查启动前关闭问题；与其他会话Access独立run不合并成绩。[完整台账](../../.scratch/openclaw-logs-verification-20261105.md)
+
 更新至 2026-10-27。环境：Windows 10 x64、Node 24.15.0、Electron 44.3.0、Playwright 1.64.0、Serenity/JS 3.49.0。
 
 ## 2026-11-01：统一工作区工件与 licensed Chat 基础进入

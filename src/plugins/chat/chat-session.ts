@@ -43,8 +43,9 @@ export function selectChatSelection(state: ChatStoreState) {
     currentConversation,
     currentSessionRecordKey,
     currentComposerDraftKey: currentConversation?.kind === 'session' ? currentSessionRecordKey
-      : currentConversation?.kind === 'draft' ? `${currentConversation.runtimeScopeKey}:agent:${currentConversation.agentId}:draft` : '',
-    currentWorkspaceIdentity: currentConversation?.kind === 'session' ? currentConversation.sessionIdentity : meta.sessionIdentity,
+      : currentConversation?.kind === 'draft' ? currentConversation.composerDraftKey : '',
+    currentWorkspaceIdentity: currentConversation?.kind === 'session' ? currentConversation.sessionIdentity
+      : currentConversation?.kind === 'draft' ? null : meta.sessionIdentity,
     currentWorkspaceDraftId: currentConversation?.kind === 'draft' ? currentConversation.id : currentConversation?.promotedDraft?.id,
     currentWorkspacePromotion: currentConversation?.kind === 'session' ? currentConversation.promotedDraft : undefined,
     connectorSessionIdentity: meta.sessionIdentity,

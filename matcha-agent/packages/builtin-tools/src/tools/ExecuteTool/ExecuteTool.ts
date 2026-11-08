@@ -9,7 +9,6 @@ import {
   type Tools,
 } from 'src/Tool.js'
 import { lazySchema } from 'src/utils/lazySchema.js'
-import { createUserMessage } from 'src/utils/messages.js'
 import { formatZodValidationError } from 'src/utils/toolErrors.js'
 import {
   extractDiscoveredToolNames,
@@ -68,17 +67,9 @@ export const ExecuteTool = buildTool({
 
     const targetTool = findToolByName(tools, input.tool_name)
     if (!targetTool) {
-      return {
-        data: {
-          result: null,
-          tool_name: input.tool_name,
-        },
-        newMessages: [
-          createUserMessage({
-            content: `Tool "${input.tool_name}" not found. Use SearchExtraTools to discover available tools.`,
-          }),
-        ],
-      }
+      throw new Error(
+        `Tool "${input.tool_name}" not found. Use SearchExtraTools to discover available tools.`,
+      )
     }
 
     // Guard: block execution of undiscovered deferred tools.
@@ -93,33 +84,17 @@ export const ExecuteTool = buildTool({
     ) {
       const discovered = extractDiscoveredToolNames(context.messages)
       if (!discovered.has(input.tool_name)) {
-        return {
-          data: {
-            result: null,
-            tool_name: input.tool_name,
-          },
-          newMessages: [
-            createUserMessage({
-              content: `Tool "${input.tool_name}" has not been discovered yet. You must first use SearchExtraTools to discover this tool before executing it.\n\nUsage: SearchExtraTools("select:${input.tool_name}")`,
-            }),
-          ],
-        }
+        throw new Error(
+          `Tool "${input.tool_name}" has not been discovered yet. You must first use SearchExtraTools to discover this tool before executing it.\n\nUsage: SearchExtraTools("select:${input.tool_name}")`,
+        )
       }
     }
 
     // Check if the target tool is currently enabled
     if (!targetTool.isEnabled()) {
-      return {
-        data: {
-          result: null,
-          tool_name: input.tool_name,
-        },
-        newMessages: [
-          createUserMessage({
-            content: `工具 "${input.tool_name}" 当前不可用：Remote Control 未连接。`,
-          }),
-        ],
-      }
+      throw new Error(
+        `工具 "${input.tool_name}" 当前不可用：Remote Control 未连接。`,
+      )
     }
 
     // Schema-validate params against the target tool BEFORE delegating.
@@ -140,17 +115,7 @@ export const ExecuteTool = buildTool({
         | { success: true; data: Record<string, unknown> }
         | { success: false; error: z.ZodError }
       if (!parsed.success) {
-        return {
-          data: {
-            result: null,
-            tool_name: input.tool_name,
-          },
-          newMessages: [
-            createUserMessage({
-              content: formatZodValidationError(input.tool_name, parsed.error),
-            }),
-          ],
-        }
+        throw new Error(formatZodValidationError(input.tool_name, parsed.error))
       }
       // Use parsed params going forward — picks up .default() values and
       // strips unknown keys for strictObject schemas so validateInput/call
@@ -167,17 +132,9 @@ export const ExecuteTool = buildTool({
         context,
       )
       if (!validation.result) {
-        return {
-          data: {
-            result: null,
-            tool_name: input.tool_name,
-          },
-          newMessages: [
-            createUserMessage({
-              content: `Invalid parameters for tool "${input.tool_name}": ${validation.message}`,
-            }),
-          ],
-        }
+        throw new Error(
+          `Invalid parameters for tool "${input.tool_name}": ${validation.message}`,
+        )
       }
     }
 
@@ -187,17 +144,9 @@ export const ExecuteTool = buildTool({
       context,
     )
     if (permResult && permResult.behavior === 'deny') {
-      return {
-        data: {
-          result: null,
-          tool_name: input.tool_name,
-        },
-        newMessages: [
-          createUserMessage({
-            content: `Permission denied for tool "${input.tool_name}": ${permResult.message ?? 'Permission denied'}`,
-          }),
-        ],
-      }
+      throw new Error(
+        `Permission denied for tool "${input.tool_name}": ${permResult.message ?? 'Permission denied'}`,
+      )
     }
 
     // Delegate execution to the target tool
@@ -250,10 +199,8 @@ export const ExecuteTool = buildTool({
   renderToolResultMessage(content, progressMessages, options) {
     const innerTool = options.tools.find(t => t.name === content.tool_name)
     if (!innerTool?.renderToolResultMessage) return null
-    // Guard against null/undefined result — several error branches in this
-    // tool (tool-not-found, validation-failed, permission-denied, etc.) set
-    // result: null, and delegating null to the inner tool's UI would crash
-    // on any property access (e.g. output.worktreeBranch).
+    // Guard against null/undefined or non-object output from the inner tool
+    // before delegating to its UI.
     if (content.result == null || typeof content.result !== 'object')
       return null
     const innerInput = (options.input as { params?: unknown } | undefined)

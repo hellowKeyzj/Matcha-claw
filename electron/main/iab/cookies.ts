@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { safeStorage, WebContentsView, type Session } from 'electron';
 
 import type { IabLog } from './contracts';
-import { replacePrivateFile } from './persistence';
+import { replacePrivateFile } from '../../utils/private-file';
 
 type PartitionKey = { topLevelSite: string; hasCrossSiteAncestor: boolean };
 type SessionCookie = {

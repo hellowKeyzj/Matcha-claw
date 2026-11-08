@@ -41,6 +41,38 @@ function createMarkdownRenderer(extensions: readonly MarkdownExtension[]): Markd
     linkify: false,
   });
 
+  // Relax punctuation-adjacent double-star boundaries; native pairing still owns nesting.
+  renderer.inline.ruler.before('emphasis', 'strong_boundaries', (state, silent) => {
+    const start = state.pos;
+    if (silent || state.src.charCodeAt(start) !== 0x2a) return false;
+    const scanned = state.scanDelims(start, true);
+    if (scanned.length !== 2 || state.src.charCodeAt(start - 1) === 0x2a) return false;
+    const previous = start > 0 ? state.src.charCodeAt(start - 1) : 0x20;
+    const next = start + 2 < state.posMax ? state.src.charCodeAt(start + 2) : 0x20;
+    const canOpen = scanned.can_open || (
+      !renderer.utils.isWhiteSpace(previous)
+      && (renderer.utils.isMdAsciiPunct(next) || renderer.utils.isPunctChar(String.fromCharCode(next)))
+    );
+    const canClose = scanned.can_close || (
+      (renderer.utils.isMdAsciiPunct(previous) || renderer.utils.isPunctChar(String.fromCharCode(previous)))
+      && !renderer.utils.isWhiteSpace(next)
+    );
+    if (canOpen === scanned.can_open && canClose === scanned.can_close) return false;
+    for (let index = 0; index < 2; index += 1) {
+      state.push('text', '', 0).content = '*';
+      state.delimiters.push({
+        marker: 0x2a,
+        length: 2,
+        token: state.tokens.length - 1,
+        end: -1,
+        open: canOpen,
+        close: canClose,
+      });
+    }
+    state.pos += 2;
+    return true;
+  });
+
   for (const extension of extensions) extension.install(renderer);
   renderer.options.html = false;
 

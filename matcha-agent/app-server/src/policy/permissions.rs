@@ -146,45 +146,36 @@ pub(super) async fn set(
     // The shared per-agent guard orders commit and short native ACK, not model execution.
     let _guard = sessions.agent_guard(&target.agent_id).await;
     let native = settings::native_settings(&target, sessions).await?;
-    config
+    let states = config
         .update(|config| {
             let next = settings::patch(
                 settings::section(config, &target.agent_id, "permissions")?,
                 incoming.clone(),
             )?;
-            settings::replace(config, &target.agent_id, "permissions", next)
+            settings::replace(config, &target.agent_id, "permissions", next)?;
+            Ok(config
+                .agents
+                .get(&target.agent_id)
+                .expect("Agent checked")
+                .skill_states
+                .clone())
         })
         .await?;
 
     let mut applied = Applied::new();
     if let Some(native) = native.as_ref() {
-        let current = native.flag_section("permissions");
-        let mut live = current.clone();
-        let mut has_live_change = false;
-        for (field, value) in incoming.as_object().expect("permissions is an object") {
-            let restart = field == "additionalDirectories"
-                || (matches!(field.as_str(), "allow" | "deny" | "ask")
-                    && !settings::additions_only(current.get(field), value));
-            if restart {
-                applied.restart_fields.push(format!("permissions.{field}"));
-            } else {
-                live[field] = value.clone();
-                has_live_change = true;
-            }
-        }
-        if has_live_change {
-            applied
-                .control(
-                    &target,
-                    native,
-                    sessions,
-                    json!({
-                        "subtype": "apply_flag_settings", "settings": { "permissions": live },
-                    }),
-                    "apply_flag_settings",
-                )
-                .await?;
-        }
+        applied.restart_fields = sessions
+            .apply_instance_permissions(&native.session_id, &native.instance_id, &incoming, &states)
+            .await
+            .map_err(|error| {
+                error.with_data(json!({
+                    "agentId": target.agent_id, "sessionId": native.session_id,
+                    "instanceId": native.instance_id, "persisted": true,
+                    "projection": "nextLaunchFlagSettings", "failedStep": "apply_flag_settings",
+                    "restartRequired": true, "otherSessions": "notApplied",
+                }))
+            })?;
+        applied.steps.push("apply_flag_settings");
         if let Some(mode) = request.permissions.default_mode {
             applied
                 .control(
@@ -202,7 +193,7 @@ pub(super) async fn set(
     let mut result = applied.receipt(&target, native.as_ref());
     result["authority"] = json!("nativePermissionPipeline");
     result["nativeMerge"] = json!(
-        "Arrays concatenate across sources; removals require a new CLI instance and do not erase native user or managed rules"
+        "Inline flag rules are replaceable; rules still present in the launch flag file require a new CLI instance. Native user, project, CLI argument and managed rules are not erased"
     );
     Ok(result)
 }

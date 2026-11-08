@@ -64,15 +64,8 @@ impl Sessions {
         let (cli, spec, replay_state) = {
             let mut execution = session.data.lock().await;
             writable(&execution)?;
-            self.validate_model_thinking(
-                snapshot.clone(),
-                &execution,
-                &input.model,
-                input.provider_id.as_deref(),
-            )
-            .await?;
             let mut spec = self.launch_spec(snapshot, &execution)?;
-            let replay_state = replay_state(&execution, &spec);
+            let replay_state = replay_state(&execution, &spec)?;
             spec.agent.model = Some(input.model.clone());
             if let Some(provider) = &input.provider_id {
                 spec.agent.provider = Some(provider.clone());
@@ -85,6 +78,7 @@ impl Sessions {
             {
                 return Err(super::not_sent(rpc::Error::not_found("Provider")));
             }
+            self.validate_model_thinking(&execution, &spec).await?;
             let cli = execution.cli.clone();
             if cli.is_some() {
                 execution.idle = Idle::Handoff;
@@ -254,7 +248,7 @@ async fn confirm(cli: &Cli, spec: &LaunchSpec) -> rpc::Result<Value> {
     cli.confirm_selection(model, provider).await
 }
 
-fn replay_state(execution: &Execution, spec: &LaunchSpec) -> Option<Value> {
+pub(super) fn replay_state(execution: &Execution, spec: &LaunchSpec) -> rpc::Result<Option<Value>> {
     let model = execution
         .record
         .model
@@ -279,15 +273,22 @@ fn replay_state(execution: &Execution, spec: &LaunchSpec) -> Option<Value> {
         .unwrap_or("default");
     let mut replay = json!({
         "model":model,"permissionMode":mode,"effort":execution.record.effort,
+        "permissions":crate::cli::permissions::project(
+            spec.agent.settings.get("permissions").cloned().unwrap_or_else(|| json!({})),
+            &spec.agent.skill_states,
+        )?,
         "initialization":{
             "systemPrompt":spec.agent.system_prompt,
-            "appendSystemPrompt":spec.agent.append_system_prompt,
+            "appendSystemPrompt":crate::prompt::append_system_prompt(
+                &spec.agent_id,
+                spec.agent.append_system_prompt.as_deref(),
+            ),
         },
     });
     if let Some(search) = &spec.config.search {
         replay["search"] = search.settings();
     }
-    Some(replay)
+    Ok(Some(replay))
 }
 
 fn writable(execution: &Execution) -> rpc::Result<()> {

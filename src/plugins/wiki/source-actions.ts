@@ -20,7 +20,6 @@ export async function pickAndImportSource(context: WikiSourceActionContext): Pro
   if (!path) return;
   await context.mutate({
     label: 'import-source',
-    projectBound: true,
     observeTasks: true,
     success: t('actions.importedSource'),
   }, async () => {
@@ -47,7 +46,6 @@ export async function pickAndImportFolder(context: WikiSourceActionContext): Pro
   if (!path) return;
   await context.mutate({
     label: 'import-folder',
-    projectBound: true,
     observeTasks: true,
     success: t('actions.importedFolder'),
   }, async () => {
@@ -66,9 +64,9 @@ export async function pickAndImportFolder(context: WikiSourceActionContext): Pro
 }
 
 export async function rescanSources(context: WikiSourceActionContext): Promise<void> {
-  const { t } = context;
+  const { projectId, t } = context;
   await context.mutate({ label: 'rescan', success: t('actions.rescanned') }, async () => {
-    const call = await hostWikiRescanSources()
+    const call = await hostWikiRescanSources({ projectId })
       .then((receipt) => waitForCall(receipt, 'wiki'))
       .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
     if (call.command !== 'rescan-sources' || call.detail.operation !== 'rescan-sources' || call.status === 'unknown') {
@@ -82,9 +80,9 @@ export async function rescanSources(context: WikiSourceActionContext): Promise<v
 
 export async function deleteSourceAtPath(context: WikiSourceActionContext, path: string): Promise<void> {
   if (!path.trim()) return;
-  const { t } = context;
+  const { projectId, t } = context;
   await context.mutate({ label: 'delete-source', success: t('actions.deletedSource') }, async () => {
-    const call = await hostWikiDeleteSource({ sourcePath: path })
+    const call = await hostWikiDeleteSource({ projectId, sourcePath: path })
       .then((receipt) => waitForCall(receipt, 'wiki'))
       .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
     if (call.command !== 'delete-source' || call.detail.operation !== 'delete-source' || call.status === 'unknown') {
@@ -109,7 +107,6 @@ export async function refreshSources(context: WikiSourceActionContext): Promise<
   const { projectId, t } = context;
   await context.mutate({
     label: 'refresh-sources',
-    projectBound: true,
     observeTasks: true,
     success: t('actions.refreshedSources'),
   }, async () => {

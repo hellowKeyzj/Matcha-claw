@@ -175,6 +175,7 @@ export interface SessionRenderSystemItem extends SessionTimelineEntryBase {
   kind: 'system';
   role: 'system';
   level: 'info' | 'warning' | 'error';
+  notice?: 'restart-recovery';
 }
 
 export type SessionTimelineEntry =

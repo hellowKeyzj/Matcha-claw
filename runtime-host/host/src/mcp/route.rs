@@ -16,6 +16,7 @@ use super::{Family, MAX_BYTES, now_millis, revision};
 
 const TEAM_PATHS: &[RoutePath] = &[RoutePath::Exact(Family::Team.path())];
 const WIKI_PATHS: &[RoutePath] = &[RoutePath::Exact(Family::Wiki.path())];
+const MAINTENANCE_PATHS: &[RoutePath] = &[RoutePath::Exact(Family::Maintenance.path())];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,9 +30,12 @@ pub(crate) fn descriptor(
     verifier: CapabilityDecisionVerifier,
     resolver: Arc<dyn organization::RoleSessionIdentityResolver>,
     wiki: wiki::WikiHandle,
+    maintenance: maintenance::Maintenance,
 ) -> ModuleDescriptor {
     let verifier = Arc::new(Mutex::new(verifier));
     let team_verifier = Arc::clone(&verifier);
+    let maintenance_verifier = Arc::clone(&verifier);
+    let maintenance = Arc::new(maintenance);
     ModuleDescriptor::new(
         ModuleId::new("host.mcp"),
         vec![
@@ -46,6 +50,20 @@ pub(crate) fn descriptor(
                     Box::pin(
                         async move { handle_team(org, verifier, resolver, request).await.into() },
                     )
+                },
+            ),
+            RouteDescriptor::bound(
+                "host.mcp.maintenance.call",
+                MAINTENANCE_PATHS,
+                maintenance_head_plan,
+                move |request| {
+                    let maintenance = Arc::clone(&maintenance);
+                    let verifier = Arc::clone(&maintenance_verifier);
+                    Box::pin(async move {
+                        handle_maintenance(maintenance, verifier, request)
+                            .await
+                            .into()
+                    })
                 },
             ),
             RouteDescriptor::bound(
@@ -84,6 +102,36 @@ fn wiki_head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
             wiki_unavailable,
         )
     })
+}
+
+fn maintenance_head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
+    (head.path == Family::Maintenance.path()).then(|| {
+        RouteHeadPlan::new(
+            BodyPolicy::Required {
+                max_bytes: MAX_BYTES,
+            },
+            Duration::from_secs(30),
+            maintenance_unavailable,
+        )
+    })
+}
+
+async fn handle_maintenance(
+    maintenance: Arc<maintenance::Maintenance>,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    request: Request,
+) -> Response {
+    let tool = match authorize(&request, &verifier, Family::Maintenance).await {
+        Ok(tool) => tool,
+        Err(response) => return response,
+    };
+    match maintenance.execute_mcp(&tool.name, &tool.arguments).await {
+        Ok(result) => Response::json(200, result),
+        Err(ToolCallError::InvalidParams) => Response::bad_request(),
+        Err(ToolCallError::Execution(result)) => Response::json(409, result),
+        Err(ToolCallError::ExecutionText(text)) => Response::json(422, Value::String(text)),
+        Err(ToolCallError::Internal) => maintenance_unavailable(),
+    }
 }
 
 async fn handle_team(
@@ -139,6 +187,7 @@ async fn authorize(
     let allowed = match family {
         Family::Team => organization::is_team_tool(&tool.name),
         Family::Wiki => wiki::is_wiki_tool(&tool.name),
+        Family::Maintenance => maintenance::is_maintenance_tool(&tool.name),
     };
     if !allowed {
         return Err(Response::bad_request());
@@ -146,6 +195,7 @@ async fn authorize(
     let now = now_millis().map_err(|_| match family {
         Family::Team => team_unavailable(),
         Family::Wiki => wiki_unavailable(),
+        Family::Maintenance => maintenance_unavailable(),
     })?;
     let decision = verifier.lock().await.verify(
         authorization,
@@ -172,6 +222,7 @@ fn unauthorized(family: Family) -> Response {
         match family {
             Family::Team => "Team MCP authorization is invalid",
             Family::Wiki => "Wiki MCP authorization is invalid",
+            Family::Maintenance => "Maintenance MCP authorization is invalid",
         },
     )
 }
@@ -182,4 +233,8 @@ fn team_unavailable() -> Response {
 
 fn wiki_unavailable() -> Response {
     Response::error(503, "Wiki MCP owner is unavailable")
+}
+
+fn maintenance_unavailable() -> Response {
+    Response::error(503, "Maintenance MCP owner is unavailable")
 }

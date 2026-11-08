@@ -250,6 +250,10 @@ export async function refreshCloudAccountSession(): Promise<AccountSessionProjec
   }));
 }
 
+export async function openCloudAccountConsole(): Promise<void> {
+  await hostApiFetch<{ success: true }>('/api/account/console/open', { method: 'POST' });
+}
+
 export async function logoutCloudAccount(): Promise<AccountSessionProjection> {
   await hostApiFetch<{ success: true }>('/api/account/logout', {
     method: 'POST',

@@ -13,7 +13,7 @@ export type FileHistoryPanelProps = Readonly<{
   projectId: string;
   path: string;
   currentContent: string;
-  busy: string | null;
+  writeBusy: string | null;
   onRestored(projectId: string, path: string): Promise<void>;
   onClose?(): void;
 }>;
@@ -22,7 +22,7 @@ export function FileHistoryPanel(props: FileHistoryPanelProps): JSX.Element {
   return <FileHistoryView key={JSON.stringify([props.projectId, props.path])} {...props} />;
 }
 
-function FileHistoryView({ projectId, path, currentContent, busy, onRestored, onClose }: FileHistoryPanelProps): JSX.Element {
+function FileHistoryView({ projectId, path, currentContent, writeBusy, onRestored, onClose }: FileHistoryPanelProps): JSX.Element {
   const { t } = useTranslation('wiki');
   const [entries, setEntries] = useState<readonly WikiHistoryEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -33,7 +33,8 @@ function FileHistoryView({ projectId, path, currentContent, busy, onRestored, on
   const [notice, setNotice] = useState('');
   const controllerRef = useRef<AbortController | null>(null);
   const selected = entries.find((entry) => entry.id === selectedId);
-  const disabled = busy !== null || loading || restoring;
+  const disabled = loading || restoring;
+  const restoreDisabled = writeBusy !== null || disabled;
 
   const load = useCallback(async (signal: AbortSignal) => {
     setLoading(true);
@@ -60,7 +61,7 @@ function FileHistoryView({ projectId, path, currentContent, busy, onRestored, on
 
   async function restore(): Promise<void> {
     const signal = controllerRef.current?.signal;
-    if (!selected || disabled || !signal || signal.aborted) return;
+    if (!selected || restoreDisabled || !signal || signal.aborted) return;
     setRestoring(true);
     setError('');
     setNotice('');
@@ -123,7 +124,7 @@ function FileHistoryView({ projectId, path, currentContent, busy, onRestored, on
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs text-muted-foreground">{formatDateTime(selected.timestamp)}</span>
-                <Button type="button" size="sm" variant="outline" className="rounded-full" disabled={disabled} onClick={() => setConfirmRestore(true)}><RotateCcw className="h-4 w-4" />{restoring ? t('history.restoring', { defaultValue: '恢复中…' }) : t('history.restore', { defaultValue: '恢复此版本' })}</Button>
+                <Button type="button" size="sm" variant="outline" className="rounded-full" disabled={restoreDisabled} onClick={() => setConfirmRestore(true)}><RotateCcw className="h-4 w-4" />{restoring ? t('history.restoring', { defaultValue: '恢复中…' }) : t('history.restore', { defaultValue: '恢复此版本' })}</Button>
               </div>
               <div className="grid gap-4 lg:grid-cols-2">
                 <section className="min-w-0 space-y-2">

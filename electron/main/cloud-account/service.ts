@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { shell } from 'electron';
 import { isTraceEnabled, startupTrace } from '../../utils/trace-logger';
 import { executePackageOperation, PackageOperationError, type PackageOperationTransports } from './package-operations';
 import { confirmPackageInstall, type PackageInstallConfirmation } from './package-confirmation';
@@ -30,6 +31,7 @@ export type CloudAccountService = Readonly<{
   sendVerifyCode(request: AuthSendVerifyCodeRequest): Promise<AuthSendVerifyCodeResult>;
   refreshSession(): Promise<AccountSessionProjection>;
   logout(): Promise<void>;
+  openConsole(): Promise<void>;
   getCheckoutInfo(): Promise<BillingCheckoutInfo>;
   getPlans(): Promise<BillingPlan[]>;
   createPaymentOrder(request: CreatePaymentOrderRequest): Promise<CreatePaymentOrderResult>;
@@ -74,6 +76,7 @@ export function createCloudAccountService(
   let publicSettingsTask: Promise<PublicCloudSettings> | undefined;
   let sessionTask: Promise<AccountSessionProjection> | undefined;
   let refreshTask: Promise<CloudAccountSession | null> | undefined;
+  let consoleOpening: Readonly<{ epoch: number; task: Promise<void> }> | undefined;
   const traceEnabled = isTraceEnabled();
   let traceSeq = 0;
   let publicSettingsSeq = 0;
@@ -345,6 +348,22 @@ export function createCloudAccountService(
       throw error;
     }
   };
+  const openConsole = (): Promise<void> => {
+    const expected = epoch;
+    assertCurrent(expected);
+    if (consoleOpening) {
+      assertCurrent(consoleOpening.epoch);
+      return consoleOpening.task;
+    }
+    const task = withSession(async (session) => {
+      assertCurrent(expected);
+      const url = await client.createConsoleLoginUrl(session.accessToken);
+      assertCurrent(expected);
+      await shell.openExternal(url);
+    }).finally(() => { if (consoleOpening?.task === task) consoleOpening = undefined; });
+    consoleOpening = { epoch: expected, task };
+    return task;
+  };
   const authorizePackage = (request: Omit<CloudPackageAuthorizationRequest, 'devicePublicKey'>) => withSession(async (session) => client.authorizePackage(session.accessToken, {
     ...request, devicePublicKey: await getCloudPackageDevicePublicKey(),
   }));
@@ -602,6 +621,7 @@ export function createCloudAccountService(
     },
     getPublicSettings,
     getSession,
+    openConsole,
     login: async (request) => {
       const { expected, clearing, previousSession } = beginSessionChange();
       await previousSession;
@@ -717,6 +737,7 @@ export function createCloudAccountService(
       unsubscribeSkillExports = undefined;
       operationShutdown.abort();
       await sessionTail;
+      await consoleOpening?.task.catch(() => undefined);
       while (packageTasks.size || providerTasks.size) await Promise.all([...packageTasks, ...providerTasks]);
       closed = true;
       epoch += 1;

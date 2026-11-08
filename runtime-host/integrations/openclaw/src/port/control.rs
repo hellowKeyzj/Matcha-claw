@@ -99,6 +99,13 @@ impl OpenClawGateway {
             .await
     }
 
+    pub(crate) async fn log_file(&self) -> Result<String, GatewayClientError> {
+        let request = wire::gateway_logs_tail_request(next_request_id("log-file"), None, 1, 1)
+            .map_err(|_| GatewayClientError::Protocol)?;
+        let response = self.client.rpc_query(request).await?;
+        wire::decode_gateway_log_file(response).map_err(|_| GatewayClientError::Protocol)
+    }
+
     pub async fn tail_logs(
         &self,
         cursor: Option<u64>,

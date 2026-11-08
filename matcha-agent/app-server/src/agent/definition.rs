@@ -5,7 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -18,6 +18,8 @@ pub(super) struct Definition {
     pub append_system_prompt: Option<String>,
     #[serde(default = "empty_settings")]
     pub settings: Value,
+    #[serde(default)]
+    pub skill_states: BTreeMap<String, bool>,
     pub tools: Option<Vec<String>>,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
@@ -41,6 +43,7 @@ impl From<Definition> for AgentConfig {
             system_prompt: value.system_prompt,
             append_system_prompt: value.append_system_prompt,
             settings: value.settings,
+            skill_states: value.skill_states,
             tools: value.tools,
             allowed_tools: value.allowed_tools,
             disallowed_tools: value.disallowed_tools,
@@ -60,6 +63,7 @@ impl From<&AgentConfig> for Definition {
             system_prompt: value.system_prompt.clone(),
             append_system_prompt: value.append_system_prompt.clone(),
             settings: value.settings.clone(),
+            skill_states: value.skill_states.clone(),
             tools: value.tools.clone(),
             allowed_tools: value.allowed_tools.clone(),
             disallowed_tools: value.disallowed_tools.clone(),
@@ -87,6 +91,8 @@ pub(super) struct Patch {
     #[serde(default)]
     settings: Field<Value>,
     #[serde(default)]
+    skill_states: Field<BTreeMap<String, bool>>,
+    #[serde(default)]
     tools: Field<Option<Vec<String>>>,
     #[serde(default)]
     allowed_tools: Field<Vec<String>>,
@@ -111,6 +117,7 @@ impl Patch {
             system_prompt,
             append_system_prompt,
             settings,
+            skill_states,
             tools,
             allowed_tools,
             disallowed_tools,
@@ -194,6 +201,9 @@ pub(super) fn validate(agent: &AgentConfig, config: &Config) -> rpc::Result<()> 
         ));
     }
     validate_settings(&agent.settings)?;
+    for name in agent.skill_states.keys() {
+        crate::cli::skills::validate_name(name)?;
+    }
     if let Some(description) = &agent.description
         && description.contains('\0')
     {

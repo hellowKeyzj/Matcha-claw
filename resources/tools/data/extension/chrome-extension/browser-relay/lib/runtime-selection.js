@@ -5,7 +5,15 @@ export function createRuntimeSelection(manager, sendToRelay, isConnected) {
   let browserInstanceId = ''
   let selectedBrowserInstanceId = null
   let selectedWindowId = null
-  const ready = getBrowserInstanceId().then((id) => { browserInstanceId = id })
+  let ready = getBrowserInstanceId().then((id) => { browserInstanceId = id })
+
+  function retryReady() {
+    const previous = ready
+    return previous.catch(() => {
+      if (ready === previous) ready = getBrowserInstanceId().then((id) => { browserInstanceId = id })
+      return ready
+    })
+  }
 
   const isCurrentBrowserSelected = () =>
     browserInstanceId !== '' && selectedBrowserInstanceId === browserInstanceId
@@ -139,7 +147,8 @@ export function createRuntimeSelection(manager, sendToRelay, isConnected) {
   }
 
   return {
-    ready,
+    get ready() { return ready },
+    retryReady,
     snapshot,
     mirror,
     isCurrentBrowserSelected,

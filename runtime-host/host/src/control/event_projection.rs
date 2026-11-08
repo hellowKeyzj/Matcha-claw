@@ -1,11 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ::cron::{CronExecutionTerminalEvent, CronExecutionTerminalStatus};
-use foundation::{
-    execution::{
-        EventObservation, EventReason, EventStage, ObservationRecord, ObservationSink, TraceContext,
-    },
-    process::supervision::SupervisorSnapshot,
+use foundation::execution::{
+    EventObservation, EventReason, EventStage, ObservationRecord, ObservationSink, TraceContext,
 };
 use openclaw::session::events::SessionEvent;
 
@@ -86,9 +83,7 @@ pub(crate) fn project_observed(
             OPENCLAW_RUNTIME_EVENT,
             SafeEvent::OpenClawRuntime {},
         ),
-        HostEvent::MatchaLifecycle(snapshot) => {
-            project_matcha_lifecycle_observed(snapshot, observation)
-        }
+        HostEvent::MatchaLifecycle(state) => project_matcha_lifecycle_observed(state, observation),
     }
 }
 
@@ -155,10 +150,10 @@ fn project_cron_execution_observed(
 }
 
 fn project_matcha_lifecycle_observed(
-    snapshot: SupervisorSnapshot,
+    state: RuntimeState,
     observation: &ObservationSink,
 ) -> Option<SafeEvent> {
-    let lifecycle = RuntimeState::from_snapshot(&snapshot).lifecycle();
+    let lifecycle = state.lifecycle();
     project_accepted(
         observation,
         MATCHA_LIFECYCLE_EVENT,

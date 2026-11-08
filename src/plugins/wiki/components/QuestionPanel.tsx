@@ -9,6 +9,7 @@ import { fetchSelectableProviderModels, resolveModelCatalogEntry, resolveModelRu
 import type { ModelCatalogEntry } from '@/types/subagent';
 import type { WikiQuestionTask } from '@/types/wiki-capabilities';
 import { QuestionMessage, type QuestionTurn } from '@/plugins/wiki/components/QuestionMessage';
+import { classifyWikiObservationFailure } from '@/plugins/wiki/observation-error';
 import { WikiEmpty, WikiIconButton, WikiPanel, WikiPanelHeader, WikiPrimaryButton } from '@/plugins/wiki/components/WikiChrome';
 
 export type QuestionPanelProps = Readonly<{
@@ -44,6 +45,7 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
   const [localWaitingTaskId, setLocalWaitingTaskId] = useState<string | null>(null);
   const [pollVersion, setPollVersion] = useState(0);
   const [error, setError] = useState('');
+  const [observationError, setObservationError] = useState('');
   const conversationsRef = useRef(conversations);
   const actionRef = useRef<Action>(null);
   const serialRef = useRef<Promise<unknown>>(Promise.resolve());
@@ -102,6 +104,7 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
     const receipt = await hostWikiQuestionTask({ projectId, taskId });
     if (!isCurrent()) return null;
     if (receipt.projectId !== projectId || receipt.task.projectId !== projectId || receipt.task.id !== taskId) throw projectFailure();
+    setObservationError('');
     const previous = conversationsRef.current.flatMap((conversation) => conversation.turns).find((turn) => turn.id === taskId)?.task;
     if (previous && receipt.task.revision < previous.revision) return previous;
     applyTask(receipt.task);
@@ -112,7 +115,6 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
     if (!observeTaskId) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
-    let polls = 0;
     const isCurrent = () => !cancelled;
     const poll = async () => {
       if (cancelled) return;
@@ -128,14 +130,13 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
           setLocalWaitingTaskId((current) => current === observeTaskId ? null : current);
           return;
         }
-        if (++polls >= 600) {
-          setError(t('qa.progressPaused', { defaultValue: '后台任务未结束，自动刷新已暂停；点击刷新继续查看。' }));
-          return;
-        }
-        timer = setTimeout(() => { void poll(); }, 1000);
       } catch (failure) {
-        if (!cancelled) setError(failure instanceof Error ? failure.message : t('qa.readFailed', { defaultValue: '无法读取任务进度，请刷新重试。' }));
+        if (cancelled) return;
+        const observationFailure = classifyWikiObservationFailure(failure, t('qa.readFailed', { defaultValue: '无法读取任务进度，请刷新重试。' }));
+        setObservationError(observationFailure.message);
+        if (observationFailure.reason === 'stopped') return;
       }
+      if (!cancelled) timer = setTimeout(() => { void poll(); }, 1000);
     };
     void poll();
     return () => { cancelled = true; clearTimeout(timer); };
@@ -299,7 +300,7 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
               <div ref={bottomRef} />
             </div>
           </div>
-          {error ? <div className="shrink-0 space-y-2 px-5 py-2"><p role="alert" className="text-sm text-destructive">{error}</p><div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" disabled={disabled} onClick={refresh}><RefreshCw className="h-3.5 w-3.5" />{t('qa.refreshTask', { defaultValue: '刷新任务' })}</Button>{pendingTurn ? <><Button size="sm" variant="ghost" disabled={disabled} onClick={() => { updateConversations((current) => current.map((conversation) => ({ ...conversation, turns: conversation.turns.map((turn) => turn.id === pendingTurn.id ? { ...turn, localWaitEnded: true } : turn) }))); setObserveTaskId(null); setLocalWaitingTaskId(null); setError(''); }}>{t('qa.endLocalWait', { defaultValue: '结束本地等待' })}</Button><span className="text-xs text-muted-foreground">{t('qa.localWaitOnly', { defaultValue: '仅退出本地等待，不取消后台；任务身份保留，可返回本会话刷新恢复。' })}</span></> : null}</div></div> : null}
+          {error || observationError ? <div className="shrink-0 space-y-2 px-5 py-2"><p role="alert" className="text-sm text-destructive">{error || observationError}</p><div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" disabled={disabled} onClick={refresh}><RefreshCw className="h-3.5 w-3.5" />{t('qa.refreshTask', { defaultValue: '刷新任务' })}</Button>{pendingTurn ? <><Button size="sm" variant="ghost" disabled={disabled} onClick={() => { updateConversations((current) => current.map((conversation) => ({ ...conversation, turns: conversation.turns.map((turn) => turn.id === pendingTurn.id ? { ...turn, localWaitEnded: true } : turn) }))); setObserveTaskId(null); setLocalWaitingTaskId(null); setError(''); setObservationError(''); }}>{t('qa.endLocalWait', { defaultValue: '结束本地等待' })}</Button><span className="text-xs text-muted-foreground">{t('qa.localWaitOnly', { defaultValue: '仅退出本地等待，不取消后台；任务身份保留，可返回本会话刷新恢复。' })}</span></> : null}</div></div> : null}
           <form onSubmit={submit} className="shrink-0 space-y-3 border-t border-border/70 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
               <label className="flex min-w-0 items-center gap-2"><span>{t('qa.model', { defaultValue: '回答模型' })}</span><select aria-label={t('qa.model', { defaultValue: '回答模型' })} value={resolveModelCatalogEntry(models, modelRef)?.id ?? ''} disabled={disabled || Boolean(pendingTurn) || modelLoading} onChange={(event) => setModelRef(resolveModelRuntimeReference(models, event.target.value) ?? '')} className="h-8 min-w-0 max-w-80 rounded-lg border border-border bg-card px-2 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><option value="">{t(modelLoading ? 'qa.modelsLoading' : 'qa.selectModel', { defaultValue: modelLoading ? '读取模型中…' : '请选择模型' })}</option>{models.map((model) => <option key={model.id} value={model.id}>{model.displayLabel}</option>)}</select></label>

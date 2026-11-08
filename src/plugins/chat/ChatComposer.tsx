@@ -12,6 +12,7 @@ import { supportsSessionGoal } from '@/plugins/runtime/directory';
 import { useGatewayStore } from '@/plugins/runtime/store';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { getProviderAccountRuntimeReport, useProviderStore } from '@/plugins/providers/stores/providers';
+import { useCapabilityRoutingStore } from '@/plugins/providers/stores/capability-routing';
 import { useComposerDraftStore } from '@/plugins/chat/composer-drafts';
 import { CHAT_COMPOSER_STAGE_EVENT, composerTargetMatches, type ComposerStageRequest } from './composer-actions';
 import { agentScope, buildCapabilityScopeKey, buildSessionIdentityKey, runtimeEndpointsEqual, runtimeInstanceScope, sessionIdentitiesEqual, sessionScope } from '@/types/desktop/runtime-address';
@@ -106,6 +107,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
   const { agents, currentAgent } = useChatAgent();
   const providerModels = useSubagentsStore((state) => state.availableModels);
   const providerSnapshot = useProviderStore((state) => state.providerSnapshot);
+  const chatPrimary = useCapabilityRoutingStore((state) => state.routing.chat?.primary);
   const providerModelsLoading = useSubagentsStore((state) => state.modelsLoading);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const currentSendGate = useChatStore(selectCurrentChatSendGate);
@@ -143,6 +145,10 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
   const draftAgentModel = currentDraftScope ? agents.find((agent) => agent.id === currentAgentId)?.model ?? null : null;
   const draftModelEntry = useMemo(() => resolveModelCatalogEntry(availableModels, draftAgentModel),
     [availableModels, draftAgentModel]);
+  const draftPrimaryModelEntry = useMemo(() => currentDraftScope && isMatchaModelSession && !draftAgentModel && chatPrimary
+    ? availableModels.find((model) => model.accountId === chatPrimary.accountId && model.modelLabel === chatPrimary.modelId)
+    : undefined, [availableModels, chatPrimary, currentDraftScope, draftAgentModel, isMatchaModelSession]);
+  const previewModelSelectionId = composerConfiguration?.modelSelectionId ?? draftPrimaryModelEntry?.id;
   const draftConfigurationScopeKey = currentDraftScope ? buildCapabilityScopeKey(currentDraftScope) : '';
   const draftConfigurationOwner = useMemo(() => ({ scope: currentDraftScope, ready: currentChatRuntimeAvailable, scopeKey: draftConfigurationScopeKey }), [currentDraftScope, currentChatRuntimeAvailable, draftConfigurationScopeKey]);
   const [draftConfigurationCapability, setDraftConfigurationCapability] = useState<{
@@ -171,6 +177,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
     allowedSkillIdsForChat,
     availableSkillOptions,
     skillsLoading: skillConfigSkillsLoading,
+    skillsError: skillConfigSkillsError,
     savingSkillId,
     prepare: prepareSkillConfig,
     resetSession: resetSkillConfigSession,
@@ -297,7 +304,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
     recordKey: currentSessionRecordKey,
     ready: currentChatRuntimeAvailable,
     activeRun,
-    modelSelectionId: composerConfiguration?.modelSelectionId,
+    modelSelectionId: previewModelSelectionId,
     modelReference: currentDraftScope ? draftAgentModel ?? '' : currentSessionModelReference,
     modelSwitching,
     initializationBusy: composerInitializationBusy || thinkingSendPending || currentSession.runtime.runPhase === 'stopping',
@@ -315,12 +322,11 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
       : undefined;
     return { id: model.id, label: model.modelLabel, provider: model.providerLabel, groupId: model.accountId, disabled, description };
   }), [availableModels, currentConversationEndpoint, providerSnapshot, t]);
-  const selectedModelOption = modelOptions.find((option) => option.id === (composerConfiguration?.modelSelectionId
+  const selectedModelOption = modelOptions.find((option) => option.id === (previewModelSelectionId
     ?? (currentDraftScope ? draftModelEntry?.id : currentSessionModelId)));
   const modelAccountNotice = selectedModelOption?.disabled ? selectedModelOption.description : null;
   const modelPicker = useMemo(() => {
-    const intendedModelId = composerConfiguration?.modelSelectionId;
-    const currentModelId = intendedModelId ?? (currentDraftScope ? '' : currentSessionModelId);
+    const currentModelId = previewModelSelectionId ?? (currentDraftScope ? '' : currentSessionModelId);
     if (!thinkingPicker && !currentModelId && !draftAgentModel && availableModels.length === 0 && !modelsLoading
       && !(isMatchaModelSession && (currentSession.meta.modelState?.selected || currentSession.meta.modelState?.active))) {
       return null;
@@ -342,7 +348,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
       disabled: activeRun || sessionSendPending || !currentChatRuntimeAvailable || composerInitializationBusy && !thinkingPicker?.switching || (currentDraftScope
         ? !draftConfigurationReady || draftConfigurationCapability?.modelSelection !== true : !modelSelectionAvailable),
     };
-  }, [activeRun, availableModels, composerConfiguration?.modelSelectionId, composerInitializationBusy, currentChatRuntimeAvailable, currentDraftScope, currentSession.meta.modelState, currentSessionModelId, draftAgentModel, draftModelEntry, draftConfigurationCapability, draftConfigurationReady, isMatchaModelSession, modelOptions, modelSelectionAvailable, modelSwitching, modelsLoading, sessionSendPending, t, thinkingPicker]);
+  }, [activeRun, availableModels, previewModelSelectionId, composerInitializationBusy, currentChatRuntimeAvailable, currentDraftScope, currentSession.meta.modelState, currentSessionModelId, draftAgentModel, draftModelEntry, draftConfigurationCapability, draftConfigurationReady, isMatchaModelSession, modelOptions, modelSelectionAvailable, modelSwitching, modelsLoading, sessionSendPending, t, thinkingPicker]);
   const composerContextTraceRef = useRef<string | null>(null);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
@@ -517,13 +523,14 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
     title: t('skillConfigDialog.titleWithAgent', { agent: currentAgent?.name || currentAgentId }),
     options: availableSkillOptions,
     loading: skillConfigSkillsLoading,
+    error: skillConfigSkillsError,
     savingSkillId,
     selectedSkillIds,
     skillPreview,
     onToggleSkill: toggleSkillConfigSelection,
     onPreviewSkill: handlePreviewSkill,
     onClearSkillPreview: clearSkillPreview,
-  }), [availableSkillOptions, clearSkillPreview, currentAgent?.name, currentAgentId, handlePreviewSkill, savingSkillId, selectedSkillIds, skillConfigSkillsLoading, skillPreview, t, toggleSkillConfigSelection]);
+  }), [availableSkillOptions, clearSkillPreview, currentAgent?.name, currentAgentId, handlePreviewSkill, savingSkillId, selectedSkillIds, skillConfigSkillsError, skillConfigSkillsLoading, skillPreview, t, toggleSkillConfigSelection]);
   const inputModelPicker = useMemo(() => modelPicker ? {
     ...modelPicker,
     thinking: thinkingPicker,

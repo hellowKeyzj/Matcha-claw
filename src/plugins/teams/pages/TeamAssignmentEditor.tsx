@@ -1,5 +1,6 @@
 import { useId, useState } from 'react';
-import { Bot, Maximize2, Minimize2 } from 'lucide-react';
+import { Bot, Loader2, Maximize2, Minimize2, Plus } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
 import type { TeamAssignmentEditorProps } from '@/plugins/teams/pages/team-node-editor-types';
 
@@ -13,6 +14,9 @@ export function TeamAssignmentEditor({
   roles,
   prompt,
   outputArtifactKind,
+  bindingRequired,
+  sessionCreation,
+  onCreateSession,
   onBindingChange,
   onPromptChange,
   onOutputArtifactKindChange,
@@ -23,7 +27,12 @@ export function TeamAssignmentEditor({
   const sessions = roles.filter((role) => role.roleId === roleId);
   const roleValid = roleIds.includes(roleId);
   const binding = sessions.find((role) => role.sessionRef === sessionRef);
-  const showSessions = sessions.length > 1 || !binding;
+  const invalidRole = Boolean(roleId) && !roleValid;
+  const invalidSession = Boolean(sessionRef) && !binding;
+  const showBindingError = !binding && (bindingRequired || invalidRole || invalidSession);
+  const sessionLabel = (value: string) => value === 'rs0'
+    ? labels.defaultSession
+    : labels.numberedSession.replace('{{number}}', value.slice(2));
   const memberLabel = kind === 'review' ? labels.reviewMember : labels.workMember;
   const promptLabel = kind === 'review' ? labels.reviewPrompt : labels.workPrompt;
   const fieldClassName = 'w-full min-w-0 rounded-xl border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60';
@@ -45,8 +54,8 @@ export function TeamAssignmentEditor({
               id={`${id}-role`}
               className={fieldClassName}
               value={roleId}
-              aria-invalid={!roleValid}
-              aria-describedby={!binding ? `${id}-binding-hint` : undefined}
+              aria-invalid={invalidRole || (bindingRequired && !roleId)}
+              aria-describedby={showBindingError ? `${id}-binding-hint` : undefined}
               disabled={!editable || disabled || roleIds.length === 0}
               onChange={(event) => {
                 const nextRoleId = event.target.value;
@@ -61,24 +70,44 @@ export function TeamAssignmentEditor({
             {binding ? <p className="mt-1 truncate px-1 text-xs text-muted-foreground" title={binding.agentId}>{binding.agentId}</p> : null}
           </div>
         </div>
-        {showSessions ? (
-          <label className="grid gap-1.5 text-xs text-muted-foreground">
-            {labels.sessionRef}
-            <select
-              className={fieldClassName}
-              value={sessionRef}
-              aria-invalid={!binding}
-              aria-describedby={!binding ? `${id}-binding-hint` : undefined}
-              disabled={!editable || disabled || sessions.length === 0}
-              onChange={(event) => onBindingChange(roleId, event.target.value)}
-            >
-              <option value="">{labels.selectSession}</option>
-              {sessionRef && !binding ? <option value={sessionRef} disabled>{labels.invalidBinding.replace('{{value}}', sessionRef)}</option> : null}
-              {sessions.map((role) => <option key={role.sessionRef} value={role.sessionRef}>{role.sessionRef} · {role.agentId}</option>)}
-            </select>
-          </label>
+        {roleValid ? (
+          <div className="flex flex-wrap items-end gap-2">
+            {sessions.length > 1 || invalidSession ? (
+              <label className="grid min-w-0 flex-1 gap-1.5 text-xs text-muted-foreground">
+                {labels.sessionRef}
+                <select
+                  className={fieldClassName}
+                  value={sessionRef}
+                  aria-invalid={showBindingError}
+                  aria-describedby={showBindingError ? `${id}-binding-hint` : undefined}
+                  disabled={!editable || disabled || sessionCreation === 'pending'}
+                  onChange={(event) => onBindingChange(roleId, event.target.value)}
+                >
+                  <option value="">{labels.selectSession}</option>
+                  {invalidSession ? <option value={sessionRef} disabled>{labels.sessionUnavailable}</option> : null}
+                  {sessions.map((role) => <option key={role.sessionRef} value={role.sessionRef}>{sessionLabel(role.sessionRef!)}</option>)}
+                </select>
+              </label>
+            ) : binding ? <p className="min-w-0 flex-1 py-2 text-xs text-muted-foreground" aria-label={labels.sessionRef}>{sessionLabel(binding.sessionRef!)}</p> : null}
+            {editable && onCreateSession ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1.5 px-2"
+                disabled={disabled || sessionCreation === 'pending'}
+                aria-busy={sessionCreation === 'pending'}
+                aria-describedby={sessionCreation === 'failed' ? `${id}-session-error` : undefined}
+                onClick={onCreateSession}
+              >
+                {sessionCreation === 'pending' ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <Plus className="h-3.5 w-3.5" aria-hidden="true" />}
+                {sessionCreation === 'pending' ? labels.creatingSession : sessionCreation === 'failed' ? labels.retryCreateSession : labels.createSession}
+              </Button>
+            ) : null}
+          </div>
         ) : null}
-        {!binding ? <p id={`${id}-binding-hint`} className="text-xs text-destructive">{roleIds.length === 0 ? labels.noRoleBindings : labels.roleBindingRequired}</p> : null}
+        {showBindingError ? <p id={`${id}-binding-hint`} role="alert" className="text-xs text-destructive">{roleIds.length === 0 ? labels.noRoleBindings : labels.roleBindingRequired}</p> : null}
+        {sessionCreation === 'failed' ? <p id={`${id}-session-error`} role="alert" className="text-xs text-destructive">{labels.createSessionFailed}</p> : null}
       </section>
 
       <section className="space-y-2" aria-labelledby={`${id}-prompt-label`}>

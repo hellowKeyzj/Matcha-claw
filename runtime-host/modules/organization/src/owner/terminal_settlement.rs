@@ -19,6 +19,7 @@ struct PendingTeamMessageRepair {
     status: organization::NativeTerminalStatus,
     settled_at: u64,
     attempt: usize,
+    business_messages: Vec<String>,
 }
 
 impl TeamRunTerminalSettlement {
@@ -162,7 +163,8 @@ impl TeamRunTerminalSettlement {
             }));
             return Ok(TeamMessageTerminalObservation::Settled);
         }
-        self.plan_and_settle(store, team_run, PendingTeamMessageRepair { context, status, settled_at, attempt: 0 }, assistant_texts)
+        let business_messages = crate::TeamNodeOutput::business_messages_from(&assistant_texts);
+        self.plan_and_settle(store, team_run, PendingTeamMessageRepair { context, status, settled_at, attempt: 0, business_messages }, assistant_texts)
             .inspect_err(|error| {
                 runtime_trace("runtime.team_run.terminal.error", || json!({
                     "nativeRunHash": identifier_hash(&native_run_id),
@@ -210,7 +212,7 @@ impl TeamRunTerminalSettlement {
         &mut self,
         store: &mut OrganizationStore,
         team_run: &TeamRunOwner,
-        pending: PendingTeamMessageRepair,
+        mut pending: PendingTeamMessageRepair,
         assistant_texts: Vec<String>,
     ) -> Result<TeamMessageTerminalObservation, StoreFault> {
         store.refresh().inspect_err(|error| {
@@ -249,6 +251,7 @@ impl TeamRunTerminalSettlement {
         );
         match plan {
             organization::TeamMessageTerminalPlan::Settle { output } => {
+                let output = output.with_business_messages(std::mem::take(&mut pending.business_messages));
                 settle_native_run(store, team_run, pending, Ok(Some(output)))?;
                 Ok(TeamMessageTerminalObservation::Settled)
             }

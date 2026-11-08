@@ -91,6 +91,420 @@ DP-xxx 或 `none`
 
 ## 6. 当前归档案例
 
+## Case: Markdown 粗体兼容只覆盖汉字相邻
+
+### Status / Linked pattern
+
+宪法 §26 与 debugging P3／P6／P7 已覆盖；属于边界覆盖不足，不新增同义规范。
+
+### Source incident / Symptom
+
+2026-11-09，用户真实聊天截图出现 `**检索口径：**GitHub`、`**关注理由：**OSINT` 原始星号；相同标签后接汉字却正常加粗。
+
+### Real minimum loop / Root cause boundary
+
+`TextPart → AssistantMessageBody → assistant-markdown-body → md-pipeline → markdown-it`。真实生产公开渲染入口复现两英文相邻输入不生成 strong，加空格后生成。标准解析器亦受强调标点边界限制；已有 `cjk_strong` 仅放宽 Han 相邻，不是业务文案匹配，但仍是语言特例，不能支持完整混排结论。
+
+### Wrong path taken / Fix boundary
+
+以单一文字类别样本代替语法边界覆盖。修复落在原共享 parser：用语言无关的双星标点边界规则替换旧 Han 特例，保留 native 配对、嵌套、转义与代码边界，不在正文清洗层替换字符串，不更改消息原文或原生协议。
+
+### Verification closure / Reusable rule
+
+本轮结果及未验范围见 [验证记录](../../.scratch/markdown-strong-20261109/validation.md)。既有 §26 和 P3／P6／P7 在 bugfix 入口及 reviewer pass 应触发：按定界符、空白、标点、文字、代码与转义分类验证，不按业务词穷举；此规则不要求普通文案改动扩大成解析器改造。
+
+## Case: 隐藏恢复输入造成聊天展示分界不一致
+
+### Status / Linked pattern
+
+promoted；宪法 §26 与 debugging P3／P6／P7 已覆盖，不新增同义规则
+
+### Source incident / Symptom
+
+2026-11-09，用户真实 OpenClaw 截图中工具呈1/2/2与10/1/2，仅末两工具进入过程摘要，恢复分界却不可见。四条 native internal_system 恢复 user 在 Renderer 清空，presentation 与 work 各自解释边界。旧组件通过不证明该真实输入已覆盖。
+
+### Real minimum loop / Wrong path taken
+
+只读原生DB → Rust解码／wire正文 → Renderer投影 → presentation／work → 实际ChatList。最初建议跳过隐藏user合并5／13工具；核本地OpenClaw Web后撤回：恢复notice默认startsTurn=true，应显示分界，不合并不同恢复执行。公共wire未保留provenance，本轮只复用现有精确prompt识别，不冒充严格来源判断。
+
+### Fix boundary / Verification closure
+
+清洗前投影本地恢复notice；presentation统一展示组及计时，work消费而不再自行划界。修复mixed tool run计时回归与跨notice复用input的串时反例，保留内容规则和结构共享。owner16项、独立组件12组／53断言通过，200×3历史额外render／commit为0。真实桌面确认四条原key通知、两摘要交互、图片不隐藏、正文／草稿不变；未发消息或启停runtime。记录与限制见[修复验证](../../.scratch/chat-boundary-20261109/validation.md)。
+
+### Reusable rule / Applies to / Does not apply to / Archive note
+
+可见性与分组必须在同一展示owner解释，消费者不能再按未投影身份重划边界；引用上游须核其实际notice与turn规则。适用于消息清洗、系统通知、派生分组与计时，不要求普通文案变更扩查native协议。已有规则足够，修正执行与真实样本覆盖。
+
+### 后续：来源启发式收口（2026-11-09）
+
+用户再次质疑补丁后，复核确认精确prompt识别仍会把真人同文当系统、受系统措辞变化影响；此前Final-form结论超出了Renderer分组收口范围。用户批准后，恢复来源在原生统一decoder分类，以窄typed notice贯穿原UserMessage/view/delta/严格解码，Renderer才转system，删除恢复reader及清洗引用。不把公共item提前改System：Body内部正依UserMessage划terminal/tool边界，不能为展示来源改变执行身份。另补display signature遗漏notice，reconciliation原已包含。规则§26与P3/P7已有，属于执行失败，不新增同义规范；本轮证据与限制见[来源链验证](../../.scratch/chat-origin-20261109/validation.md)。
+
+## Case: 过程折叠复核遗漏耗时归属与历史行渲染
+
+### Status / Linked pattern
+
+promoted；宪法 §26 与 debugging P3／P6／P7 已覆盖，属于代理执行未遵守，不新增同义规则
+
+### Source incident / Symptom
+
+2026-11-09，公共过程折叠内容回放与交互通过后，复核仍以局部 diff 宣称没有结构性问题。完整走读发现摘要直接借用更宽回复组耗时，以及每次重算全部 work 对象使历史消息 memo 失效。
+
+### Real minimum loop / Root cause boundary
+
+生产 `buildThreadPresentation → buildThreadWorkPlan → ChatList → ChatAssistantTurn／Parts`。两个 lane 各1秒、中间9秒，第二摘要误显示11秒；实际 React 的200个历史区间经历3次尾部delta，历史 ChatItem／ChatAssistantTurn 各600次 render／commit，变化的 prop 只有 work。测量位于隔离组件，不等于完整桌面性能基准。
+
+### Wrong path taken / Missed first probe
+
+把“当前行有可靠 finished timing”误认为“该耗时属于当前折叠区间”；检查内容正确性、DOM保留和滚动，却没量流式更新时未变化历史行的真实渲染。读取局部 diff 不足以支持整体收口结论。
+
+### Fix boundary / Verification closure
+
+在 Renderer 分组 owner 按原生 run／input 身份确定区间耗时；已提交结果仅用于输出结构共享，折叠资格每次重算，不能恢复成功事件账本。ChatList保留同identity提交边界，footer仅在本组摘要已显示相同跨度时去重。实施及本轮验证结果见 [Session Dev Notes](../architecture-knowledge/modules/session-chat/dev.md) 与 [修复记录](../../.scratch/chat-work-fix-20261109/validation.md)，不沿用旧轮通过数作新验收。
+
+### Reusable rule / Applies to / Does not apply to / Archive note
+
+已有§26与P3／P6／P7在入口及 reviewer pass 即应触发：核聚合输入的实际归属和热路径消费者，不以函数引用检查或编译代替真实渲染测量。适用于派生展示分组、计时聚合与流式列表；单文案修改不要求性能实验。规则已清楚，问题是未执行，不修改长期规范本体。
+
+### 后续：历史缺计时与原生口径反证（2026-11-09）
+
+真实daily-weibo摘要22工具、16assistant同run，列表未获runTimings；原生sessionInfo缺计时字段。最初据数据库trajectory起止推断“适配可补回”，但实施前追producer发现trajectory记录attempt准备／延后收尾时刻，非实时agent/lifecycle起止，不能以其363751ms替代run耗时。当前Gateway的agent.wait仅10分钟内存；trajectory无已注册RPC，CLI tail不提供run精确metadata，export会写整条会话。保持原生协议与禁止直读数据库的边界后，本轮没有合法同口径持久来源，停止实施，不加Host影子计时或上游补丁。此前“只是漏接历史”的结论过强，应改为历史计时能力缺口、原生producer受阻。[VERIFY: runtime-host/integrations/openclaw/src/session/window/history.rs:443-461] [VERIFY: runtime-host/integrations/openclaw/src/session/protocol.rs:3544-3558]
+
+已有§26与P3/P4/P6/P7足够，属于producer核查与结论校准未遵守，不增同义长期规则。下次在入口与reviewer pass同时核实时／历史的事实源、时间口径及合法读取能力；相同runId不证明不同记录事件的时刻可互换。证据与停止边界见[本轮调查记录](../../.scratch/run-timing-unified-20261109/validation.md)。
+
+## Case: 侧栏启动分区的隔离验证遗漏真实启动窗口
+
+### Status / Linked pattern
+
+promoted；DP-001 与宪法 §26 已覆盖，属于执行遗漏，不新增同义规则
+
+### Source incident / Symptom
+
+2026-11-08，隔离侧栏交互已通过、复核仍报告未发现问题；用户随后在真实启动截图指出只有 OpenClaw、没有 Matcha Agent，状态依次跳变。
+
+### Real minimum loop / Root cause boundary
+
+真实自动启动调度 → prepare → 进程与连接 ready → Directory → 双 runtime 分区。前轮仅给 OpenClaw 提前声明分区，Matcha 仍等 ready catalog；OpenClaw prepare 期间 Supervisor 仍 Idle，Gateway 将其映为 stopped。日志 stopped→starting 约4.5秒；这是 owning workflow 事实缺失，不是应由 UI 防抖消除的渲染抖动。
+
+### Wrong path taken / Missed first probe
+
+供给 Gateway／Directory 状态验证按钮和草稿，未验证状态的真实 producer、两个 peer 的对称覆盖及生产 `RuntimeService → control loop` 入口；读局部 view model 后再次给出过强复核结论。HEAD 同失败测试对照只证明已有失败未变化，不能证明新增启动语义。
+
+### Fix boundary / Verification closure
+
+双分区同用 Directory；观测未取得仅 spinner，不把未知当停止；Directory 并发刷新合并，事件失效串行补读。真实启动流程状态由已有 Peer startup owner 补齐，不改 Foundation 状态或以 autoStart 配置猜已接单。同日再复核删除侧栏对契约外状态组合的推断，并修正共享函数将 declared 当作 starting 的遗留误判；否则侧栏“未启动”而Chat仍“正在准备”。同输入HEAD／当前执行已证明该谓词变化，既有Directory4项、五阶段Chat consumer及13组组件交互通过。后续又确认 Matcha 原生 Running 事件绕过完整启动结算、autostart Busy可覆盖Stop；已在原typed事件链统一有效投影，Matcha结算绑定实际ready-projection进程而非recovery后重采的新进程；OpenClaw Pending与实际reservation绑定，未取得执行权不写共享结果；两peer均仅在停止确认成功后清启动反馈，停止失败不抹掉原事实。当前Host源码使用缓存依赖的metadata编译通过；既有事件测试编译触硬限未运行，完整构建／真实冷启动仍未完成。当前证据与限制见[本轮记录](../../.scratch/openclaw-sidebar-20261108-db2zt7o9/verification.md)，不以组件供给事实冒充冷启动验收。
+
+### Reusable rule / Applies to / Does not apply to / Archive note
+
+已有 P7、DP-001、宪法 §26 足以覆盖：生命周期展示须核 owning workflow 与下游进程两个生命周期、实际生产入口及并列 runtime；验收结论限定到实际运行边界。适用于异步启动／状态展示，不要求单文案修改重跑全应用。保留此次误判证据，不新增状态／验证框架。
+
+## Case: 桌面账号交接依赖散落的回调路径特判
+
+### Status / Linked pattern
+
+promoted；宪法 §26 已覆盖，本次为执行遗漏，不新增同义规则
+
+### Source incident / Symptom
+
+2026-11-07，桌面账号免登录的真实浏览器验证已通过，用户仍质疑补丁式实现。源码复核发现：App 的订阅、公告、可见性回调分别判断 `/auth/desktop`，router 又按来源路径放行登录页，HTTP client 硬编码兑换 URL 排除认证恢复。
+
+### Real minimum loop / Root cause boundary
+
+旧账号内存投影与持久凭据没有区分暂停和删除：为保留失败前的凭据，旧方案恢复旧内存身份后再在各消费者阻止副作用。真正责任方是 Auth Store 的会话生命周期，不是各页面；匿名请求策略属于 API 调用配置，不应靠通用 client 识别业务 URL。
+
+### Fix boundary
+
+Auth Store 的 `suspendSession()` 统一停定时器、失效旧 profile 并清内存，保留持久凭据；`clearAuth()` 复用该路径再删除凭据。router 仅在交接入口暂停，删除恢复选项及登录来源例外，App 删除所有桌面回调路径特判。兑换显式声明 Axios `Authorization:false`，通用 client 尊重匿名语义；票据单次消费、取消旧兑换及安装前资格校验保持不变。[VERIFY: third_party/sub2api/frontend/src/stores/auth.ts] [VERIFY: third_party/sub2api/frontend/src/router/index.ts] [VERIFY: third_party/sub2api/frontend/src/App.vue] [VERIFY: third_party/sub2api/frontend/src/api/auth.ts] [VERIFY: third_party/sub2api/frontend/src/api/client.ts]
+
+### Verification closure
+
+本轮既有 111 项回归、Vue 类型检查、定向 ESLint 通过；隔离真实后端与 Chrome 重放冷启动、已有账号切换、失败保留凭据与普通登录、同页新票据、A/B 响应乱序，完整 dashboard 可见。首次回归曾因错误对象的 plain headers 不具 `.get()` 失败，改为读取原生 Authorization 属性后同组复跑通过，未改测试。桌面 OS 点击全链与线上部署未验证；后端/Main 安全与 close drain 契约未改。
+
+### 原生质量复核补充（2026-11-07）
+
+此前通过功能闭环后仍遗漏了三条失败语义：service 将内部原因替换成裸 503，审计只在成功时标记登录，前端把权限 403 误归无效票据。宪法 §16–18／§26 和 P7 已明确覆盖，属于 reviewer pass 执行遗漏，不新增同义规则；事故事实归本案例，当前行为归模块知识库。修复分别复用 `ApplicationError.WithCause`、`auditActionOverrides` 和 `extractApiErrorCode`，不另建日志、审计或错误解析框架。
+
+本次隔离真实后端逐项触发票据存储、消费、token pair、用户读取、设置读取五类故障，均公开安全 503，原日志保留阶段与根因；查询审计确认 200/401/403/429/503 全为 `auth.login`、body 全省略且失败无伪造 actor。Chrome 中英真实 403 提示管理员限制，同账号完整控制台及复用票据拒绝通过；详细检查与限制见[本轮验证](../../.scratch/browser-login-quality-xoZh2a/validation.md)。下次“给现有认证入口加桌面交接”在实现检查及 reviewer pass 核对成功与失败的原生扩展点；“改按钮文字”不触发此链路复核。
+
+### Reusable rule / Applies to / Does not apply to
+
+适用于同一生命周期语义被多个消费者分别猜测的情形：在真实 owner 表达状态转换，消费者只读状态；在调用配置表达匿名策略，不把路径识别扩散到 transport。不是禁止必要安全 guard，也不要求重写全站认证。下次在入口责任归属与 final reviewer pass 检查；单按钮文案改动不触发。
+
+### Archive note
+
+已有 final-form／单一 owner 规则足以指导本例；保留事故证据，不追加通用认证框架或重复规范。
+
+## Case: 完成态修复的单入口结算与恢复预算错位
+
+### Status
+
+promoted
+
+### Linked pattern
+
+DP-001；宪法§2／§26与P6／P7已覆盖，属于执行遗漏，不新增同义规则
+
+### Source incident / Symptom
+
+2026-11-07，正文已显示但仍响应。CLI重复stop根因修复后，用户再次要求排除补丁式修改；复核发现回执只在完整view投影结算、恢复退休证据按整段历史累计，原本的单条happy path与类型检查没有暴露它们。
+
+### Real minimum loop / Root cause boundary
+
+实际生产函数顺序显示：无已知run的ended timing快照先到，terminalRunIds为空；迟到ACK保accepted，UI已done仍拦下一次发送。独立源码核查另确认：restoring内部预览从未发Host，却全记入外部退休名单，101条双预览历史超过200上限。两者分别归原Renderer record commit与Integration恢复候选边界，不归CLI producer或UI按钮。
+
+### Wrong path taken / Missed first probe
+
+把“落在原owner”和局部检查通过当作语义已收敛，遗漏同一事实从不同入口、不同顺序到达，以及候选内部与外部已发布身份的区别。不是所有guard都错误；原生失败事实到展示的映射仍必要。
+
+### Fix boundary
+
+沿原runtime message model在record commit统一结算exact send／abort／timing，删除投影独有的timing→terminal缓存补偿；恢复以sync-local Restoration保存固定cut和起点checkpoint IDs，原ItemsReplaced清内部候选，只有起点集合的exact退休进入对外证据，删除Streaming全历史镜像，不取消预算或扩live。[VERIFY: src/plugins/chat/store/session-record-projection.ts] [VERIFY: src/plugins/chat/store/matcha-session.ts] [VERIFY: src/plugins/chat/store/session-presentation.ts] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/observation.rs] [VERIFY: runtime-host/integrations/matcha-agent/src/session/projection/stream.rs]
+
+### Verification closure
+
+实际record提交函数八个检查通过，Renderer类型／lint通过；Rust与真实应用验证边界保留在[模块记录](../architecture-knowledge/modules/session-chat/dev.md#工程质量复核收敛事实提交不继续堆-guard)。没有Rust恢复动态回放，不以源码反例或编译代替历史重开验收。
+
+### Reusable rule / Applies to / Does not apply to
+
+已有完整链路与final-form规则：在提交点验证事实的两种到达顺序，并区分内部候选与对外已发布证据。适用于异步回执、恢复和分页旁路；不要求为普通局部修正创建通用状态机，也不授权改原生公共协议。
+
+### Archive note
+
+默认诊断顺序已由DP-001覆盖，此处仅保留可追溯反例，不新增active pattern或架构框架。
+
+## Case: MCP schema 超大整数上限触发模型 502
+
+### Status
+
+promoted
+
+### Linked pattern
+
+DP-001；P3/P4/P5 的真实失败边界与双端协议核查已覆盖。code.md §8 已要求事故归档，旧记录未接入 playbook 索引，本轮又未检索已有记录，属于执行遗漏，不新增同义规则。
+
+### Source incident
+
+2026-11-03，`team_graph_patch.metadata` 的整数 schema 使用 `maximum: u64::MAX`，已删除并进入提交 `e68b7b6f`；原始证据见[当日诊断](../../.scratch/model-diagnosis-20261103/RESULTS.md)。2026-11-07，新增 `maintenance.cursor` 又声明相同上限，复发同类模型 502。当前 Organization 旧修复仍在，不是旧代码回退。[VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:137] [VERIFY: runtime-host/modules/maintenance/src/lib.rs:143-147]
+
+### Symptom / Surface path
+
+OpenClaw 尚未执行工具就无法回复，裸 API 和其他客户端却可成功；本轮又与域名切换相邻。真实链路为 MCP schema → OpenClaw/JavaScript → Magpie → 服务端 Chat→Responses/OAuth 转换 → 模型上游。上游 HTTP 500 被包装为 502，外层 overloaded 分类不是根因。
+
+### Real minimum loop
+
+同入口、模型和凭据，仅携 maintenance 工具声明与最小无上下文消息，交错改变 `cursor.maximum` 或 `allOf`，检查 HTTP、流终态和实际回复；不调用维护动作、不修改生产配置。
+
+### Wrong path taken / Missed first probe
+
+未先检索已有模型 502 诊断及 schema 数值边界，重复扩大域名、协议、重试链调查；把“同一个 MCP 已连接”当作模型实际收到同一工具声明，也会误排该候选。应先核已知故障签名与最终发出的工具集合，再做单变量差分，而不是删工具或条件 schema 试运气。
+
+### Root cause / Root cause boundary
+
+Rust 工具发布了不适合跨浮点 JSON 链路传递的 u64 上限。`18446744073709551615` 经 JavaScript `JSON.parse` 舍入到 2⁶⁴，序列化为 `18446744073709552000`；安装版工具 normalizer 保留该有限数值。已部署服务端 OAuth 转换也以 `map[string]any` / `float64` 解码，因此直接发送精确 u64 上限并不能保证转发后仍精确。修复归 MCP 声明源头，不是 UI、重试、域名或 OpenClaw 专属禁用。
+
+2026-11-03 旧入口的精确 u64 上限对照曾成功；2026-11-07 当前转换链的精确上限对照失败。两次结果必须分列，不能把旧入口结果冒充当前行为。上游内部为何返回 500 未公开，也未捕获本次完整 OpenClaw 出站体。
+
+### Correct first-round plan / Fix boundary
+
+先读取相似事故并核当前源码是否仍有该签名；用同链路交错对照区分数值、条件关键词和偶发恢复。只删除 maintenance 声明的 `cursor.maximum`，保留 `integer`、`minimum: 0`、`allOf`、工具本身和执行端 `as_u64()` 校验；不添加 provider 过滤、兼容层或任意缩小合法范围。[VERIFY: runtime-host/modules/maintenance/src/lib.rs:86-90] [VERIFY: runtime-host/modules/maintenance/src/lib.rs:143-166]
+
+### Verification closure
+
+2026-11-07 同链路 14 次最小差分：完整 maintenance schema 三次均 502；只删除 maximum 两次均 200/OK；只删除 allOf 仍 502；safe integer 及稍低于 u64 上限的值成功，精确 u64 上限与 2⁶⁴ 失败。修改源码后再从当前声明生成 schema，经安装版 normalizer 和同模型入口得到 200/OK、完整流结束，响应 ID 为 `d0a2e338-0820-497e-949c-174fcc4dce30`。限定 rustfmt 检查通过；未新增测试。
+
+以上证明该字段在当前链路可独立触发故障，不等于完整桌面恢复：尚未重建/投递 runtime-host，修改后的真实 stdio catalog、维护工具调用和完整 OpenClaw 对话均未复验。
+
+### Reusable rule / Applies to
+
+新增或修改 MCP/模型工具的数值 schema，以及“裸 API 成功、带工具请求失败”时，检查 schema 数值本身经过各 JSON 解析器后是否保真；连接成功、工具没有执行或另一客户端成功不能代替模型出站工具声明核对。既有 DP-001/P4 负责诊断顺序，本卡提供具体签名与反例。
+
+### Does not apply to
+
+不把所有 502 都归为 schema，不删除正常的 u32 maximum，也不把仅在 Rust 内部使用的 `u64::MAX` 当作模型协议缺陷。不同入口、账户或协议的历史成功不能替代当前链路差分。
+
+### Archive note
+
+合并首次事故与新增工具复发，保留差分结论及未验边界；playbook 索引供下一次 diagnosis 入口触发，code.md 仅保留既有路由，不堆业务细节。
+
+## Case: 把本机对外显示名称误解成成员备注
+
+### Status
+
+archived
+
+### Linked pattern
+
+项目 CLAUDE.md §2 先理解目标、§26 Final-form 先查事实源与消费者；规则已明确，本次为沟通与调查执行偏差，不新增同义规则。
+
+### Source incident / Symptom
+
+2026-11-07 用户圈出本机名称并询问可否修改。回答先沿 member.update 建议成员改名，遗漏真正目标是「我改一次本机显示名，对方看到同一设备的新名字」，随后又把建议行为表述得像现有能力。用户明确纠正不是成员备注。
+
+### Real minimum loop / Root cause boundary
+
+本机名称输入 → Main Access.host_name持久化 → 邀请/Join/认证hello发送 → 对端关联成员显示投影。旧本机初始化同时填充host与member名称，但不是同一个编辑责任；网络deviceName又是独立节点标签。仅因界面落在成员详情就认定事实归属，未提前读出生产者到远端列表的完整链。后续实现又把对端名双写 SQLite member.name 与 pair 文件；SQLite先提交、pair保存失败时两处分歧，缺少失败边界核查，仍属既有事实源规则的执行偏差。
+
+### Fix boundary
+
+统一可编辑事实仍为host_name；左上角和配对前复用同一设置，本机成员名由host投影。对端名唯一归关联Access member.name，认证 `acceptName` 仅写SQLite，不再保存pair名称；公开 `PairedClient.name` 从成员投影，缺成员显式 `storage-unavailable`、无旧名fallback。私有旧pair校验后仅去冗余name，原身份/key/credential/join/phase保留，不重置数据。同步沿原command和mutation lane，无后台轮询或跨库事务/补偿；首次建成员与配对仍非跨store原子，不据名称修复承诺该边界。[VERIFY: electron/main/interconnect/index.ts] [VERIFY: electron/main/interconnect/pairing.ts] [VERIFY: electron/main/interconnect/storage.ts] [VERIFY: src/types/desktop/interconnect.ts]
+
+### Verification closure
+
+历史实现与运行证据见[本机名验证](../../.scratch/host-display-name-20261107-i6eco_p4/validation.md)：SQLite5组、三native8项通过，licensed UI8项业务通过，但runtime-host shutdown deadline导致exit1，完整UI验收失败；恢复与锁释放已核，不扩修退出流程。未运行部分按该记录明确列出，不沿用旧成绩。
+
+本轮真实Electron safeStorage/SQLite将 `state.json` 改为目录注入保存失败，认证hello后重开SQLite见memberName=After、pairName=Before，分歧复现run exit0，见[基线日志](../../.scratch/host-name-consistency-20261107-imlri6d2/baseline.log)。该run仅证明缺陷；修复后另次三native同次10项、licensed真实UI同次8项通过，均正常exit0/Job0，原状态恢复/锁释放及源码工件无漂移已核。准确证据和未验边界见[名称一致性验证](../../.scratch/host-name-consistency-20261107-imlri6d2/validation.md)，不据此宣称历史退出deadline已修复。
+
+### Reusable rule / Applies to / Does not apply to
+
+入口判断先辨别用户在改「本人发布的事实」还是「本地备注」，再查生产者及对端消费者；最终回复区分当前能力与建议行为。已有规则覆盖，承认本次未遵守，不扩成所有名称都跨端同步。
+
+### Archive note
+
+保留可追溯误判，不修改或堆叠长期规则；下次在入口归属判断和最终事实核对阶段触发。
+
+## Case: 共享资源只有暂停，没有取消登记
+
+### Status
+
+archived
+
+### Linked pattern
+
+既有完整链路检查与 `CODING_CONSTITUTION.md` §26；不新增同义规则。
+
+### Source incident / Symptom
+
+2026-11-07 用户在「我的共享」指出已登记能力无法删除。原详情仅暂停/恢复；公共 AccessChange、strict parser 和 Main domain 均无删除操作，不是按钮遗漏或刷新故障。
+
+### Real minimum loop / Root cause boundary
+
+真实资源详情确认 → 既有 commandAccess/POST command → Main Access 唯一事务删除 resource 与其 grants → 新快照 → 原 discover/admit 不再授予访问。缺失归属资源生命周期，不能用 UI 隐藏或暂停代替终止登记，也不能删除原 capability。
+
+### Fix boundary
+
+新增 `resource.delete{id}`，沿原 expectedRevision/顺序边界/SQLite 事务一次清理目标登记及其 grants；四语应用内确认，成功后收起详情。其他资源、成员、角色、配对和本机能力保持；重新登记为新 ID、不继承旧授权，已准入操作不回滚。无新 route、owner、缓存或取消框架。
+
+### Verification closure
+
+本轮独立真实 SQLite 同次7组与 Windows licensed UI 同次9项通过；包括严格输入、revision冲突、事务清授权、重开、active/paused、取消确认、角色投影、重载、重新登记与四语短窗。正常exit0/Job0、锁释放、原状态恢复及33source/5artifact无漂移已核。初次shell引号和隐藏radio定位失败保留；未改产品迎合carrier。不是跨机或全平台证明，详见[本轮记录](../../.scratch/resource-access-implementation/resource-delete-validation-20261107.md)。
+
+### Reusable rule / Applies to / Does not apply to
+
+功能闭环应覆盖当前业务真正需要的终止动作，并在事实owner一次清理关联授权，不能只核创建和暂时禁用。不据此推导所有实体都必须可删除，也不自动扩大到成员/角色删除或已执行副作用回滚。
+
+### Archive note
+
+现有完整链路和 final-form 原则足够；保留具体遗漏与运行证据，不堆叠长期同义规则。
+
+## Case: TeamRun 会话创建误拆独立 MCP 工具
+
+### Status
+
+promoted
+
+### Linked pattern
+
+`CODING_CONSTITUTION.md` §26 的现有入口复用与单一路径规则；不是新增架构框架。
+
+### Source incident
+
+2026-11-06，用户要求 MCP 支持同 Agent 多会话，并要求 schema 描述参考已有字段。首版另加独立创建 tool，用户追问为何不能放进原有创建节点的工具。
+
+### Wrong path taken
+
+把原生会话创建与图写事务不同，直接当作必须拆成两个模型工具的理由。内部副作用边界决定执行与失败语义，不必一一决定用户工具数量；只证明复用后端 owner，遗漏模型实际使用的建图入口。
+
+### Root cause boundary
+
+Organization MCP catalog/schema/dispatch，而非原生 create 或 durable intent。独立工具并非用户要求，也非现有 `team_graph_patch.operations` 无法表达。
+
+### Correct first-round plan
+
+在原工具扩展 `create_role_session` 操作，明确单项调用、禁止与改图混批；成功返回真实 role/ref，再经 context 与同工具保存节点。保持原设计 guard、幂等与 unknown 恢复，不承诺跨原生创建和图保存的原子事务。
+
+### Fix boundary
+
+删除独立工具的注册、allowlist、函数与分发，不保留别名；schema、prompt、parser 和当前契约文档一致收回原入口。底层仍只有原创建 owner。
+
+### Verification closure
+
+源码残留与差异检查通过；Organization 定向 check 的 Cargo exit0，守卫等待后代超时124、清理后Job0，分列记录。新版完整构建、实际工具列表及原生生命周期的结果以[本轮记录](../../.scratch/team-role-sessions-20261105-xWJYZt/validation.md)为准，不沿用独立tool版本工件。
+
+### Reusable rule
+
+扩展已有工作流前先检查原工具的操作语法；内部事务或owner不同，不自动推出新增对外工具。复用入口不能抹掉副作用、混批、幂等和未知结果边界。
+
+### Archive note
+
+已有§26覆盖，属于入口契约选择的执行纠偏，不增加同义规则。
+
+## Case: TeamRun 画布跟随修复遗漏空闲帧与提交归属
+
+### Status
+
+promoted
+
+### Linked pattern
+
+P6/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖；规则明确而执行遗漏，不新增同义规范。
+
+### Source incident
+
+2026-11-06，用户报告运行图节点偶发不能拖、上移受限、越出视口不跟随；完成首轮修改后再次要求避免补丁式实现。
+
+### Wrong path taken
+
+首轮正确去掉负坐标钳制、区分读取与mutation锁并补四边平移，但将rAF无条件续订到整个手势结束；指针停在画布中央也逐帧读DOM。原点补偿与待提交pan又由两个layout effect先后写scroll。四边能动及类型检查通过，没有覆盖中央静止、滚动唤醒和同次视口提交。
+
+### Root cause boundary
+
+Renderer的同一画布交互流程没有同时收口调度和提交：需要连续运行的是边缘平移，不是全部拖拽存续时间；原点补偿和平移应在同次几何提交后一起应用。[VERIFY: src/plugins/teams/pages/TeamRunGraphCanvas.tsx]
+
+### Fix boundary
+
+保留现有Canvas与原patch契约；同一frame请求入口受pointermove/scroll唤醒，edge pan才续帧，中央停止并清时间基线。单一layout effect合成原点补偿与pan，不扩成通用手势框架、不再加外层guard。[VERIFY: src/plugins/teams/pages/TeamRunGraphCanvas.tsx]
+
+### Verification closure
+
+首轮真实前台四边持续拖动及touchCancel还原通过，0位置patch，但属于调度收口前。收口后的Renderer noEmit、两文件ESLint零告警、既有Canvas19/19及限定diff-check通过，未编写测试。首次effect依赖告警已按真实提交依赖修正。当前只读核到实际应用隐藏Chat、无Canvas，未再导航或激活；最终中央停帧、scroll唤醒、四边平移及松手保存未实机复验，不用旧实测或既有编辑器单测冒称已覆盖。详细结果见[模块记录](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-06-画布拖拽边界与边缘平移)。
+
+### Reusable rule
+
+按既有§26在交互reviewer pass核对活动区间和实际提交责任：连续手势不等于必须连续执行；验证中央静止、边缘持续、外部scroll与最终事件，不只看单次拖动能否移动。普通文案或无持续调度的点击不扩做帧循环审查。
+
+## Case: 审批展示预算误作原生请求有效性
+
+### Status
+
+promoted
+
+### Linked pattern
+
+DP-001；P4/P6/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖，本次为执行遗漏，不新增同义规则。
+
+### Source incident
+
+2026-11-05，用户报告工具审批没有工具名或操作内容；首轮补齐 Matcha 信息链后，质量复核发现合法大参数会被展示预算拒绝，OpenClaw 的空详情接线也不代表功能可用。
+
+### Wrong path taken
+
+把公开展示的 128KiB 预算直接用于判定原生请求有效性；只核字段经过各层，没有覆盖原生合法输入超出展示预算的反例。OpenClaw 只补空详情以通过公共类型编译，未据此检查原生展示、无 runId 事件及查询／响应入口的完整消费者。后续复核又漏掉 constructor 合法字段、公共 request 可省略及已解决历史占满32项三个边界；属于既有规则明确但执行未遵守，不新增同义规则。
+
+### Root cause boundary
+
+原生 Matcha input 没有同等字节限制，首轮 `Pending::approval()` 的详情校验失败会在消费 cursor 提交前中断观察，冷回放仍可再次遇到该事件。OpenClaw 原生 presentation 是 exec／plugin／system-agent 三种事实，不能强造 Matcha tool ID；native session UUID 也不能当作 session key。[VERIFY: matcha-agent/app-server/src/interaction/native.rs:28-49] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/observation.rs:351-381] [VERIFY: runtime-host/integrations/openclaw/src/session/protocol.rs]
+
+### Fix boundary
+
+原生有效性与展示完整性分开，预算不足须明确表达，不静默截断成完整内容、不放大所有 payload 预算。两个 Integration 各自核原生身份与决策，公共卡片只展示事实，不从工具名、run 或展示字段反推授权。后续补齐 OpenClaw 候选失败：内部 Result 区分失败与 no-op，失败复用无成功 native cursor 的 Unknown／RecoveryRequired，审批 known 失效至权威同步；不在 router 叠 guard 或新增重试。连接接收序号与 Host 发布恢复事实的 seq 仍可推进，不把它们误称为业务成功水位。[VERIFY: runtime-host/integrations/openclaw/src/session/reducer.rs:399-548,858-871] [VERIFY: runtime-host/integrations/openclaw/src/driver/projection.rs:42-59]
+
+### Verification closure
+
+展示预算、两运行时原生审批链与后续三处补修已改；decoder／决策入口及单方法连续1024周期对照通过，既有四 suite仍12通过／9失败。再补候选失败语义后 production check与实际失败转换入口执行通过，但完整生产库回放构建两次触World依赖的5GiB硬限，未执行完整回放。保留构建／验证失败与后续局部通过的区别。真实审批与恢复未验收，完整结果见 [Session / Chat 验证记录](../architecture-knowledge/modules/session-chat/dev.md#2026-11-05-审批候选失败语义--源码已改完整回放受阻)，不据编译或局部运行宣称业务修复完成。
+
+### Reusable rule
+
+在实现检查与 reviewer pass 对照原生合法输入范围、公开展示预算、实际查询／响应入口；覆盖合法数据字段、可选输入缺省与同一 owner 的连续生命周期，而不只验首个成功样本。用超限输入、无可选 run 身份及第二运行时原生判别作为反例，不以共同字段或编译通过代替语义闭环。
+
 ## Case: OpenClaw 原生媒体配置先于运行包交付
 
 ### Status
@@ -245,6 +659,14 @@ Main noEmit 与七文件 no-fix lint 通过（1 条既有 warning）；首次 Re
 
 同日用户再次质疑补丁式修改。限定复核发现 download popup 的完成回调先将 activeTabId 改回 opener 再 close，绕过统一后继规则；从已释放 claim 的 retained Agent 页派生用户 popup 后，切 B 再完成下载，可走到激活 A 的任务页。现删除回调里的 opener 预选，仅保原 popup 实例校验并调用 close；不在 Renderer 补 hide、不增加第二个显示权限判断。[VERIFY: electron/main/iab/manager.ts:452-455] 本次为静态因果确认，未实机复现；Main noEmit 与单文件 no-fix lint 结果见同一[验证记录](../../.scratch/workspace-browser-session-continuity-20261103-verification.md)。
 
+### 2026-11-08 续记：聊天选择与实际呈现遗漏
+
+前轮手动开页已移除跨 await 的旧 Workspace controller，但仅凭静态检查就宣称结构收口。独立只读复核确认两条源码可达反例：主区选聊天后关闭后台 native active 页，普通快照因两区 null 自动激活后继主区页；侧区非 IAB 全屏时新增归主区的浏览器页，IAB 仅凭 main placement 就消费开页意图，主区仍被遮挡。沿既有 §26／P6／P7 归类为执行未遵守，不新增规则；2026-11-03 的手动页跨 scope 规则已由 2026-11-07 精确展示 scope 合同取代，不恢复全局混显。
+
+修复保留原 `activate` 单一路径：显式主区激活解除侧区 full／fullscreen 与 composer dock，`reveal:false` 不改布局；Workspace 提供纯呈现资格判断，IAB 确认后消费，普通快照不将 main null 当空选择。描述符同步与选区／布局确认分开，不新增状态、重试、兼容层或 native 生命周期分支。[VERIFY: src/plugins/workspace/context.tsx:60-65] [VERIFY: src/plugins/workspace/page-placement.ts:3-11] [VERIFY: src/plugins/iab/workspace.tsx:43-83]
+
+最终三文件 nofix lint exit0（1 条既有 Fast Refresh warning）、Renderer 全量 noEmit exit0，受控 Job 均 active=0；未新增测试／probe／日志，未运行本轮构建、应用或 E2E，两条真实 UI 路径仍未验收。该成绩不替代前轮转正迟到开页、会话隔离或 native 实例连续性验证。
+
 ### Reusable rule
 
 沿已有完整链路规则，在目标冻结和最终复核时分别检查容器意图、页面生命周期、原生实例和操作权；不能用保一个 flag 或类型成功替代用户原始结果。无需扩大为全会话页面缓存或另一套权限系统。
@@ -338,6 +760,10 @@ DP-001；既有 P4/P6/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖，属于执
 ### 2026-10-31 原提示词忠实性纠偏
 
 用户追问增强提示词来源，确认先前仅参考机制、正文为自行编写后，明确要求直接用Accio原文。静态追到提取包本地默认`xfo.PROMPT_ENHANCE_SYSTEM_PROMPT`与`xza/Sza`最终规则，增强组件现逐字保留1642字符原文，删除旧JSON rewrite与摘要伪领域增强路径。不将单prompt桥冒称原system/user两消息，不复制候选增强器平台或更改服务端。原文逐字比较、定向lint及Renderer noEmit通过，未调用模型；来源hash、必要适配及未验限制见[本轮台账](../../.scratch/design-interaction-20261031/README.md#2026-10-31-直接复用-accio-原增强提示词)。这是既有参考忠实与§26的执行纠偏，不新增同义规则。[VERIFY: src/plugins/chat/components/ComposerPromptEnhancement.tsx]
+
+### 2026-11-08 路径复制提示原文忠实性纠偏
+
+用户批准迁入参考版“逐字符复制，不重输目录”，主侧却将其原始 Bash 完整命令改成自写 Read JSON 参数指引。用户明确不要加工后，撤掉改写，沿原内置 Skill owner 接入参考三段原句与两批预算；只适配本地工具可用性、预算、路径和安全 quoting，不把 Artifact 专属上下文或全文 tail 塞进巨大日志处理。三段模板只读原文比对通过；类型/既有回归不证明真实模型不会抄错，实机未复验。用户继续追问发现 Read 截断还自行叠加粗估/字节约束、提前中止及空串兜底，未证明优于参考；按“能一比一移植就不自行修改”撤掉，算法循环和警告选择回到源分支，只适配本地类型/字段及缺少 allow_large 的接口。既有上游保真要求已覆盖，是执行遗漏，不增加同义规则。下次在提示组装处同时核原句来源与适用边界，不将“语义类似”称为原文。[VERIFY: matcha-agent/src/skills/bundledSkills.ts] [VERIFY: matcha-agent/src/utils/toolResultStorage.ts] [VERIFY: .scratch/large-output-alignment-20261108.md]
 
 ### 2026-11-03 浏览器工具原文忠实性纠偏
 
@@ -1241,6 +1667,24 @@ Host admission 通知与 Organization coordinator 生命周期接线；查看入
 ### Archive note
 
 本卡保存已证根因、修复落点与尚未闭合的验收；现有规则已完整覆盖，不增同义 pattern，也不把归档状态当成 live 验收通过。
+
+## Case: Session 历史恢复与错误码展示（2026-11-06）
+
+### Status
+
+源码已修，真实会话恢复未验收；不是整体验收完成。
+
+### Symptom and evidence
+
+Matcha 历史中的合法审批收尾发生在 run terminal 之后，被公共状态机一概拒绝，形成 InvalidChange → InvalidReadback → 503。原生持久事件与 Host 日志、Renderer 内存交叉核对：文件会话459成功→461实例关闭；另一会话442成功→2025重启恢复；未完成性能会话则是恢复审批后记录 outcomeUnknown/server_restarted，属于不同语义。证据见 `.scratch/session-history-fix-20261106-sonqn0hu/verification.md`。
+
+### Owning fix and quality correction
+
+SessionState 在原 apply 与 replay 路径允许合法 Resolved，保留 Requested 和运行防复活，不删事件或清终态集合。首次展示修复仍用英文 `Session runtime unknown` 匹配翻译；质量复核确认这是把已知结构化 issue 降成文案再猜回语义。最终在原 projection 使用既有 lastIssue.code 保留 `session.runtime.<issue>`，展示复用原按码本地化，删除字符串匹配，不新增 DTO、状态或错误框架。加载失败只依据当前 scoped historyStatus，不接无归属全局错误。
+
+### Reusable rule and verification boundary
+
+已有编码宪法§16/§17/§26与DP-001已覆盖，偏差是执行遗漏，不新增同义规则。修复或本地化运行错误时，入口及reviewer均检查“原生结构化原因→现有错误载体→展示”的完整链；纯文案替换不触发状态模型改造。类型和lint通过不代表真实重放恢复；旧测试夹具失败及共享构建限制原样保留在验证记录。
 
 ## Case: Goal 原生窗口 ID 被会话地址替代
 

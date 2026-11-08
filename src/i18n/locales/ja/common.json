@@ -902,6 +902,8 @@
             "signedIn": "ログイン中",
             "checking": "ログイン状態を確認中",
             "openMenu": "アカウントメニューを開く",
+            "openConsole": "クラウドアカウント管理",
+            "openConsoleFailed": "クラウドアカウント管理画面を開けませんでした",
             "loginAria": "MatchaClaw にログイン",
             "quotaEmpty": "ログイン後に使用量を表示",
             "subscription": "サブスクリプション",
@@ -1086,6 +1088,15 @@
         "selectAgent": "エージェントを選択"
     },
     "switchboard": {
+        "runtimeStarting": "起動中、エージェントの読み込みを待っています…",
+        "runtimeFailed": "起動失敗",
+        "runtimeStopped": "未起動",
+        "openClawRepair": "<status>起動失敗</status>、Matcha で診断・修復",
+        "openClawStart": "<status>未起動</status>、Matcha で確認して起動",
+        "runtimeStatusUnavailable": "現在、状態を取得できません",
+        "openClawMatchaUnavailable": "Matcha Agent の準備ができると利用できます",
+        "openClawDraftFailed": "診断用の下書きを開けませんでした。もう一度お試しください",
+        "openClawDiagnosticPrompt": "この端末で Matcha が管理している OpenClaw を調べ、起動または接続できない原因を特定してください。問題を修復して再起動し、接続とエージェント一覧が復旧したことを確認してください。既存の設定とセッションを保持し、データは消去しないでください。",
         "allAgents": "すべてのエージェント",
         "allTeams": "すべてのチーム",
         "searchSessions": "セッションを検索",
@@ -1111,9 +1122,9 @@
         "runtime": "ランタイム",
         "teamSession": "チーム会話",
         "tabs": {
-            "agents": "Agents",
-            "teams": "Teams",
-            "sessions": "Sessions"
+            "agents": "エージェント",
+            "teams": "チーム",
+            "sessions": "会話"
         },
         "normalSessions": "通常"
     },

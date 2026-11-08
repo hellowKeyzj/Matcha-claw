@@ -54,9 +54,11 @@ export function handleWebSocketOpen(ws: WSContext, sessionId: string) {
 
   const bus = getEventBus(sessionId)
 
-  // Replay ALL events (inbound + outbound) so the bridge can reconstruct
-  // the full conversation history — assistant replies are inbound events.
-  const missed = bus.getEventsSince(0)
+  // Replay only outbound events, matching live delivery. Inbound events are
+  // CLI output for Web/history and must not be echoed back to the worker.
+  const missed = bus
+    .getEventsSince(0)
+    .filter(event => event.direction === 'outbound')
   if (missed.length > 0) {
     log(`[WS] Replaying ${missed.length} missed event(s)`)
     for (const event of missed) {

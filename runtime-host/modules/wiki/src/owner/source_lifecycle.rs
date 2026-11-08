@@ -666,10 +666,12 @@ fn lock_source_mutations(root: &Path, project_id: &str, paths: &[&str]) -> Resul
 fn mark_source_task_done(
     root: &Path,
     task_id: Option<&str>,
+    kind: &WikiSourceTaskKind,
 ) -> Result<(), WikiFailure> {
     let _tasks_lock = lock_source_tasks(root)?;
     let mut tasks = read_source_tasks_unlocked(root)?;
     if let Some(task) = tasks.iter_mut().find(|task| Some(task.id()) == task_id)
+        && task.kind() == kind
         && task_is_open(task)
         && !task.is_paused()
     {
@@ -696,7 +698,7 @@ pub(super) fn finish_source_execution(
         if cancelled {
             task.mark_cancelled();
         } else if let Some(error) = error {
-            task.mark_failed(format!("{error:?}"));
+            task.mark_failed(error.to_string());
         } else {
             task.mark_done();
         }
@@ -961,7 +963,7 @@ pub(super) async fn delete_source(
     snapshot_paths.extend(updated_pages.iter().map(String::as_str));
     snapshot_paths.extend(deleted_pages.iter().map(String::as_str));
     refresh_file_snapshot_for_source(root, &snapshot_paths, project_id, task_id.as_deref(), &[&source_relative_path], cleanup)?;
-    mark_source_task_done(root, task_id.as_deref())?;
+    mark_source_task_done(root, task_id.as_deref(), &WikiSourceTaskKind::Deleted)?;
     Ok(WikiDeleteSourceReceipt::new(
         source_relative_path,
         deleted_pages,
@@ -1230,7 +1232,7 @@ pub(super) fn migrate_source_path(
         rollback_page_updates(root, &page_updates, &updated_pages);
         return Err(error);
     }
-    mark_source_task_done(root, task_id.as_deref())?;
+    mark_source_task_done(root, task_id.as_deref(), &WikiSourceTaskKind::Moved)?;
     Ok(WikiSourceMoveReceipt::new(
         old_source_relative_path.to_owned(),
         new_source_relative_path.to_owned(),
@@ -3503,6 +3505,8 @@ fn is_snapshot_ignored(relative_path: &str) -> bool {
         || relative_path.starts_with(".llm-wiki/")
         || relative_path == WIKI_MEDIA_DIR
         || relative_path.starts_with("wiki/media/")
+        || relative_path == "raw/sources/.artifacts"
+        || relative_path.starts_with("raw/sources/.artifacts/")
         || relative_path == "raw/sources/.cache"
         || relative_path.starts_with("raw/sources/.cache/")
         || relative_path.contains("/.cache/")

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::LazyLock};
 
-use crate::ProviderModelCapability;
+use crate::{ProviderApiProtocol, ProviderModelCapability};
 use serde::Deserialize;
 
 static CATALOG: LazyLock<ModelReferenceCatalog> = LazyLock::new(|| {
@@ -13,6 +13,8 @@ pub(crate) struct ModelReference {
     capabilities: Vec<ProviderModelCapability>,
     context_window: Option<u64>,
     max_tokens: Option<u64>,
+    reasoning: Option<bool>,
+    reasoning_efforts: ModelReasoningEfforts,
 }
 
 impl ModelReference {
@@ -31,6 +33,32 @@ impl ModelReference {
 
 pub(crate) fn find(model_id: &str) -> Option<&'static ModelReference> {
     CATALOG.find(model_id)
+}
+
+pub fn model_reasoning(model_id: &str) -> Option<bool> {
+    find(model_id).and_then(|model| model.reasoning)
+}
+
+pub fn model_reasoning_efforts(
+    model_id: &str,
+    protocol: ProviderApiProtocol,
+) -> Option<&'static [String]> {
+    let efforts = &find(model_id)?.reasoning_efforts;
+    match protocol {
+        ProviderApiProtocol::OpenAiCompletions => efforts.openai_completions.as_deref(),
+        ProviderApiProtocol::OpenAiResponses => efforts.openai_responses.as_deref(),
+        ProviderApiProtocol::AnthropicMessages => efforts.anthropic_messages.as_deref(),
+        ProviderApiProtocol::GoogleGenerativeAi => efforts.google_generative_ai.as_deref(),
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelReasoningEfforts {
+    openai_completions: Option<Vec<String>>,
+    openai_responses: Option<Vec<String>>,
+    anthropic_messages: Option<Vec<String>>,
+    google_generative_ai: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -80,6 +108,8 @@ impl ModelReferenceCatalog {
                     capabilities,
                     context_window: record.context_window,
                     max_tokens: record.max_tokens,
+                    reasoning: record.reasoning,
+                    reasoning_efforts: record.reasoning_efforts,
                 },
             );
             if previous.is_some() {
@@ -94,7 +124,13 @@ impl ModelReferenceCatalog {
         if model_id.is_empty() {
             return None;
         }
-        self.records.get(model_id)
+        self.records.get(model_id).or_else(|| {
+            let model_id = model_id.rsplit('/').next()?;
+            self.records
+                .iter()
+                .find(|(id, _)| id.eq_ignore_ascii_case(model_id))
+                .map(|(_, model)| model)
+        })
     }
 }
 
@@ -112,6 +148,9 @@ struct ModelReferenceRecord {
     capabilities: Vec<String>,
     context_window: Option<u64>,
     max_tokens: Option<u64>,
+    reasoning: Option<bool>,
+    #[serde(default)]
+    reasoning_efforts: ModelReasoningEfforts,
     source: String,
     checked_at: String,
 }

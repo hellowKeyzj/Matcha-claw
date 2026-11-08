@@ -161,6 +161,8 @@ enum NativeStatus {
 #[derive(Serialize, Deserialize)]
 struct Output {
     text: Body,
+    #[serde(default)]
+    business_messages: Option<Vec<Body>>,
     summary: Body,
     decision: String,
 }
@@ -223,6 +225,8 @@ impl Terminal {
             .map(|value| -> Result<Output, StoreFault> {
                 Ok(Output {
                     text: bodies.put(value.final_assistant_text())?,
+                    business_messages: Some(value.business_messages().iter()
+                        .map(|text| bodies.put(text)).collect::<Result<_, _>>()?),
                     summary: bodies.put(value.summary())?,
                     decision: value.decision().to_owned(),
                 })
@@ -280,12 +284,22 @@ impl Terminal {
         };
         let output = self
             .output
-            .map(|value| {
-                valid(TeamNodeOutput::restore(
+            .map(|value| -> Result<TeamNodeOutput, StoreFault> {
+                let output = valid(TeamNodeOutput::restore(
                     bodies.read(value.text)?,
                     bodies.read(value.summary)?,
                     value.decision,
-                ))
+                ))?;
+                match value.business_messages {
+                    Some(messages) => {
+                        let messages = messages.into_iter().map(|body| bodies.read(body)).collect::<Result<Vec<_>, _>>()?;
+                        if messages.iter().any(|message| message.trim().is_empty()) {
+                            return Err(StoreFault::InvalidFacts);
+                        }
+                        Ok(output.with_business_messages(messages))
+                    },
+                    None => Ok(output),
+                }
             })
             .transpose()?;
         Ok(TerminalObservationSnapshot::new(

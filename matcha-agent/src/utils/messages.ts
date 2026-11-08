@@ -135,6 +135,7 @@ import {
   LOCAL_COMMAND_STDOUT_TAG,
 } from '../constants/xml.js'
 import { DiagnosticTrackingService } from '../services/diagnosticTracking.js'
+import { renderToolInputSchema } from '../services/searchExtraTools/toolSchema.js'
 import {
   findToolByName,
   type Tool,
@@ -3984,11 +3985,12 @@ Read the team config to discover your teammates' names. Check the task list peri
     if (attachment.type === 'tool_discovery') {
       if (attachment.tools.length === 0) return []
       const lines = attachment.tools.map(
-        t => `- ${t.name}: ${t.description.slice(0, 100)}`,
+        t =>
+          `- ${t.name}: ${t.description.slice(0, 100)}\n${renderToolInputSchema(t.inputSchema)}`,
       )
       return wrapMessagesInSystemReminder([
         createUserMessage({
-          content: `The following tools were discovered as relevant to your task. To invoke them, you MUST use ExecuteExtraTool — this is the only way to call these tools. Do not read source code or reason about whether they are callable; just call ExecuteExtraTool({"tool_name": "<name>", "params": {...}}) directly.\n\n${lines.join('\n')}`,
+          content: `The following tools were discovered as relevant to your task. To invoke them, you MUST use ExecuteExtraTool({"tool_name": "<name>", "params": {...}}) with the exact parameter names from their input schemas. Never guess arguments. If a schema is unavailable, first call SearchExtraTools({"query": "select:<name>"}) to get the tool definition before invoking it.\n\n${lines.join('\n\n')}`,
           isMeta: true,
         }),
       ])

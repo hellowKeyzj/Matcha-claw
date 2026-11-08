@@ -37,8 +37,7 @@ export const interactiveRoles = new Set(['button', 'link', 'textbox', 'checkbox'
 const contentRoles = new Set(['heading', 'cell', 'gridcell', 'columnheader', 'rowheader', 'listitem', 'article', 'region', 'main', 'navigation'])
 const structuralRoles = new Set(['generic', 'group', 'list', 'table', 'row', 'rowgroup', 'grid', 'treegrid', 'menu', 'menubar', 'toolbar', 'tablist', 'tree', 'directory', 'document', 'application', 'presentation', 'none'])
 const collapsedRoles = new Set(['generic', 'none', 'presentation', 'document', 'application'])
-const intentRules: { roles: string[]; words?: string[] }[] = [
-  { roles: ['navigation'] }, { roles: ['contentinfo'] },
+const intentRules: { roles: string[]; words: string[] }[] = [
   { roles: ['region', 'dialog', 'alertdialog', 'banner', 'complementary', 'alert'], words: ['cookie', 'consent', 'accept all', 'we use cookies', 'agree to', 'cookie 政策', '使用 cookies', '使用cookies', '使用 cookie', '隐私偏好'] },
   { roles: ['complementary', 'region', 'dialog'], words: ['intercom', 'zendesk', 'zopim', 'drift', 'live chat', 'chat with us', 'support chat', 'help chat', 'crisp chat', 'tawk.to', '在线客服', '在线咨询'] },
   { roles: ['navigation', 'list'], words: ['breadcrumb', 'breadcrumbs', '面包屑'] },
@@ -323,7 +322,7 @@ function pruneAndRender(roots: FusedNode[], options: NativeSnapshotOptions): Nat
   }
   const total = tree.reduce((sum, node) => sum + summarize(node).interactive, 0)
   const pruneIntent = (nodes: FusedNode[]): FusedNode[] => nodes.filter((node) => {
-    const matched = intentRules.some((rule) => rule.roles.includes(node.role) && (!rule.words || rule.words.some((word) => node.name.toLowerCase().includes(word))))
+    const matched = intentRules.some((rule) => rule.roles.includes(node.role) && rule.words.some((word) => node.name.toLowerCase().includes(word)))
     const stats = intent.get(node)!
     return !matched || stats.hasMain || total > 0 && stats.interactive / total > 0.5
   }).map((node) => { node.children = pruneIntent(node.children); return node })

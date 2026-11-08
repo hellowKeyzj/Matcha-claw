@@ -14,6 +14,8 @@ use super::{decode, record};
 struct Header {
     revision: u64,
     runtime: Option<Vec<Binding>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    role_session_intents: std::collections::BTreeMap<String, SessionIntent>,
     creation_key: String,
     lifecycle: Lifecycle,
     gate: Gate,
@@ -33,6 +35,37 @@ struct Binding {
     endpoint_session: String,
     agent: String,
     endpoint: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionIntent {
+    binding: Binding,
+    submission_uncertain: bool,
+}
+
+fn encode_binding(binding: &RoleSessionReceipt) -> Binding {
+    Binding {
+        team: binding.team().as_str().to_owned(),
+        run: binding.team_run().as_str().to_owned(),
+        role: binding.role().as_str().to_owned(),
+        session: binding.session_ref().as_str().to_owned(),
+        endpoint_session: binding.endpoint_session_id().as_str().to_owned(),
+        agent: binding.agent().as_str().to_owned(),
+        endpoint: binding.endpoint().as_str().to_owned(),
+    }
+}
+
+fn decode_binding(binding: Binding) -> Result<RoleSessionReceipt, StoreFault> {
+    Ok(RoleSessionReceipt::with_endpoint_session_id(
+        TeamId::try_new(binding.team).map_err(|_| StoreFault::InvalidFacts)?,
+        GraphRunId::new(binding.run),
+        RoleId::try_new(binding.role).map_err(|_| StoreFault::InvalidFacts)?,
+        RoleSessionRef::try_new(binding.session).map_err(|_| StoreFault::InvalidFacts)?,
+        EndpointSessionId::try_new(binding.endpoint_session).map_err(|_| StoreFault::InvalidFacts)?,
+        ManagedAgentReference::try_new(binding.agent).map_err(|_| StoreFault::InvalidFacts)?,
+        RuntimeEndpointReference::try_new(binding.endpoint).map_err(|_| StoreFault::InvalidFacts)?,
+    ))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,6 +89,7 @@ pub(crate) struct RunHeader {
     pub(crate) run: GraphRunId,
     pub(crate) revision: TeamRevision,
     pub(crate) runtime: Option<RunRuntimeReceipt>,
+    pub(crate) role_session_intents: std::collections::BTreeMap<String, crate::store::RoleSessionIntent>,
     pub(crate) lifecycle: GraphRunLifecycle,
     pub(crate) gate: RunStartGate,
     pub(crate) retired_executions:
@@ -76,17 +110,12 @@ pub(crate) fn encode_header(run: &GraphRunFacts) -> Result<StoredRecord, StoreFa
         RunStartGate::Designing { design_epoch, prompt_generation } => Gate::Designing(design_epoch.clone(), prompt_generation.clone()),
         RunStartGate::Started => Gate::Started,
     };
-    let runtime = run.runtime().map(|runtime| runtime.bindings().iter().map(|binding| Binding {
-        team: binding.team().as_str().to_owned(),
-        run: binding.team_run().as_str().to_owned(),
-        role: binding.role().as_str().to_owned(),
-        session: binding.session_ref().as_str().to_owned(),
-        endpoint_session: binding.endpoint_session_id().as_str().to_owned(),
-        agent: binding.agent().as_str().to_owned(),
-        endpoint: binding.endpoint().as_str().to_owned(),
-    }).collect());
+    let runtime = run.runtime().map(|runtime| runtime.bindings().iter().map(encode_binding).collect());
     record(run.team(), run.run_id(), RecordKind::RunHeader, "", &Header {
         revision: run.frozen_team_revision().get(), runtime,
+        role_session_intents: run.role_session_intents().iter().map(|(key, intent)| (key.clone(), SessionIntent {
+            binding: encode_binding(&intent.binding), submission_uncertain: intent.submission_uncertain,
+        })).collect(),
         task_execution_context: run.task_execution_context().cloned(),
         creation_key: run.lifecycle().creation_idempotency_key().to_owned(), lifecycle, gate,
         retired_executions: run
@@ -110,15 +139,7 @@ pub(crate) fn decode_header(row: &StoredRecord) -> Result<RunHeader, StoreFault>
     if row.key.scope != run.as_str() || !row.key.id.is_empty() { return Err(StoreFault::InvalidFacts); }
     let revision = TeamRevision::try_new(header.revision).map_err(|_| StoreFault::InvalidFacts)?;
     let runtime = header.runtime.map(|bindings| {
-        let bindings = bindings.into_iter().map(|binding| Ok(RoleSessionReceipt::with_endpoint_session_id(
-            TeamId::try_new(binding.team).map_err(|_| StoreFault::InvalidFacts)?,
-            GraphRunId::new(binding.run),
-            RoleId::try_new(binding.role).map_err(|_| StoreFault::InvalidFacts)?,
-            RoleSessionRef::try_new(binding.session).map_err(|_| StoreFault::InvalidFacts)?,
-            EndpointSessionId::try_new(binding.endpoint_session).map_err(|_| StoreFault::InvalidFacts)?,
-            ManagedAgentReference::try_new(binding.agent).map_err(|_| StoreFault::InvalidFacts)?,
-            RuntimeEndpointReference::try_new(binding.endpoint).map_err(|_| StoreFault::InvalidFacts)?,
-        ))).collect::<Result<Vec<_>, StoreFault>>()?;
+        let bindings = bindings.into_iter().map(decode_binding).collect::<Result<Vec<_>, StoreFault>>()?;
         RunRuntimeReceipt::try_new(run.clone(), bindings).map_err(|_| StoreFault::InvalidFacts)
     }).transpose()?;
     let state = match header.lifecycle {
@@ -153,6 +174,11 @@ pub(crate) fn decode_header(row: &StoredRecord) -> Result<RunHeader, StoreFault>
     }
     Ok(RunHeader {
         task_execution_context: header.task_execution_context,
+        role_session_intents: header.role_session_intents.into_iter()
+            .map(|(key, intent)| Ok((key, crate::store::RoleSessionIntent {
+                binding: decode_binding(intent.binding)?, submission_uncertain: intent.submission_uncertain,
+            })))
+            .collect::<Result<_, StoreFault>>()?,
         team,
         run,
         revision,

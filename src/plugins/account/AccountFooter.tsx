@@ -1,7 +1,8 @@
 import { memo, startTransition, useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { CreditCard, Info, LogIn, LogOut, Palette, UserPlus } from 'lucide-react';
+import { CreditCard, ExternalLink, Info, LockKeyhole, LogIn, LogOut, Palette, UserPlus, Wallet } from 'lucide-react';
+import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import {
   DropdownMenu,
@@ -15,7 +16,8 @@ import { SubscriptionPlanDialog } from './billing/SubscriptionPlanDialog';
 import { useAccountStore } from './stores/account';
 import { useLocalLicenseLocked } from './stores/license';
 import { useSubscriptionStore } from './stores/subscription';
-import type { AccountSubscriptionProjection, AccountUsageProjection, CloudUser } from './api/account';
+import { useSettingsStore } from '@/plugins/settings/store';
+import { openCloudAccountConsole, type AccountSubscriptionProjection, type AccountUsageProjection, type CloudUser } from './api/account';
 import type { SubscriptionProgress as SubscriptionProgressItem, SubscriptionSummary } from './api/subscription';
 
 const SIDEBAR_ACCOUNT_QUOTA_RENDER_LIMIT = 2;
@@ -66,15 +68,6 @@ function buildSidebarQuotaViews(quotas: readonly SidebarQuotaInput[], t: (key: s
   return quotas
     .slice(0, SIDEBAR_ACCOUNT_QUOTA_RENDER_LIMIT)
     .map((quota, index) => buildSidebarQuotaView(quota, index, t));
-}
-
-function buildSidebarBalanceViews(user: CloudUser | null, t: (key: string, options?: Record<string, unknown>) => string): SidebarQuotaView[] {
-  if (!user) return [];
-  const frozenBalance = user.frozenBalance ?? 0;
-  return buildSidebarQuotaViews([
-    { id: 'balance:available', name: t('sidebar.account.quota.availableBalance'), used: user.balance, limit: null, unit: 'USD' },
-    { id: 'balance:frozen', name: t('sidebar.account.quota.frozenBalance'), used: frozenBalance, limit: null, unit: 'USD' },
-  ], t);
 }
 
 function isUsableSubscriptionStatus(status: string | undefined): boolean {
@@ -202,10 +195,12 @@ interface SidebarAccountCardProps {
 }
 
 function SidebarAccountAvatar({ user, initial }: { user: CloudUser | null; initial: string }) {
-  if (user?.avatarUrl) {
+  const userAvatarDataUrl = useSettingsStore((state) => state.userAvatarDataUrl);
+  const avatarUrl = userAvatarDataUrl || user?.avatarUrl;
+  if (avatarUrl) {
     return (
       <img
-        src={user.avatarUrl}
+        src={avatarUrl}
         alt=""
         className="h-8 w-8 rounded-full object-cover"
       />
@@ -234,7 +229,11 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
   onOpenAbout,
   onLogout,
 }: SidebarAccountCardProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const balanceFormatter = useMemo(() => new Intl.NumberFormat(i18n.language, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }), [i18n.language]);
   const signedOutLabel = t('sidebar.account.signedOut');
   const displayName = useMemo(() => accountDisplayName(user, signedOutLabel), [signedOutLabel, user]);
   const email = user?.email?.trim() || undefined;
@@ -248,11 +247,7 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
     if (subscriptionQuotaViews.length > 0) {
       return subscriptionQuotaViews;
     }
-    const balanceViews = buildSidebarBalanceViews(user, t);
-    if (balanceViews.length > 0) {
-      return balanceViews;
-    }
-    if (usage) {
+    if (!user && usage) {
       return buildSidebarQuotaViews([{ ...usage, id: 'account-usage', name: t('sidebar.account.quota.totalUsage') }], t);
     }
     return [];
@@ -261,6 +256,19 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
   const triggerLabel = signedIn ? `${t('sidebar.account.openMenu')} · ${displayName}` : t('sidebar.account.loginAria');
   const triggerClassName = 'mx-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-transparent transition-[background-color,box-shadow] hover:bg-[hsl(var(--shell-surface-hover))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--shell-surface))] data-[state=open]:bg-[hsl(var(--shell-surface-active))] data-[state=open]:ring-2 data-[state=open]:ring-[hsl(var(--shell-border-strong))]';
 
+  const accountIdentity = (
+    <>
+      <SidebarAccountAvatar user={user} initial={initial} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold text-foreground">{displayName}</div>
+        <div className="mt-0.5 truncate text-xs font-normal text-[hsl(var(--shell-text-muted))]">{email ?? statusLabel}</div>
+      </div>
+      <Badge variant={planVariant} className="max-w-[96px] shrink-0 px-2 py-0.5">
+        {planLabel}
+      </Badge>
+    </>
+  );
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -268,44 +276,77 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
           <SidebarAccountAvatar user={user} initial={initial} />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side="right" className="w-72">
-        <DropdownMenuLabel className="space-y-1.5">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <SidebarAccountAvatar user={user} initial={initial} />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-semibold text-foreground">{displayName}</div>
-              <div className="truncate text-xs font-normal text-[hsl(var(--shell-text-muted))]">{email ?? statusLabel}</div>
+      <DropdownMenuContent align="end" side="right" className="w-80 max-w-[calc(100vw-2rem)] rounded-2xl p-2">
+        {signedIn ? (
+          <DropdownMenuItem
+            className="group flex-col items-stretch gap-3 p-3"
+            onSelect={() => {
+              void openCloudAccountConsole().catch(() => {
+                toast.error(t('sidebar.account.openConsoleFailed'));
+              });
+            }}
+          >
+            <div className="flex min-w-0 items-center gap-2.5">{accountIdentity}</div>
+            <div className="flex items-center justify-between text-xs text-muted-foreground group-data-[highlighted]:text-foreground">
+              <span>{t('sidebar.account.openConsole')}</span>
+              <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
             </div>
-            <Badge variant={planVariant} className="max-w-[96px] shrink-0 px-2 py-0.5">
-              {planLabel}
-            </Badge>
-          </div>
-        </DropdownMenuLabel>
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuLabel className="flex min-w-0 items-center gap-2.5 p-3">{accountIdentity}</DropdownMenuLabel>
+        )}
 
-        <div className="space-y-2 px-2.5 py-2">
-          {quotaViews.length > 0 ? (
-            quotaViews.map((quota) => (
-              <div key={quota.id} className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2 text-[11px] text-[hsl(var(--shell-text-muted))]">
-                  <span className="truncate">{quota.name}</span>
-                  <span className="shrink-0">{quota.usageLabel}</span>
-                </div>
-                {quota.hasLimit ? (
-                  <div className="h-1.5 overflow-hidden rounded-full bg-[hsl(var(--shell-surface-muted))]">
-                    <div
-                      className="h-full rounded-full bg-[hsl(var(--shell-icon-active))]"
-                      style={{ width: `${quota.percent}%` }}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ))
-          ) : (
-            <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-[hsl(var(--shell-text-muted))]">
-              {t('sidebar.account.quotaEmpty')}
+        {user ? (
+          <dl className="mx-1 my-2 grid grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] rounded-xl border border-border/70 bg-[hsl(var(--shell-surface-muted))] px-3.5 py-4">
+            <div className="min-w-0 pr-3">
+              <dt className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Wallet aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                {t('sidebar.account.quota.availableBalance')}
+              </dt>
+              <dd className="mt-2 break-all text-[23px] font-semibold leading-none tracking-tight tabular-nums text-foreground">
+                {balanceFormatter.format(user.balance)}
+                <span className="ml-1 text-[10px] font-medium tracking-normal text-muted-foreground">USD</span>
+              </dd>
             </div>
-          )}
-        </div>
+            <div className="min-w-0 border-l border-border pl-3.5">
+              <dt className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <LockKeyhole aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                {t('sidebar.account.quota.frozenBalance')}
+              </dt>
+              <dd className="mt-2 break-all text-[23px] font-semibold leading-none tracking-tight tabular-nums text-foreground">
+                {balanceFormatter.format(user.frozenBalance ?? 0)}
+                <span className="ml-1 text-[10px] font-medium tracking-normal text-muted-foreground">USD</span>
+              </dd>
+            </div>
+          </dl>
+        ) : null}
+
+        {quotaViews.length > 0 || !user ? (
+          <div className="space-y-3 px-3 py-2">
+            {quotaViews.length > 0 ? (
+              quotaViews.map((quota) => (
+                <div key={quota.id} className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-[hsl(var(--shell-text-muted))]">
+                    <span className="truncate">{quota.name}</span>
+                    <span className="shrink-0">{quota.usageLabel}</span>
+                  </div>
+                  {quota.hasLimit ? (
+                    <div className="h-1.5 overflow-hidden rounded-full bg-[hsl(var(--shell-surface-muted))]">
+                      <div
+                        className="h-full rounded-full bg-[hsl(var(--shell-icon-active))]"
+                        style={{ width: `${quota.percent}%` }}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              ))
+            ) : (
+              <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-[hsl(var(--shell-text-muted))]">
+                {t('sidebar.account.quotaEmpty')}
+              </div>
+            )}
+          </div>
+        ) : null}
 
         <DropdownMenuSeparator />
         {signedIn ? (

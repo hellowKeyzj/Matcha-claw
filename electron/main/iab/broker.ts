@@ -71,9 +71,10 @@ export class IabBroker implements IabBrokerContract {
     if (!controller.prepared) this.trackOperation(signal, controller.preparation.then(() => {}, () => {}));
   }
 
-  async acquire(tabId: string, ownerId: string, signal: AbortSignal, generation = 1, assertCurrent?: () => void): Promise<IabCdpLease> {
+  async acquire(tabId: string, ownerId: string, signal: AbortSignal, generation = 1, assertCurrent?: () => void | Promise<void>): Promise<IabCdpLease> {
     signal.throwIfAborted();
-    assertCurrent?.();
+    await assertCurrent?.();
+    signal.throwIfAborted();
     this.checkGeneration(generation);
     this.bindTarget(tabId, ownerId, signal);
     const controller = this.resolveController(tabId, ownerId);
@@ -87,10 +88,12 @@ export class IabBroker implements IabBrokerContract {
     signal.addEventListener('abort', abortAcquire, { once: true });
     try {
       await this.awaitPreparation(controller, signal);
-      const epoch = await this.attach(controller, signal, assertCurrent);
-      assertCurrent?.();
-      signal?.throwIfAborted();
+      const epoch = await this.attach(controller, signal, assertCurrent, undefined, generation);
+      await assertCurrent?.();
+      signal.throwIfAborted();
+      if (this.drainedSignals.has(signal)) throw iabError('IAB_OPERATION_DRAINED', 'Browser operation has already physically drained');
       this.checkGeneration(generation);
+      this.checkOperationEpoch(controller, signal);
       this.checkEpoch(controller, epoch);
       const state: LeaseState = {
         id: randomUUID(), generation, controller, events: new Set(), rules: [],
@@ -99,7 +102,7 @@ export class IabBroker implements IabBrokerContract {
       controller.leases.add(state.id);
       const screenshotEpochs = new WeakMap<AbortSignal, number>();
       const executor: IabCdpExecutor = {
-        send: <T extends IabJsonValue = IabJsonObject>(method: string, params?: IabJsonObject, commandOptions?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal; assertCurrent?: () => void }) => {
+        send: <T extends IabJsonValue = IabJsonObject>(method: string, params?: IabJsonObject, commandOptions?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal; assertCurrent?: () => void | Promise<void> }) => {
           this.checkLease(state);
           if (!/^[A-Za-z]+\.[A-Za-z]+$/u.test(method) || ['Browser', 'Target', 'SystemInfo', 'Tethering'].includes(method.split('.')[0])) {
             throw iabError('IAB_CDP_METHOD_FORBIDDEN', `CDP domain is not available to IAB callers: ${method}`);
@@ -110,11 +113,13 @@ export class IabBroker implements IabBrokerContract {
         },
         setScreenshotViewport: (options) => {
           const work = (async () => {
-            options.signal.throwIfAborted(); options.assertCurrent?.(); this.checkLease(state);
+            options.signal.throwIfAborted(); await options.assertCurrent?.();
+            options.signal.throwIfAborted(); this.checkLease(state);
             this.checkOperationEpoch(controller, options.signal);
-            const epoch = await this.attach(controller, options.signal, options.assertCurrent);
-            this.checkLease(state); this.checkEpoch(controller, epoch);
-            options.signal.throwIfAborted(); options.assertCurrent?.();
+            const epoch = await this.attach(controller, options.signal, options.assertCurrent, state);
+            await options.assertCurrent?.();
+            options.signal.throwIfAborted(); this.checkLease(state);
+            this.checkOperationEpoch(controller, options.signal); this.checkEpoch(controller, epoch);
             screenshotEpochs.set(options.signal, epoch);
             await this.command(controller, epoch, 'Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 0, mobile: false }, undefined, options.timeoutMs, options.signal, state.id, options.assertCurrent);
           })();
@@ -136,24 +141,36 @@ export class IabBroker implements IabBrokerContract {
           return () => state.events.delete(listener);
         },
         setInterceptPolicy: async (rules, options) => {
-          options.signal.throwIfAborted(); options.assertCurrent?.(); this.checkLease(state);
+          options.signal.throwIfAborted();
+          const epoch = controller.epoch;
+          const targetState = controller.state;
+          await options.assertCurrent?.();
+          options.signal.throwIfAborted(); this.checkLease(state);
+          if (this.drainedSignals.has(options.signal)) throw iabError('IAB_OPERATION_DRAINED', 'Browser operation has already physically drained');
+          this.checkOperationEpoch(controller, options.signal);
+          if (controller.epoch !== epoch || controller.state !== targetState) throw iabError('IAB_OPERATION_EPOCH_CHANGED', 'The physical epoch changed during interception policy validation');
+          if (targetState === 'attached') this.checkEpoch(controller, epoch);
           if ([...controller.leases].some((id) => id !== state.id && this.leases.get(id)?.fetchParams)) throw iabError('IAB_INTERCEPT_OWNER_CONFLICT', 'Only one live lease may settle intercepted requests for this tab');
           state.rules = structuredClone(rules);
         },
         listChildFrames: (options) => {
           const work = (async () => {
             this.checkLease(state);
-            options?.assertCurrent?.();
             const requestSignal = options?.signal;
+            requestSignal?.throwIfAborted();
+            await options?.assertCurrent?.();
+            requestSignal?.throwIfAborted(); this.checkLease(state);
             this.checkOperationEpoch(controller, requestSignal);
-            const epoch = await this.attach(controller, requestSignal, options?.assertCurrent);
+            const epoch = await this.attach(controller, requestSignal, options?.assertCurrent, state);
             await this.command(controller, epoch, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: [{ type: 'iframe', exclude: false }] }, undefined, options?.timeoutMs ?? 30_000, requestSignal, state.id, options?.assertCurrent);
             while (controller.discoveries.size) {
               await Promise.all([...controller.discoveries.values()]);
               this.checkLease(state);
               this.checkEpoch(controller, epoch);
             }
-            options?.assertCurrent?.();
+            await options?.assertCurrent?.();
+            requestSignal?.throwIfAborted(); this.checkLease(state);
+            this.checkOperationEpoch(controller, requestSignal); this.checkEpoch(controller, epoch);
             return [...controller.childFrames].map(([sessionId, frameId]) => ({ sessionId, frameId }));
           })();
           this.trackPhysical(controller, controller.epoch, false, work, options?.signal);
@@ -349,7 +366,7 @@ export class IabBroker implements IabBrokerContract {
     this.checkController(controller);
   }
 
-  private async attach(controller: Controller, signal?: AbortSignal, assertCurrent?: () => void): Promise<number> {
+  private async attach(controller: Controller, signal?: AbortSignal, assertCurrent?: () => void | Promise<void>, lease?: LeaseState, generation = lease?.generation): Promise<number> {
     signal?.throwIfAborted();
     if (signal && this.drainedSignals.has(signal)) throw iabError('IAB_OPERATION_DRAINED', 'Browser operation has already physically drained');
     this.checkController(controller);
@@ -358,7 +375,18 @@ export class IabBroker implements IabBrokerContract {
     if (controller.state === 'attached' && controller.debugger.isAttached()) { this.bindOperation(controller, controller.epoch, signal); return controller.epoch; }
     if (controller.state === 'attached') this.invalidate(controller, controller.epoch, 'debugger detached', false);
     this.checkOperationEpoch(controller, signal);
-    assertCurrent?.();
+    const previousEpoch = controller.epoch;
+    const current = assertCurrent?.();
+    if (current) await current;
+    signal?.throwIfAborted();
+    if (signal && this.drainedSignals.has(signal)) throw iabError('IAB_OPERATION_DRAINED', 'Browser operation has already physically drained');
+    if (lease) this.checkLease(lease);
+    if (generation !== undefined) this.checkGeneration(generation);
+    this.checkController(controller);
+    this.checkOperationEpoch(controller, signal);
+    if (controller.attachFlight) { this.bindOperation(controller, controller.epoch, signal); return controller.attachFlight; }
+    if (controller.state === 'attached' && controller.debugger.isAttached()) { this.bindOperation(controller, controller.epoch, signal); return controller.epoch; }
+    if (controller.epoch !== previousEpoch) throw iabError('IAB_OPERATION_EPOCH_CHANGED', 'The physical epoch changed during debugger acquisition');
     if (controller.debugger.isAttached()) throw iabError('IAB_DEBUGGER_IN_USE', 'IAB debugger is already in use');
     controller.debugger.attach('1.3');
     controller.state = 'attached';
@@ -367,9 +395,9 @@ export class IabBroker implements IabBrokerContract {
     const flight = (async () => {
       try {
         const override = this.options.resolveUserAgentOverride?.(controller.key.tabId, controller.key.ownerId);
-        if (override) await this.command(controller, epoch, 'Emulation.setUserAgentOverride', override, undefined, 30_000, signal, undefined, assertCurrent, true);
-        await this.command(controller, epoch, 'Page.enable', undefined, undefined, 30_000, signal, undefined, assertCurrent, true);
-        await this.command(controller, epoch, 'Page.addScriptToEvaluateOnNewDocument', { source: "(() => { if (globalThis === globalThis.top || location.href !== 'about:blank' || typeof globalThis.chrome !== 'undefined') return; Object.defineProperty(globalThis, 'chrome', {value:{},configurable:true,enumerable:true,writable:true}); })()" }, undefined, 30_000, signal, undefined, assertCurrent, true);
+        if (override) await this.command(controller, epoch, 'Emulation.setUserAgentOverride', override, undefined, 30_000, signal, lease?.id, assertCurrent, true);
+        await this.command(controller, epoch, 'Page.enable', undefined, undefined, 30_000, signal, lease?.id, assertCurrent, true);
+        await this.command(controller, epoch, 'Page.addScriptToEvaluateOnNewDocument', { source: "(() => { if (globalThis === globalThis.top || location.href !== 'about:blank' || typeof globalThis.chrome !== 'undefined') return; Object.defineProperty(globalThis, 'chrome', {value:{},configurable:true,enumerable:true,writable:true}); })()" }, undefined, 30_000, signal, lease?.id, assertCurrent, true);
         this.checkEpoch(controller, epoch);
         return epoch;
       } catch (error) {
@@ -436,17 +464,21 @@ export class IabBroker implements IabBrokerContract {
     } catch { this.invalidate(controller, epoch, 'intercepted request policy failed'); }
   }
 
-  private async sendForLease<T extends IabJsonValue>(lease: LeaseState, method: string, params?: IabJsonObject, options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal; assertCurrent?: () => void }): Promise<T> {
+  private async sendForLease<T extends IabJsonValue>(lease: LeaseState, method: string, params?: IabJsonObject, options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal; assertCurrent?: () => void | Promise<void> }): Promise<T> {
     options?.signal?.throwIfAborted();
     if (options?.signal && this.drainedSignals.has(options.signal)) throw iabError('IAB_OPERATION_DRAINED', 'Browser operation has already physically drained');
-    options?.assertCurrent?.();
     const controller = lease.controller;
     this.checkOperationEpoch(controller, options?.signal);
-    const epoch = await this.attach(controller, options?.signal, options?.assertCurrent);
+    const epoch = await this.attach(controller, options?.signal, options?.assertCurrent, lease);
     this.checkLease(lease);
     this.checkEpoch(controller, epoch);
-    options?.assertCurrent?.();
+    // Native currency is checked at dispatch: command() for CDP, here for Main-owned effects.
     if (method === 'Page.setDownloadBehavior' && this.options.downloads) {
+      await options?.assertCurrent?.();
+      options?.signal?.throwIfAborted();
+      if (options?.signal && this.drainedSignals.has(options.signal)) throw iabError('IAB_OPERATION_DRAINED', 'Browser operation has already physically drained');
+      this.checkLease(lease);
+      this.checkOperationEpoch(controller, options?.signal); this.checkEpoch(controller, epoch);
       if (options?.sessionId) throw iabError('IAB_DOWNLOAD_FRAME_UNSUPPORTED', 'Download capture belongs to the owning tab');
       if (params?.behavior === 'default') this.options.downloads.releaseDownloadCapture(controller.webContents, lease.id);
       else {
@@ -471,7 +503,11 @@ export class IabBroker implements IabBrokerContract {
     }
     // Page-wide CDP settings must preserve every other live lease's active policy.
     const cacheDisabled = method === 'Network.setCacheDisabled' ? params?.cacheDisabled : undefined;
+    let dispatchCheck = options?.assertCurrent;
     if (method === 'Fetch.enable' || method === 'Fetch.disable' || typeof cacheDisabled === 'boolean') {
+      await dispatchCheck?.();
+      options?.signal?.throwIfAborted(); this.checkLease(lease);
+      this.checkOperationEpoch(controller, options?.signal); this.checkEpoch(controller, epoch);
       const otherLeases = [...controller.leases].filter((id) => id !== lease.id).map((id) => this.leases.get(id));
       if (method === 'Fetch.enable' || method === 'Fetch.disable') {
         const otherPolicy = otherLeases.some((other) => other?.fetchParams);
@@ -479,13 +515,15 @@ export class IabBroker implements IabBrokerContract {
         if (otherPolicy) return {} as T;
       }
       if (typeof cacheDisabled === 'boolean') params = { ...params, cacheDisabled: cacheDisabled || otherLeases.some((other) => other?.cacheDisabled) };
+      // Dispatch synchronously after this check so policy ownership cannot change in another await.
+      dispatchCheck = undefined;
     }
     // Fetch may pause a request before the enable command acknowledgement arrives.
     if (!options?.sessionId && method === 'Fetch.enable') lease.fetchParams = params ?? {};
     const disablingFetch = !options?.sessionId && method === 'Fetch.disable';
     if (disablingFetch) lease.fetchDisabling = true;
     try {
-      const result = await this.command<T>(controller, epoch, method, params, options?.sessionId, options?.timeoutMs, options?.signal, lease.id, options?.assertCurrent);
+      const result = await this.command<T>(controller, epoch, method, params, options?.sessionId, options?.timeoutMs, options?.signal, lease.id, dispatchCheck);
       this.checkLease(lease); this.checkEpoch(controller, epoch);
       if (method === 'Network.clearBrowserCookies') invalidateIabClientHints(controller.webContents.session);
       if (!options?.sessionId) {
@@ -496,8 +534,13 @@ export class IabBroker implements IabBrokerContract {
         if (disablingFetch) while (controller.discoveries.size) await Promise.all([...controller.discoveries.values()]);
         if (method === 'Fetch.enable' || method === 'Fetch.disable' || method === 'Network.setCacheDisabled') {
           for (const sessionId of controller.childSessions) {
-            try { await this.command(controller, epoch, method, params, sessionId, options?.timeoutMs, options?.signal, lease.id, options?.assertCurrent); }
-            catch (error) { if (controller.childSessions.has(sessionId)) throw error; this.checkEpoch(controller, epoch); }
+            try {
+              await options?.assertCurrent?.();
+              options?.signal?.throwIfAborted(); this.checkLease(lease);
+              this.checkOperationEpoch(controller, options?.signal); this.checkEpoch(controller, epoch);
+              const childParams = typeof cacheDisabled === 'boolean' ? { ...params, cacheDisabled: cacheDisabled || [...controller.leases].some((id) => id !== lease.id && this.leases.get(id)?.cacheDisabled) } : params;
+              await this.command(controller, epoch, method, childParams, sessionId, options?.timeoutMs, options?.signal, lease.id);
+            } catch (error) { if (controller.childSessions.has(sessionId)) throw error; this.checkEpoch(controller, epoch); }
           }
         }
         if (disablingFetch) lease.fetchParams = undefined;
@@ -509,7 +552,7 @@ export class IabBroker implements IabBrokerContract {
     } finally { if (disablingFetch) lease.fetchDisabling = undefined; }
   }
 
-  private command<T extends IabJsonValue = IabJsonObject>(controller: Controller, epoch: number, method: string, params?: IabJsonObject, sessionId?: string, timeoutMs = 30_000, signal?: AbortSignal, leaseId?: string, assertCurrent?: () => void, epochScoped = false, physicalSignal = signal, cancellation: 'epoch' | 'command' = 'epoch'): Promise<T> {
+  private command<T extends IabJsonValue = IabJsonObject>(controller: Controller, epoch: number, method: string, params?: IabJsonObject, sessionId?: string, timeoutMs = 30_000, signal?: AbortSignal, leaseId?: string, assertCurrent?: () => void | Promise<void>, epochScoped = false, physicalSignal = signal, cancellation: 'epoch' | 'command' = 'epoch'): Promise<T> {
     this.checkEpoch(controller, epoch);
     signal?.throwIfAborted();
     if (signal && this.drainedSignals.has(signal)) throw iabError('IAB_OPERATION_DRAINED', 'Browser operation has already physically drained');
@@ -537,16 +580,30 @@ export class IabBroker implements IabBrokerContract {
       controller.pending.add(pending);
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) { abort(); return; }
-      try {
-        assertCurrent?.();
-        this.checkEpoch(controller, epoch);
-        const raw = controller.debugger.sendCommand(method, params, sessionId);
-        this.trackPhysical(controller, epoch, epochScoped, raw, physicalSignal);
-        void raw.then((value: T) => {
+      const dispatch = (async () => {
+        try {
+          const current = assertCurrent?.();
+          if (current) await current;
           if (settled) return;
-          try { this.checkEpoch(controller, epoch); finish(undefined, value); } catch { pending.invalidate('target or physical epoch changed'); }
-        }, (error: unknown) => finish(error));
-      } catch (error) { finish(error); }
+          signal?.throwIfAborted();
+          if (signal && this.drainedSignals.has(signal)) throw iabError('IAB_OPERATION_DRAINED', 'Browser operation has already physically drained');
+          if (leaseId) {
+            const lease = this.leases.get(leaseId);
+            if (!lease) throw iabError('IAB_LEASE_INVALID', 'IAB lease is unavailable');
+            this.checkLease(lease);
+          }
+          this.checkOperationEpoch(controller, signal);
+          this.checkEpoch(controller, epoch);
+          if (sessionId && !controller.childSessions.has(sessionId)) throw iabError('IAB_CDP_SESSION_INVALID', 'CDP child session does not belong to this tab');
+          const raw = controller.debugger.sendCommand(method, params, sessionId);
+          this.trackPhysical(controller, epoch, epochScoped, raw, physicalSignal);
+          void raw.then((value: T) => {
+            if (settled) return;
+            try { this.checkEpoch(controller, epoch); finish(undefined, value); } catch { pending.invalidate('target or physical epoch changed'); }
+          }, (error: unknown) => finish(error));
+        } catch (error) { finish(error); }
+      })();
+      this.trackPhysical(controller, epoch, epochScoped, dispatch, physicalSignal);
     });
   }
 

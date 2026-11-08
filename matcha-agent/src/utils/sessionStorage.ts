@@ -15,7 +15,6 @@ import {
   unlink,
   writeFile,
 } from 'fs/promises'
-import memoize from 'lodash-es/memoize.js'
 import { basename, dirname, join } from 'path'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -82,7 +81,7 @@ import {
   traceSessionTiming,
 } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
-import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
+import { getClaudeCodeProjectDirName, isEnvTruthy } from './envUtils.js'
 import { isENOENT, isFsInaccessible } from './errors.js'
 import type { FileHistorySnapshot } from './fileHistory.js'
 import { formatFileSize } from './format.js'
@@ -98,12 +97,17 @@ import { readSourceBytes } from './readFileInRange.js'
 import {
   extractJsonStringField,
   extractLastJsonStringField,
+  findProjectDirs,
+  getProjectDir,
+  getProjectsDir,
   LITE_READ_BUF_SIZE,
   readHeadAndTail,
   readTranscriptBufferForLoad,
   readTranscriptForLoad,
+  resolveSessionFilePath,
   SKIP_PRECOMPACT_THRESHOLD,
 } from './sessionStoragePortable.js'
+export { getProjectDir, getProjectsDir } from './sessionStoragePortable.js'
 import { getSettings_DEPRECATED } from './settings/settings.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
@@ -208,10 +212,6 @@ const EPHEMERAL_PROGRESS_TYPES = new Set([
 ])
 export function isEphemeralToolProgress(dataType: unknown): boolean {
   return typeof dataType === 'string' && EPHEMERAL_PROGRESS_TYPES.has(dataType)
-}
-
-export function getProjectsDir(): string {
-  return join(getClaudeConfigHomeDir(), 'projects')
 }
 
 export function getTranscriptPath(): string {
@@ -414,7 +414,10 @@ export async function listRemoteAgentMetadata(): Promise<
 }
 
 export function sessionIdExists(sessionId: string): boolean {
-  const projectDir = getProjectDir(getOriginalCwd())
+  const projectDir =
+    getClaudeCodeProjectDirName() !== undefined && sessionId === getSessionId()
+      ? (getSessionProjectDir() ?? getProjectDir(getOriginalCwd()))
+      : getProjectDir(getOriginalCwd())
   const sessionFile = join(projectDir, `${sessionId}.jsonl`)
   const fs = getFsImplementation()
   try {
@@ -442,15 +445,6 @@ function getEntrypoint(): string | undefined {
 export function isCustomTitleEnabled(): boolean {
   return true
 }
-
-// Memoized: called 12+ times per turn via hooks.ts createBaseHookInput
-// (PostToolUse path, 5×/turn) + various save* functions. Input is a cwd
-// string; homedir/env/regex are all session-invariant so the result is
-// stable for a given input. Worktree switches just change the key — no
-// cache clear needed.
-export const getProjectDir = memoize((projectDir: string): string => {
-  return join(getProjectsDir(), sanitizePath(projectDir))
-})
 
 let project: Project | null = null
 let cleanupRegistered = false
@@ -2730,9 +2724,32 @@ async function trackSessionBranchingAnalytics(
   })
 }
 
+async function getProjectLogsLite(
+  cwd: string,
+  limit?: number,
+): Promise<LogOption[]> {
+  const projectDirs =
+    getClaudeCodeProjectDirName() === undefined
+      ? [getProjectDir(cwd)]
+      : await findProjectDirs(cwd)
+  const logs = (
+    await Promise.all(
+      projectDirs.map(projectDir =>
+        getSessionFilesLite(
+          projectDir,
+          projectDirs.length > 1 ? undefined : limit,
+          cwd,
+        ),
+      ),
+    )
+  ).flat()
+  return projectDirs.length > 1
+    ? deduplicateLogsBySessionId(logs).slice(0, limit || undefined)
+    : logs
+}
+
 export async function fetchLogs(limit?: number): Promise<LogOption[]> {
-  const projectDir = getProjectDir(getOriginalCwd())
-  const logs = await getSessionFilesLite(projectDir, limit, getOriginalCwd())
+  const logs = await getProjectLogsLite(getOriginalCwd(), limit)
 
   await trackSessionBranchingAnalytics(logs)
 
@@ -4099,12 +4116,20 @@ async function loadSessionFile(sessionId: UUID): Promise<{
   contextCollapseCommits: ContextCollapseCommitEntry[]
   contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
   leafUuids: Set<UUID>
+  sessionFile: string
 }> {
-  const sessionFile = join(
-    getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
-    `${sessionId}.jsonl`,
-  )
-  return loadTranscriptFile(sessionFile)
+  const resolved =
+    (getSessionProjectDir() === null || sessionId !== getSessionId()) &&
+    getClaudeCodeProjectDirName() !== undefined
+      ? await resolveSessionFilePath(sessionId, getOriginalCwd())
+      : undefined
+  const sessionFile =
+    resolved?.filePath ??
+    join(
+      getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
+      `${sessionId}.jsonl`,
+    )
+  return { ...(await loadTranscriptFile(sessionFile)), sessionFile }
 }
 
 /**
@@ -4215,6 +4240,7 @@ export async function getLastSessionLog(
     contextCollapseCommits,
     contextCollapseSnapshot,
     leafUuids,
+    sessionFile,
   } = await loadSessionFile(sessionId)
   if (messages.size === 0) return null
   // Prime getSessionMessages cache so recordTranscript (called after REPL
@@ -4251,7 +4277,9 @@ export async function getLastSessionLog(
       customTitle,
       buildFileHistorySnapshotChain(fileHistorySnapshots, transcript),
       tag,
-      getTranscriptPathForSession(sessionId),
+      getClaudeCodeProjectDirName() === undefined
+        ? getTranscriptPathForSession(sessionId)
+        : sessionFile,
       buildAttributionSnapshotChain(attributionSnapshots, transcript),
       agentSetting,
       contentReplacements.get(sessionId) ?? [],
@@ -4454,9 +4482,7 @@ async function getStatOnlyLogsForWorktrees(
   const projectsDir = getProjectsDir()
 
   if (worktreePaths.length <= 1) {
-    const cwd = getOriginalCwd()
-    const projectDir = getProjectDir(cwd)
-    return getSessionFilesLite(projectDir, undefined, cwd)
+    return getProjectLogsLite(getOriginalCwd())
   }
 
   // On Windows, drive letter case can differ between git worktree list
@@ -4488,8 +4514,17 @@ async function getStatOnlyLogsForWorktrees(
     logForDebugging(
       `Failed to read projects dir ${projectsDir}, falling back to current project: ${e}`,
     )
-    const projectDir = getProjectDir(getOriginalCwd())
-    return getSessionFilesLite(projectDir, limit, getOriginalCwd())
+    return getProjectLogsLite(getOriginalCwd(), limit)
+  }
+
+  if (getClaudeCodeProjectDirName() !== undefined) {
+    for (const projectDir of await findProjectDirs(getOriginalCwd())) {
+      const dirName = basename(projectDir)
+      seenDirs.add(caseInsensitive ? dirName.toLowerCase() : dirName)
+      allLogs.push(
+        ...(await getSessionFilesLite(projectDir, undefined, getOriginalCwd())),
+      )
+    }
   }
 
   for (const dirent of allDirents) {

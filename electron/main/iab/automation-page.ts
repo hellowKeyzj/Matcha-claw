@@ -17,7 +17,7 @@ const networkBuffers = { maxResourceBufferSize: responseBodyLimit, maxTotalBuffe
 export type Operation = { signal: AbortSignal; deadline: number; assertCurrent?: () => void; onActionPerformed?: () => void; tasks?: Set<Promise<unknown>>; failures: unknown[] };
 type RemoteResult = { result: { value?: any; objectId?: string; description?: string; subtype?: string }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
 const helperName = '__matchaIabAutomation';
-const injectedExpression = `(() => { const module = {exports:{}}; ${injectedSource}\n; return new module.exports.InjectedScript(globalThis,{isUnderTest:false,sdkLanguage:'javascript',testIdAttributeName:'data-testid',stableRafCount:2,browserName:'chromium',customEngines:[],isUtilityWorld:true}); })()`;
+const injectedExpression = `(() => { const module = {exports:{}}; ${injectedSource}\n; return new (module.exports.InjectedScript())(globalThis,{isUnderTest:false,sdkLanguage:'javascript',testIdAttributeName:'data-testid',stableRafCount:2,browserName:'chromium',customEngines:[],isUtilityWorld:true}); })()`;
 
 export class IabAutomationPage {
   readonly messages: IabJsonObject[] = [];

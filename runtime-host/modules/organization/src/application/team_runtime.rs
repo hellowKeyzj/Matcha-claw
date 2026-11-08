@@ -37,6 +37,16 @@ pub enum TeamRuntimeStatus {
     OutcomeUnknown,
 }
 
+pub(crate) enum RoleSessionCreateScope {
+    Runtime(organization::RuntimeEndpointReference),
+    Design { epoch: String, generation: String },
+}
+
+pub(crate) enum RoleSessionCreateError {
+    Store(StoreFault),
+    Runtime(TeamRuntimeStatus),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TeamNodeEventCommandOutcome {
     NonTerminal(TeamNodeEventOutcome),
@@ -478,6 +488,13 @@ fn team_event_graph_node_role_id(node: &organization::NodeDefinition) -> Option<
 }
 
 pub enum TeamRuntimeCommand {
+    RoleSessionCreate {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        role_id: organization::RoleId,
+        idempotency_key: IdempotencyKey,
+        endpoint: organization::RuntimeEndpointReference,
+    },
     RunStart {
         team_id: TeamId,
         run_id: GraphRunId,
@@ -534,6 +551,7 @@ pub enum TeamRuntimeCommand {
         run_id: GraphRunId,
         event_cursor: Option<u64>,
         event_limit: Option<u64>,
+        message_cursor: Option<crate::run::public_projection::TeamRunMessageCursor>,
     },
     GraphSave {
         command: Box<organization::RunCommand>,
@@ -602,6 +620,7 @@ pub enum TeamRuntimeCommand {
 }
 
 pub enum TeamRuntimeCommandOutcome {
+    RoleSessionCreate(Result<organization::RoleSessionReceipt, TeamRuntimeStatus>),
     Design {
         read: bool,
         result: Result<Value, StoreFault>,
@@ -723,6 +742,7 @@ pub fn decode_team_runtime_command(
         "team.provisionAgents" => decode_team_provision(input, target, endpoint),
         "team.delete" => decode_team_delete(input, target),
         "team.runDelete" => decode_team_run_delete(input, target),
+        "team.roleSessionCreate" => decode_role_session_create(input, target, endpoint),
         "team.runList" => {
             let team_id = decode_team_id_target(target, input)?;
             if input.len() != 1 {
@@ -779,6 +799,30 @@ pub fn decode_team_runtime_command(
         "team.runCancel" => decode_team_run_cancel(input, target),
         _ => Err(TeamRuntimeDecodeError::Unavailable),
     }
+}
+
+fn decode_role_session_create(
+    input: &serde_json::Map<String, Value>,
+    target: &Value,
+    endpoint: organization::RuntimeEndpointReference,
+) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
+    use TeamRuntimeDecodeError::InvalidInput;
+    let fields = ["teamId", "runId", "roleId", "idempotencyKey"];
+    if input.len() != fields.len() || input.keys().any(|key| !fields.contains(&key.as_str())) {
+        return Err(InvalidInput);
+    }
+    let field = |key| input.get(key).and_then(Value::as_str)
+        .filter(|value| valid_identifier(value)).ok_or(InvalidInput);
+    let team_id = TeamId::try_new(field("teamId")?).map_err(|_| InvalidInput)?;
+    let run_id = GraphRunId::new(field("runId")?);
+    let role_id = organization::RoleId::try_new(field("roleId")?).map_err(|_| InvalidInput)?;
+    if target != &json!({"kind":"team-run","runId":run_id.as_str()}) {
+        return Err(InvalidInput);
+    }
+    Ok(TeamRuntimeCommand::RoleSessionCreate {
+        team_id, run_id, role_id, endpoint,
+        idempotency_key: decode_idempotency_key(input, "idempotencyKey")?,
+    })
 }
 
 fn decode_team_run_start(
@@ -1183,7 +1227,7 @@ fn decode_team_snapshot(
     if !input.keys().all(|key| {
         matches!(
             key.as_str(),
-            "runId" | "teamId" | "eventCursor" | "eventLimit"
+            "runId" | "teamId" | "eventCursor" | "eventLimit" | "messageCursor"
         )
     }) {
         return Err(TeamRuntimeDecodeError::InvalidInput);
@@ -1192,11 +1236,17 @@ fn decode_team_snapshot(
     if let Some(event_limit) = optional_u64(input, "eventLimit")? {
         usize::try_from(event_limit).map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
     }
+    let message_cursor = input.get("messageCursor").map(|value| {
+        let cursor: crate::run::public_projection::TeamRunMessageCursor = serde_json::from_value(value.clone())
+            .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
+        cursor.is_valid().then_some(cursor).ok_or(TeamRuntimeDecodeError::InvalidInput)
+    }).transpose()?;
     Ok(TeamRuntimeCommand::RunSnapshot {
         team_id,
         run_id,
         event_cursor,
         event_limit: optional_u64(input, "eventLimit")?,
+        message_cursor,
     })
 }
 

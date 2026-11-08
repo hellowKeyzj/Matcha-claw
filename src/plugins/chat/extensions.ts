@@ -87,3 +87,4 @@ export interface ChatComposerContribution {
 export const chatComposerActions = defineExtensionPoint<ChatComposerAction>('chat.composer.actions');
 export const chatComposerContent = defineExtensionPoint<ChatComposerContribution>('chat.composer.content');
 export const chatWorkspaceContent = defineExtensionPoint<ChatContentContribution<ChatWorkspaceContentProps>>('chat.workspace.content');
+export const chatThreadHeader = defineExtensionPoint<ChatContentContribution<ChatWorkspaceContentProps>>('chat.thread.header');

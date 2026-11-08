@@ -1,4 +1,12 @@
 {
+  "Add credentials to the selected provider account": "Add credentials to the selected provider account",
+  "Provider credentials could not be read; check the provider account credentials": "Provider credentials could not be read; check the provider account credentials",
+  "The text provider rejected its credentials; update the provider account credentials": "The text provider rejected its credentials; update the provider account credentials",
+  "The text provider denied this request; check account and model permissions": "The text provider denied this request; check account and model permissions",
+  "The text provider rate limit was reached; wait before retrying": "The text provider rate limit was reached; wait before retrying",
+  "Text generation exceeded its time limit; the provider request may already have occurred. Check the provider service before retrying": "Text generation exceeded its time limit; the provider request may already have occurred. Check the provider service before retrying",
+  "The text provider returned an invalid response; check the model and provider configuration": "The text provider returned an invalid response; check the model and provider configuration",
+  "The text provider is unavailable; check the provider service and connection": "The text provider is unavailable; check the provider service and connection",
   "selection": {
     "title": "Selection assistant",
     "close": "Close selection assistant",
@@ -85,6 +93,7 @@
   "home": {
     "title": "Library",
     "search": "Search",
+    "noResults": "No matching libraries",
     "myLibraries": "My libraries",
     "recent": "Recent",
     "newLibrary": "New library",
@@ -134,6 +143,7 @@
   },
   "content": {
     "selectPage": "Select a page",
+    "loading": "Loading content…",
     "history": "Version history",
     "previewUnavailable": "Preview unavailable",
     "inlineUnsupported": "Inline preview is not supported",
@@ -359,7 +369,7 @@
     "cancelling": "Requesting cancellation…",
     "cancelRequested": "Cancellation requested; waiting to stop",
     "cancelFailed": "Cancellation could not be confirmed. Refresh task status before trying again.",
-    "readFailed": "Progress updates are paused; background task status is unchanged. Refresh records to resume observation.",
+    "readFailed": "Unable to read progress right now. Background tasks are unaffected.",
     "status": {
       "pending": "Waiting",
       "running": "Processing",

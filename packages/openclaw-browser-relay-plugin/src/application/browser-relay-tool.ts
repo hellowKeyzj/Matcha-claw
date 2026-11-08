@@ -77,7 +77,7 @@ const browserRelayToolParameters = (mode: BrowserBackendMode) => ({
     } : {}),
     retain: { type: 'boolean', description: 'Mark tab as persistent (exempt from auto-cleanup). Default false. Use when the page has valuable state.' },
     clear: { type: 'boolean', description: 'Errors/requests: clear after read.' },
-    filter: mode === 'relay' ? { type: 'string', description: 'Requests: URL filter.' } : {
+    filter: {
       description: 'Snapshot: keyword/role filter object. Requests: URL substring filter.',
       anyOf: [
         { type: 'string' },
@@ -92,13 +92,11 @@ const browserRelayToolParameters = (mode: BrowserBackendMode) => ({
         },
       ],
     },
-    ...(mode === 'iab' ? {
-      scope: {
-        type: 'object',
-        description: 'Snapshot: frame, landmark or CSS scope.',
-        properties: { frame: { type: 'string', description: 'Frame selector.' }, landmark: { type: 'string', description: 'Accessibility landmark, e.g. main/nav/form/dialog.' }, selector: { type: 'string', description: 'CSS subtree selector.' } },
-      },
-    } : {}),
+    scope: {
+      type: 'object',
+      description: 'Snapshot: frame, landmark or CSS scope.',
+      properties: { frame: { type: 'string', description: 'Frame selector.' }, landmark: { type: 'string', description: 'Accessibility landmark, e.g. main/nav/form/dialog.' }, selector: { type: 'string', description: 'CSS subtree selector.' } },
+    },
     operation: { type: 'string', enum: mode === 'iab' ? ['get', 'set', 'clear', 'remove'] : ['get', 'set', 'clear'], description: 'Cookies/storage operation; remove is IAB storage-only.' },
     cookies: {
       type: 'array',

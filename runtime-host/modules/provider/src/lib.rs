@@ -39,6 +39,7 @@ pub use adapters::migration::{
 pub use adapters::model_store::{ProviderModelStore, ProviderModelStoreFault};
 pub use adapters::routing_store::{ProviderRoutingStore, ProviderRoutingStoreFault};
 pub use api::ProviderHandle;
+pub use application::model_reference::{model_reasoning, model_reasoning_efforts};
 pub use application::receipts::{
     ProviderAccountExecution, ProviderAccountExecutionStatus, ProviderAccountMutationKind,
     ProviderAccountView, ProviderAccountsDelivery, ProviderCommitOutcome,

@@ -16,6 +16,17 @@
     "updateSuccess": "Agent workspace updated and a new session was started.",
     "updateFailed": "Failed to update workspace: {{error}}"
   },
+  "systemNotice": {
+    "restartRecovery": "Перезапуск шлюза прервал предыдущий ход; агенту предложено продолжить и завершить ответ"
+  },
+  "work": {
+    "duration": "Затрачено времени: {{duration}}",
+    "process": "Процесс выполнения",
+    "tools_count_one": "{{count}} вызов инструмента",
+    "tools_count_few": "{{count}} вызова инструментов",
+    "tools_count_many": "{{count}} вызовов инструментов",
+    "tools_count_other": "{{count}} вызова инструментов"
+  },
   "toolActivity": {
     "input": "Ввод",
     "output": "Вывод",
@@ -375,10 +386,7 @@
     "teamDesignExit": "Выйти из проектирования, сохранив граф выполнения",
     "teamDesignExiting": "Возврат…",
     "teamDesignExitWaiting": "Остановите текущий ответ перед выходом из проектирования",
-    "gatewayDisconnectedPlaceholder": "Gateway not connected...",
-    "gatewayRecoveringNotice": "Подготовка среды выполнения…",
     "messagePlaceholder": "Message, / for skills, Enter to send, Shift+Enter for newline",
-    "approvalWaitingPlaceholder": "Waiting for approval...",
     "pickModel": "Выбрать модель",
     "pickWiki": "Выбрать базу знаний",
     "wikiPickerLabel": "База знаний: {{name}}",
@@ -401,8 +409,7 @@
     "attachmentReady": "{{count}} attachment ready",
     "attachmentsReady": "{{count}} attachments ready",
     "contextUsageLabel": "Context used {{pct}}%",
-    "contextUsageTitle": "Context used {{pct}}% ({{detail}})",
-    "imageGenerationActive": "Generating image"
+    "contextUsageTitle": "Context used {{pct}}% ({{detail}})"
   },
   "goal": {
     "title": "Цель сеанса", "set": "Задать цель", "edit": "Изменить цель", "cancel": "Отменить режим цели", "placeholder": "Опишите цель, Enter — отправить, Shift+Enter — новая строка", "pause": "Приостановить", "resume": "Продолжить", "complete": "Отметить завершённой", "block": "Отметить блокировку", "clear": "Удалить цель", "more": "Другие действия с целью", "refresh": "Проверить текущее состояние", "unknown": "Состояние цели не подтверждено", "note": "Примечание", "tokens": "Использовано {{count}} токенов", "budget": "Бюджет: {{count}} токенов", "inlineOnly": "В режиме цели нужны файлы для прямой отправки. Удалите папки, вложения только с путём и файлы, превышающие ограничения текущего рантайма.", "noAttachmentsOnEdit": "Редактирование изменяет только цель. Сначала удалите вложения.",
@@ -443,23 +450,23 @@
     "refreshing": "Refreshing...",
     "mutating": "Applying changes..."
   },
+  "replyTiming": {
+    "seconds_one": "{{count}} секунда",
+    "seconds_few": "{{count}} секунды",
+    "seconds_many": "{{count}} секунд",
+    "seconds_other": "{{count}} секунды",
+    "minutesSeconds": "{{minutes}} мин {{seconds}} с",
+    "running": "Выполняется… {{duration}}",
+    "completed": "Завершено за {{duration}}",
+    "stopped": "Остановлено через {{duration}}",
+    "failed": "Ошибка через {{duration}}",
+    "copy": "Копировать ответ",
+    "copied": "Ответ скопирован"
+  },
   "pending": {
-    "creatingSession": "Создание сеанса",
-    "configuringSession": "Настройка сеанса",
     "typing": "Thinking",
     "activity": "Working",
     "compacting": "Compressing context, then the reply will continue",
-    "startup": {
-      "waiting_for_state": "Ожидание готовности состояния сеанса",
-      "preparing_workspace": "Подготовка рабочей области",
-      "naming_worktree": "Именование рабочей области",
-      "creating_worktree": "Создание рабочей области",
-      "running_setup": "Запуск инициализации",
-      "provisioning_environment": "Подготовка среды выполнения",
-      "preparing_context": "Подготовка контекста",
-      "memory_flushing": "Сохранение памяти",
-      "starting_model": "Запуск модели"
-    },
     "retrying": "Модель ограничена по частоте, повтор {{attempt}}/{{maxAttempts}}"
   },
   "runtimeStatus": {
@@ -478,6 +485,8 @@
     "previewUnavailable": "Предпросмотр изображения временно недоступен"
   },
   "errors": {
+    "historyUnavailable": "Не удалось загрузить историю диалога. Проверьте состояние среды выполнения и откройте диалог заново",
+    "runOutcomeUnknown": "Результат предыдущего запуска не подтверждён. Перед повторной отправкой проверьте, какие действия уже выполнены",
     "activeRunDisconnected": "The active run disconnected before a terminal event was received.",
     "abortStoppingTimeout": "После запроса остановки событие завершения не получено. Можно снова нажать «Остановить».",
     "abortUnknown": "Результат запроса остановки не подтверждён. Ответ может ещё выполняться; можно снова нажать «Остановить».",
@@ -540,7 +549,18 @@
   "skillConfigDialog": {
     "titleWithAgent": "Skill Configuration · {{agent}}",
     "loading": "Loading skills...",
-    "empty": "No available skills."
+    "loadFailed": "Не удалось загрузить навыки. Закройте окно и откройте снова",
+    "empty": "No available skills.",
+    "toggleSkill": "Включить или выключить навык: {{name}}",
+    "saveFailed": "Не удалось подтвердить сохранение настроек навыка. Закройте окно и откройте снова",
+    "savedNextStart": "Сохранено; вступит в силу при следующем запуске",
+    "savedPartial": "Сохранено; часть сеансов не подтвердила применение",
+    "savedAcknowledged": "Сохранено; нативные экземпляры подтвердили применение",
+    "applicationCounts": "Подтверждено: {{acknowledged}}, не подтверждено: {{unconfirmed}}",
+    "acknowledged": "Подтверждено",
+    "unconfirmed": "Не подтверждено",
+    "sessionStatus": "Сеанс {{sessionId}} · экземпляр {{instanceId}}: {{status}}",
+    "policyLimits": "Использование навыка по-прежнему может ограничиваться политиками пользователя или проекта"
   },
   "skillPreviewTooltip": "Предпросмотр SKILL.md",
   "skillPreviewTitle": "Предпросмотр SKILL.md",
@@ -600,12 +620,51 @@
     "workspaceLoadFailed": "Не удалось загрузить рабочую директорию: {{error}}"
   },
   "approval": {
-    "panelTitle": "Approval required",
-    "waitingLabel": "Waiting for approval...",
+    "panelTitle": "Требуется разрешение",
+    "waitingLabel": "Ожидание разрешения...",
+    "requestLabel": "Требуется разрешение на вызов инструмента",
+    "parameters": "Показать параметры",
+    "parametersOmitted": "Параметры превышают лимит отображения и показаны не полностью (всего {{totalBytes}} байт)",
+    "textIncomplete": "Текст показан не полностью: первые {{shownBytes}} из {{totalBytes}} байт",
+    "commandRequest": "Требуется разрешение на выполнение команды",
+    "commandPreview": "Краткое описание команды",
+    "description": "Описание запроса",
+    "detail": "Подробности",
+    "warning": "Предупреждение",
+    "severityLabel": "Уровень риска",
+    "severities": { "info": "Информация", "warning": "Предупреждение", "critical": "Критический" },
+    "scopeLabel": "Область действия",
+    "scopeKind": "Тип действия",
+    "scopeKinds": { "message-send": "Отправка сообщения", "payment": "Платёж", "external-post": "Внешняя публикация", "standing-grant": "Постоянное разрешение" },
+    "target": "Цель",
+    "automation": "Автоматизация",
+    "expiresInDays": "Срок действия (дни)",
+    "recipientCount": "Число получателей",
+    "recipientPreview": "Предпросмотр получателей",
+    "audienceLabel": "Аудитория",
+    "audiences": { "internal": "Внутренняя", "external": "Внешняя" },
+    "amount": "Сумма",
+    "currency": "Валюта",
+    "visibilityLabel": "Видимость",
+    "visibility": { "public": "Общедоступно", "restricted": "Ограниченный доступ" },
+    "host": "Хост",
+    "nodeId": "ID узла",
+    "agentId": "ID агента",
+    "pluginId": "ID плагина",
+    "toolName": "Инструмент",
+    "externalResolution": "Внешнее согласование",
+    "externalDecisions": "Варианты внешнего согласования",
+    "proposalHash": "Хеш предложения",
+    "command": "Команда",
+    "file_path": "Путь к файлу",
+    "path": "Путь",
+    "url": "Веб-адрес",
+    "decisionReason": "Причина запроса разрешения",
+    "blockedPath": "Путь с ограниченным доступом",
     "pendingRequest": "{{title}}",
-    "allowOnce": "Allow once",
-    "allowAlways": "Always allow",
-    "deny": "Deny"
+    "allowOnce": "Разрешить один раз",
+    "allowAlways": "Разрешать всегда",
+    "deny": "Отклонить"
   },
   "runtimeContent": {
     "leaseExpired": "Срок доступа к содержимому истёк.",

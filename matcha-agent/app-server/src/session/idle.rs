@@ -73,13 +73,21 @@ impl Execution {
 
 impl Sessions {
     pub(super) async fn sleep_instance(&self, session: Arc<Session>) {
+        let agent_id = session.data.lock().await.record.agent_id.clone();
+        let _agent = tokio::select! {
+            _ = session.stopped.cancelled() => return,
+            guard = self.agent_guard(&agent_id) => guard,
+        };
         // Permanent close and idle handoff cannot own the same consumer join.
         let Ok(_closing) = session.close_guard.try_lock() else {
             return;
         };
         // Search holds this existing guard from instance lookup through readback.
         let _search = self.search_guard().await;
-        let cli = {
+        let Ok(config) = self.0.config.checked_snapshot().await else {
+            return;
+        };
+        let (cli, replay_state) = {
             let mut execution = session.data.lock().await;
             if self.0.shutdown.load(Ordering::Acquire)
                 || execution
@@ -88,10 +96,19 @@ impl Sessions {
             {
                 return;
             }
+            let Ok(spec) = self.launch_spec(config, &execution) else {
+                return;
+            };
+            let Ok(replay_state) = super::selection::replay_state(&execution, &spec) else {
+                return;
+            };
             execution.idle = Idle::Handoff;
-            execution.cli.as_ref().expect("sleep candidate CLI").clone()
+            (
+                execution.cli.as_ref().expect("sleep candidate CLI").clone(),
+                replay_state,
+            )
         };
-        let prepared = cli.prepare_to_sleep().await;
+        let prepared = cli.prepare_to_sleep(replay_state).await;
         if matches!(prepared, Ok(Preparation::Busy | Preparation::Resident)) {
             let mut execution = session.data.lock().await;
             if execution

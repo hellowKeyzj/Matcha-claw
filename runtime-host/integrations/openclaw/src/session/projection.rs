@@ -324,6 +324,9 @@ pub enum CanonicalSessionChange {
     RunYielded {
         run_id: RunId,
     },
+    RunTimingUpdated {
+        timing: sessions_module::state::RunTiming,
+    },
     AssistantTurnChunk {
         run_id: RunId,
         message_id: Option<MessageId>,
@@ -348,14 +351,16 @@ pub enum CanonicalSessionChange {
         is_error: Option<bool>,
     },
     ApprovalRequested {
-        run_id: RunId,
+        run_id: Option<RunId>,
         approval_id: ApprovalId,
         option_ids: Vec<ApprovalOptionId>,
+        details: sessions_module::state::ApprovalDetails,
     },
     ApprovalResolved {
-        run_id: RunId,
+        run_id: Option<RunId>,
         approval_id: ApprovalId,
         option_ids: Vec<ApprovalOptionId>,
+        details: sessions_module::state::ApprovalDetails,
     },
     RuntimeActivity {
         run_id: RunId,
@@ -419,6 +424,7 @@ impl fmt::Debug for CanonicalSessionChange {
         match self {
             Self::RunStarted { .. } => formatter.debug_struct("RunStarted").finish(),
             Self::RunYielded { .. } => formatter.debug_struct("RunYielded").finish(),
+            Self::RunTimingUpdated { .. } => formatter.debug_struct("RunTimingUpdated").finish(),
             Self::AssistantTurnChunk {
                 kind,
                 text,
@@ -744,13 +750,14 @@ impl CanonicalSessionDeltaProducer {
                 {
                     return None;
                 }
-                let run_id = approval.run_id.clone().or_else(|| event.run_id.clone())?;
+                let run_id = approval.run_id.clone();
                 match approval.lifecycle {
                     super::protocol::SessionApprovalLifecycle::Requested => {
                         CanonicalSessionChange::ApprovalRequested {
                             run_id,
                             approval_id: approval.approval_id.clone(),
                             option_ids: approval.option_ids.clone(),
+                            details: approval.details.clone(),
                         }
                     }
                     super::protocol::SessionApprovalLifecycle::Resolved => {
@@ -758,6 +765,7 @@ impl CanonicalSessionDeltaProducer {
                             run_id,
                             approval_id: approval.approval_id.clone(),
                             option_ids: approval.option_ids.clone(),
+                            details: approval.details.clone(),
                         }
                     }
                 }

@@ -137,6 +137,11 @@ async function updateMagicDoc(
     )
     const output = result.data as FileReadToolOutput
     if (output.type === 'text') {
+      if (output.file.truncatedByTokenCap) {
+        throw new Error(
+          'Cannot update a Magic Doc from a token-truncated read.',
+        )
+      }
       currentDoc = output.file.content
     }
   } catch (e: unknown) {

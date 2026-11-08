@@ -7,6 +7,7 @@ pub enum WikiFailure {
     Cancelled,
     StateUnavailable { message: String },
     CurrentProjectUnset,
+    RequestKeyConflict,
     ProjectNotFound { project_id: String },
     InvalidInput { field: String, message: String },
     InvalidPath { path: String },
@@ -16,6 +17,31 @@ pub enum WikiFailure {
     NotText { path: String },
     Io { path: String, message: String },
     IndexUnavailable { backend: String, reason: String },
+}
+
+impl std::fmt::Display for WikiFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OwnerUnavailable => formatter.write_str("Wiki owner is unavailable"),
+            Self::Cancelled => formatter.write_str("Wiki source import was cancelled"),
+            Self::StateUnavailable { message } => formatter.write_str(message),
+            Self::CurrentProjectUnset => formatter.write_str("Current wiki project is not set"),
+            Self::RequestKeyConflict => formatter.write_str("Artifact request key already identifies different content"),
+            Self::ProjectNotFound { project_id } => {
+                write!(formatter, "Wiki project not found: {project_id}")
+            }
+            Self::InvalidInput { field, message } => write!(formatter, "Invalid {field}: {message}"),
+            Self::InvalidPath { path } => write!(formatter, "Invalid wiki path: {path}"),
+            Self::PathOutsideProject { path } => write!(formatter, "Wiki path is outside project: {path}"),
+            Self::NotFound { path } => write!(formatter, "Wiki path not found: {path}"),
+            Self::IsDirectory { path } => write!(formatter, "Wiki path is a directory: {path}"),
+            Self::NotText { path } => write!(formatter, "Wiki file is not text: {path}"),
+            Self::Io { path, message } => write!(formatter, "Wiki file error at {path}: {message}"),
+            Self::IndexUnavailable { backend, reason } => {
+                write!(formatter, "Wiki index backend {backend} is unavailable: {reason}")
+            }
+        }
+    }
 }
 
 impl WikiFailure {

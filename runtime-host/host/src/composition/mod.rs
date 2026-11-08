@@ -25,6 +25,7 @@ pub(crate) use openclaw::driver::control::{
 };
 pub use openclaw::driver::{ConstructionError as OpenClawConstructionError, OpenClawInput};
 pub(crate) use peer::{
-    PeerHandle, RuntimeRestartCommandError, RuntimeStartCommandError, RuntimeStopCommandError,
+    PeerAutostart, PeerHandle, RuntimeRestartCommandError, RuntimeStartCommandError,
+    RuntimeStopCommandError,
 };
 pub use sessions_module::RuntimeSessionError;

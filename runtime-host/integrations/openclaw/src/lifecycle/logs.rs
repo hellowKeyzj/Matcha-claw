@@ -4,77 +4,280 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+use super::journal::{LifecycleJournal, LifecycleProcess, format_line};
+
 const REDACTED: &str = "[redacted]";
-const SECRET_MARKERS: [&str; 11] = [
+const SECRET_MARKERS: [&str; 15] = [
     "token",
     "secret",
     "password",
-    "api_key",
     "apikey",
+    "accesskey",
+    "privatekey",
+    "secretkey",
     "authorization",
     "credential",
+    "credentials",
     "bearer",
-    "config",
     "transcript",
-    "canary",
+    "passphrase",
+    "content",
+    "messages",
 ];
 
 pub fn sanitize_log_line(bytes: &[u8]) -> String {
-    let source = String::from_utf8_lossy(bytes);
-    let mut sanitized = String::with_capacity(source.len().min(MAX_TAIL_ENTRY_BYTES));
-    let mut redact_next = false;
+    sanitize_log_line_bounded(bytes, MAX_TAIL_ENTRY_BYTES)
+}
 
-    for token in source.split_whitespace() {
-        let lower = token.to_ascii_lowercase();
-        let is_sensitive_key = SECRET_MARKERS.iter().any(|marker| lower.contains(marker));
-        let is_path = token.starts_with('/')
-            || token.starts_with('\\')
-            || (token.len() >= 3 && token.as_bytes()[1] == b':' && token.as_bytes()[2] == b'\\')
-            || token.contains("\\\\");
-        let is_url = token.contains("://");
-        let rendered = if redact_next || is_sensitive_key {
-            redact_next = is_sensitive_key && !token.contains('=');
-            if let Some((key, _)) = token.split_once('=') {
-                format!("{key}={REDACTED}")
-            } else {
-                REDACTED.to_owned()
+pub(crate) fn sanitize_log_line_bounded(bytes: &[u8], limit: usize) -> String {
+    let source = String::from_utf8_lossy(bytes);
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&source) {
+        sanitize_json_log(&mut value);
+        bound_json_log(&mut value, limit);
+        return serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.to_owned());
+    }
+    let mut line = sanitize_log_text(&source);
+    line.truncate(line.floor_char_boundary(limit));
+    line
+}
+
+fn bound_json_log(value: &mut serde_json::Value, limit: usize) -> usize {
+    match value {
+        serde_json::Value::String(text) => {
+            let mut length = serde_json::to_string(text).unwrap().len();
+            while length > limit && !text.is_empty() {
+                let character = text.pop().unwrap();
+                length -= match character {
+                    '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+                    character if character <= '\u{1f}' => 6,
+                    character => character.len_utf8(),
+                };
             }
+            length
+        }
+        serde_json::Value::Object(fields) => {
+            let mut length = 2;
+            fields.retain(|key, value| {
+                let overhead =
+                    serde_json::to_string(key).unwrap().len() + 1 + usize::from(length > 2);
+                if length + overhead + 4 > limit {
+                    return false;
+                }
+                length += overhead + bound_json_log(value, limit - length - overhead);
+                true
+            });
+            length
+        }
+        serde_json::Value::Array(values) => {
+            let mut length = 2;
+            let mut retained = 0;
+            for value in values.iter_mut() {
+                let comma = usize::from(retained > 0);
+                if length + comma + 4 > limit {
+                    break;
+                }
+                length += comma + bound_json_log(value, limit - length - comma);
+                retained += 1;
+            }
+            values.truncate(retained);
+            length
+        }
+        _ => {
+            let length = serde_json::to_string(value).unwrap().len();
+            if length > limit {
+                *value = serde_json::Value::Null;
+                4
+            } else {
+                length
+            }
+        }
+    }
+}
+
+fn sanitize_json_log(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if is_secret_log_key(key) {
+                    *value = serde_json::Value::String(REDACTED.to_owned());
+                } else {
+                    sanitize_json_log(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => values.iter_mut().for_each(sanitize_json_log),
+        serde_json::Value::String(text) => *text = sanitize_log_text(text),
+        _ => {}
+    }
+}
+
+fn sanitize_log_text(source: &str) -> String {
+    let mut redacted = String::with_capacity(source.len());
+    let mut copied = 0;
+    let mut cursor = 0;
+    while cursor < source.len() {
+        let character = source[cursor..].chars().next().unwrap();
+        if !character.is_ascii() || !is_log_key_byte(character as u8) {
+            cursor += character.len_utf8();
+            continue;
+        }
+        let start = cursor;
+        while cursor < source.len() && is_log_key_byte(source.as_bytes()[cursor]) {
+            cursor += 1;
+        }
+        if source[start..cursor].eq_ignore_ascii_case("api") {
+            let next = cursor + source[cursor..].len() - source[cursor..].trim_start().len();
+            if source[next..]
+                .get(..3)
+                .is_some_and(|key| key.eq_ignore_ascii_case("key"))
+                && source
+                    .as_bytes()
+                    .get(next + 3)
+                    .is_none_or(|byte| !is_log_key_byte(*byte))
+            {
+                cursor = next + 3;
+            }
+        }
+        let key = &source[start..cursor];
+        let after_key = source[cursor..]
+            .trim_start_matches(['\'', '"'])
+            .trim_start();
+        let value = if is_secret_log_key(key) && after_key.starts_with(['=', ':']) {
+            after_key[1..].trim_start()
+        } else if is_secret_log_key(key) && source[cursor..].starts_with(char::is_whitespace) {
+            source[cursor..].trim_start()
+        } else {
+            continue;
+        };
+        let value_start = source.len() - value.len();
+        let mut value_end = log_value_end(value);
+        if value[..value_end].eq_ignore_ascii_case("bearer")
+            || value[..value_end].eq_ignore_ascii_case("basic")
+        {
+            let credential = value[value_end..].trim_start();
+            value_end = value.len() - credential.len() + log_value_end(credential);
+        }
+        redacted.push_str(&source[copied..value_start]);
+        if value.starts_with(['\'', '"']) {
+            let quote = value.as_bytes()[0] as char;
+            redacted.push(quote);
+            redacted.push_str(REDACTED);
+            redacted.push(quote);
+        } else {
+            redacted.push_str(REDACTED);
+        }
+        cursor = value_start + value_end;
+        copied = cursor;
+    }
+    redacted.push_str(&source[copied..]);
+
+    let mut sanitized = String::with_capacity(redacted.len().min(MAX_TAIL_ENTRY_BYTES));
+    let mut remaining = redacted.trim();
+    while !remaining.is_empty() {
+        // Keep quoted paths together so a space in a user directory cannot expose its suffix.
+        let mut quote = None;
+        let mut escaped = false;
+        let end = remaining
+            .char_indices()
+            .find_map(|(index, character)| {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if quote == Some(character) {
+                    quote = None;
+                } else if quote.is_none() && matches!(character, '\'' | '"') {
+                    quote = Some(character);
+                } else if quote.is_none() && character.is_whitespace() {
+                    return Some(index);
+                }
+                None
+            })
+            .unwrap_or(remaining.len());
+        let token = &remaining[..end];
+        let is_path = token.contains(['/', '\\']);
+        let rendered = if token.contains("://") {
+            "[url redacted]"
         } else if is_path {
-            "[path redacted]".to_owned()
-        } else if is_url {
-            "[url redacted]".to_owned()
+            "[path redacted]"
         } else {
             token
-                .chars()
-                .map(|character| {
-                    if character.is_control() {
-                        ' '
-                    } else {
-                        character
-                    }
-                })
-                .collect()
         };
-
         if !sanitized.is_empty() && sanitized.len() < MAX_TAIL_ENTRY_BYTES {
             sanitized.push(' ');
         }
-        if sanitized.len() + rendered.len() > MAX_TAIL_ENTRY_BYTES {
-            let remaining = MAX_TAIL_ENTRY_BYTES.saturating_sub(sanitized.len());
-            let mut truncated = String::new();
-            for character in rendered.chars() {
-                if truncated.len() + character.len_utf8() > remaining {
-                    break;
-                }
-                truncated.push(character);
+        for character in rendered.chars() {
+            let character = if character.is_control() {
+                ' '
+            } else {
+                character
+            };
+            if sanitized.len() + character.len_utf8() > MAX_TAIL_ENTRY_BYTES {
+                return sanitized;
             }
-            sanitized.push_str(&truncated);
-            break;
+            sanitized.push(character);
         }
-        sanitized.push_str(&rendered);
+        remaining = remaining[end..].trim_start();
     }
-
     sanitized
+}
+
+fn is_log_key_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+}
+
+fn is_secret_log_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
+    SECRET_MARKERS
+        .iter()
+        .any(|marker| normalized.ends_with(marker))
+        || key.split(['.', '_', '-']).any(|part| {
+            SECRET_MARKERS
+                .iter()
+                .any(|marker| part.eq_ignore_ascii_case(marker))
+        })
+}
+
+fn log_value_end(value: &str) -> usize {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' && quote.is_some() {
+            escaped = true;
+        } else if quote == Some(character) {
+            quote = None;
+            if depth == 0 {
+                return index + character.len_utf8();
+            }
+        } else if quote.is_some() {
+            continue;
+        } else if matches!(character, '\'' | '"') {
+            if index > 0 && depth == 0 {
+                return index;
+            }
+            quote = Some(character);
+        } else if matches!(character, '{' | '[') {
+            depth += 1;
+        } else if matches!(character, '}' | ']') {
+            if depth == 0 {
+                return index;
+            }
+            depth -= 1;
+            if depth == 0 {
+                return index + character.len_utf8();
+            }
+        } else if depth == 0 && (character.is_whitespace() || matches!(character, ',' | ';')) {
+            return index;
+        }
+    }
+    value.len()
 }
 
 pub const MAX_LINE_BYTES: usize = 16 * 1024;
@@ -116,11 +319,61 @@ struct LifecycleLogBufferState {
 #[derive(Clone, Default)]
 pub struct LifecycleLogBuffer {
     state: Arc<Mutex<LifecycleLogBufferState>>,
+    journal: Option<LifecycleJournal>,
+    restored: Arc<tokio::sync::OnceCell<()>>,
+    process: Option<LifecycleProcess>,
 }
 
 impl LifecycleLogBuffer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn with_journal(state_dir: platform::state_dir::CanonicalStateDir) -> Self {
+        Self {
+            journal: Some(LifecycleJournal::new(state_dir)),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn for_process(&self, process: LifecycleProcess) -> Self {
+        Self {
+            process: Some(process),
+            ..self.clone()
+        }
+    }
+
+    pub(crate) async fn restore(&self) {
+        self.restored
+            .get_or_init(|| async {
+                let Some(journal) = &self.journal else { return };
+                let (entries, evicted) = journal.read_tail().await;
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("OpenClaw lifecycle log buffer mutex poisoned");
+                state.tail_evicted |= evicted;
+                for (stream, line) in entries.into_iter().rev() {
+                    if state.entries.len() == MAX_TAIL_LINES {
+                        state.tail_evicted = true;
+                        break;
+                    }
+                    state.entries.push_front(LifecycleLogEntry { stream, line });
+                }
+            })
+            .await;
+    }
+
+    pub(crate) async fn flush(&self) {
+        self.restore().await;
+        if let Some(journal) = &self.journal {
+            if let Some(notice) = journal.flush().await {
+                self.push(LifecycleLogEntry {
+                    stream: LogStream::Stderr,
+                    line: format_line(None, LogStream::Stderr, notice.as_bytes()),
+                });
+            }
+        }
     }
 
     pub fn snapshot(&self) -> Vec<LifecycleLogEntry> {
@@ -157,10 +410,15 @@ impl LifecycleLogBuffer {
     }
 
     pub fn append(&self, stream: LogStream, bytes: &[u8]) {
-        self.push(LifecycleLogEntry {
-            stream,
-            line: sanitize_log_line(&bytes[..bytes.len().min(MAX_LINE_BYTES)]),
-        });
+        let bytes = &bytes[..bytes.len().min(MAX_LINE_BYTES)];
+        let line = if let Some(journal) = &self.journal {
+            let line = format_line(self.process, stream, bytes);
+            journal.append(&line);
+            line
+        } else {
+            sanitize_log_line(bytes)
+        };
+        self.push(LifecycleLogEntry { stream, line });
     }
 
     fn push(&self, entry: LifecycleLogEntry) {

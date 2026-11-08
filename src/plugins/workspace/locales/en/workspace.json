@@ -1,6 +1,12 @@
 {
   "title": "Workspace",
   "tabs": "Workspace tabs",
+  "mainTabs": "Main pane tabs",
+  "sideTabs": "Side pane tabs",
+  "chat": "Chat",
+  "dragTabHint": "Drag to the other pane, or press Alt+Shift+Arrow to move",
+  "dropToMain": "Drop to move to main pane",
+  "dropToSide": "Drop to move to right pane",
   "addPage": "Open a page",
   "allTabs": "All open tabs ({{count}})",
   "closePage": "Close {{title}}",

@@ -8,8 +8,8 @@ import {
   hostApiFetch,
 } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
-import { hostSkillsMutation, waitForSkillsOperation, selectedSkillsScope, requireSkillsScope } from '../services/client';
-import type { SkillsBatchStateResult } from '@/types/skills-operation-result';
+import { hostSkillsMutation, waitForSkillsOperation, selectedSkillsScope, requireSkillsScope, type SkillsMutationResult } from '../services/client';
+import type { SkillsBatchStateResult, SkillsConfigApplication } from '@/types/skills-operation-result';
 import type { Skill, MarketplaceSkill, SkillMissingCategory, SkillMissingRequirements, SkillUnavailableReason } from '@/types/skill';
 import type { CapabilityTarget } from '@/types/desktop/capability-target';
 import type { LocalSkillImportPayload } from '../services/local-import';
@@ -191,18 +191,21 @@ function scopedState(scope: RuntimeScope, followSelection = true) {
   return { set, current };
 }
 
-async function enableSkillConfig(skillId: string, scope: RuntimeScope, current: () => boolean): Promise<void> {
-  const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: true, scope }, 'skills.config');
-  if (result.outcome !== 'accepted') throw new Error('Failed to enable skill');
-  if (!current()) return;
-  const state = useSkillsStore.getState();
-  const skill = state.skills.find((entry) => entry.id === skillId);
-  if (skill) {
-    state.updateSkill(skillId, {
-      enabled: true,
-      ...(skill.unavailableReason === 'disabled' ? { unavailableReason: null } : {}),
-    });
+async function setSkillEnabledConfig(skillId: string, enabled: boolean, scope: RuntimeScope, current: () => boolean): Promise<SkillsMutationResult> {
+  const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled, scope }, 'skills.config');
+  if (result.outcome !== 'accepted' && !(result.outcome === 'partial' && result.application?.persisted)) {
+    throw new Error(enabled ? 'Failed to enable skill' : 'Failed to disable skill');
   }
+  if (!current()) return result;
+  useSkillsStore.setState((state) => ({
+    skills: state.skills.map((skill) => skill.id === skillId ? {
+      ...skill,
+      enabled,
+      ...(!enabled ? { unavailableReason: 'disabled' as const } : skill.unavailableReason === 'disabled' ? { unavailableReason: null } : {}),
+    } : skill),
+    configApplicationBySkillId: { ...state.configApplicationBySkillId, [skillId]: result.application },
+  }));
+  return result;
 }
 
 interface SkillsState {
@@ -216,6 +219,7 @@ interface SkillsState {
   refreshing: boolean;
   mutating: boolean;
   mutatingBySkillId: Record<string, number>;
+  configApplicationBySkillId: Record<string, SkillsConfigApplication | undefined>;
   searching: boolean;
   searchError: string | null;
   installing: Record<string, boolean>; // slug -> boolean
@@ -229,8 +233,8 @@ interface SkillsState {
   importLocalSkill: (payload: LocalSkillImportPayload, scope?: RuntimeScope) => Promise<string>;
   finishSkillInstallation: (skillId: string, scope: RuntimeScope, current: () => boolean) => Promise<void>;
   uninstallSkill: (skillKey: string, slug?: string) => Promise<void>;
-  enableSkill: (skillId: string, scope?: RuntimeScope) => Promise<void>;
-  disableSkill: (skillId: string) => Promise<void>;
+  enableSkill: (skillId: string, scope?: RuntimeScope) => Promise<SkillsMutationResult>;
+  disableSkill: (skillId: string, scope?: RuntimeScope) => Promise<SkillsMutationResult>;
   batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<SkillsBatchStateResult>;
   setSkills: (skills: Skill[]) => void;
   updateSkill: (skillId: string, updates: Partial<Skill>) => void;
@@ -246,7 +250,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     inflightSkillsFetch = null;
     lastSkillsFetchAt = 0;
     set({ scopeKey: key, scopeGeneration: get().scopeGeneration + 1, skills: [], snapshotReady: false,
-      initialLoading: false, refreshing: false, mutating: false, mutatingBySkillId: {}, installing: {}, error: null });
+      initialLoading: false, refreshing: false, mutating: false, mutatingBySkillId: {}, configApplicationBySkillId: {}, installing: {}, error: null });
   },
   skills: [],
   searchResults: [],
@@ -255,6 +259,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   refreshing: false,
   mutating: false,
   mutatingBySkillId: {},
+  configApplicationBySkillId: {},
   searching: false,
   searchError: null,
   installing: {},
@@ -549,7 +554,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         mutating: true,
       }));
       try {
-        await enableSkillConfig(skillId, scope, current);
+        await setSkillEnabledConfig(skillId, true, scope, current);
       } finally {
         set((state) => {
           const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, skillId);
@@ -601,7 +606,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
   enableSkill: async (skillId, sourceScope) => {
     const scope = sourceScope ?? requireSkillsScope();
-    if (scope.kind !== 'runtime-instance') throw new Error('This runtime has no per-skill enable switch');
+    if (scope.kind !== 'runtime-instance' && !(scope.kind === 'agent' && scope.endpoint.kind === 'native-runtime'
+      && scope.endpoint.runtimeAdapterId === 'matcha-agent')) throw new Error('This runtime has no per-skill enable switch');
     const { set, current } = scopedState(scope, !sourceScope);
     set((state) => {
       const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillId);
@@ -612,10 +618,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      await enableSkillConfig(skillId, scope, current);
+      const result = await setSkillEnabledConfig(skillId, true, scope, current);
       if (current() && !get().skills.some((skill) => skill.id === skillId)) {
         await get().fetchSkills({ force: true, silent: true, fresh: true, scope });
       }
+      return result;
     } catch (error) {
       console.error('Failed to enable skill:', error);
       throw error;
@@ -630,11 +637,12 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  disableSkill: async (skillId) => {
-    const scope = requireSkillsScope();
-    if (scope.kind !== 'runtime-instance') throw new Error('This runtime has no per-skill enable switch');
-    const { set, current } = scopedState(scope);
-    const { updateSkill, skills } = get();
+  disableSkill: async (skillId, sourceScope) => {
+    const scope = sourceScope ?? requireSkillsScope();
+    if (scope.kind !== 'runtime-instance' && !(scope.kind === 'agent' && scope.endpoint.kind === 'native-runtime'
+      && scope.endpoint.runtimeAdapterId === 'matcha-agent')) throw new Error('This runtime has no per-skill enable switch');
+    const { set, current } = scopedState(scope, !sourceScope);
+    const { skills } = get();
 
     const skill = skills.find((s) => s.id === skillId);
     if (skill?.isCore) {
@@ -649,16 +657,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: false, scope }, 'skills.config');
-      if (result.outcome !== 'accepted') {
-        throw new Error('Failed to disable skill');
-      }
-      if (!current()) return;
-      if (skill) {
-        updateSkill(skillId, { enabled: false });
-      } else {
+      const result = await setSkillEnabledConfig(skillId, false, scope, current);
+      if (current() && !get().skills.some((entry) => entry.id === skillId)) {
         await get().fetchSkills({ force: true, silent: true, fresh: true, scope });
       }
+      return result;
     } catch (error) {
       console.error('Failed to disable skill:', error);
       throw error;

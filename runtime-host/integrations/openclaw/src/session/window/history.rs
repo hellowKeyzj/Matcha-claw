@@ -15,6 +15,7 @@ use super::model::{
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_TOOL_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_METADATA_BYTES: usize = 8 * 1024;
+const MAX_STREAM_ID_BYTES: usize = 256;
 const MAX_MEDIA_REF_BYTES: usize = 512;
 const MAX_DELIVERY_MEDIA_REF_BYTES: usize = 256;
 const MAX_TOOL_NAME_BYTES: usize = 256;
@@ -243,7 +244,15 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
                 Some(Value::Null) => Ok(None),
                 _ => optional_string(info, "activeLeafEntryId").map(|leaf| leaf
                     .map(|leaf| leaf.trim().to_owned()).filter(|leaf| !leaf.is_empty())),
-            }).transpose()?);
+            }).transpose()?)
+        .with_history_path(envelope.as_ref().map(decode_history_path).transpose()?.flatten());
+    if kind != HistoryKind::Reset && let Some(Some(path)) = state.history_path() {
+        if native_session_id.as_deref() != Some(path.anchor.session_id.as_str())
+            || state.active_leaf_scope().is_some_and(|leaf| leaf != path.anchor.leaf_entry_id.as_deref())
+        {
+            return Err(payload_error("historyPath", "scope_mismatch", "object"));
+        }
+    }
     Ok(SessionWindow::new(
         messages,
         range,
@@ -253,6 +262,36 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
         native_session_id,
         state,
     ).with_input_receipts(envelope.as_ref().map(decode_input_receipts).transpose()?.flatten()))
+}
+
+fn decode_history_path(envelope: &Map<String, Value>) -> Result<Option<Option<crate::session::protocol::HistoryPath>>, HistoryError> {
+    use crate::session::protocol::{HistoryPath, HistoryRelation};
+    let Some(value) = envelope.get("historyPath") else { return Ok(None); };
+    if value.is_null() { return Ok(Some(None)); }
+    let path: HistoryPath = serde_json::from_value(value.clone())
+        .map_err(|_| payload_error("historyPath", "invalid", value_kind(value)))?;
+    if !path.anchor.valid() || path.previous.as_ref().is_some_and(|anchor| !anchor.valid())
+        || path.previous.is_some() != path.relation.is_some()
+        || value.get("previous").is_some_and(Value::is_null) || value.get("relation").is_some_and(Value::is_null)
+    {
+        return Err(payload_error("historyPath", "invalid", "object"));
+    }
+    if let (Some(previous), Some(relation)) = (&path.previous, path.relation) {
+        let same_generation = previous.generation == path.anchor.generation;
+        let initial_generation = previous.generation.is_none() && previous.leaf_entry_id.is_none();
+        let valid = match relation {
+            HistoryRelation::Exact => previous.session_id == path.anchor.session_id
+                && (same_generation || initial_generation)
+                && previous.leaf_entry_id == path.anchor.leaf_entry_id,
+            HistoryRelation::Ancestor => previous.session_id == path.anchor.session_id
+                && (same_generation || initial_generation)
+                && previous.leaf_entry_id != path.anchor.leaf_entry_id,
+            HistoryRelation::OffPath => previous.session_id == path.anchor.session_id && same_generation,
+            HistoryRelation::Reset => true,
+        };
+        if !valid { return Err(payload_error("historyPath", "inconsistent_relation", "object")); }
+    }
+    Ok(Some(Some(path)))
 }
 
 fn decode_native_session_id(envelope: &Map<String, Value>) -> Result<Option<String>, HistoryError> {
@@ -401,9 +440,27 @@ fn decode_session_state(envelope: &Map<String, Value>) -> Result<SessionState, H
         decode_delta_cursor(envelope)?,
         optional_bool(envelope, "completeSnapshot")?,
     );
-    let Some(info) = envelope.get("sessionInfo") else { return Ok(state); };
+    let mut timings = Vec::new();
+    if let Some(run) = state.in_flight_run()
+        && let Some(object) = envelope.get("inFlightRun").and_then(Value::as_object)
+    {
+        let run_id = crate::session::protocol::RunId::try_new(run.run_id().to_owned())
+            .map_err(|_| payload_error("inFlightRun.runId", "invalid", "string"))?;
+        let mut timing = crate::session::protocol::native_run_timing(run_id, object)
+            .map_err(|_| payload_error("inFlightRun.startedAt", "invalid", "number"))?;
+        timing.ended_at_ms = None;
+        timings.push(timing);
+    }
+    let Some(info) = envelope.get("sessionInfo") else { return Ok(state.with_run_timings(timings)); };
     let info = info.as_object().ok_or_else(|| payload_error("sessionInfo", "expected_object", value_kind(info)))?;
-    Ok(state.with_activity(
+    if let Some(value) = info.get("lastRunId").filter(|value| !value.is_null()) {
+        let run_id = crate::session::protocol::RunId::try_new(bounded_id(value, "lastRunId")?)
+            .map_err(|_| payload_error("lastRunId", "invalid", "string"))?;
+        let timing = crate::session::protocol::native_run_timing(run_id, info)
+            .map_err(|_| payload_error("sessionInfo.timing", "invalid", "number"))?;
+        if timing.ended_at_ms.is_some() { timings.push(timing); }
+    }
+    Ok(state.with_run_timings(timings).with_activity(
         optional_string(info, "status")?,
         match info.get("hasActiveRun") {
             None | Some(Value::Null) => None,
@@ -792,6 +849,11 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         .ok_or_else(|| message_error(index, "message", "expected_object", value_kind(value)))?;
     let role_value = required_message(message, index, "role")?;
     let role = decode_role(index, string_message(role_value, index, "role")?)?;
+    let notice = (role == MessageRole::User
+        && message.get("provenance").is_some_and(|provenance|
+            provenance.get("kind").and_then(Value::as_str) == Some("internal_system")
+                && provenance.get("sourceTool").and_then(Value::as_str) == Some("main_session_restart_recovery")))
+        .then_some(sessions_module::state::SessionNotice::RestartRecovery);
     let (text, mut content) = decode_content(index, required_message(message, index, "content")?)?;
     let native = message.get("__openclaw").filter(|value| !value.is_null())
         .map(|value| value.as_object().ok_or_else(|| message_error(index, "__openclaw", "expected_object", value_kind(value))))
@@ -805,6 +867,13 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         .transpose()?.flatten().unwrap_or(false);
     let identity_message_id = native.map(|meta| projection_string(meta, index, "id")).transpose()?.flatten()
         .or(envelope.map(|envelope| projection_string(envelope, index, "messageId")).transpose()?.flatten());
+    let identity_stream_id = native.and_then(|meta| meta.get("streamId")).filter(|value| !value.is_null())
+        .map(|value| {
+            let text = string_message(value, index, "streamId")?;
+            if text.len() > MAX_STREAM_ID_BYTES { return Err(message_error(index, "streamId", "string_too_large", "string")); }
+            if text.contains('\0') { return Err(message_error(index, "streamId", "invalid", "string")); }
+            Ok(text.trim().to_owned())
+        }).transpose()?.filter(|id| !id.is_empty());
     let message_id = identity_message_id.clone().or(optional_alias_string_message(message, index, "messageId", "id")?);
     let parent_id = optional_alias_string_message(message, index, "parentId", "parentMessageId")?;
     let origin = bounded_optional_string_message(message, index, "origin", MAX_METADATA_BYTES)?;
@@ -909,10 +978,10 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         sequence,
         created_at,
         updated_at,
-    ).with_display(display_position, stream_fallback).with_imported(is_imported)
+    ).with_notice(notice).with_display(display_position, stream_fallback).with_imported(is_imported)
         .with_content_identity(idempotency_key, stop_reason, final_content, tool_continuation)
         .with_input_id(input_id)
-        .with_identity(identity_message_id, identity_run_id, identity_sequence, after_sequence)
+        .with_identity(identity_message_id, identity_stream_id, identity_run_id, identity_sequence, after_sequence)
         .with_steer_target_run_id(steer_target_run_id)
         .with_projection_state(None, mirror_origin, run_terminal)
         .with_event_facts(

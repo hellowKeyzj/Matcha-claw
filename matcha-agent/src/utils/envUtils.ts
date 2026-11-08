@@ -17,6 +17,19 @@ export function getTeamsDir(): string {
   return join(getClaudeConfigHomeDir(), 'teams')
 }
 
+export function getClaudeCodeProjectDirName(): string | undefined {
+  const name = process.env.CLAUDE_CODE_PROJECT_DIR_NAME
+  if (
+    process.env.CLAUDE_CONFIG_DIR &&
+    name &&
+    name.length <= 64 &&
+    !/[^A-Za-z0-9_-]/.test(name) &&
+    !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(name)
+  ) {
+    return name
+  }
+}
+
 /**
  * Check if NODE_OPTIONS contains a specific flag.
  * Splits on whitespace and checks for exact match to avoid false positives.

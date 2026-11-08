@@ -89,6 +89,7 @@ pub(super) struct RunHeader {
     pub(super) team: TeamId,
     pub(super) revision: TeamRevision,
     pub(super) runtime: Option<RunRuntimeReceipt>,
+    pub(super) role_session_intents: BTreeMap<String, RoleSessionIntent>,
     pub(super) lifecycle: GraphRunLifecycle,
     pub(super) start_gate: RunStartGate,
     pub(super) retired_executions: BTreeSet<(NodeId, ExecutionFence)>,
@@ -100,6 +101,7 @@ impl RunHeader {
         Self {
             team: run.team.clone(), revision: run.frozen_team_revision,
             runtime: run.runtime.clone(), lifecycle: run.lifecycle.clone(),
+            role_session_intents: run.role_session_intents.clone(),
             start_gate: run.start_gate.clone(),
             retired_executions: run.retired_executions.clone(),
             task_execution_context: run.task_execution_context.clone(),
@@ -110,6 +112,7 @@ impl RunHeader {
         run.team = self.team;
         run.frozen_team_revision = self.revision;
         run.runtime = self.runtime;
+        run.role_session_intents = self.role_session_intents;
         run.lifecycle = self.lifecycle;
         run.start_gate = self.start_gate;
         run.retired_executions = self.retired_executions;
@@ -204,6 +207,7 @@ impl OrganizationFacts {
                 return Err(OrganizationFactsError::InvalidGraphRun);
             }
             if let RunUndo::Updated(old) = old {
+                run.validate_session_transition(old.runtime.as_ref(), &old.role_session_intents)?;
                 if run.team != old.team || run.frozen_team_revision != old.revision
                     || run.task_execution_context != old.task_execution_context { return Err(OrganizationFactsError::RunOwnershipChanged); }
                 if !run.lifecycle.can_transition_from(&old.lifecycle) { return Err(OrganizationFactsError::InvalidGraphRunLifecycle); }
@@ -216,6 +220,7 @@ impl OrganizationFacts {
                 !context.valid() || context.root_request_id != run.lifecycle().creation_idempotency_key()
             }) { return Err(OrganizationFactsError::InvalidGraphRun); }
             run.validate_retired_executions(&run.retired_executions)?;
+            run.validate_role_session_intents()?;
             if matches!(old, RunUndo::Inserted) {
                 GraphState::restore_durable(run.graph.durable_snapshot()).map_err(|_| OrganizationFactsError::InvalidGraphRun)?;
             } else {

@@ -20,8 +20,10 @@ use crate::{
 
 use super::models::{
     ProviderModelOwner, provider_execution_endpoint, provider_execution_protocol,
-    provider_generation_credential, text_generation_model_limits,
+    provider_generation_credential, text_generation_model_limits, text_generation_timeout_ms,
 };
+
+const INPUT_TOKEN_COUNT_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl ProviderModelOwner {
     pub(super) fn prepare_generation_binding(
@@ -151,7 +153,11 @@ impl ProviderModelOwner {
                 },
             ));
         }
-        let timeout = request.binding.limits.timeout_ms;
+        let timeout = request.binding.limits.timeout_ms
+            .map(Duration::from_millis)
+            .map_or(INPUT_TOKEN_COUNT_TIMEOUT, |timeout| {
+                timeout.min(INPUT_TOKEN_COUNT_TIMEOUT)
+            });
         let request = self
             .bound_request(accounts, catalog, request, &cancellation)
             .await?;
@@ -166,13 +172,8 @@ impl ProviderModelOwner {
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Err(Failure::new(Stage::Read, FailureKind::Cancelled)),
-                result = async {
-                    match timeout {
-                        Some(timeout) => tokio::time::timeout(Duration::from_millis(timeout), &mut count)
-                            .await.map_err(|_| Failure::new(Stage::Read, FailureKind::GenerationDeadline)),
-                        None => Ok(count.await),
-                    }
-                } => result,
+                result = tokio::time::timeout(timeout, &mut count) => result
+                    .map_err(|_| Failure::new(Stage::Read, FailureKind::GenerationDeadline)),
             }
         }?;
         result.map_err(|error| match error {
@@ -258,13 +259,10 @@ impl ProviderModelOwner {
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => Err(Failure::new(Stage::Read, FailureKind::Cancelled)),
-                result = async {
-                    match binding.limits.timeout_ms {
-                        Some(timeout) => tokio::time::timeout(Duration::from_millis(timeout), &mut generation).await
-                            .map_err(|_| Failure::new(Stage::Read, FailureKind::GenerationDeadline)),
-                        None => Ok(generation.await),
-                    }
-                } => result,
+                result = tokio::time::timeout(
+                    Duration::from_millis(text_generation_timeout_ms(binding.limits.timeout_ms)),
+                    &mut generation,
+                ) => result.map_err(|_| Failure::new(Stage::Read, FailureKind::GenerationDeadline)),
             }
         }.and_then(|result| result.map_err(|error| classify(&error, &observation)));
         let mut response = match &result {

@@ -16,10 +16,10 @@ export function useTeamSessionProjection<T>(selector: (state: TeamSessionProject
   return useTeamsStore(selector);
 }
 
-export function selectTeamSessionRoles(state: TeamSessionProjection, teamId: string): readonly TeamRoleBindingRecord[] {
+export function selectTeamSessionRoles(state: TeamSessionProjection, teamId: string, requestedRunId?: string): readonly TeamRoleBindingRecord[] {
   const team = state.teams.find((team) => team.id === teamId);
   if (!team) return EMPTY_TEAM_SESSION_ROLES;
-  const runId = team.activeRunId;
+  const runId = requestedRunId ?? team.activeRunId;
   const roles = runId
     ? state.designByRunId[runId]?.snapshot?.roles
       ?? state.runListByTeamId[team.id]?.find((run) => run.runId === runId)?.sessions

@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod driver;
 pub mod gateway;
 pub mod lifecycle;
+pub mod maintenance;
 mod native_config;
 mod package_status;
 pub mod platform_runtime;

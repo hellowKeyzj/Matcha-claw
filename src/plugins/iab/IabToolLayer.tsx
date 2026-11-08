@@ -1,34 +1,32 @@
 import { useEffect, useRef, useState } from 'react';
 import { Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useWorkspace } from '@/plugins/workspace/context';
 import type { WorkspacePageProps } from '@/plugins/workspace/extensions';
 import type { IabEvent } from '@/types/desktop/iab';
-import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
 import { BrowserChrome } from './BrowserChrome';
 import { HistoryPage } from './HistoryPage';
 import { DownloadsPage } from './DownloadsPage';
 import { IabConfirmation } from './IabConfirmation';
-import { useNativeView } from './useNativeView';
-import { iabCommand, isIabTabVisible, onIabEvent, reportIabError, useIabStore } from './store';
+import { iabPageId } from './browser-page';
+import { buildIabDisplayScope, iabCommand, isIabTabVisible, onIabEvent, reportIabError, useIabStore } from './store';
 import './iab.css';
 
 type ClearRequest = Extract<IabEvent, { type: 'clear-data-requested' }>;
 
-export function IabToolLayer({ sessionIdentity, visible: pageVisible, ownerId, tabId }: WorkspacePageProps & { ownerId: string; tabId: string }) {
-  const { t, i18n } = useTranslation('iab');
+export function IabToolLayer({ visible: pageVisible, ownerId, tabId }: WorkspacePageProps & { ownerId: string; tabId: string }) {
+  const { t } = useTranslation('iab');
+  const workspace = useWorkspace();
   const currentOwnerId = useIabStore((state) => state.ownerId);
-  const activeTabId = useIabStore((state) => state.activeTabId);
-  const sessionGroupId = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
-  const tab = useIabStore((state) => state.tabs.find((entry) => entry.ownerId === ownerId && entry.id === tabId && isIabTabVisible(entry, sessionGroupId)) ?? null);
+  const displayScope = buildIabDisplayScope(workspace);
+  const tab = useIabStore((state) => state.tabs.find((entry) => entry.ownerId === ownerId && entry.id === tabId && isIabTabVisible(entry, displayScope)) ?? null);
   const matchingOwner = currentOwnerId === ownerId;
-  const visible = pageVisible && matchingOwner && !!tab && activeTabId === tabId;
+  const visible = pageVisible && matchingOwner && !!tab;
   const surface = useRef<HTMLDivElement>(null);
-  const placeholder = useRef<HTMLDivElement>(null);
   const [clearRequest, setClearRequest] = useState<ClearRequest | null>(null);
   const [clearError, setClearError] = useState(false);
   const clearRunning = useRef(false);
   const browserVisible = visible && clearRequest === null;
-  useNativeView(placeholder, browserVisible && !!tab && !tab.internalPage && tab.url !== 'about:blank' && !tab.crash, matchingOwner ? ownerId : null);
   useEffect(() => {
     if (!visible) { setClearRequest(null); setClearError(false); }
   }, [visible, ownerId]);
@@ -37,14 +35,6 @@ export function IabToolLayer({ sessionIdentity, visible: pageVisible, ownerId, t
       setClearRequest(event); setClearError(false);
     }
   }), [visible, ownerId, tabId]);
-  useEffect(() => {
-    if (!matchingOwner) return;
-    const sync = () => void iabCommand({ action: 'set-presentation', theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light', locale: i18n.language }).catch(() => {});
-    sync();
-    const observer = new MutationObserver(sync);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-    return () => observer.disconnect();
-  }, [i18n.language, matchingOwner, ownerId]);
   const clearData = async () => {
     const target = clearRequest;
     if (!target || clearRunning.current || target.ownerId !== useIabStore.getState().ownerId) return;
@@ -57,9 +47,13 @@ export function IabToolLayer({ sessionIdentity, visible: pageVisible, ownerId, t
     } catch { if (target.ownerId === useIabStore.getState().ownerId) setClearError(true); }
     finally { clearRunning.current = false; }
   };
-  return <div ref={surface} data-browser-surface className="iab-root flex h-full min-h-0 min-w-0 flex-col bg-card text-foreground">
+  const activate = () => {
+    const pageId = iabPageId(ownerId, tabId);
+    if (visible && workspace.activePageId !== pageId) workspace.activatePage(pageId, { reveal: false });
+  };
+  return <div ref={surface} data-browser-surface onPointerDownCapture={activate} onFocusCapture={activate} className="iab-root flex h-full min-h-0 min-w-0 flex-col bg-card text-foreground">
     <BrowserChrome key={`${ownerId}:${tabId}:${browserVisible}`} tab={tab} surface={surface} visible={browserVisible} />
-    <div ref={placeholder} className="min-h-0 flex-1">
+    <div data-iab-owner={ownerId} data-iab-tab={tabId} data-iab-visible={browserVisible && !tab?.crash} className="min-h-0 flex-1">
       {tab?.internalPage === 'history' ? <HistoryPage key={tab.id} tabId={tab.id} visible={browserVisible} />
         : tab?.internalPage === 'downloads' ? <DownloadsPage key={tab.id} visible={browserVisible} />
         : tab?.crash ? <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-muted-foreground"><p>{t('crashed')}</p><button type="button" className="iab-action" onClick={() => void iabCommand({ action: 'reload', tabId: tab.id }).catch(reportIabError)}>{t('reload')}</button></div>

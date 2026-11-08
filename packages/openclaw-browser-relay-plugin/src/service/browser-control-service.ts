@@ -1414,6 +1414,7 @@ export class BrowserControlService {
           mode,
           fnBody: requiredString(payload.fn ?? payload.expression, 'fn'),
           ref: payload.ref,
+          frameId: payload.frameId,
           timeoutMs,
         }),
       }
@@ -1526,6 +1527,7 @@ export class BrowserControlService {
             mode,
             fnBody: requiredString(payload.fn ?? payload.expression, 'fn'),
             ref: payload.ref,
+            frameId: payload.frameId,
             timeoutMs,
           }),
         }

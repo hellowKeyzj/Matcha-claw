@@ -464,6 +464,24 @@ impl SessionOps for MatchaRuntimeDriver {
             })
         })
     }
+    fn read_execution_result<'a>(
+        &'a self,
+        command: sessions_module::execution::SessionRunReadCommand,
+    ) -> SessionFuture<'a, Option<sessions_module::execution::SessionExecutionResult>> {
+        Box::pin(async move {
+            use sessions_module::execution::{
+                SessionRunReadOutcome, SessionRunSelector, native_execution_result,
+            };
+            let SessionRunSelector::RunId(run_id) = command.selector.clone() else {
+                return None;
+            };
+            let identity = command.identity.clone();
+            match self.read_session_run(command).await {
+                SessionRunReadOutcome::Found(record) => native_execution_result(identity, run_id, record),
+                _ => None,
+            }
+        })
+    }
     fn session_model_runtime_command_cancellable<'a>(
         &'a self,
         identity: &'a sessions_module::state::SessionIdentity,

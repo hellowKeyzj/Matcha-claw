@@ -53,6 +53,14 @@ output { width: 44px; font-size: 12px; text-align: center; font-variant-numeric:
 .separator { height: 1px; margin: 6px 12px; background: hsl(var(--border) / .6); }
 .submenu { width: 248px; max-width: calc(100vw - 24px); padding: 6px; z-index: 20; }
 .menu, .downloads { z-index: 10; }
+.choices { z-index: 10; min-width: 224px; max-width: min(320px, calc(100vw - 24px)); max-height: min(70vh, var(--radix-dropdown-menu-content-available-height)); padding: 6px; overflow-y: auto; }
+.choice { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; font-size: 14px; cursor: default; outline: none; }
+.choice[data-selected], .choice[data-highlighted] { background: hsl(var(--hover)); }
+.choice[data-disabled] { pointer-events: none; opacity: .45; }
+.choice-icon { width: 16px; height: 16px; object-fit: contain; flex-shrink: 0; }
+.choice-badge, .choice-page { color: hsl(var(--muted)); font-size: 12px; }
+.choice-badge { flex-shrink: 0; }
+.choice-page { padding: 8px 10px; }
 .suggestions { position: fixed; left: 4px; top: 4px; width: calc(100% - 8px); padding: 4px; max-height: calc(100vh - 8px); overflow-y: auto; }
 .suggestion { display: flex; height: 48px; width: 100%; align-items: center; border-radius: 8px; }
 .suggestion:hover, .suggestion.selected { background: hsl(var(--hover)); }

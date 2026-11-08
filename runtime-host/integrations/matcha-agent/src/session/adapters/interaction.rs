@@ -104,7 +104,7 @@ pub(super) async fn approvals(
         return PendingApprovalsOutcome::Unsupported;
     }
     let result = async {
-        rpc::get(client, &command.session_id, None).await?;
+        rpc::bound(client, &command.identity, Some(&command.session_id)).await?;
         native::pending(client, &command.session_id, "approvals")
             .await?
             .iter()
@@ -113,9 +113,11 @@ pub(super) async fn approvals(
                     && item.delivery == QuestionDelivery::NotSent
             })
             .map(|item| {
+                let approval = item.approval()?;
                 Ok(PendingApproval {
-                    approval_id: item.approval_id()?,
-                    option_ids: vec!["allow".into(), "deny".into()],
+                    approval_id: approval.approval_id,
+                    option_ids: approval.option_ids,
+                    details: approval.details,
                 })
             })
             .collect::<Result<Vec<_>, Failure>>()
@@ -138,7 +140,7 @@ pub(super) async fn approve(
         return SessionApprovalOutcome::Unsupported;
     }
     let result=async {
-        rpc::get(client,&command.session_id,None).await?;
+        rpc::bound(client,&command.identity,Some(&command.session_id)).await?;
         let items=native::pending(client,&command.session_id,"approvals").await?;
         let item=items.iter().find(|item|item.approval_id().ok().as_deref()==Some(command.approval_id.as_str())).ok_or(Failure::InvalidInput)?;
         if item.availability != QuestionAvailability::Pending || item.delivery != QuestionDelivery::NotSent { return Err(Failure::InvalidInput); }

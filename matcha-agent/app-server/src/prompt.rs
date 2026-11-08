@@ -1,11 +1,23 @@
 use crate::{
-    config::{self, ConfigStore},
+    config::{self, ConfigStore, DEFAULT_AGENT_ID},
     memory::files,
     rpc,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Component, Path};
+
+pub(crate) fn append_system_prompt(agent_id: &str, configured: Option<&str>) -> Option<String> {
+    if agent_id != DEFAULT_AGENT_ID {
+        return configured.map(str::to_owned);
+    }
+    let mut prompt = include_str!("agent/maintenance.md").trim_end().to_owned();
+    if let Some(configured) = configured {
+        prompt.push_str("\n\n");
+        prompt.push_str(configured);
+    }
+    Some(prompt)
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

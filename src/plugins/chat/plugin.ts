@@ -1,7 +1,7 @@
 import { MessageSquare, Paperclip, Settings2, Target } from 'lucide-react';
 import { applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
-import { chatComposerActions, chatComposerContent, chatWorkspaceContent, type ChatComposerAction } from './extensions';
+import { chatComposerActions, chatComposerContent, chatThreadHeader, chatWorkspaceContent, type ChatComposerAction } from './extensions';
 import { subscribeChatHostEvents } from './host-observation';
 
 const ChatPage = lazyWithPreload(() => import('./page'));
@@ -24,7 +24,7 @@ const composerActions: readonly ChatComposerAction[] = [
 export const chatPlugin = definePlugin({
   id: 'chat',
   requires: ['app-shell', 'workspace'],
-  extensionPoints: [chatComposerActions, chatComposerContent, chatWorkspaceContent],
+  extensionPoints: [chatComposerActions, chatComposerContent, chatWorkspaceContent, chatThreadHeader],
   contributes: [
     contribute(applicationPages, { id: 'chat', path: '/', component: ChatPage, viewport: 'custom', preload: ChatPage.preload }),
     ...composerActions.map((action) => contribute(chatComposerActions, action)),

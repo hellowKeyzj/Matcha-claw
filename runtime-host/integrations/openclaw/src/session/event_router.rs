@@ -51,6 +51,12 @@ impl EventRouter {
             SessionReducerActor::new(SessionKey::try_new(identity.session_key.clone()).expect("validated observation key")))
     }
 
+    pub(crate) fn pending_approvals(&self, identity: &SessionIdentity, generation: u64, session_id: &str) -> Result<Vec<sessions_module::state::ApprovalView>, RuntimeOperationFailure> {
+        let actor = self.actors.get(&(identity_key(identity), generation)).ok_or(RuntimeOperationFailure::Unavailable)?;
+        if actor.native_session_id() != Some(session_id) { return Err(RuntimeOperationFailure::TargetRejected); }
+        actor.pending_approvals()
+    }
+
     pub(crate) fn image_task_tools(&self, identity: &SessionIdentity, generation: u64) -> Vec<sessions_module::state::ToolView> {
         self.actors.get(&(identity_key(identity), generation)).map(|actor|
             actor.image_task_tools().iter().filter(|tool| super::image_tasks::task_id(tool).is_some()).cloned().collect()
@@ -281,6 +287,10 @@ impl EventRouter {
         self.actor(identity, generation).sync_approvals(&approvals, epoch)
     }
 
+    pub(crate) fn history_anchor(&self, identity: &SessionIdentity, generation: u64) -> Option<super::protocol::HistoryAnchor> {
+        self.actors.get(&(identity_key(identity), generation)).and_then(|actor| actor.history_anchor()).cloned()
+    }
+
     pub(crate) fn history(&mut self, identity: SessionIdentity, generation: u64, mut window: SessionWindow, page: PageRequest, epoch: GatewayEpoch, host_epoch: u64) -> Result<Option<SessionSync>, RuntimeOperationFailure> {
         let mut page_actor;
         let actor = if matches!(page.direction(), Direction::Latest) {
@@ -419,6 +429,7 @@ mod tests {
             activity: None,
             approval: None,
             changed: None,
+            run_timing: None,
         }
     }
 

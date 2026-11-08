@@ -3,6 +3,7 @@ import { Loader2 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
+import type { SkillsConfigApplication } from '@/types/skills-operation-result';
 
 export interface AgentSkillOption {
   id: string;
@@ -10,6 +11,8 @@ export interface AgentSkillOption {
   description?: string;
   icon?: string;
   selectable?: boolean;
+  application?: SkillsConfigApplication;
+  saveError?: boolean;
   unavailableReason?: string;
 }
 
@@ -18,6 +21,7 @@ export function AgentSkillConfigPanel({
   headerAccessory,
   skillOptions,
   skillsLoading,
+  skillsError,
   savingSkillId,
   selectedSkillIds,
   onToggleSkill,
@@ -26,6 +30,7 @@ export function AgentSkillConfigPanel({
   headerAccessory?: ReactNode;
   skillOptions: AgentSkillOption[];
   skillsLoading: boolean;
+  skillsError?: string | null;
   savingSkillId: string | null;
   selectedSkillIds: string[];
   onToggleSkill: (skillId: string, checked: boolean) => void;
@@ -45,6 +50,8 @@ export function AgentSkillConfigPanel({
         <div className="min-w-0">
           {skillsLoading ? (
             <p className="text-sm text-muted-foreground">{t('skillConfigDialog.loading')}</p>
+          ) : skillsError ? (
+            <p role="alert" className="text-sm text-destructive">{t('skillConfigDialog.loadFailed')}</p>
           ) : skillOptions.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t('skillConfigDialog.empty')}</p>
           ) : (
@@ -53,6 +60,9 @@ export function AgentSkillConfigPanel({
                 const checked = selectedSkillIds.includes(skill.id);
                 const saving = savingSkillId === skill.id;
                 const switchDisabled = savingSkillId !== null || (skill.selectable === false && !checked);
+                const sessions = skill.application?.sessions;
+                const acknowledged = sessions?.filter((session) => session.status === 'acknowledged').length ?? 0;
+                const unconfirmed = (sessions?.length ?? 0) - acknowledged;
                 return (
                   <div
                     key={skill.id}
@@ -88,6 +98,22 @@ export function AgentSkillConfigPanel({
                               {skill.unavailableReason}
                             </p>
                           ) : null}
+                          {skill.saveError ? (
+                            <p role="alert" className="mt-1 text-xs leading-5 text-destructive">{t('skillConfigDialog.saveFailed')}</p>
+                          ) : !saving && sessions ? (
+                            <div role="status" className="mt-1 text-xs leading-5 text-muted-foreground">
+                              <p title={sessions.map((session) => t('skillConfigDialog.sessionStatus', {
+                                sessionId: session.sessionId,
+                                instanceId: session.instanceId,
+                                status: t(`skillConfigDialog.${session.status}`),
+                              })).join('\n')}>
+                                {t(sessions.length === 0 ? 'skillConfigDialog.savedNextStart'
+                                  : unconfirmed > 0 ? 'skillConfigDialog.savedPartial' : 'skillConfigDialog.savedAcknowledged')}
+                                {sessions.length > 0 ? ` · ${t('skillConfigDialog.applicationCounts', { acknowledged, unconfirmed })}` : null}
+                              </p>
+                              <p>{t('skillConfigDialog.policyLimits')}</p>
+                            </div>
+                          ) : null}
                         </div>
                         <div className="shrink-0 flex items-center gap-2">
                           <span className="flex h-4 w-4 items-center justify-center" role="status">
@@ -99,7 +125,7 @@ export function AgentSkillConfigPanel({
                             ) : null}
                           </span>
                           <Switch
-                            aria-label={skill.name}
+                            aria-label={t('skillConfigDialog.toggleSkill', { name: skill.name })}
                             checked={checked}
                             disabled={switchDisabled}
                             onCheckedChange={(nextChecked) => onToggleSkill(skill.id, nextChecked)}

@@ -132,9 +132,9 @@ function buildManualRoleId(agent: SubagentSummary, usedRoleIds: ReadonlySet<stri
 }
 
 function teamRoleCount(team: TeamMeta, roles: TeamRoleBindingRecord[] | undefined, runs: TeamRunListItem[] | undefined): number | undefined {
-  if (roles?.length && (!team.activeRunId || roles.every((role) => role.runId === team.activeRunId))) return roles.length;
+  if (roles?.length && (!team.activeRunId || roles.every((role) => role.runId === team.activeRunId))) return new Set(roles.map((role) => role.roleId)).size;
   const run = runs?.find((run) => run.runId === team.activeRunId);
-  if (run) return run.sessions.length;
+  if (run) return new Set(run.sessions.map((role) => role.roleId)).size;
   return !team.activeRunId && runs?.length === 0 ? 0 : undefined;
 }
 

@@ -188,7 +188,8 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
   const gate = resolveChatSendGateForPayload(sendGate, { text, attachmentCount });
   if (!gate.canSend) return { accepted: false, reason: gate.reason, error: gate.error };
   let conversation = input.get().currentConversation;
-  let key = gate.kind === 'draft' ? `${gate.runtimeScopeKey}:agent:${gate.agentId}:draft` : gate.sessionKey;
+  let key = gate.kind === 'session' ? gate.sessionKey : conversation?.kind === 'draft' ? conversation.composerDraftKey : '';
+  if (!key) return { accepted: false, reason: 'missing-session', dispatch: 'not-dispatched' };
   const sourceKey = key;
   let snapshot = readComposerDraftSnapshot(key);
   const submission = !intent && payload.operationId ? useComposerDraftStore.getState().submissions[key] : undefined;

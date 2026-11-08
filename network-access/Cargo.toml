@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "matcha-network"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+easytier = { path = "../build/network-source/easytier/easytier", default-features = false, features = ["aes-gcm", "websocket", "quic", "wireguard"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

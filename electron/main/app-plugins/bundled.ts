@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { requireDigest, requireObject, requirePluginId } from './package';
-import { MAX_INSTALLED_APP_PLUGINS, readBoundedFile } from './storage';
+import { MAX_INSTALLED_APP_PLUGINS } from './storage';
+import { readBoundedFile } from '../../utils/private-file';
 
 export interface BundledAppPlugin {
   readonly id: string;

@@ -275,7 +275,7 @@ export function useChatWindowDockController({
   }, []);
 
   const openSidePanel = useCallback(async (options?: { flush?: boolean }) => {
-    if (inlineRef.current) {
+    if (!enabledRef.current) {
       openPanelRef.current();
       return;
     }
@@ -319,14 +319,7 @@ export function useChatWindowDockController({
       return;
     }
 
-    const appliedDockWidth = enabledRef.current      ? await setWindowRightDockWidth(requestedDockWidth, { currentDockWidth: 0 })
-      : 0;
-    const resetCancelledOpening = async () => {
-      if (appliedDockWidth > 0) {
-        await setWindowRightDockWidth(0, { currentDockWidth: appliedDockWidth });
-      }
-      clearRightDockLayout();
-    };
+    const appliedDockWidth = await setWindowRightDockWidth(requestedDockWidth, { currentDockWidth: 0 });
     const openingCancelled = () => (
       !mountedRef.current
       || transitionSeqRef.current !== seq
@@ -334,7 +327,6 @@ export function useChatWindowDockController({
     );
 
     if (openingCancelled()) {
-      await resetCancelledOpening();
       return;
     }
 
@@ -342,7 +334,6 @@ export function useChatWindowDockController({
     if (isDockWidthUsable(appliedDockWidth)) {
       const windowExpanded = await waitForWindowWidthAtLeast(baseWindowWidth + appliedDockWidth);
       if (openingCancelled()) {
-        await resetCancelledOpening();
         return;
       }
       if (windowExpanded) {
@@ -350,7 +341,6 @@ export function useChatWindowDockController({
       }
     }
     if (openingCancelled()) {
-      await resetCancelledOpening();
       return;
     }
     if (!docked) {
@@ -415,22 +405,6 @@ export function useChatWindowDockController({
       closePanelRef.current();
       return;
     }
-    if (currentState.phase === 'opening') {
-      transitionSeqRef.current += 1;
-      clearRightDockLayout();
-      const closedState = createClosedDockState(preferredWidthRef.current);
-      if (flush) {
-        flushSync(() => {
-          commitDockState(closedState);
-          closePanelRef.current();
-        });
-      } else {
-        commitDockState(closedState);
-        closePanelRef.current();
-      }
-      return;
-    }
-
     const seq = transitionSeqRef.current + 1;
     transitionSeqRef.current = seq;
     const sidePanelWidth = currentState.sidePanelWidth;
@@ -447,8 +421,8 @@ export function useChatWindowDockController({
       : 0;
     const windowDockActive = currentState.mode === 'docked'
       && currentDockWidth > 0
-      && (!dockLayout || windowWidth > dockLayout.baseWidth + 1);
-    const closeDockOptions = windowDockActive
+      && (currentState.phase === 'opening' || !dockLayout || windowWidth > dockLayout.baseWidth + 1);
+    const closeDockOptions = windowDockActive && currentState.phase !== 'opening'
       ? { currentDockWidth }
       : undefined;
     const closingState: ChatWindowDockState = {
@@ -492,7 +466,7 @@ export function useChatWindowDockController({
         await waitForWindowWidthAtMost(baseWindowWidth);
       }
     } finally {
-      if (mountedRef.current && (transitionSeqRef.current === seq || dockStateRef.current.phase === 'closing')) {
+      if (mountedRef.current && transitionSeqRef.current === seq) {
         const closedState = createClosedDockState(preferredWidthRef.current);
         clearRightDockLayout();
         if (flush) {
@@ -618,7 +592,21 @@ export function useChatWindowDockController({
     commitDockState({ ...currentState, mainWidth, anchorMainWidth });
   }, [commitDockState, containerWidth, dockState.phase, enabled, inline]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      transitionSeqRef.current += 1;
+      const currentState = dockStateRef.current;
+      if (currentState.phase === 'opening' || currentState.appliedDockWidth > 0) {
+        void setWindowRightDockWidth(0);
+      }
+      dockStateRef.current = createClosedDockState(preferredWidthRef.current);
+      clearRightDockLayout();
+    };
+  }, [setWindowRightDockWidth]);
+
+  useLayoutEffect(() => {
     if (!enabled || inline) {
       const currentState = dockStateRef.current;
       if (currentState.phase !== 'closed') {
@@ -626,7 +614,7 @@ export function useChatWindowDockController({
         commitDockState(createClosedDockState(preferredWidthRef.current));
       }
       clearRightDockLayout();
-      if (currentState.appliedDockWidth > 0) {
+      if (currentState.phase === 'opening' || currentState.appliedDockWidth > 0) {
         void setWindowRightDockWidth(0);
       }
       return;
@@ -640,21 +628,9 @@ export function useChatWindowDockController({
     }
   }, [closeSidePanel, commitDockState, enabled, inline, openSidePanel, panelOpen, setWindowRightDockWidth]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      const currentState = dockStateRef.current;
-      if (currentState.appliedDockWidth > 0) {
-        void setWindowRightDockWidth(0);
-      }
-      clearRightDockLayout();
-    };
-  }, [setWindowRightDockWidth]);
-
   return useMemo(() => {
     const phase: ChatWindowDockPhase = inline ? enabled && panelOpen ? 'open' : 'closed'
-      : enabled && panelOpen && dockState.phase === 'closed' ? 'opening' : dockState.phase;
+      : dockState.phase;
     const sidePanelMounted = phase !== 'closed';
     const sidePanelWidth = inline || phase === 'closed'
       ? renderWidth
@@ -670,7 +646,7 @@ export function useChatWindowDockController({
       sidePanelMode: inline || phase === 'closed' ? 'docked' : dockState.mode,
       sidePanelWidth,
       sidePanelMainWidth,
-      sidePanelVisible: phase === 'open',
+      sidePanelVisible: sidePanelMounted,
       toggleSidePanel,
       openSidePanel,
       closeSidePanel,

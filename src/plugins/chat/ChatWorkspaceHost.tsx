@@ -2,8 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Pointer
 import { useTranslation } from 'react-i18next';
 import { AgentSessionsPane } from '@/plugins/chat/AgentSessionsPane';
 import { Chat } from '@/plugins/chat';
-import { useChatStore } from '@/plugins/chat/store';
-import { isChatRuntimePreparing, useChatRuntime } from '@/plugins/chat/chat-session';
 import { useLayoutStore } from '@/app/layout/store';
 import { CHAT_WORKSPACE_LAYOUT, NAVIGATION_RAIL_WIDTH, getSidebarResizeMaxWidth, resolveChatWorkspaceLayout } from '@/app/layout/workspace';
 import { isTraceEnabled } from '@/lib/trace-logger';
@@ -30,10 +28,7 @@ export function ChatWorkspaceHost({
   const layoutContainerWidth = rightDockLayout && rightDockLayout.dockWidth > 0
     ? rightDockLayout.baseWidth - (workspaceFullscreen ? 0 : NAVIGATION_RAIL_WIDTH)
     : containerWidth;
-  const { runtime, directory } = useChatRuntime();
-  const preparing = useChatStore((state) => isChatRuntimePreparing(state, runtime, directory.status));
-  const sessionsEnabled = sidebarVisible && !workspaceFullscreen;
-  const sessionsVisible = sessionsEnabled && !preparing;
+  const sessionsVisible = sidebarVisible && !workspaceFullscreen;
   const workspaceLayout = resolveChatWorkspaceLayout({
     containerWidth: layoutContainerWidth,
     sidebarVisible: sessionsVisible,
@@ -118,7 +113,7 @@ export function ChatWorkspaceHost({
         className="h-full min-w-0 shrink-0 overflow-hidden bg-[hsl(var(--shell-surface-muted))]"
         style={{ width: workspaceLayout.sidebarWidth }}
       >
-        {sessionsEnabled ? <AgentSessionsPane /> : null}
+        {sessionsVisible ? <AgentSessionsPane /> : null}
       </div>
       {sessionsVisible ? (
         <div

@@ -1,4 +1,12 @@
 {
+  "Add credentials to the selected provider account": "请为所选服务商账号配置凭据",
+  "Provider credentials could not be read; check the provider account credentials": "无法读取服务商凭据，请检查该账号的凭据配置",
+  "The text provider rejected its credentials; update the provider account credentials": "文本服务商拒绝了当前凭据，请更新该账号的凭据",
+  "The text provider denied this request; check account and model permissions": "文本服务商拒绝了本次请求，请检查账号和模型权限",
+  "The text provider rate limit was reached; wait before retrying": "文本服务商请求频率已达上限，请稍后重试",
+  "Text generation exceeded its time limit; the provider request may already have occurred. Check the provider service before retrying": "文本生成超时；服务商可能已执行请求，请先检查服务状态再重试",
+  "The text provider returned an invalid response; check the model and provider configuration": "文本服务商返回了无效响应，请检查模型和服务商配置",
+  "The text provider is unavailable; check the provider service and connection": "文本服务商暂不可用，请检查服务状态和网络连接",
   "selection": {
     "title": "选区助手",
     "close": "关闭选区助手",
@@ -85,6 +93,7 @@
   "home": {
     "title": "资料库",
     "search": "搜索",
+    "noResults": "搜索无匹配资料库",
     "myLibraries": "我的资料",
     "recent": "最近",
     "newLibrary": "新建资料库",
@@ -134,6 +143,7 @@
   },
   "content": {
     "selectPage": "选择页面",
+    "loading": "正在读取内容…",
     "history": "版本历史",
     "previewUnavailable": "无法预览",
     "inlineUnsupported": "暂不支持内联预览",
@@ -359,7 +369,7 @@
     "cancelling": "正在请求取消…",
     "cancelRequested": "已请求取消，等待停止",
     "cancelFailed": "取消请求未能确认，请刷新任务状态后重试。",
-    "readFailed": "进度更新已暂停，后台任务状态未改变；请刷新记录继续观察。",
+    "readFailed": "暂时无法读取进度，后台任务不受影响。",
     "status": {
       "pending": "等待处理",
       "running": "处理中",

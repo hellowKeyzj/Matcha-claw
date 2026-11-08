@@ -199,7 +199,7 @@ impl SessionHandle {
                 let permit = self.shared.terminal_permit().await;
                 let accepted = self.request_command_inner(producer, |reply| SessionCommand::SyncTerminals {
                     identity, generation: generation.expect("validated observation generation"),
-                    terminals: vec![(terminal, assistant_texts)], publish: false, permit, reply,
+                    terminals: vec![(terminal, crate::state::TerminalBodies::Complete(assistant_texts))], publish: false, permit, reply,
                 }).await?;
                 Ok(if accepted.is_some() { SessionIngestOutcome::TerminalRestored } else {
                     SessionIngestOutcome::Rejected { reason: "Observation is stale".to_owned() }
@@ -299,6 +299,17 @@ impl SessionHandle {
         command: crate::execution::SessionRunReadCommand,
     ) -> Result<crate::execution::SessionRunReadOutcome, ()> {
         self.request_query(|reply| SessionQuery::ReadRun { command, reply }).await
+    }
+
+    pub async fn read_execution_result(
+        &self,
+        identity: SessionIdentity,
+        run_id: String,
+    ) -> Result<Option<crate::execution::SessionExecutionResult>, ()> {
+        let command = crate::execution::SessionRunReadCommand::try_new(
+            identity, None, crate::execution::SessionRunSelector::RunId(run_id),
+        ).map_err(|_| ())?;
+        self.request_query(|reply| SessionQuery::ExecutionResult { command, reply }).await
     }
 
     pub async fn prepare_session_model_runtime(

@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     cli::{
-        Cli,
+        Cli, LaunchSpec,
         effort::{self, Capabilities, Level},
     },
     config::Config,
@@ -246,32 +246,31 @@ impl Sessions {
 
     pub(super) async fn validate_model_thinking(
         &self,
-        snapshot: Config,
         execution: &Execution,
-        model: &str,
-        provider: Option<&str>,
+        spec: &LaunchSpec,
     ) -> rpc::Result<()> {
         let Some(level) = execution.record.effort else {
             return Ok(());
         };
         writable(execution)?;
-        let mut config = self.thinking_config(snapshot, execution)?;
-        let agent = config
-            .agents
-            .get_mut(&execution.record.agent_id)
-            .ok_or_else(|| rpc::Error::not_found("Agent"))?;
-        agent.model = Some(model.to_owned());
-        if let Some(provider) = provider {
-            agent.provider = Some(provider.to_owned());
-        }
-        let capabilities = effort::query(
-            &config,
-            self.0.config.paths(),
-            &execution.record.agent_id,
-            Some(level),
-            None,
-        )
-        .await?;
+        let capabilities = if let Some(cli) = &execution.cli
+            && cli.connection_matches(spec)?
+        {
+            let control = cli.admit()?;
+            let response = control_request(
+                &control,
+                json!({"subtype":"get_effort_capabilities","model":spec.agent.model,"effort":level}),
+                false,
+            )
+            .await?;
+            effort::decode(&response)?
+        } else {
+            let mut config = spec.config.clone();
+            config
+                .agents
+                .insert(spec.agent_id.clone(), spec.agent.clone());
+            effort::query(&config, &spec.paths, &spec.agent_id, Some(level), None).await?
+        };
         if !capabilities.accepts(level) {
             return Err(rpc::Error::conflict("thinking_level_model_conflict", "Clear the Session thinking override with sessions.thinking.set level:null before selecting this model")
                 .with_data(json!({"level":level,"options":capabilities.supported_effort_levels,"nativeRequestSent":false})));

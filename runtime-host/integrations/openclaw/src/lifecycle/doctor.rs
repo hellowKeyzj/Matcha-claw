@@ -14,6 +14,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    journal::LifecycleProcess,
     launch::{OpenClawLaunchInput, base_launch_environment},
     logs::{LifecycleLogBuffer, LifecycleLogClassifier, LogStream},
 };
@@ -39,12 +40,14 @@ impl OpenClawDoctorRepair {
         cancellation: CancellationToken,
         logs: LifecycleLogBuffer,
     ) -> DoctorRepairOutcome {
+        let logs = logs.for_process(LifecycleProcess::Doctor(None));
         logs.append(LogStream::Stdout, b"[doctor] repair started");
         let outcome = self.run_process(cancellation, &logs).await;
         logs.append(
             LogStream::Stdout,
             format!("[doctor] repair {outcome:?}").as_bytes(),
         );
+        logs.flush().await;
         outcome
     }
 
@@ -71,8 +74,21 @@ impl OpenClawDoctorRepair {
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         let mut child = match command.spawn() {
             Ok(child) => child,
-            Err(_) => return DoctorRepairOutcome::SpawnFailed,
+            Err(error) => {
+                logs.append(
+                    LogStream::Stderr,
+                    format!(
+                        "[doctor] spawn failed error_kind={:?} os_error={:?}",
+                        error.kind(),
+                        error.raw_os_error()
+                    )
+                    .as_bytes(),
+                );
+                return DoctorRepairOutcome::SpawnFailed;
+            }
         };
+        let logs = logs.for_process(LifecycleProcess::Doctor(child.id()));
+        logs.append(LogStream::Stdout, b"[doctor] process spawned");
         let stdout = child.stdout.take().expect("doctor stdout is piped");
         let stderr = child.stderr.take().expect("doctor stderr is piped");
         let outcome = tokio::select! {
@@ -81,7 +97,7 @@ impl OpenClawDoctorRepair {
             _ = tokio::time::sleep(DOCTOR_REPAIR_TIMEOUT) => DoctorRepairOutcome::TimedOut,
             result = async {
                 tokio::try_join!(
-                    child.wait(),
+                    wait_child(&mut child, &logs),
                     drain_output(stdout, LogStream::Stdout, logs.clone()),
                     drain_output(stderr, LogStream::Stderr, logs.clone()),
                 )
@@ -91,7 +107,8 @@ impl OpenClawDoctorRepair {
                 Err(_) => DoctorRepairOutcome::Failed,
             },
         };
-        if !terminate_child(&mut child).await {
+        let _ = child.start_kill();
+        if wait_child(&mut child, &logs).await.is_err() {
             logs.append(
                 LogStream::Stderr,
                 b"[doctor] child cleanup unconfirmed; repair failed",
@@ -180,23 +197,48 @@ async fn drain_output(
     stream: LogStream,
     logs: LifecycleLogBuffer,
 ) -> std::io::Result<()> {
-    let mut classifier = LifecycleLogClassifier::with_buffer(stream, logs);
+    let mut classifier = LifecycleLogClassifier::with_buffer(stream, logs.clone());
     let mut chunk = [0; 8 * 1024];
     loop {
-        let read = output.read(&mut chunk).await?;
+        let read = match output.read(&mut chunk).await {
+            Ok(read) => read,
+            Err(error) => {
+                logs.append(
+                    LogStream::Stderr,
+                    format!("[doctor] stdio read failed error_kind={:?}", error.kind()).as_bytes(),
+                );
+                logs.flush().await;
+                return Err(error);
+            }
+        };
         if read == 0 {
             classifier.finish();
+            logs.flush().await;
             return Ok(());
         }
         // Doctor output is a private tail, never a Gateway startup diagnostic.
         classifier.push(&chunk[..read]);
+        logs.flush().await;
     }
 }
 
-async fn terminate_child(child: &mut Child) -> bool {
-    let _ = child.start_kill();
-    // Keep the caller's lifecycle permit until the owned process has been reaped.
-    child.wait().await.is_ok()
+async fn wait_child(
+    child: &mut Child,
+    logs: &LifecycleLogBuffer,
+) -> std::io::Result<std::process::ExitStatus> {
+    // Preserve the actual exit even when a sibling output future later fails or is cancelled.
+    let result = child.wait().await;
+    match &result {
+        Ok(status) => logs.append(
+            LogStream::Stdout,
+            format!("[doctor] exited exit_code={:?}", status.code()).as_bytes(),
+        ),
+        Err(error) => logs.append(
+            LogStream::Stderr,
+            format!("[doctor] wait failed error_kind={:?}", error.kind()).as_bytes(),
+        ),
+    }
+    result
 }
 
 #[cfg(test)]

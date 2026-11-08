@@ -5,6 +5,7 @@ export interface AppApplicationManifest {
   readonly name: string;
   readonly entry: string;
   readonly placement?: 'page' | 'chat-panel' | 'both';
+  readonly scope?: 'session' | 'workspace';
   readonly imageEditor?: {
     readonly label: string;
     readonly tool: string;
@@ -60,8 +61,11 @@ export interface AppPluginManifest {
   readonly version: string;
   readonly description?: string;
   readonly apiVersion?: 1;
+  readonly minSdkVersion?: string;
   readonly main?: string;
   readonly backend?: AppPluginBackend;
+  /** Activate this enabled backend when Matcha starts, without waiting for a page or tool call. */
+  readonly background?: true;
   readonly contributes: {
     readonly readers?: readonly AppReaderManifest[];
     readonly connectors?: readonly AppConnectorManifest[];

@@ -314,7 +314,7 @@ impl SessionQuery {
                 "sessions.observe",
                 SessionsCallDetail::session(command.identity.provider(), command.identity.session_key(), None),
             ),
-            ReadRun { command, .. } => {
+            ReadRun { command, .. } | ExecutionResult { command, .. } => {
                 let mut detail = SessionsCallDetail::session(
                     command.identity.provider(), command.identity.session_key(), command.endpoint_session_id.as_deref(),
                 );
@@ -554,6 +554,19 @@ impl CallOutcome for Option<SessionView> {
                 SessionsCallOutcome::Complete
             }
             None => SessionsCallOutcome::NotFound,
+        };
+        detail.outcome(outcome)
+    }
+}
+
+impl CallOutcome for Option<crate::execution::SessionExecutionResult> {
+    fn summarize(&self, detail: &mut SessionsCallDetail) -> CallStatus {
+        let outcome = match self {
+            Some(result) => {
+                detail.count = Some(result.messages.len());
+                if result.complete { SessionsCallOutcome::Complete } else { SessionsCallOutcome::Incomplete }
+            }
+            None => SessionsCallOutcome::Unavailable,
         };
         detail.outcome(outcome)
     }

@@ -59,6 +59,7 @@ export type GeminiGenerateContentRequest = {
     thinkingConfig?: {
       includeThoughts?: boolean
       thinkingBudget?: number
+      thinkingLevel?: string
     }
   }
 }

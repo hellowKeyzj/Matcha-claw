@@ -72,6 +72,27 @@ impl AuditFailure for TeamRuntimeStatus {
     }
 }
 
+impl AuditOutcome for Result<crate::RoleSessionReceipt, crate::application::team_runtime::RoleSessionCreateError> {
+    fn summarize(&self, detail: &mut OrganizationCallDetail) {
+        use crate::application::team_runtime::RoleSessionCreateError;
+        match self {
+            Ok(binding) => role_session_created(binding, detail),
+            Err(RoleSessionCreateError::Store(error)) => detail.set_outcome(error.outcome()),
+            Err(RoleSessionCreateError::Runtime(status)) => status.summarize(detail),
+        }
+    }
+}
+
+fn role_session_created(binding: &crate::RoleSessionReceipt, detail: &mut OrganizationCallDetail) {
+    detail.team_reference(binding.team().as_str());
+    detail.run_reference(binding.team_run().as_str());
+    detail.role_session = Some(super::RoleSessionSummary {
+        role_id: binding.role().as_str().to_owned(),
+        session_ref: binding.session_ref().as_str().to_owned(),
+    });
+    detail.set_outcome(Outcome::Created);
+}
+
 impl AuditOutcome for TeamRuntimeStatus {
     fn summarize(&self, detail: &mut OrganizationCallDetail) {
         detail.set_outcome(self.outcome());
@@ -517,6 +538,10 @@ impl AuditOutcome for crate::TeamRuntimeCommandOutcome {
                 Ok(_) => Outcome::CommandCommitted,
                 Err(error) => error.outcome(),
             }),
+            RoleSessionCreate(value) => match value {
+                Ok(binding) => role_session_created(binding, detail),
+                Err(error) => detail.set_outcome(error.outcome()),
+            },
             PackageValidate(value) => value.summarize(detail),
             DependencyPlan(value) => value.summarize(detail),
             ProvisionAgents(value) => value.summarize(detail),

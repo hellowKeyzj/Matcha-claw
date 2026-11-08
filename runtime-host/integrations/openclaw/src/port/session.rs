@@ -295,6 +295,17 @@ impl OpenClawGateway {
             .map_err(Into::into)
     }
 
+    pub(crate) async fn create_session_delivery(
+        &self,
+        params: SessionCreateParams,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::session::operation::SessionCreateDelivery, OpenClawSessionError> {
+        SessionOperation::new(Arc::clone(&self.client))
+            .create_session_delivery(params, cancellation)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn delete_session(
         &self,
         params: SessionDeleteParams,
@@ -383,6 +394,14 @@ impl sessions_module::ports::SessionObservation for OpenClawObservation {
 }
 
 impl OpenClawSessionGateway {
+    pub(crate) async fn pending_approvals(&self, command: sessions_module::approval::PendingApprovalsCommand) -> sessions_module::approval::PendingApprovalsOutcome {
+        SessionOperation::new(Arc::clone(&self.client)).pending_approvals(command).await
+    }
+
+    pub(crate) async fn respond_to_approval(&self, command: sessions_module::approval::SessionApprovalCommand) -> sessions_module::approval::SessionApprovalOutcome {
+        SessionOperation::new(Arc::clone(&self.client)).respond_to_approval(command).await
+    }
+
     pub(crate) async fn cancel_image_tasks(&self, identity: &sessions_module::state::SessionIdentity, run_id: &str) -> Result<Option<crate::session::image_tasks::ImageTaskCancellation>, sessions_module::ports::RuntimeOperationFailure> {
         self.client.cancel_image_tasks(identity, run_id).await
     }

@@ -4,6 +4,7 @@ import { isTraceEnabled, startupTrace } from '@/lib/trace-logger';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { refreshProviderPostMutationProjections } from './stores/provider-post-mutation-refresh';
 import { useProviderStore } from './stores/providers';
+import { useCapabilityRoutingStore } from './stores/capability-routing';
 import { ProviderRecoveryDialog } from './components/ProviderRecoveryDialog';
 
 export function ProvidersLifecycle({ hostReady, contentVisible }: ApplicationLifecycleProps) {
@@ -18,6 +19,8 @@ export function ProvidersLifecycle({ hostReady, contentVisible }: ApplicationLif
 
   useEffect(() => {
     if (!hostReady) return;
+    const routing = useCapabilityRoutingStore.getState();
+    if (!routing.ready && !routing.loading) void routing.refresh();
     if (!isTraceEnabled()) {
       void initProviders();
       return;

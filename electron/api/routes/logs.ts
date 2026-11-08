@@ -1,7 +1,5 @@
-import { join } from 'node:path';
 import type { RuntimeControlTransportResponse, RuntimeLogsResponse } from '../../main/runtime-host-delivery/transport/runtime-control';
 import { logger } from '../../utils/logger';
-import { getOpenClawConfigDir } from '../../utils/paths';
 import type { RuntimeHostTransportContext } from '../context';
 import { jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 
@@ -38,10 +36,6 @@ function parseCursor(url: URL): number | undefined {
   return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : undefined;
 }
 
-function getOpenClawLogDir(): string {
-  return join(getOpenClawConfigDir(), 'logs');
-}
-
 export async function handleMainLogRoutes(
   req: HostApiRequest,
   url: URL,
@@ -64,7 +58,7 @@ export async function handleMainLogRoutes(
 export async function handleLogRoutes(
   req: HostApiRequest,
   url: URL,
-  ctx: RuntimeHostTransportContext<'runtimeControlTransport'>,
+  ctx: RuntimeHostTransportContext<'runtimeControlTransport' | 'openClawPlatformTransport'>,
 ): Promise<HostApiRouteResult> {
   const mainResult = await handleMainLogRoutes(req, url);
   if (mainResult !== undefined) return mainResult;
@@ -74,7 +68,18 @@ export async function handleLogRoutes(
   }
 
   if (url.pathname === '/api/openclaw/logs/dir' && req.method === 'GET') {
-    return jsonResult(200, { dir: getOpenClawLogDir() });
+    try {
+      const response = await ctx.runtimeHostTransports.openClawPlatformTransport.logDirectory();
+      if (response.status !== 200
+        || !isRecord(response.body)
+        || !hasExactKeys(response.body, ['dir'])
+        || (response.body.dir !== null && typeof response.body.dir !== 'string')) {
+        return sendOpenClawLogsUnavailable();
+      }
+      return jsonResult(200, { dir: response.body.dir });
+    } catch {
+      return sendOpenClawLogsUnavailable();
+    }
   }
 
   return undefined;

@@ -31,6 +31,7 @@ export type WikiContentPanelProps = Readonly<{
   preview: WikiContentPreview;
   editorText: string;
   busy: string | null;
+  writeBusy: string | null;
   modelRef?: string;
   onSelectionPrepare(snapshot: WikiSelectionSnapshot): Promise<void>;
   onSelectionApplied(receipt: WikiSelectionApplyReceipt): Promise<void>;
@@ -89,6 +90,7 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
     preview,
     editorText,
     busy,
+    writeBusy,
     resolveImageSrc,
     onEditorTextChange,
     onSave,
@@ -97,6 +99,7 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
   const hasSelectedPage = selectedPath.trim().length > 0;
   const editable = preview.kind === 'text';
   const embeddable = preview.kind === 'text' && preview.contentType === 'markdown';
+  const writeBlocked = busy ?? writeBusy;
   const size = preview.kind === 'binary' ? formatFileSize(preview.size) : '';
   const previewRef = useRef<HTMLDivElement>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -170,7 +173,6 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
           <>
             {preview.kind !== 'empty' ? <Badge variant="secondary">{typeLabel(preview.contentType, preview.ext)}</Badge> : null}
             {size ? <span className="text-xs text-muted-foreground">{size}</span> : null}
-            {busy ? <Badge variant="secondary">{busy}</Badge> : null}
           </>
         )}
         actions={(
@@ -184,13 +186,13 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
             {embeddable ? <Button type="button" size="sm" variant="ghost" className="h-8 rounded-full" aria-pressed={linksOpen} onClick={() => { setSelectionRequest(null); setLinksOpen((value) => !value); }}><Link2 className="h-4 w-4" />{t('pageLinks.title')}</Button> : null}
             {editable ? <Button size="sm" variant="ghost" disabled={busy !== null} className="h-8 rounded-full" onClick={() => setHistoryOpen(true)}><Clock3 className="h-4 w-4" />{t('history.title', { defaultValue: '文件历史' })}</Button> : null}
             {editable ? (
-              <Button size="sm" variant="ghost" onClick={onSave} disabled={busy !== null} className="h-8 rounded-full">
+              <Button size="sm" variant="ghost" onClick={onSave} disabled={writeBlocked !== null} className="h-8 rounded-full">
                 <Save className="h-4 w-4" />
                 {t('content.save')}
               </Button>
             ) : null}
             {embeddable ? (
-              <WikiPrimaryButton size="sm" onClick={onEmbedPage} disabled={busy !== null}>
+              <WikiPrimaryButton size="sm" onClick={onEmbedPage} disabled={writeBlocked !== null}>
                 <Sparkles className="h-4 w-4" />
                 {t('content.embed')}
               </WikiPrimaryButton>
@@ -200,17 +202,17 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
       />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div ref={previewRef} className="relative min-w-0 flex-1 overflow-hidden">
-          {hasSelectedPage ? <PreviewBody preview={preview} editorText={editableMarkdown} editing={editing} resolveImageSrc={resolveImageSrc} onEditorTextChange={changeEditorText} onEditorSelection={captureEditorSelection} onTextSelection={captureRenderedSelection} /> : <EmptyState />}
-          {embeddable && !selection && linksOpen ? <PageLinksPanel projectId={props.projectId} relativePath={selectedPath} busy={busy} unsaved={editorText !== preview.content} onOpenFile={props.onOpenFile} onCreated={props.onCreated} onClose={() => setLinksOpen(false)} /> : null}
+          {busy === 'read' || busy === 'read-source' ? <div role="status" className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">{t('content.loading')}</div> : hasSelectedPage ? <PreviewBody preview={preview} editorText={editableMarkdown} editing={editing} resolveImageSrc={resolveImageSrc} onEditorTextChange={changeEditorText} onEditorSelection={captureEditorSelection} onTextSelection={captureRenderedSelection} /> : <EmptyState />}
+          {embeddable && !selection && linksOpen ? <PageLinksPanel projectId={props.projectId} relativePath={selectedPath} busy={busy} writeBusy={writeBusy} unsaved={editorText !== preview.content} onOpenFile={props.onOpenFile} onCreated={props.onCreated} onClose={() => setLinksOpen(false)} /> : null}
         </div>
-        {embeddable && selection ? <SelectionAssistantPanel key={selection.key} projectId={props.projectId} relativePath={selectedPath} selection={selection.snapshot} modelRef={props.modelRef} busy={busy} onPrepare={props.onSelectionPrepare} onApplied={props.onSelectionApplied} onOpenFile={props.onOpenFile} onClose={() => setSelectionRequest(null)} /> : null}
+        {embeddable && selection ? <SelectionAssistantPanel key={selection.key} projectId={props.projectId} relativePath={selectedPath} selection={selection.snapshot} modelRef={props.modelRef} busy={writeBlocked} onPrepare={props.onSelectionPrepare} onApplied={props.onSelectionApplied} onOpenFile={props.onOpenFile} onClose={() => setSelectionRequest(null)} /> : null}
       </div>
       <Dialog.Root open={historyOpen} onOpenChange={setHistoryOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
           <Dialog.Content className="fixed left-1/2 top-1/2 z-40 flex h-[min(80dvh,760px)] w-[calc(100vw-2rem)] max-w-6xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-elevated focus:outline-none" aria-describedby={undefined}>
             <Dialog.Title className="sr-only">{t('history.title', { defaultValue: '文件历史' })}</Dialog.Title>
-            <FileHistoryPanel projectId={props.projectId} path={selectedPath} currentContent={editorText} busy={busy} onRestored={props.onRestored} onClose={() => setHistoryOpen(false)} />
+            <FileHistoryPanel projectId={props.projectId} path={selectedPath} currentContent={editorText} writeBusy={writeBlocked} onRestored={props.onRestored} onClose={() => setHistoryOpen(false)} />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

@@ -268,6 +268,57 @@ export class UseElectron extends Ability {
     await this.completeNativePicker(absolutePath, 'file', pickerTitle);
   }
 
+  async pressFindShortcut(pageUrl: string): Promise<void> {
+    if (!this.app) throw new Error('E2E Electron app was not launched');
+    await this.app.evaluate(({ webContents }, url) => {
+      const pages = webContents.getAllWebContents().filter(contents => !contents.isDestroyed() && contents.getURL() === url);
+      if (pages.length !== 1) throw new Error('Find shortcut requires one exact existing web contents');
+      pages[0].focus();
+      pages[0].sendInputEvent({ type: 'keyDown', keyCode: 'F', modifiers: ['control'] });
+      pages[0].sendInputEvent({ type: 'keyUp', keyCode: 'F', modifiers: ['control'] });
+    }, pageUrl);
+  }
+
+  async observeIabWebContents(url: string): Promise<{
+    webContentsId: number; url: string; visible: boolean; attached: boolean;
+    bounds: { x: number; y: number; width: number; height: number } | null;
+    contentBounds: { width: number; height: number };
+  }[]> {
+    if (!this.app) throw new Error('E2E Electron app was not launched');
+    return this.app.evaluate(({ BrowserWindow, WebContentsView, webContents }, request) => {
+      const windows = BrowserWindow.getAllWindows().filter(window => window.webContents.getURL() === request.rendererUrl);
+      if (windows.length !== 1) throw new Error('IAB observation requires the exact owned primary window');
+      const views = windows[0].contentView.children.filter((view): view is InstanceType<typeof WebContentsView> => view instanceof WebContentsView);
+      const { width, height } = windows[0].getContentBounds();
+      return webContents.getAllWebContents().filter(contents => !contents.isDestroyed() && contents.getURL() === request.url).map(contents => {
+        const view = views.find(view => view.webContents.id === contents.id);
+        return { webContentsId: contents.id, url: contents.getURL(), attached: view !== undefined,
+          visible: view?.getVisible() ?? false, bounds: view?.getBounds() ?? null, contentBounds: { width, height } };
+      });
+    }, { rendererUrl: this.page.url(), url });
+  }
+
+  async desktopWindow(): Promise<{ handle: string; bounds: { left: number; top: number; width: number; height: number; windowState: string } }> {
+    if (!this.app) throw new Error('E2E Electron app was not launched');
+    const window = await this.app.browserWindow(this.page);
+    try {
+      return await window.evaluate(window => {
+        const bounds = window.getBounds();
+        return { handle: window.getNativeWindowHandle().readBigUInt64LE().toString(), bounds: {
+          left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height,
+          windowState: window.isMinimized() ? 'minimized' : window.isMaximized() ? 'maximized' : 'normal',
+        } };
+      });
+    } finally { await window.dispose(); }
+  }
+
+  async prepareDownloadDirectory(): Promise<string> {
+    if (!this.app) throw new Error('E2E Electron app was not launched');
+    const directory = await mkdtemp(join(this.profileRoot, 'iab-downloads-'));
+    await this.app.evaluate(({ app }, directory) => app.setPath('downloads', directory), directory);
+    return directory;
+  }
+
   private async completeNativePicker(absolutePath: string, kind: 'directory' | 'file', pickerTitle: string, confirmation?: {
     pickerTitle: string; title: string; button: string; expectedText: readonly string[];
   }): Promise<void> {
@@ -680,6 +731,7 @@ try {
   }
 
   async connectBrowser(): Promise<Browser> {
+    if (this.connectedBrowser?.isConnected()) return this.connectedBrowser;
     try {
       const activePortFile = join(this.profileRoot, 'user-data', 'DevToolsActivePort');
       const [portText, browserPath] = (await readFile(activePortFile, 'utf8')).trim().split(/\r?\n/);

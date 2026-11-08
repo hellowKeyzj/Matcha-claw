@@ -22,6 +22,7 @@ export function requireSkillsScope(): AgentScope | RuntimeInstanceScope {
 import {
   decodeSkillsOperationResult,
   type SkillBundle,
+  type SkillsConfigApplication,
   type SkillsOperationResult,
 } from '@/types/skills-operation-result';
 
@@ -32,6 +33,7 @@ export type SkillsMutationResult = {
   version?: string;
   invalidKeys?: string[];
   reason?: string;
+  application?: SkillsConfigApplication;
 };
 
 async function skillsTerminal(receipt: unknown, command: string, input: Record<string, unknown>, options?: WaitForCallOptions<'skills'>): Promise<CallRecord<'skills'>> {

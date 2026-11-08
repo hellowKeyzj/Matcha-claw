@@ -10,7 +10,7 @@ use crate::session::{
 use sessions_module::{
     command::{SessionEvent, SessionIngressEvent},
     state::{
-        ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, RunProgress,
+        ApprovalPhase, ItemStatus, RecoveryReason, RunPhase, RunProgress,
         RunStartupPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeErrorKind, RuntimeNotice,
         RuntimeNoticeKind, RuntimeView, SessionChange, SessionContent, SessionEventBinding,
         SessionItem, ToolPhase, ToolView,
@@ -66,6 +66,9 @@ pub fn openclaw_canonical_changes(changes: &[CanonicalSessionChange]) -> Vec<Ses
 
     for change in changes {
         match change {
+            CanonicalSessionChange::RunTimingUpdated { timing } => {
+                projected.push(SessionChange::RunTimingUpdated { timing: timing.clone() });
+            }
             CanonicalSessionChange::RunStarted { run_id } => {
                 projected.push(SessionChange::RunPhaseChanged {
                     run_id: run_id.as_str().to_owned(),
@@ -259,38 +262,14 @@ pub fn openclaw_canonical_changes(changes: &[CanonicalSessionChange]) -> Vec<Ses
                     });
                 }
             }
-            CanonicalSessionChange::ApprovalRequested {
-                run_id,
-                approval_id,
-                option_ids,
-            } => {
+            CanonicalSessionChange::ApprovalRequested { run_id, approval_id, option_ids, details } => {
                 projected.push(SessionChange::ApprovalUpdated {
-                    approval: ApprovalView {
-                        approval_id: approval_id.as_str().to_owned(),
-                        run_id: Some(run_id.as_str().to_owned()),
-                        phase: ApprovalPhase::Requested,
-                        option_ids: option_ids
-                            .iter()
-                            .map(|option_id| option_id.as_str().to_owned())
-                            .collect(),
-                    },
+                    approval: crate::session::approval::view(approval_id, run_id.as_ref(), ApprovalPhase::Requested, option_ids, details),
                 });
             }
-            CanonicalSessionChange::ApprovalResolved {
-                run_id,
-                approval_id,
-                option_ids,
-            } => {
+            CanonicalSessionChange::ApprovalResolved { run_id, approval_id, option_ids, details } => {
                 projected.push(SessionChange::ApprovalUpdated {
-                    approval: ApprovalView {
-                        approval_id: approval_id.as_str().to_owned(),
-                        run_id: Some(run_id.as_str().to_owned()),
-                        phase: ApprovalPhase::Resolved,
-                        option_ids: option_ids
-                            .iter()
-                            .map(|option_id| option_id.as_str().to_owned())
-                            .collect(),
-                    },
+                    approval: crate::session::approval::view(approval_id, run_id.as_ref(), ApprovalPhase::Resolved, option_ids, details),
                 });
             }
             CanonicalSessionChange::RecoveryRequired { reason } => {
@@ -579,6 +558,7 @@ mod tests {
         protocol::{ApprovalId, ApprovalOptionId, MessageId, RunId, ToolId},
     };
     use serde_json::json;
+    use sessions_module::state::ApprovalView;
 
     use super::*;
 
@@ -922,12 +902,13 @@ mod tests {
     #[test]
     fn approval_requested_projects_public_approval_update() {
         let changes = openclaw_canonical_changes(&[CanonicalSessionChange::ApprovalRequested {
-            run_id: RunId::try_new("run-1").unwrap(),
+            run_id: Some(RunId::try_new("run-1").unwrap()),
             approval_id: ApprovalId::try_new("approval-1").unwrap(),
             option_ids: vec![
                 ApprovalOptionId::try_new("approve").unwrap(),
                 ApprovalOptionId::try_new("deny").unwrap(),
             ],
+            details: crate::session::approval::decode_presentation(json!({ "kind": "exec", "commandText": "command", "allowedDecisions": ["allow-once", "deny"] })).unwrap(),
         }]);
 
         assert_eq!(
@@ -938,6 +919,7 @@ mod tests {
                     run_id: Some("run-1".to_owned()),
                     phase: ApprovalPhase::Requested,
                     option_ids: vec!["approve".to_owned(), "deny".to_owned()],
+                    details: None,
                 },
             }]
         );
@@ -946,12 +928,13 @@ mod tests {
     #[test]
     fn approval_resolved_projects_public_approval_update() {
         let changes = openclaw_canonical_changes(&[CanonicalSessionChange::ApprovalResolved {
-            run_id: RunId::try_new("run-1").unwrap(),
+            run_id: Some(RunId::try_new("run-1").unwrap()),
             approval_id: ApprovalId::try_new("approval-1").unwrap(),
             option_ids: vec![
                 ApprovalOptionId::try_new("approve").unwrap(),
                 ApprovalOptionId::try_new("deny").unwrap(),
             ],
+            details: crate::session::approval::decode_presentation(json!({ "kind": "exec", "commandText": "command", "allowedDecisions": ["allow-once", "deny"] })).unwrap(),
         }]);
 
         assert_eq!(
@@ -962,6 +945,7 @@ mod tests {
                     run_id: Some("run-1".to_owned()),
                     phase: ApprovalPhase::Resolved,
                     option_ids: vec!["approve".to_owned(), "deny".to_owned()],
+                    details: None,
                 },
             }]
         );

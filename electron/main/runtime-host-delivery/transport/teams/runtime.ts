@@ -42,7 +42,7 @@ export function createTeamRuntimeTransport(
         return { status: 503, body: withCreationFailure(UNAVAILABLE, request, delivery.reason) };
       }
       const response = delivery.response;
-      if (isRecord(request) && (request.operationId === 'team.provisionAgents' || request.operationId === 'team.delete' || request.operationId === 'team.runDelete')) {
+      if (isRecord(request) && (request.operationId === 'team.provisionAgents' || request.operationId === 'team.delete' || request.operationId === 'team.runDelete' || request.operationId === 'team.roleSessionCreate')) {
         if (response?.status === 202) {
           try {
             return { status: 202, body: decodeCallReceipt(response.body) };

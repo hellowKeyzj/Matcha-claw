@@ -1,13 +1,44 @@
+import { useEffect, useId, useRef } from 'react';
 import type { MessagePartProps } from './extensions';
 import { ContentNotices } from './content-notices';
 import { AssistantMessageBody } from './assistant-message-body';
 import { AssistantEmbeddedToolResults, AssistantMessageMedia, ThinkingSection, ToolCardList } from './chat-message-parts';
 import type { SessionRenderAssistantBubbleToolResult } from '@/types/session/tool-card';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity, summarizeText } from '@/lib/session-trace';
 
-export function ThinkingPart({ segment, showThinking, collapseVersion }: MessagePartProps) {
+export function ThinkingPart({ segment, itemKey, sessionIdentity, isStreaming, showThinking, collapseVersion }: MessagePartProps) {
+  const instanceId = useId();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const committedTraceRef = useRef<(() => Record<string, unknown>) | null>(null);
+
+  useEffect(() => {
+    if (!isSessionTraceEnabled()) return;
+    const container = containerRef.current;
+    const payload = {
+      identity: summarizeSessionIdentity(sessionIdentity), instanceHash: summarizeIdentifier(instanceId).hash,
+      itemHash: summarizeIdentifier(itemKey).hash, segmentHash: summarizeIdentifier(segment.key).hash,
+      content: segment.kind === 'thinking' ? summarizeText(segment.text) : null,
+      rendered: container !== null, showThinking, isStreaming,
+    };
+    committedTraceRef.current = () => ({
+      ...payload, containerConnected: container?.isConnected ?? false,
+    });
+    logSessionTrace('session.thinking-part.committed', 'session-thinking-part-boundary', committedTraceRef.current);
+  });
+
+  useEffect(() => {
+    if (!isSessionTraceEnabled() || !committedTraceRef.current) return;
+    // StrictMode replays effects with the same instanceHash; effect stages do not count DOM instances.
+    logSessionTrace('session.thinking-part.effect-mounted', 'session-thinking-part-boundary', committedTraceRef.current);
+    return () => {
+      if (!isSessionTraceEnabled() || !committedTraceRef.current) return;
+      logSessionTrace('session.thinking-part.effect-cleanup', 'session-thinking-part-boundary', committedTraceRef.current);
+    };
+  }, []);
+
   if (segment.kind !== 'thinking' || !showThinking || !segment.text.trim()) return null;
   return (
-    <div className="flex w-full flex-col items-start gap-0.5 pt-0.5">
+    <div ref={containerRef} className="flex w-full flex-col items-start gap-0.5 pt-0.5">
       <ThinkingSection content={segment.text} collapseVersion={collapseVersion} />
     </div>
   );

@@ -1,6 +1,6 @@
 import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
-import { deriveSessionRuntime, reconcileSessionMessageItems } from '@/plugins/chat/store/session-presentation';
+import { deriveSessionRuntime, reconcileSessionMessageItems, settleSessionReceipts } from '@/plugins/chat/store/session-presentation';
 import type { ApprovalItem, ChatSession, ChatSessionHistoryStatus, ChatSessionMetaState, ChatSessionRecord, ChatSessionRuntimeState, ChatSessionViewportState, ChatStoreState } from '@/plugins/chat/store/types';
 import { deriveSessionImageGenerationPendingStateFromItems, type SessionRenderItem } from '@/types/session/render-item';
 import type { SessionContextTokenSnapshot, SessionStateSnapshot } from '@/types/session/snapshot';
@@ -373,6 +373,7 @@ function areApprovalItemsEquivalent(left: ApprovalComparable, right: ApprovalCom
     && left.runId === right.runId
     && left.title === right.title
     && left.command === right.command
+    && (left.details === right.details || JSON.stringify(left.details) === JSON.stringify(right.details))
     && left.createdAtMs === right.createdAtMs
     && left.expiresAtMs === right.expiresAtMs
     && left.decision === right.decision
@@ -478,17 +479,21 @@ export function patchSessionRecordValue(
   current: ChatSessionRecord,
   patch: ChatSessionRecordPatch,
 ): ChatSessionRecord {
-  const nextRecord = {
+  let nextRecord: ChatSessionRecord = {
     meta: patch.meta ?? current.meta,
     runtime: patch.runtime ?? current.runtime,
     send: patch.send === undefined ? current.send : patch.send,
     abort: patch.abort === undefined ? current.abort : patch.abort,
     items: patch.items ?? current.items,
     window: patch.window ?? current.window,
+    runTimings: patch.runTimings ?? current.runTimings,
     contextTokens: Object.prototype.hasOwnProperty.call(patch, 'contextTokens')
       ? patch.contextTokens ?? undefined
       : current.contextTokens,
   };
+  if (current.send !== nextRecord.send || current.abort !== nextRecord.abort || current.runTimings !== nextRecord.runTimings) {
+    nextRecord = settleSessionReceipts(nextRecord);
+  }
   if (
     current.meta === nextRecord.meta
     && current.runtime === nextRecord.runtime
@@ -496,6 +501,7 @@ export function patchSessionRecordValue(
     && current.abort === nextRecord.abort
     && current.items === nextRecord.items
     && current.window === nextRecord.window
+    && current.runTimings === nextRecord.runTimings
     && areSessionContextTokensEquivalent(current.contextTokens, nextRecord.contextTokens)
   ) {
     return current;

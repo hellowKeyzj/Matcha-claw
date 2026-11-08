@@ -28,6 +28,7 @@ impl LifecycleOps for OpenClawDriver {
         let gateway_port = self.gateway_port;
         let plugins = self.plugins();
         let diagnostic_reporter = Arc::clone(&self.diagnostic_reporter);
+        let logs = self.lifecycle_logs.clone();
         Box::pin(async move {
             let started = platform::trace::enabled().then(std::time::Instant::now);
             if platform::trace::enabled() {
@@ -43,17 +44,37 @@ impl LifecycleOps for OpenClawDriver {
                     prepared.is_ok()
                 );
             }
+            logs.append(
+                LogStream::Stdout,
+                format!("[gateway] lifecycle preparation result={prepared:?}").as_bytes(),
+            );
+            logs.flush().await;
             prepared.map_err(|_| RuntimeStartFailure::CompletionFailed)?;
             if platform::trace::enabled() {
                 eprintln!("[startup-trace] source=openclaw-launch phase=process-start stage=start");
             }
-            start_supervisor(supervisor).await
+            let result = start_supervisor(supervisor).await;
+            logs.append(
+                LogStream::Stdout,
+                format!("[gateway] start result={result:?}").as_bytes(),
+            );
+            logs.flush().await;
+            result
         })
     }
 
     fn stop(&self) -> OwnedRuntimeFuture<Result<TerminationCompletion, RuntimeLifecycleFailure>> {
         let supervisor = self.supervisor_handle();
-        Box::pin(stop_supervisor(supervisor))
+        let logs = self.lifecycle_logs.clone();
+        Box::pin(async move {
+            let result = stop_supervisor(supervisor).await;
+            logs.append(
+                LogStream::Stdout,
+                format!("[gateway] stop result={result:?}").as_bytes(),
+            );
+            logs.flush().await;
+            result
+        })
     }
 
     fn restart(&self) -> OwnedRuntimeFuture<Result<RestartOutcome, RuntimeLifecycleFailure>> {
@@ -61,11 +82,18 @@ impl LifecycleOps for OpenClawDriver {
         let gateway_port = self.gateway_port;
         let plugins = self.plugins();
         let diagnostic_reporter = Arc::clone(&self.diagnostic_reporter);
+        let logs = self.lifecycle_logs.clone();
         Box::pin(async move {
             prepare_openclaw_lifecycle(&supervisor, gateway_port, plugins, diagnostic_reporter)
                 .await
                 .map_err(|_| RuntimeLifecycleFailure::CompletionFailed)?;
-            restart_supervisor(supervisor).await
+            let result = restart_supervisor(supervisor).await;
+            logs.append(
+                LogStream::Stdout,
+                format!("[gateway] restart result={result:?}").as_bytes(),
+            );
+            logs.flush().await;
+            result
         })
     }
 }

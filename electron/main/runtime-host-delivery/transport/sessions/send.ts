@@ -115,7 +115,7 @@ export type SessionSendTransportResponse =
   | Readonly<{ status: 503; body: typeof UNAVAILABLE }>;
 
 export interface SessionSendTransport {
-  send(request: unknown, traceId?: string | null): Promise<SessionSendTransportResponse>;
+  send(request: unknown, traceId?: string | null, signal?: AbortSignal): Promise<SessionSendTransportResponse>;
 }
 
 export function createSessionSendTransport(
@@ -124,7 +124,7 @@ export function createSessionSendTransport(
   fetcher: typeof fetch = fetch,
 ): SessionSendTransport {
   return {
-    async send(request: unknown, traceId?: string | null): Promise<SessionSendTransportResponse> {
+    async send(request: unknown, traceId?: string | null, signal?: AbortSignal): Promise<SessionSendTransportResponse> {
       if (!isSessionSendRequest(request)) {
         publishE2ESessionSendBoundary(() => ({ stage: 'rejected-request' }));
         logSessionTrace('electron.send.rejected', traceId);
@@ -153,6 +153,7 @@ export function createSessionSendTransport(
         fetcher,
         body: request,
         headers: traceHeader(traceId),
+        signal,
       });
       if (delivery.outcome !== 'response') {
         publishE2ESessionSendBoundary(() => ({ stage: 'transport-failure' }));

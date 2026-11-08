@@ -509,7 +509,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, selectionCurrent, onOpenF
 
           <div className="flex items-center justify-between p-4 border-t bg-muted/10">
             <div className="flex items-center gap-2">
-              {nativeAgent ? <span>{t('nativeCandidateShort', { defaultValue: '候选 · 新会话生效' })}</span> : skill.enabled ? (
+              {skill.source === 'native-agent-candidate' ? <span>{t('nativeCandidateShort', { defaultValue: '候选 · 新会话生效' })}</span> : skill.enabled ? (
                 <>
                   <CheckCircle2 className="h-5 w-5 text-green-500" />
                   <span className="text-green-600 dark:text-green-400">{t('detail.enabled')}</span>
@@ -541,6 +541,7 @@ interface SkillGridCardViewModel {
   skillDescription: string;
   skillIcon: string;
   nativeAgent: boolean;
+  nativeCandidate: boolean;
   sourceLabel: string;
   isCore: boolean;
   uninstallable: boolean;
@@ -567,6 +568,7 @@ const SkillGridCard = memo(function SkillGridCard({
   skillDescription,
   skillIcon,
   nativeAgent,
+  nativeCandidate,
   sourceLabel,
   isCore,
   uninstallable,
@@ -623,7 +625,7 @@ const SkillGridCard = memo(function SkillGridCard({
           title={missingSummaryLabel}
         >
           <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />
-          <span className="truncate">{nativeAgent ? t('nativeCandidateShort', { defaultValue: '候选 · 新会话生效' }) : availabilityLabel}</span>
+          <span className="truncate">{nativeCandidate ? t('nativeCandidateShort', { defaultValue: '候选 · 新会话生效' }) : availabilityLabel}</span>
         </span>
         {!nativeAgent && <Switch
           className="relative z-10 shrink-0"
@@ -927,6 +929,7 @@ export function InstalledSkillsView(props: SkillViewProps) {
         skillDescription: skill.description,
         skillIcon: skill.icon || '',
         nativeAgent: skill.runtimeId === 'matcha-agent',
+        nativeCandidate: skill.source === 'native-agent-candidate',
         sourceLabel: resolveSkillSourceLabel(skill, t),
         isCore: Boolean(skill.isCore),
         uninstallable: skill.uninstallable === true,

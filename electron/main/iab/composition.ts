@@ -112,7 +112,7 @@ export function createIab(input: {
       return closing ??= (async () => {
         closed = true;
         control.abort(new Error('In-app browser is closing'));
-        manager.setVisible(false);
+        manager.setViews([]);
         const failures: unknown[] = [];
         const settle = async (operation: () => void | Promise<unknown>) => {
           try { await operation(); } catch (error) { failures.push(error); }

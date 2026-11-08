@@ -163,6 +163,7 @@ pub fn matcha_event_changes(event: RendererEventEnvelope) -> Option<Vec<SessionC
                     RendererApprovalPhase::Resolved => ApprovalPhase::Resolved,
                 },
                 option_ids,
+                details: None,
             },
         }]),
     }

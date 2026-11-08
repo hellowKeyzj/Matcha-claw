@@ -146,6 +146,20 @@ impl SessionShared {
         crate::trace::log("runtime.thinking.native-dispatch", trace_id.as_deref(), || {
             serde_json::json!({ "operation": operation, "runtime": runtime })
         });
+        if runtime == ThinkingRuntime::MatchaAgent
+            && matches!(&command.action, SessionThinkingAction::Set { level: Some(_) })
+            && let Some(identity) = command.scope.identity()
+            && let Err(outcome) = self.prepare_matcha_session_model_runtime(
+                identity, None, trace_id.as_deref(), &tokio_util::sync::CancellationToken::new(),
+            ).await
+        {
+            return failed("model_preparation", match outcome {
+                crate::send::SessionSendOutcome::Rejected => SessionThinkingOutcome::Rejected(runtime),
+                crate::send::SessionSendOutcome::Unsupported => SessionThinkingOutcome::Unsupported(runtime),
+                crate::send::SessionSendOutcome::Unknown => SessionThinkingOutcome::Unknown(runtime),
+                _ => SessionThinkingOutcome::Unavailable(runtime),
+            });
+        }
         let outcome = ops.session_thinking(command.clone()).await;
         let outcome = command.validate_outcome(outcome);
         crate::trace::log("runtime.thinking.native-outcome", trace_id.as_deref(), || {

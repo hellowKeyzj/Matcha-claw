@@ -41,6 +41,35 @@ impl std::error::Error for LlmClientError {
     }
 }
 
+impl From<&LlmClientError> for crate::ProviderTextGenerationUnavailableReason {
+    fn from(error: &LlmClientError) -> Self {
+        use crate::ProviderTextGenerationUnavailableReason::{
+            Authentication, Deadline, InvalidResponse, PermissionDenied, ProviderUnavailable,
+            RateLimited,
+        };
+        let status = match error {
+            LlmClientError::Http(error) => error.status().map(|status| status.as_u16()),
+            LlmClientError::HttpStatus { status, .. } => Some(*status),
+            _ => None,
+        };
+        match status {
+            Some(401) => Authentication,
+            Some(403) => PermissionDenied,
+            Some(429) => RateLimited,
+            _ => match error {
+                LlmClientError::Deadline => Deadline,
+                LlmClientError::Http(error) if error.is_timeout() => Deadline,
+                LlmClientError::Http(error) if error.is_decode() => InvalidResponse,
+                LlmClientError::Protocol(_) => InvalidResponse,
+                LlmClientError::UnsupportedProtocol
+                | LlmClientError::Http(_)
+                | LlmClientError::HttpStatus { .. }
+                | LlmClientError::StreamSink(_) => ProviderUnavailable,
+            },
+        }
+    }
+}
+
 impl From<reqwest::Error> for LlmClientError {
     fn from(error: reqwest::Error) -> Self {
         Self::Http(error)

@@ -1,12 +1,12 @@
 import Ajv, { type ValidateFunction } from 'ajv';
 import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { AppConfirmationUnavailableError, isAppConfirmationRequest, type AppConfirmationRequest } from '../../../src/types/desktop/app-plugin-sdk';
+import { APP_EXECUTION_OPERATIONS, APP_SERVICE_OPERATIONS, AppServiceError, AppConfirmationUnavailableError, isAppConfirmationRequest, type AppConfirmationRequest, type AppExecutionApi, type AppExecutionResult, type AppPluginContext, type AppServiceResult } from '../../../src/types/desktop/app-plugin-sdk';
 import { isAbsolute, join, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginModule, AppToolHandler, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
 import type { HostRequest, PluginLoad, WorkerMessage } from './protocol';
-import { isJson, isModelErrorCode, isToolResult, toolError } from './protocol';
+import { isExecutionEnvelope, isExecutionPayload, parseExecutionRequest, isServiceEnvelope, isServicePayload, parseServiceRequest, serviceError, isJson, isModelErrorCode, isToolResult, toolError } from './protocol';
 
 const port = process.parentPort;
 if (!port) throw new Error('App plugin worker requires its Electron parent port.');
@@ -23,7 +23,7 @@ interface ActivePlugin {
 }
 const plugins = new Map<string, ActivePlugin>();
 const calls = new Map<string, { pluginId: string; controller: AbortController; done: Promise<void> }>();
-const models = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
+const hostRequests = new Map<string, { plugin: ActivePlugin; kind: 'model' | 'execution' | 'service'; resolve: (result: unknown) => void; reject: (error: Error) => void }>();
 const toolScope = new AsyncLocalStorage<{ callId: string; pluginId: string }>();
 const confirmations = new Map<string, { resolve: (result: boolean) => void; reject: (error: Error) => void }>();
 
@@ -49,25 +49,69 @@ function requestConfirmation(plugin: ActivePlugin, request: AppConfirmationReque
   });
 }
 
-function requestModel<T>(plugin: ActivePlugin, sendRequest: (requestId: string) => void, signal?: AbortSignal): Promise<T> {
+function requestHost<T>(plugin: ActivePlugin, kind: 'model' | 'execution' | 'service', sendRequest: (requestId: string) => void, signal?: AbortSignal): Promise<T> {
   const combined = signal ? AbortSignal.any([signal, plugin.controller.signal]) : plugin.controller.signal;
-  combined.throwIfAborted();
-  if (models.size >= 128) throw new Error('Too many plugin model requests.');
+  if (kind === 'service') {
+    if (combined.aborted) throw serviceError(new AppServiceError('cancelled', ''), combined);
+    if (plugins.get(plugin.load.manifest.id) !== plugin || plugin.retiring || hostRequests.size >= 128) throw new AppServiceError('unavailable', 'App service request is inactive or exceeds the concurrency limit.');
+  } else {
+    combined.throwIfAborted();
+    if (hostRequests.size >= 128) throw new Error('Too many plugin host requests.');
+  }
   const requestId = randomUUID();
   return new Promise<T>((resolve, reject) => {
     const cancel = () => {
-      send({ type: 'model-cancel', requestId });
-      models.get(requestId)?.reject(new Error('Model request cancelled; external effects may already have occurred.'));
+      try {
+        send(kind === 'model' ? { type: 'model-cancel', requestId }
+          : { type: kind === 'service' ? 'service-cancel' : 'execution-cancel', requestId, pluginId: plugin.load.manifest.id, digest: plugin.load.digest });
+      } catch { /* A closed parent channel cannot receive cancellation; the local request still rejects. */ }
+      finally { hostRequests.get(requestId)?.reject(kind === 'service'
+        ? serviceError(new AppServiceError('outcome-unknown', ''))
+        : new Error('Host request cancelled; native execution or external effects may already have occurred.')); }
     };
-    const finish = () => { combined.removeEventListener('abort', cancel); models.delete(requestId); };
-    models.set(requestId, {
+    const finish = () => { combined.removeEventListener('abort', cancel); hostRequests.delete(requestId); };
+    hostRequests.set(requestId, {
+      plugin, kind,
       resolve: (result) => { finish(); resolve(result as T); },
       reject: (error) => { finish(); reject(error); },
     });
     combined.addEventListener('abort', cancel, { once: true });
     try { sendRequest(requestId); }
-    catch (error) { finish(); reject(error); }
+    catch (error) { finish(); reject(kind === 'service' ? serviceError(error, combined) : error); }
   });
+}
+
+function executionApi(plugin: ActivePlugin): AppExecutionApi {
+  // The SDK owns the method set and input guard; Main rechecks every request before native execution.
+  return Object.freeze(Object.fromEntries(APP_EXECUTION_OPERATIONS.map((operation) => [operation, (input: unknown, signal?: AbortSignal) => {
+    const request = parseExecutionRequest({ operation, input });
+    const scope = request.operation === 'resolveTeamApproval' ? toolScope.getStore() : undefined;
+    if (request.operation === 'resolveTeamApproval') {
+      const call = scope?.pluginId === plugin.load.manifest.id ? calls.get(scope.callId) : undefined;
+      if (!call || call.pluginId !== plugin.load.manifest.id || call.controller.signal.aborted || plugin.controller.signal.aborted
+        || plugins.get(plugin.load.manifest.id) !== plugin || plugin.retiring) throw new AppConfirmationUnavailableError('Approval unavailable: resolving team approval requires an active tool call.');
+      signal = AbortSignal.any([call.controller.signal, ...(signal ? [signal] : [])]);
+    }
+    return requestHost<AppExecutionResult>(plugin, 'execution', (requestId) => {
+      const envelope = { type: 'execution-request' as const, requestId, pluginId: plugin.load.manifest.id, digest: plugin.load.digest };
+      const message = request.operation === 'resolveTeamApproval' ? { ...envelope, request, callId: scope!.callId } : { ...envelope, request };
+      if (!isExecutionEnvelope(message)) throw new Error('Execution request envelope exceeds 1 MiB.');
+      send(message);
+    }, signal);
+  }]))) as AppExecutionApi;
+}
+
+function serviceApis(plugin: ActivePlugin): Pick<AppPluginContext, keyof typeof APP_SERVICE_OPERATIONS> {
+  return Object.fromEntries(Object.entries(APP_SERVICE_OPERATIONS).map(([service, operations]) => [service,
+    Object.freeze(Object.fromEntries(operations.map((operation) => [operation, (input: unknown, signal?: AbortSignal) => {
+      const request = parseServiceRequest({ service, operation, input });
+      return requestHost<AppServiceResult>(plugin, 'service', (requestId) => {
+        const message = { type: 'service-request', requestId, pluginId: plugin.load.manifest.id, digest: plugin.load.digest, request } satisfies WorkerMessage;
+        if (!isServiceEnvelope(message)) throw new AppServiceError('invalid-request', 'App service request envelope exceeds 8 MiB.');
+        send(message);
+      }, signal);
+    }]))),
+  ])) as Pick<AppPluginContext, keyof typeof APP_SERVICE_OPERATIONS>;
 }
 
 async function deactivate(pluginId: string): Promise<void> {
@@ -138,33 +182,35 @@ async function activate(load: PluginLoad): Promise<void> {
         send({ type: 'event', event: { pluginId: manifest.id, digest, topic, data } });
       },
       requestConfirmation: (request: AppConfirmationRequest, signal?: AbortSignal) => requestConfirmation(plugin, request, signal),
+      execution: executionApi(plugin),
+      ...serviceApis(plugin),
       models: Object.freeze({
         list(request: AppMediaModelListRequest, signal?: AbortSignal) {
-          return requestModel<AppMediaModelList>(plugin, (requestId) => send({ type: 'media-model', operation: 'list', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppMediaModelList>(plugin, 'model', (requestId) => send({ type: 'media-model', operation: 'list', requestId, pluginId: manifest.id, digest, request }), signal);
         },
         generate(request: AppModelRequest, signal?: AbortSignal) {
-          return requestModel<AppModelResult>(plugin, (requestId) => send({ type: 'model', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppModelResult>(plugin, 'model', (requestId) => send({ type: 'model', requestId, pluginId: manifest.id, digest, request }), signal);
         },
         submitVideo(request: AppModelRequest & { readonly kind: 'video' }, signal?: AbortSignal) {
-          return requestModel<AppVideoTaskResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'submitVideo', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppVideoTaskResult>(plugin, 'model', (requestId) => send({ type: 'media-model', operation: 'submitVideo', requestId, pluginId: manifest.id, digest, request }), signal);
         },
         queryVideo(request: AppVideoTaskRequest, signal?: AbortSignal) {
-          return requestModel<AppVideoTaskResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'queryVideo', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppVideoTaskResult>(plugin, 'model', (requestId) => send({ type: 'media-model', operation: 'queryVideo', requestId, pluginId: manifest.id, digest, request }), signal);
         },
         collectVideo(request: AppVideoTaskRequest, signal?: AbortSignal) {
-          return requestModel<AppModelResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'collectVideo', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppModelResult>(plugin, 'model', (requestId) => send({ type: 'media-model', operation: 'collectVideo', requestId, pluginId: manifest.id, digest, request }), signal);
         },
         generateText(request: AppTextModelRequest, signal?: AbortSignal) {
-          return requestModel<AppTextModelResult>(plugin, (requestId) => send({ type: 'text-model', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppTextModelResult>(plugin, 'model', (requestId) => send({ type: 'text-model', requestId, pluginId: manifest.id, digest, request }), signal);
         },
         generateSpeech(request: AppSpeechModelRequest, signal?: AbortSignal) {
-          return requestModel<AppModelResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'generateSpeech', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppModelResult>(plugin, 'model', (requestId) => send({ type: 'media-model', operation: 'generateSpeech', requestId, pluginId: manifest.id, digest, request }), signal);
         },
         transcribe(request: AppTranscriptionModelRequest, signal?: AbortSignal) {
-          return requestModel<AppModelResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'transcribe', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppModelResult>(plugin, 'model', (requestId) => send({ type: 'media-model', operation: 'transcribe', requestId, pluginId: manifest.id, digest, request }), signal);
         },
         generateMusic(request: AppMusicModelRequest, signal?: AbortSignal) {
-          return requestModel<AppModelResult>(plugin, (requestId) => send({ type: 'media-model', operation: 'generateMusic', requestId, pluginId: manifest.id, digest, request }), signal);
+          return requestHost<AppModelResult>(plugin, 'model', (requestId) => send({ type: 'media-model', operation: 'generateMusic', requestId, pluginId: manifest.id, digest, request }), signal);
         },
       }),
       log: Object.freeze({
@@ -197,8 +243,33 @@ async function dispatch(message: HostRequest): Promise<void> {
     else pending?.reject(new Error('Invalid confirmation response.'));
     return;
   }
+  if (message.type === 'service-result') {
+    const pending = hostRequests.get(message.requestId);
+    if (!pending || pending.kind !== 'service' || pending.plugin.load.manifest.id !== message.pluginId
+      || pending.plugin.load.digest !== message.digest || plugins.get(message.pluginId) !== pending.plugin) return;
+    if (!isServiceEnvelope(message)) { pending.reject(new AppServiceError('response-too-large', 'Invalid app service response envelope.')); return; }
+    if (typeof message.error === 'string') pending.reject(serviceError(new AppServiceError(message.errorCode!, '')));
+    else if (pending.plugin.controller.signal.aborted || pending.plugin.retiring) pending.reject(serviceError(new AppServiceError('outcome-unknown', '')));
+    else if (isServicePayload(message.result)) pending.resolve(message.result);
+    else pending.reject(new AppServiceError('response-too-large', 'App service result must be a JSON object within 8 MiB.'));
+    return;
+  }
+  if (message.type === 'execution-result') {
+    const pending = hostRequests.get(message.requestId);
+    if (!pending || pending.kind !== 'execution' || pending.plugin.load.manifest.id !== message.pluginId
+      || pending.plugin.load.digest !== message.digest || plugins.get(message.pluginId) !== pending.plugin) return;
+    if (!isExecutionEnvelope(message)) { pending.reject(new Error('Invalid execution response envelope.')); return; }
+    if (typeof message.error === 'string') {
+      const error = message.errorCode === 'approval_unavailable' ? new AppConfirmationUnavailableError(message.error.slice(0, 2000)) : new Error(message.error.slice(0, 2000));
+      if (message.errorCode === 'unavailable' || message.errorCode === 'cancelled') Object.assign(error, { code: message.errorCode });
+      pending.reject(error);
+    } else if (isExecutionPayload(message.result)) pending.resolve(message.result);
+    else pending.reject(new Error('Invalid execution response.'));
+    return;
+  }
   if (message.type === 'model-result' || message.type === 'text-model-result' || message.type === 'media-model-result') {
-    const pending = models.get(message.requestId);
+    const pending = hostRequests.get(message.requestId);
+    if (pending?.kind !== 'model') return;
     if (message.error) {
       const error = new Error(message.error);
       if (isModelErrorCode(message.errorCode)) Object.assign(error, { code: message.errorCode });

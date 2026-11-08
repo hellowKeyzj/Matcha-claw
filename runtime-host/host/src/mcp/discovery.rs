@@ -59,8 +59,9 @@ impl Discovery {
         org: organization::OrganizationHandle,
         resolver: std::sync::Arc<dyn organization::RoleSessionIdentityResolver>,
         wiki: wiki::WikiHandle,
+        maintenance: maintenance::Maintenance,
     ) -> platform::loopback::ModuleDescriptor {
-        super::route::descriptor(org, self.verifier.clone(), resolver, wiki)
+        super::route::descriptor(org, self.verifier.clone(), resolver, wiki, maintenance)
     }
 
     pub(crate) fn publish(&self) -> Result<(), ()> {

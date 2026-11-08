@@ -5,7 +5,7 @@ import type { WebContents } from 'electron';
 
 import type { IabHistoryEntry, IabHistoryPage, IabHistoryQuery } from '../../../src/types/desktop/iab';
 import { fetchPublicFavicon } from './favicon-fetch';
-import { replacePrivateFile } from './persistence';
+import { replacePrivateFile } from '../../utils/private-file';
 
 const MAX_ENTRIES = 3_000;
 type PendingVisit = { url: string; title: string; visitedAt: number; timer: ReturnType<typeof setTimeout>; cancelled?: boolean; drainMetadata?(): Promise<void> };

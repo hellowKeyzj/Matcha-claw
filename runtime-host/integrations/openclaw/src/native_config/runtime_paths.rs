@@ -3,8 +3,40 @@ use std::{fmt, path::Path};
 
 use crate::surfaces::workspace::{OpenClawWorkspaceAccess, WorkspaceDirectoryFailure};
 
+use super::config_store::OpenClawConfigStore;
+
 const SKILLS_DIRECTORY: &str = "skills";
 const CLI_ENTRY: &str = "openclaw.mjs";
+
+pub fn log_directory(
+    state_dir: &CanonicalStateDir,
+    gateway_cwd: &Path,
+) -> Result<String, RuntimePathsError> {
+    let document = OpenClawConfigStore::new(state_dir.clone())
+        .read_private()
+        .map_err(|_| RuntimePathsError::Unavailable)?;
+    let file = document
+        .get("logging")
+        .and_then(|logging| logging.get("file"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or(RuntimePathsError::Unavailable)?;
+    // A direct file overrides includes; values supplied only by includes remain native-owned.
+    if file.trim().is_empty() || file.contains('\0') || file.contains("${") {
+        return Err(RuntimePathsError::Unavailable);
+    }
+    if file.trim_start().starts_with('~') {
+        return Err(RuntimePathsError::Unavailable);
+    }
+    log_file_directory(file, gateway_cwd)
+}
+
+pub(crate) fn log_file_directory(
+    file: &str,
+    gateway_cwd: &Path,
+) -> Result<String, RuntimePathsError> {
+    let file = gateway_cwd.join(file);
+    path_text(file.parent().ok_or(RuntimePathsError::Unavailable)?)
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct RuntimePaths {

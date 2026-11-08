@@ -3,7 +3,7 @@ import { lstat, readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join, basename } from 'node:path';
 
 import type { IabDownload } from '../../../src/types/desktop/iab';
-import { replacePrivateFile } from './persistence';
+import { replacePrivateFile } from '../../utils/private-file';
 
 export type DownloadStatus = IabDownload['status'];
 export type DownloadRecord = IabDownload & { savePath: string; recovery?: string; recoveryIdentity?: string };

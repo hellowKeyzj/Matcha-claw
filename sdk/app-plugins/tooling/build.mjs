@@ -108,7 +108,7 @@ export async function buildProject(directory = process.cwd()) {
         else await copyFile(await sourcePath(root, source), target);
       }
     }
-    await writeFile(join(temporary, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(join(temporary, 'manifest.json'), `${JSON.stringify(manifest)}\n`);
     const contents = await packDirectory(temporary);
     if (await lstat(output).catch((error) => { if (error.code !== 'ENOENT') throw error; })) {
       backup = await mkdtemp(join(root, '.matcha-previous-'));

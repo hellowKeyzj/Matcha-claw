@@ -40,7 +40,7 @@ import type {
   UserSubscription,
 } from './types';
 
-const DEFAULT_CLOUD_BASE_URL = 'http://47.251.94.80:8080/api/v1';
+const DEFAULT_CLOUD_BASE_URL = 'https://sub2api.supercnm.top/api/v1';
 const REQUEST_TIMEOUT_MS = 30_000;
 let requestTraceSeq = 0;
 
@@ -88,6 +88,7 @@ export type CloudAccountClient = Readonly<{
   sendVerifyCode(request: AuthSendVerifyCodeRequest): Promise<AuthSendVerifyCodeResult>;
   refresh(refreshToken: string): Promise<Omit<AuthTokenResult, 'user'>>;
   logout(refreshToken: string): Promise<void>;
+  createConsoleLoginUrl(token: string): Promise<string>;
   fetchProfile(token: string): Promise<CloudUser>;
   fetchClientBootstrap(token: string): Promise<CloudClientBootstrap>;
   fetchCheckoutInfo(token: string): Promise<BillingCheckoutInfo>;
@@ -137,6 +138,7 @@ export function createCloudAccountClient(): CloudAccountClient {
         body: { refresh_token: refreshToken },
       });
     },
+    createConsoleLoginUrl,
     fetchProfile: (token) => requestCloud<unknown>('/auth/me', { token }).then(toCloudUser),
     fetchClientBootstrap: (token) => requestCloud<unknown>('/client/bootstrap', { token }).then(toCloudClientBootstrap),
     fetchCheckoutInfo: (token) => requestCloud<unknown>('/payment/checkout-info', { token }).then(toBillingCheckoutInfo),
@@ -307,7 +309,27 @@ function packageExtension(packageType: string | undefined): string {
   return '.matcha-skillpkg';
 }
 
-async function requestCloud<T>(path: string, options: CloudRequestOptions = {}): Promise<T> {
+async function createConsoleLoginUrl(token: string): Promise<string> {
+  const baseUrl = cloudBaseUrl();
+  const url = new URL(baseUrl);
+  const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback))
+    || url.username || url.password || /[?#]/.test(baseUrl) || !url.pathname.endsWith('/api/v1')) {
+    throw new Error('Cloud account console URL is invalid');
+  }
+  const result = requireRecord(await requestCloud<unknown>('/auth/browser-login/ticket', {
+    method: 'POST', token,
+  }, url.href), 'Cloud account browser login response is invalid');
+  const ticket = requireString(result.ticket, 'Cloud account browser login ticket is invalid');
+  if (!/^[A-Za-z0-9_-]{43}$/.test(ticket) || result.expires_in !== 60) {
+    throw new Error('Cloud account browser login response is invalid');
+  }
+  url.pathname = `${url.pathname.slice(0, -'/api/v1'.length)}/auth/desktop`;
+  url.hash = `ticket=${ticket}`;
+  return url.href;
+}
+
+async function requestCloud<T>(path: string, options: CloudRequestOptions = {}, baseUrl = cloudBaseUrl()): Promise<T> {
   const operation = !isTraceEnabled() ? undefined
     : path === '/settings/public' ? 'public-settings' : path === '/auth/refresh' ? 'refresh'
     : path === '/auth/me' ? 'profile' : path === '/client/bootstrap' ? 'bootstrap' : undefined;
@@ -319,7 +341,7 @@ async function requestCloud<T>(path: string, options: CloudRequestOptions = {}):
     if (trace) startupTrace('cloud-account-client', 'request.timeout', () => ({ operation: trace.operation, seq: trace.seq, elapsedMs: Math.round(performance.now() - trace.startedAt) }));
   }, REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${cloudBaseUrl()}${path}`, {
+    const response = await fetch(`${baseUrl}${path}`, {
       method: options.method ?? 'GET',
       signal: controller.signal,
       headers: requestHeaders(options),

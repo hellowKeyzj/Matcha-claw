@@ -16,6 +16,8 @@ export interface SessionEventsTransport {
   onDelta(handler: SessionDeltaEventHandler): () => void;
   onResync(handler: (event: SessionResync) => void): () => void;
   onConnected(handler: () => void): () => void;
+  /** Resolves for the current connection; its signal aborts when that connection ends. */
+  ready(signal?: AbortSignal): Promise<AbortSignal>;
   close(): void;
 }
 
@@ -36,6 +38,8 @@ export function createSessionEventsTransport(
   const handlers = new Set<SessionDeltaEventHandler>();
   const resyncHandlers = new Set<(event: SessionResync) => void>();
   const connectedHandlers = new Set<() => void>();
+  const readyWaiters = new Set<() => void>();
+  let connectionLifetime: AbortController | null = null;
   let closed = false;
   let started = false;
   let controller: AbortController | null = null;
@@ -45,6 +49,7 @@ export function createSessionEventsTransport(
   const connect = async (): Promise<void> => {
     if (closed) return;
     const requestController = new AbortController();
+    const lifetime = new AbortController();
     controller = requestController;
     try {
       const response = await fetcher(url, {
@@ -55,12 +60,15 @@ export function createSessionEventsTransport(
       if (closed) return;
       if (response.status === 401 || response.status === 403 || response.status === 404) {
         closed = true;
+        readyWaiters.forEach((wake) => wake());
         return;
       }
       if (response.status !== 200 || !response.body) {
         scheduleReconnect();
         return;
       }
+      connectionLifetime = lifetime;
+      readyWaiters.forEach((wake) => wake());
       connectedHandlers.forEach((handler) => handler());
       await readEventStream(response.body, (frame) => {
         const value = parseEventData(frame.data);
@@ -100,6 +108,8 @@ export function createSessionEventsTransport(
       });
       scheduleReconnect();
     } finally {
+      if (connectionLifetime === lifetime) connectionLifetime = null;
+      lifetime.abort(new Error('Session events connection ended.'));
       if (controller === requestController) controller = null;
     }
   };
@@ -131,8 +141,27 @@ export function createSessionEventsTransport(
       connectedHandlers.add(handler);
       return () => { connectedHandlers.delete(handler); };
     },
+    ready(signal): Promise<AbortSignal> {
+      if (signal?.aborted) return Promise.reject(signal.reason);
+      if (closed) return Promise.reject(new Error('Session events transport is closed.'));
+      if (connectionLifetime) return Promise.resolve(connectionLifetime.signal);
+      return new Promise((resolve, reject) => {
+        const cleanup = () => { readyWaiters.delete(wake); signal?.removeEventListener('abort', abort); };
+        const wake = () => {
+          if (closed) { cleanup(); reject(new Error('Session events transport is closed.')); }
+          else if (connectionLifetime) { cleanup(); resolve(connectionLifetime.signal); }
+        };
+        const abort = () => { cleanup(); reject(signal?.reason); };
+        readyWaiters.add(wake);
+        signal?.addEventListener('abort', abort, { once: true });
+        if (!started) { started = true; void connect(); }
+      });
+    },
     close(): void {
       closed = true;
+      connectionLifetime?.abort(new Error('Session events transport is closed.'));
+      connectionLifetime = null;
+      readyWaiters.forEach((wake) => wake());
       handlers.clear();
       resyncHandlers.clear();
       connectedHandlers.clear();

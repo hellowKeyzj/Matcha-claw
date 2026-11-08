@@ -108,6 +108,7 @@ export const SDKControlPrepareToSleepRequestSchema = lazySchema(() =>
         model: z.string().nullable(),
         permissionMode: PermissionModeSchema(),
         effort: SDKControlSetEffortRequestSchema().shape.effort,
+        permissions: SettingsSchema().shape.permissions,
         initialization: z
           .strictObject({
             systemPrompt: z.string().nullable(),
@@ -195,6 +196,30 @@ export const SDKControlSetEffortResponseSchema = lazySchema(() =>
     supportedEffortLevels: z.array(
       z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
     ),
+  }),
+)
+
+export const SDKControlGetEffortCapabilitiesRequestSchema = lazySchema(() =>
+  z.strictObject({
+    subtype: z.literal('get_effort_capabilities'),
+    model: z
+      .string()
+      .refine(
+        model =>
+          model.trim().length > 0 && !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(model),
+        'Model must be a non-empty single line',
+      ),
+    effort: SDKControlSetEffortRequestSchema().shape.effort,
+  }),
+)
+
+export const SDKControlGetEffortCapabilitiesResponseSchema = lazySchema(() =>
+  z.strictObject({
+    model: z.string(),
+    supportsEffort: z.boolean(),
+    supportedEffortLevels:
+      SDKControlSetEffortResponseSchema().shape.supportedEffortLevels,
+    effectiveLevel: SDKControlSetEffortRequestSchema().shape.effort,
   }),
 )
 
@@ -697,6 +722,7 @@ export const SDKControlRequestInnerSchema = lazySchema(() =>
     SDKControlSetPermissionModeRequestSchema(),
     SDKControlSetModelRequestSchema(),
     SDKControlSetEffortRequestSchema(),
+    SDKControlGetEffortCapabilitiesRequestSchema(),
     SDKControlSetMaxThinkingTokensRequestSchema(),
     SDKControlMcpStatusRequestSchema(),
     SDKControlGetContextUsageRequestSchema(),

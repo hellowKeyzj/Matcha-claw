@@ -1,5 +1,5 @@
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
-import type { SessionFact, SessionView } from '@/types/session/snapshot';
+import type { SessionFact, SessionView, SessionWireApproval } from '@/types/session/snapshot';
 import type { ChatSessionRuntimeState, ChatStoreState } from '@/plugins/chat/store/types';
 import type { SessionRenderProjectionCache } from '@/plugins/chat/store/session-render-projection';
 import { getCronSessionBaseKey } from '@/plugins/chat/store/cron-session-utils';
@@ -15,10 +15,18 @@ export type SessionProjectionState = Omit<SessionView, 'modelState' | 'inputRece
   };
 };
 
+export type SessionApprovalProjectionCache = {
+  identityKey: string;
+  endpointSessionId: string | null | undefined;
+  epoch: number;
+  facts: SessionWireApproval[];
+};
+
 type ProjectionOwner = {
   canonical: Map<string, SessionProjectionState>;
   windows: Map<string, SessionProjectionState>;
   rendered: Map<string, SessionRenderProjectionCache>;
+  approvals: Map<string, SessionApprovalProjectionCache>;
 };
 
 // The store getter is the lifetime owner; no strong registry retains discarded stores.
@@ -27,7 +35,7 @@ const projectionsByStore = new WeakMap<() => ChatStoreState, ProjectionOwner>();
 function projectionOwner(get: () => ChatStoreState): ProjectionOwner {
   let owner = projectionsByStore.get(get);
   if (!owner) {
-    owner = { canonical: new Map(), windows: new Map(), rendered: new Map() };
+    owner = { canonical: new Map(), windows: new Map(), rendered: new Map(), approvals: new Map() };
     projectionsByStore.set(get, owner);
   }
   return owner;
@@ -48,6 +56,10 @@ export function windowStore(get: () => ChatStoreState): Map<string, SessionProje
 
 export function renderProjectionStore(get: () => ChatStoreState): Map<string, SessionRenderProjectionCache> {
   return projectionOwner(get).rendered;
+}
+
+export function approvalProjectionStore(get: () => ChatStoreState): Map<string, SessionApprovalProjectionCache> {
+  return projectionOwner(get).approvals;
 }
 
 export function getSessionProjectionWatermark(get: () => ChatStoreState, identity: SessionIdentity): string | null {
@@ -78,8 +90,10 @@ export function resetSessionProjection(get: () => ChatStoreState, sessionKey: st
         view.previewLoad?.controller?.abort();
         store.delete(key);
         owner.rendered.delete(key);
+        owner.approvals.delete(view.recordKey ?? key);
       }
     }
   }
   owner.rendered.delete(sessionKey);
+  owner.approvals.delete(sessionKey);
 }

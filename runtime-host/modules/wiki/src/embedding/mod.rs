@@ -20,7 +20,7 @@ impl Embedder {
             local: local::LocalMiniLm::default(),
             client: Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(8))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .map_err(|_| "failed to initialize embedding HTTP client".to_owned())?,
         })

@@ -78,6 +78,10 @@ export function normalizePayload(
   if (p.request) normalized.request = p.request
   if (p.approved !== undefined) normalized.approved = p.approved
   if (p.updated_input) normalized.updated_input = p.updated_input
+  if (p.updated_permissions)
+    normalized.updated_permissions = p.updated_permissions
+  if (type === 'control_response' && p.response)
+    normalized.response = p.response
 
   // Preserve message field for backward compat
   if (p.message) normalized.message = p.message

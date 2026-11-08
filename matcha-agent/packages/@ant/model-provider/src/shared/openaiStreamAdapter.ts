@@ -49,11 +49,11 @@ export async function* adaptOpenAIStreamToAnthropic(
     { contentIndex: number; id: string; name: string; arguments: string }
   >()
 
-  // Track thinking block state
-  let thinkingBlockOpen = false
-
-  // Track text block state
-  let textBlockOpen = false
+  // Track the active thinking or text block independently of tool indices
+  let activeBlock: {
+    type: 'thinking' | 'text'
+    contentIndex: number
+  } | null = null
 
   // Track raw OpenAI usage across chunks. The normalized Anthropic fields are
   // disjoint: ordinary input + cache reads + cache writes = total input.
@@ -73,7 +73,11 @@ export async function* adaptOpenAIStreamToAnthropic(
 
   for await (const chunk of stream) {
     const choice = chunk.choices?.[0]
-    const delta = choice?.delta
+    const delta:
+      | (ChatCompletionChunk.Choice.Delta & {
+          reasoning_content?: string | null
+        })
+      | undefined = choice?.delta
 
     // Extract usage from any chunk that carries it.
     if (chunk.usage) {
@@ -155,16 +159,24 @@ export async function* adaptOpenAIStreamToAnthropic(
     // returns reasoning_content: "" when the model answers directly. The
     // empty thinking block must round-trip back to the API in subsequent
     // requests, otherwise DeepSeek rejects with 400.
-    const reasoningContent = (delta as any).reasoning_content
+    const reasoningContent = delta.reasoning_content
     if (reasoningContent != null) {
-      if (!thinkingBlockOpen) {
+      if (activeBlock?.type !== 'thinking') {
+        if (activeBlock) {
+          yield {
+            type: 'content_block_stop',
+            index: activeBlock.contentIndex,
+          } as BetaRawMessageStreamEvent
+          openBlockIndices.delete(activeBlock.contentIndex)
+        }
+
         currentContentIndex++
-        thinkingBlockOpen = true
-        openBlockIndices.add(currentContentIndex)
+        activeBlock = { type: 'thinking', contentIndex: currentContentIndex }
+        openBlockIndices.add(activeBlock.contentIndex)
 
         yield {
           type: 'content_block_start',
-          index: currentContentIndex,
+          index: activeBlock.contentIndex,
           content_block: {
             type: 'thinking',
             thinking: '',
@@ -176,7 +188,7 @@ export async function* adaptOpenAIStreamToAnthropic(
       if (reasoningContent !== '') {
         yield {
           type: 'content_block_delta',
-          index: currentContentIndex,
+          index: activeBlock.contentIndex,
           delta: {
             type: 'thinking_delta',
             thinking: reasoningContent,
@@ -187,24 +199,22 @@ export async function* adaptOpenAIStreamToAnthropic(
 
     // Handle text content
     if (delta.content != null && delta.content !== '') {
-      if (!textBlockOpen) {
-        // Close thinking block if still open
-        if (thinkingBlockOpen) {
+      if (activeBlock?.type !== 'text') {
+        if (activeBlock) {
           yield {
             type: 'content_block_stop',
-            index: currentContentIndex,
+            index: activeBlock.contentIndex,
           } as BetaRawMessageStreamEvent
-          openBlockIndices.delete(currentContentIndex)
-          thinkingBlockOpen = false
+          openBlockIndices.delete(activeBlock.contentIndex)
         }
 
         currentContentIndex++
-        textBlockOpen = true
-        openBlockIndices.add(currentContentIndex)
+        activeBlock = { type: 'text', contentIndex: currentContentIndex }
+        openBlockIndices.add(activeBlock.contentIndex)
 
         yield {
           type: 'content_block_start',
-          index: currentContentIndex,
+          index: activeBlock.contentIndex,
           content_block: {
             type: 'text',
             text: '',
@@ -214,7 +224,7 @@ export async function* adaptOpenAIStreamToAnthropic(
 
       yield {
         type: 'content_block_delta',
-        index: currentContentIndex,
+        index: activeBlock.contentIndex,
         delta: {
           type: 'text_delta',
           text: delta.content,
@@ -228,24 +238,13 @@ export async function* adaptOpenAIStreamToAnthropic(
         const tcIndex = tc.index
 
         if (!toolBlocks.has(tcIndex)) {
-          // Close thinking block if open
-          if (thinkingBlockOpen) {
+          if (activeBlock) {
             yield {
               type: 'content_block_stop',
-              index: currentContentIndex,
+              index: activeBlock.contentIndex,
             } as BetaRawMessageStreamEvent
-            openBlockIndices.delete(currentContentIndex)
-            thinkingBlockOpen = false
-          }
-
-          // Close text block if open
-          if (textBlockOpen) {
-            yield {
-              type: 'content_block_stop',
-              index: currentContentIndex,
-            } as BetaRawMessageStreamEvent
-            openBlockIndices.delete(currentContentIndex)
-            textBlockOpen = false
+            openBlockIndices.delete(activeBlock.contentIndex)
+            activeBlock = null
           }
 
           // Start new tool_use block
@@ -292,33 +291,14 @@ export async function* adaptOpenAIStreamToAnthropic(
 
     // Handle finish
     if (choice?.finish_reason) {
-      if (thinkingBlockOpen) {
+      for (const idx of openBlockIndices) {
         yield {
           type: 'content_block_stop',
-          index: currentContentIndex,
+          index: idx,
         } as BetaRawMessageStreamEvent
-        openBlockIndices.delete(currentContentIndex)
-        thinkingBlockOpen = false
+        openBlockIndices.delete(idx)
       }
-
-      if (textBlockOpen) {
-        yield {
-          type: 'content_block_stop',
-          index: currentContentIndex,
-        } as BetaRawMessageStreamEvent
-        openBlockIndices.delete(currentContentIndex)
-        textBlockOpen = false
-      }
-
-      for (const [, block] of toolBlocks) {
-        if (openBlockIndices.has(block.contentIndex)) {
-          yield {
-            type: 'content_block_stop',
-            index: block.contentIndex,
-          } as BetaRawMessageStreamEvent
-          openBlockIndices.delete(block.contentIndex)
-        }
-      }
+      activeBlock = null
 
       pendingFinishReason = choice.finish_reason
       pendingHasToolCalls = toolBlocks.size > 0

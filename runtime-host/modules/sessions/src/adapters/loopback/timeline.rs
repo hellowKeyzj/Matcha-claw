@@ -368,6 +368,7 @@ mod tests {
             endpoint_session_id: None,
             ownership: None,
             model_state: None,
+            input_receipts: None,
             goal: crate::goal::SessionGoalView::Unknown,
             identity: SessionIdentity::new(
                 "session-1",
@@ -378,10 +379,12 @@ mod tests {
             epoch: 1,
             seq: 0,
             cursor: 0,
+            run_timings: Vec::new(),
             items: SessionFact::Complete(vec![crate::state::SessionItem::UserMessage {
                 item_id: "message-1".to_owned(),
                 message_id: Some("message-1".to_owned()),
                 input_ids: Vec::new(),
+                notice: None,
                 text: "seeded history".to_owned(),
                 content: vec![crate::state::SessionContent::Text {
                     text: "seeded history".to_owned(),

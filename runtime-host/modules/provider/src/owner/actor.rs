@@ -23,7 +23,7 @@ use crate::{
 
 use super::{
     accounts::{ProviderAccountsDesiredOutcome, ProviderAccountsMutation, ProviderAccountsOwner},
-    models::{ProviderModelOwner, text_generation_unavailable_reason},
+    models::ProviderModelOwner,
     routing::ProviderRoutingOwner,
 };
 
@@ -1052,7 +1052,7 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(error) => {
-                        let reason = text_generation_unavailable_reason(&error);
+                        let reason = crate::ProviderTextGenerationUnavailableReason::from(&error);
                         if let Some(stream) = &stream {
                             let _ = stream
                                 .0

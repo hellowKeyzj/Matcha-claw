@@ -154,6 +154,9 @@ impl LaunchFactory {
     fn prepare_attempt(&mut self) -> Result<PreparedAttempt, LaunchFailure> {
         stale_gateway_lock::remove_stale_gateway_lock_artifacts(&self.state_dir)
             .map_err(|_| LaunchFailure::ResourceUnavailable)?;
+        crate::native_config::config_store::OpenClawConfigStore::new(self.state_dir.clone())
+            .ensure_logging_defaults()
+            .map_err(|_| LaunchFailure::ResourceUnavailable)?;
         let skip_channels = channel_bootstrap::skip_channels(&self.state_dir)
             .map_err(|_| LaunchFailure::ResourceUnavailable)?;
         #[cfg(unix)]

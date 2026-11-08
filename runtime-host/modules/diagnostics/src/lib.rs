@@ -51,6 +51,7 @@ pub use owner::actor::DiagnosticsOwnerInput;
 pub use ports::{
     DiagnosticsArchiveCancellation, DiagnosticsArchiveCancellationGuard, DiagnosticsHostPort,
     DiagnosticsFuture, DiagnosticsRequestAdmission, DiagnosticsRequestAdmissionClosed,
+    RUNTIME_LOG_SNAPSHOT_BYTE_LIMIT,
 };
 
 #[derive(Clone)]

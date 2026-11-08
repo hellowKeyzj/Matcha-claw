@@ -23,7 +23,7 @@ function getToolLocationHint(): string {
     : 'Deferred tools appear by name in <available-deferred-tools> messages.'
 }
 
-const PROMPT_TAIL = ` Returns matching tool names.
+const PROMPT_TAIL = ` Returns matching tool names, descriptions, and parameter schemas.
 
 ## Two-step workflow (MUST follow exactly)
 
@@ -33,7 +33,7 @@ Step 1 — Search: Call this tool (SearchExtraTools) to discover the target tool
   Input: {"query": "select:CronCreate"}
   Response: "Found 1 deferred tool(s): CronCreate. Use ExecuteExtraTool with {"tool_name": "<name>", "params": {...}} to invoke."
 
-Step 2 — Execute: Call ExecuteExtraTool to run the discovered tool.
+Step 2 — Execute: Call ExecuteExtraTool using the returned input schema's exact parameter names. Do not rename or guess fields. If the input schema is unavailable, do not guess arguments.
   Input: {"tool_name": "CronCreate", "params": {"schedule": "*/5 * * * *", "prompt": "check the deploy"}}
   Response: the actual tool result.
 

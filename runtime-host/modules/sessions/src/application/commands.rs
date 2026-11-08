@@ -173,7 +173,7 @@ pub enum SessionCommand {
     SyncTerminals {
         identity: SessionIdentity,
         generation: u64,
-        terminals: Vec<(crate::ports::SessionTerminalRun, Vec<String>)>,
+        terminals: Vec<(crate::ports::SessionTerminalRun, crate::state::TerminalBodies)>,
         publish: bool,
         permit: crate::owner::terminal::TerminalPermit,
         reply: oneshot::Sender<Option<crate::state::SyncTerminalChanges>>,

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { logger } from '../../../../utils/logger';
+import { logger, LogLevel } from '../../../../utils/logger';
 import { isTraceEnabled } from '../../../../utils/trace-logger';
 import type { SessionChange, SessionIdentity, SessionItem, SessionView } from './session-contract';
 
@@ -16,7 +16,7 @@ export function logSessionTrace(stage: string, traceId: string | null | undefine
   if (!traceId || !isSessionTraceEnabled()) {
     return;
   }
-  logger.info(JSON.stringify({
+  logger.trace(LogLevel.INFO, JSON.stringify({
     prefix: SESSION_TRACE_PREFIX,
     source: 'electron-main',
     traceIdHash: createHash('sha256').update(traceId).digest('hex').slice(0, 16),

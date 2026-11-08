@@ -40,6 +40,7 @@ pub(crate) fn team_run_public_snapshot(
     run_id: GraphRunId,
     event_cursor: Option<u64>,
     event_limit: Option<u64>,
+    message_cursor: Option<crate::run::public_projection::TeamRunMessageCursor>,
 ) -> Option<organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome> {
     match team_id {
         Some(team_id) => {
@@ -51,6 +52,7 @@ pub(crate) fn team_run_public_snapshot(
             )
             .ok()
             .map(|request| {
+                let request = request.with_message_cursor(message_cursor);
                 organization::run::public_projection::produce_team_run_public_snapshot(
                     store.facts(),
                     &request,
@@ -62,6 +64,7 @@ pub(crate) fn team_run_public_snapshot(
             &run_id,
             event_cursor.unwrap_or_default(),
             event_limit,
+            message_cursor,
         )
         .ok(),
     }

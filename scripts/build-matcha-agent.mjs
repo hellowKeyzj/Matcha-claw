@@ -92,7 +92,7 @@ for (const arch of architectures) {
   requirePath(resolve(matchaAgentDir, 'vendor', 'audio-capture', target, 'audio-capture.node'), `audio-capture ${target}`);
 }
 
-const outputFiles = ['cli-node.js', 'cli-bun.js', 'cli.js'].map(file => resolve(matchaAgentDir, 'dist', file));
+const outputFiles = ['cli-node.js', 'cli-bun.js', 'cli.js', 'skills-catalog.json'].map(file => resolve(matchaAgentDir, 'dist', file));
 for (const arch of architectures) {
   const target = `${arch}-${process.platform}`;
   outputFiles.push(
@@ -143,6 +143,7 @@ function buildInputFingerprint() {
   }
   add(fileURLToPath(import.meta.url));
   add(resolve(rootDir, 'resources/skills/preinstalled-skill-sources/app-plugin-create/SKILL.md'));
+  add(resolve(rootDir, 'resources/skills/preinstalled-skill-sources/openclaw-maintenance'));
   add(bundledBunPath);
   return hash.digest('hex');
 }

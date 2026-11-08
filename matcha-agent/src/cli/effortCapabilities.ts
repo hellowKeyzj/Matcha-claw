@@ -57,13 +57,8 @@ export async function printEffortCapabilities(args: string[]): Promise<void> {
     const { getMainLoopModel, parseUserSpecifiedModel } = await import(
       '../utils/model/model.js'
     )
-    const {
-      EFFORT_LEVELS,
-      getInitialEffortSetting,
-      getModelEffortCapabilities,
-      isEffortLevel,
-      resolveAdapterEffort,
-    } = await import('../utils/effort.js')
+    const { EFFORT_LEVELS, getEffortCapabilities, isEffortLevel } =
+      await import('../utils/effort.js')
     const effortArg = eagerParseCliFlag('--effort', args)?.toLowerCase()
     if (
       (args.includes('--effort') && effortArg === undefined) ||
@@ -75,18 +70,7 @@ export async function printEffortCapabilities(args: string[]): Promise<void> {
       modelArg === 'default'
         ? getMainLoopModel()
         : parseUserSpecifiedModel(modelArg)
-    const capabilities = getModelEffortCapabilities(model)
-    const effort = resolveAdapterEffort(
-      model,
-      effortArg ?? getInitialEffortSetting(),
-    )
-    console.log(
-      JSON.stringify({
-        model,
-        ...capabilities,
-        effectiveLevel: typeof effort === 'string' ? effort : null,
-      }),
-    )
+    console.log(JSON.stringify(getEffortCapabilities(model, effortArg ?? null)))
   } catch (error) {
     console.error(
       `Error computing effort capabilities: ${error instanceof Error ? error.message : String(error)}`,

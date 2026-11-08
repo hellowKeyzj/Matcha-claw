@@ -1,7 +1,7 @@
 use provider_module::{
     ProviderHandle, ProviderTextGenerationModelLimits, ProviderTextGenerationModelLimitsOutcome,
     ProviderTextGenerationModelLimitsRequest, ProviderTextGenerationOutcome,
-    ProviderTextGenerationRequest,
+    ProviderTextGenerationRequest, ProviderTextGenerationUnavailableReason,
     llm_client::{
         LlmClientError, LlmGenerationOptions, LlmImageContent, LlmMessage, LlmMessagePart, LlmRole,
         LlmStreamEvent, LlmStreamSink,
@@ -93,9 +93,11 @@ impl WikiIngestLlm for ProviderWikiIngestLlm {
             if let Some(failure) = stream_sink.failure {
                 return Err(failure);
             }
-            match_generation_outcome(
-                outcome.map_err(|_| WikiFailure::state("provider text streaming failed"))?,
-            )
+            match_generation_outcome(outcome.unwrap_or_else(|error| {
+                ProviderTextGenerationOutcome::Unavailable {
+                    reason: ProviderTextGenerationUnavailableReason::from(&error),
+                }
+            }))
         })
     }
 
@@ -201,9 +203,32 @@ fn match_generation_outcome(
             "provider",
             "no usable provider is configured for wiki ingest",
         )),
-        ProviderTextGenerationOutcome::Unavailable { .. } => Err(WikiFailure::state(
-            "provider text generation is unavailable",
-        )),
+        ProviderTextGenerationOutcome::Unavailable { reason } => Err(WikiFailure::state(match reason {
+            ProviderTextGenerationUnavailableReason::CredentialMissing => {
+                "Add credentials to the selected provider account"
+            }
+            ProviderTextGenerationUnavailableReason::CredentialUnavailable => {
+                "Provider credentials could not be read; check the provider account credentials"
+            }
+            ProviderTextGenerationUnavailableReason::Authentication => {
+                "The text provider rejected its credentials; update the provider account credentials"
+            }
+            ProviderTextGenerationUnavailableReason::PermissionDenied => {
+                "The text provider denied this request; check account and model permissions"
+            }
+            ProviderTextGenerationUnavailableReason::RateLimited => {
+                "The text provider rate limit was reached; wait before retrying"
+            }
+            ProviderTextGenerationUnavailableReason::Deadline => {
+                "Text generation exceeded its time limit; the provider request may already have occurred. Check the provider service before retrying"
+            }
+            ProviderTextGenerationUnavailableReason::InvalidResponse => {
+                "The text provider returned an invalid response; check the model and provider configuration"
+            }
+            ProviderTextGenerationUnavailableReason::ProviderUnavailable => {
+                "The text provider is unavailable; check the provider service and connection"
+            }
+        })),
         ProviderTextGenerationOutcome::Cancelled => Err(WikiFailure::cancelled()),
     }
 }

@@ -90,7 +90,7 @@ export function QuestionMessage({ turn, disabled, saving, canSave, canRegenerate
             <MarkdownPreview filePath={savedPath ?? 'wiki/queries/answer.md'} markdown={referenceMarkdown(answer, references)} resolveImageSrc={resolveWikiMarkdownImage} />
           </div>
         ) : null}
-        {task?.error || turn.error || copyError ? <p role="alert" className="px-4 py-3 whitespace-pre-wrap text-sm text-destructive">{turn.error || task?.error || copyError}</p> : null}
+        {task?.error || turn.error || copyError ? <p role="alert" className="px-4 py-3 whitespace-pre-wrap text-sm text-destructive">{turn.error || (task?.error ? t(task.error, { defaultValue: task.error, keySeparator: false, nsSeparator: false }) : copyError)}</p> : null}
         {references.length > 0 ? (
           <details className="mx-4 mb-3 rounded-xl border border-border/60 p-3">
             <summary className="cursor-pointer text-xs font-medium">{t('qa.references', { count: references.length, defaultValue: '{{count}} 条检索证据' })}</summary>

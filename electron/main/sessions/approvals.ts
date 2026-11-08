@@ -1,18 +1,12 @@
 import { hasExactKeys, isRecord } from '../runtime-host-delivery/transport/client';
 import type { LoopbackJsonResponse as PublicTransportResponse } from '../runtime-host-delivery/transport/client';
-import { sameSessionIdentity as sameIdentity, type SessionIdentity } from '../runtime-host-delivery/transport/sessions/session-contract';
+import { isApprovalDetails, sameSessionIdentity as sameIdentity, type ApprovalDetails, type SessionIdentity } from '../runtime-host-delivery/transport/sessions/session-contract';
 import type { SessionApprovalListRequest, SessionApprovalListTransportResponse, SessionApprovalRespondRequest } from '../runtime-host-delivery/transport/sessions/approvals';
 import { hasAllowedKeys, isIdentifier, isSessionIdentity } from './request-validation';
 
 type SessionApprovalListRouteRequest = Readonly<{
   native: SessionApprovalListRequest;
-  identity: SessionIdentity & Readonly<{
-    endpoint: Readonly<{
-      kind: 'native-runtime';
-      runtimeAdapterId: 'matcha-agent';
-      runtimeInstanceId: 'local';
-    }>;
-  }>;
+  identity: SessionIdentity;
 }>;
 
 export function adaptSessionApprovalListRequest(body: Record<string, unknown>): SessionApprovalListRouteRequest {
@@ -23,18 +17,15 @@ export function adaptSessionApprovalListRequest(body: Record<string, unknown>): 
     || !hasExactKeys(body.scope, ['kind', 'identity'])
     || body.scope.kind !== 'session'
     || !isSessionIdentity(body.scope.identity)
-    || !isMatchaAgentIdentity(body.scope.identity)
     || !isRecord(body.target)
     || !hasExactKeys(body.target, ['kind', 'identity'])
     || body.target.kind !== 'session'
     || !isSessionIdentity(body.target.identity)
-    || !isMatchaAgentIdentity(body.target.identity)
     || !sameIdentity(body.scope.identity, body.target.identity)
     || !isRecord(body.input)
     || !hasExactKeys(body.input, ['endpointSessionId', 'sessionIdentity'])
     || !isIdentifier(body.input.endpointSessionId)
     || !isSessionIdentity(body.input.sessionIdentity)
-    || !isMatchaAgentIdentity(body.input.sessionIdentity)
     || !sameIdentity(body.scope.identity, body.input.sessionIdentity)) {
     throw new Error('Session approval request is invalid');
   }
@@ -46,9 +37,9 @@ export function adaptSessionApprovalListRequest(body: Record<string, unknown>): 
     native: {
       id: 'session.approval',
       operationId: 'sessions.approvals.list',
-      scope: { kind: 'session', endpoint, sessionId },
+      scope: { kind: 'session', endpoint, sessionId, identity },
       target: { kind: 'session' },
-      input: { endpoint, sessionId },
+      input: { endpoint, sessionId, identity },
     },
   };
 }
@@ -66,6 +57,7 @@ export function projectSessionApprovalListResponse(
           sessionKey: request.identity.sessionKey,
           sessionIdentity: request.identity,
           title: 'Approval required',
+          ...(approval.details ? { details: approval.details } : {}),
           allowedDecisions: approval.optionIds.map(nativeApprovalOptionIdToDecision).filter(isPublicApprovalDecision),
           request: { optionIds: approval.optionIds },
           createdAtMs: 0,
@@ -77,16 +69,17 @@ export function projectSessionApprovalListResponse(
 }
 
 function isNativeApprovalListResponse(value: unknown): value is Readonly<{
-  approvals: ReadonlyArray<Readonly<{ approvalId: string; optionIds: readonly string[] }>>;
+  approvals: ReadonlyArray<Readonly<{ approvalId: string; optionIds: readonly string[]; details: ApprovalDetails | null }>>;
 }> {
   return isRecord(value)
     && hasExactKeys(value, ['approvals'])
     && Array.isArray(value.approvals)
     && value.approvals.every((approval) => isRecord(approval)
-      && hasExactKeys(approval, ['approvalId', 'optionIds'])
+      && hasExactKeys(approval, ['approvalId', 'optionIds', 'details'])
       && isIdentifier(approval.approvalId)
       && Array.isArray(approval.optionIds)
-      && approval.optionIds.every((optionId) => isIdentifier(optionId)));
+      && approval.optionIds.every((optionId) => isIdentifier(optionId))
+      && (approval.details === null || isApprovalDetails(approval.details)));
 }
 
 function isPublicApprovalDecision(value: unknown): value is 'allow-once' | 'allow-always' | 'deny' {
@@ -112,7 +105,7 @@ function nativeApprovalOptionIdToDecision(optionId: string): 'allow-once' | 'all
   }
 }
 
-function approvalDecisionToOptionId(decision: 'allow-once' | 'allow-always' | 'deny', approval?: { request?: Record<string, unknown> }): string {
+function approvalDecisionToOptionId(decision: 'allow-once' | 'allow-always' | 'deny', endpoint: SessionIdentity['endpoint'], approval?: { request?: Record<string, unknown> }): string {
   const optionIds = approval?.request?.optionIds;
   if (Array.isArray(optionIds)) {
     const nativeOptionId = optionIds.find((optionId): optionId is string => (
@@ -120,13 +113,14 @@ function approvalDecisionToOptionId(decision: 'allow-once' | 'allow-always' | 'd
     ));
     if (nativeOptionId) return nativeOptionId;
   }
+  if (endpoint.runtimeAdapterId === 'openclaw') return decision;
   switch (decision) {
     case 'allow-once':
-      return 'allow-once';
+      return 'allow';
     case 'allow-always':
-      return 'allow-always';
+      throw new Error('Matcha Agent does not support allow-always');
     case 'deny':
-      return 'deny-once';
+      return 'deny';
   }
 }
 
@@ -138,12 +132,10 @@ export function adaptSessionApprovalRespondRequest(body: Record<string, unknown>
     || !hasExactKeys(body.scope, ['kind', 'identity'])
     || body.scope.kind !== 'session'
     || !isSessionIdentity(body.scope.identity)
-    || !isMatchaAgentIdentity(body.scope.identity)
     || !isRecord(body.target)
     || !hasExactKeys(body.target, ['kind', 'identity', 'approvalId'])
     || body.target.kind !== 'approval'
     || !isSessionIdentity(body.target.identity)
-    || !isMatchaAgentIdentity(body.target.identity)
     || !sameIdentity(body.scope.identity, body.target.identity)
     || !isIdentifier(body.target.approvalId)
     || !isRecord(body.input)
@@ -155,38 +147,27 @@ export function adaptSessionApprovalRespondRequest(body: Record<string, unknown>
     || body.input.sessionKey !== body.scope.identity.sessionKey
     || (body.input.request !== undefined && !isRecord(body.input.request))
     || !isSessionIdentity(body.input.sessionIdentity)
-    || !isMatchaAgentIdentity(body.input.sessionIdentity)
     || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
     || !isApprovalDecision(body.input.decision)) {
     throw new Error('Session approval request is invalid');
   }
-  const endpoint = body.scope.identity.endpoint;
+  const identity = body.scope.identity;
+  const endpoint = identity.endpoint;
   const sessionId = body.input.endpointSessionId as string;
   const approval = body.input as { request?: Record<string, unknown> };
   return {
     id: 'session.approval',
     operationId: 'sessions.approvals.respond',
-    scope: { kind: 'session', endpoint, sessionId },
+    scope: { kind: 'session', endpoint, sessionId, identity },
     target: { kind: 'approval' },
     input: {
       endpoint,
       sessionId,
+      identity,
       approvalId: body.target.approvalId,
-      optionId: approvalDecisionToOptionId(body.input.decision, approval),
+      optionId: approvalDecisionToOptionId(body.input.decision, endpoint, approval),
     },
   };
-}
-
-function isMatchaAgentIdentity(
-  value: SessionIdentity,
-): value is SessionIdentity & Readonly<{
-  endpoint: Readonly<{
-    kind: 'native-runtime';
-    runtimeAdapterId: 'matcha-agent';
-    runtimeInstanceId: 'local';
-  }>;
-}> {
-  return value.endpoint.runtimeAdapterId === 'matcha-agent';
 }
 
 function isApprovalDecision(value: unknown): value is 'allow-once' | 'allow-always' | 'deny' {

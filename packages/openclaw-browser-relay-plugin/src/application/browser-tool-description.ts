@@ -27,7 +27,7 @@ RULES:
   - Refs are reused across snapshots for matching element identities — keep using a known e<n> ref unless the latest snapshot omits it. New identities get fresh ids above the previous max; removed identities' ids are retired (do not use them). Navigation invalidates the previous snapshot state.
   - Re-snapshot after navigation or any DOM-changing action before using newly rendered elements.
   - Supported element actions click/type/hover/select/scrollIntoView, fill fields, highlight and direct upload accept backendNodeId/frameId instead of ref when the snapshot is degraded. backendNodeId takes precedence over ref.
-  - Output can be large; scan only the section relevant to the task.
+  - Output can be large; scan only the section relevant to the task.${iab ? '' : '\n  - Optional scope:{frame?,landmark?,selector?} narrows capture: frame is an iframe CSS selector; landmark or selector scopes a subtree.\n  - Optional filter:{keywords?:string[],roles?:string[],contextLines?:number,maxMatches?:number} focuses snapshot text; action="requests" still uses a string URL-substring filter.'}
   - If the snapshot is degraded, ${iab ? 'use a returned ref or backendNodeId from [dom=N] with its frameId for supported element actions' : 'use backendNodeId from [dom=N] with its frameId for supported element actions; do not reuse old e* refs'}. If actionPerformed=false and pageUpdated=true, inspect the updated snapshot before acting.
 EXAMPLE:
   {action:"snapshot", targetId:"page1"}`,
@@ -158,7 +158,7 @@ RULES:
     * resize:          {width, height}  // page viewport
     * scrollIntoView:  {ref}
     * wait:            at least one of: timeMs, text (visible), textGone, selector, url, loadState, fn — plus optional timeoutMs (see wait rules below)
-    * evaluate:        {fn} JS ${iab ? 'expression as string; invoke any function yourself. Optional frameId (from utility kind:"frames") evaluates inside that frame — cross-origin iframes (oopif:true) work too' : 'function/expression as string; optional ref evaluates fn on that element'}
+    * evaluate:        {fn} JS ${iab ? 'expression as string; invoke any function yourself. Optional frameId (from utility kind:"frames") evaluates inside that frame — cross-origin iframes (oopif:true) work too' : 'function/expression as string; functions are invoked automatically. Optional ref passes that element to fn; optional frameId (from utility kind:"frames") evaluates in that native frame, including cross-origin frames. If ref and frameId are both supplied, the ref must belong to that frame; missing/stale frames fail without falling back to the main document'}
     * clickCoords:     {x, y} viewport CSS pixel click${iab ? ' (SoM / visual grounding); optional button/doubleClick/modifiers/humanize' : ' (visual grounding); optional button/doubleClick/modifiers'}
     * close:           {} closes the page for this targetId (the tab/window), subject to the close ownership rules — not an HTML <dialog> dismiss. For native window.alert/confirm, use ${iab ? 'utility kind="dialog"' : 'action="dialog"'}; for in-page modals, prefer clicking a close control.
     * drag:            {startRef, endRef}  // drag between snapshot elements${iab ? '; alternatively startRef with endX/endY' : ''}

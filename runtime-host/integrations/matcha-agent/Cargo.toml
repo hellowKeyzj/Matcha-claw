@@ -12,6 +12,7 @@ path = "src/lib.rs"
 diagnostics-module = { package = "diagnostics", version = "0.1.0", path = "../../modules/diagnostics" }
 base64.workspace = true
 hmac.workspace = true
+regex = "1"
 reqwest.workspace = true
 world = { version = "0.1.0", path = "../../modules/world" }
 world-protocol = { version = "0.1.0", path = "../../modules/world/protocol" }

@@ -64,6 +64,15 @@ export interface SessionRenderProjectionCache {
   sessionKey: string;
   tools: Map<string, { fact: SessionWireTool; status: SessionRenderToolCard['status']; card: SessionRenderToolCard }>;
   items: Map<string, { fact: SessionWireItem; tools: (SessionRenderToolCard | undefined)[]; item: SessionRenderItem }>;
+  projection?: {
+    items: SessionWireItem[];
+    tools: SessionWireTool[];
+    runtimeConfirmed: boolean;
+    activeRunId: string | null;
+    terminal: boolean;
+    runtimeUnknown: boolean;
+    result: SessionRenderItem[];
+  };
 }
 
 const controlledItems = new WeakSet<SessionRenderItem>();
@@ -110,6 +119,7 @@ export function commitSessionPreviewItems(
     const hydrated = adoptSessionProjectionFact(merged);
     if (isSessionProjectionFact(hydrated)) controlledItems.add(hydrated);
     entry.item = hydrated;
+    cache.projection = undefined;
   }
 }
 
@@ -118,9 +128,24 @@ function projectItems(view: SessionProjectionState, cache?: SessionRenderProject
   if (!items) {
     cache?.items.clear();
     cache?.tools.clear();
+    if (cache) cache.projection = undefined;
     return [];
   }
   const tools = factValue(view.tools) ?? [];
+  const runtime = factValue(view.runtime);
+  const runtimeConfirmed = runtime !== null && runtime.issue === null
+    && view.completeness !== 'unknown' && view.completeness !== 'unavailable'
+    && !(typeof view.completeness === 'object' && view.completeness.incomplete.missing.includes('replay_cursor'));
+  const activeRunId = runtime?.activeRunId ?? null;
+  const terminal = runtime !== null && isTerminalRunPhase(runtime.phase);
+  const runtimeUnknown = !terminal && (runtime?.issue === 'unknown' || runtime?.issue === 'unavailable');
+  const previousProjection = cache?.projection;
+  if (previousProjection && previousProjection.runtimeConfirmed === runtimeConfirmed
+    && previousProjection.activeRunId === activeRunId && previousProjection.terminal === terminal
+    && previousProjection.runtimeUnknown === runtimeUnknown
+    && previousProjection.items.length === items.length && previousProjection.tools.length === tools.length
+    && items.every((item, index) => item === previousProjection.items[index])
+    && tools.every((tool, index) => tool === previousProjection.tools[index])) return [...previousProjection.result];
   const runtimeAdapterId = view.identity.endpoint.runtimeAdapterId;
   const text = getSessionTextModel(view.identity);
   const abortedRunIds = new Set<string>();
@@ -137,10 +162,6 @@ function projectItems(view: SessionProjectionState, cache?: SessionRenderProject
       toolRunIds.set(segment.toolCallId, previous === undefined || previous === item.runId ? item.runId : null);
     }
   }
-  const runtime = factValue(view.runtime);
-  const runtimeConfirmed = runtime !== null && runtime.issue === null
-    && view.completeness !== 'unknown' && view.completeness !== 'unavailable'
-    && !(typeof view.completeness === 'object' && view.completeness.incomplete.missing.includes('replay_cursor'));
   const statusForTool = (tool: SessionWireTool): SessionRenderToolCard['status'] => {
     if (tool.phase === 'completed') return 'completed';
     if (tool.phase === 'failed') return 'error';
@@ -172,6 +193,7 @@ function projectItems(view: SessionProjectionState, cache?: SessionRenderProject
       segment.kind === 'toolUse' || segment.kind === 'toolResult' ? [toolsById.get(segment.toolCallId)] : []) : [];
     const previous = cache.items.get(item.itemId);
     if (previous?.fact === item && isControlledSessionRenderItem(previous.item)
+      && (previous.item.kind !== 'assistant-turn' || previous.item.status === statusForItem(item))
       && previous.tools.length === referencedTools.length
       && previous.tools.every((tool, index) => tool === referencedTools[index])) {
       nextItems.set(item.itemId, previous);
@@ -189,11 +211,26 @@ function projectItems(view: SessionProjectionState, cache?: SessionRenderProject
   if (cache) {
     cache.tools = nextTools;
     cache.items = nextItems;
+    cache.projection = items.every(isSessionProjectionFact) && tools.every(isSessionProjectionFact)
+      && result.every(isControlledSessionRenderItem)
+      ? { items: [...items], tools: [...tools], runtimeConfirmed, activeRunId, terminal, runtimeUnknown, result: [...result] }
+      : undefined;
   }
   return result;
 
+  function statusForItem(item: SessionWireItem): SessionAssistantTurnItem['status'] {
+    // Presentation failure does not settle the native item or assign a run to an unbound preview.
+    return runtimeUnknown && item.kind === 'assistantTurn' && (!item.runId || item.runId === activeRunId)
+      && (item.status === 'pending' || item.status === 'streaming' || item.status === 'waiting_for_tool')
+      ? 'error' : projectionItemStatus(item.status);
+  }
+
   function projectItem(item: SessionWireItem): SessionRenderItem {
     if (item.kind === 'userMessage') {
+      if (item.notice === 'restart-recovery') {
+        return { key: item.itemId, kind: 'system', role: 'system', sessionKey: view.sessionKey,
+          text: '', level: 'info', notice: 'restart-recovery' };
+      }
       const media = item.content.flatMap((content) => projectionMedia(content));
       const largeText = item.content.map(projectionLargeText).find(Boolean);
       return {
@@ -260,7 +297,7 @@ function projectItems(view: SessionProjectionState, cache?: SessionRenderProject
       identitySource: item.runId ? 'run' : 'message',
       identityMode: item.runId ? 'run' : 'message',
       identityConfidence: 'strong',
-      status: projectionItemStatus(item.status),
+      status: statusForItem(item),
       segments,
       thinking: thinkingSegments.length ? thinkingSegments.map((segment) => segment.text).join('\\n') : null,
       tools,

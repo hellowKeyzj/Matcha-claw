@@ -31,10 +31,10 @@ function useAddress(tab: IabTab | null, input: RefObject<HTMLInputElement | null
   const canSuggest = tab?.url === 'about:blank' && !tab.internalPage;
   const hide = useCallback(() => {
     setDismissed(true); setEntries([]); setSelected(-1);
-    if (ownerId === useIabStore.getState().ownerId) void iabCommand({ action: 'hide-suggestions' }).catch(() => {});
-  }, [ownerId]);
+    if (tabId && ownerId === useIabStore.getState().ownerId) void iabCommand({ action: 'hide-suggestions', tabId }).catch(() => {});
+  }, [ownerId, tabId]);
   useEffect(() => () => { if (blurTimer.current) clearTimeout(blurTimer.current); hide(); }, [hide]);
-  useEffect(() => { if (!canSuggest || !visible) void iabCommand({ action: 'hide-suggestions' }).catch(() => {}); }, [canSuggest, visible]);
+  useEffect(() => { if (tabId && (!canSuggest || !visible) && ownerId === useIabStore.getState().ownerId) void iabCommand({ action: 'hide-suggestions', tabId }).catch(() => {}); }, [tabId, ownerId, canSuggest, visible]);
   const navigate = useCallback((text: string) => {
     if (!tab || !text.trim()) return;
     hide(); setFocused(false); setDraft(text); input.current?.blur();

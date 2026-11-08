@@ -135,7 +135,14 @@ impl ProviderModels {
         let mut models = object(document.get("models"));
         let mut providers = object(models.get("providers"));
         let mut provider = object(providers.get(self.provider.as_str()));
-        provider.insert("models".into(), Value::Array(self.models_json(&provider)));
+        let projected_models = self.models_json(&provider);
+        if let Some(existing) = provider.get_mut("models").and_then(Value::as_array_mut) {
+            sort_models_by_id(existing);
+            if *existing == projected_models {
+                return false;
+            }
+        }
+        provider.insert("models".into(), Value::Array(projected_models));
         providers.insert(self.provider.as_str().into(), Value::Object(provider));
         models.insert("providers".into(), Value::Object(providers));
         replace(document, "models", Value::Object(models))
@@ -168,6 +175,12 @@ impl ProviderModels {
                 let mut value = existing.get(model.id.as_str()).cloned().unwrap_or_default();
                 value.insert("id".into(), Value::String(model.id.as_str().to_owned()));
                 value.insert("name".into(), Value::String(model.id.as_str().to_owned()));
+                if !value.contains_key("reasoning")
+                    && let Some(reasoning) = ::provider::model_reasoning(model.id.as_str())
+                {
+                    value.insert("reasoning".into(), Value::Bool(reasoning));
+                }
+                apply_reasoning_efforts(&mut value, provider, model.id.as_str());
                 if !model.input.is_empty() {
                     value.insert(
                         "input".into(),
@@ -192,6 +205,81 @@ impl ProviderModels {
     }
 }
 
+fn apply_reasoning_efforts(
+    model: &mut Map<String, Value>,
+    provider: &Map<String, Value>,
+    model_id: &str,
+) {
+    use ::provider::ProviderApiProtocol;
+
+    let protocol = match model
+        .get("api")
+        .or_else(|| provider.get("api"))
+        .and_then(Value::as_str)
+    {
+        Some("openai-completions") => ProviderApiProtocol::OpenAiCompletions,
+        Some("openai-responses") => ProviderApiProtocol::OpenAiResponses,
+        Some("anthropic-messages") => ProviderApiProtocol::AnthropicMessages,
+        _ => return,
+    };
+    let Some(efforts) = ::provider::model_reasoning_efforts(model_id, protocol) else {
+        return;
+    };
+    let Some(compat) = model
+        .entry("compat")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+    else {
+        return;
+    };
+    let supported = compat
+        .entry("supportsReasoningEffort")
+        .or_insert(Value::Bool(!efforts.is_empty()));
+    if supported != &Value::Bool(true) || efforts.is_empty() {
+        return;
+    }
+    let efforts = compat
+        .entry("supportedReasoningEfforts")
+        .or_insert_with(|| Value::from(efforts.to_vec()));
+    let Some(efforts) = efforts.as_array().cloned() else {
+        return;
+    };
+    if protocol == ProviderApiProtocol::AnthropicMessages {
+        return;
+    }
+    let off = ["none", "no_think"]
+        .into_iter()
+        .find(|effort| efforts.iter().any(|value| value.as_str() == Some(*effort)));
+    if let Some(off) = off
+        && let Some(mapping) = compat
+            .entry("reasoningEffortMap")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+    {
+        mapping.entry("off").or_insert(Value::String(off.into()));
+    }
+    let Some(mapping) = model
+        .entry("thinkingLevelMap")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+    else {
+        return;
+    };
+    for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+        let effort = if level == "off" {
+            off
+        } else {
+            efforts
+                .iter()
+                .any(|value| value.as_str() == Some(level))
+                .then_some(level)
+        };
+        mapping
+            .entry(level)
+            .or_insert_with(|| effort.map_or(Value::Null, |effort| Value::String(effort.into())));
+    }
+}
+
 impl InputModality {
     fn as_str(self) -> &'static str {
         match self {
@@ -199,6 +287,14 @@ impl InputModality {
             Self::Image => "image",
         }
     }
+}
+
+pub(crate) fn sort_models_by_id(models: &mut [Value]) {
+    models.sort_by(|left, right| {
+        left.get("id")
+            .and_then(Value::as_str)
+            .cmp(&right.get("id").and_then(Value::as_str))
+    });
 }
 
 fn existing_models_by_id(provider: &Map<String, Value>) -> BTreeMap<String, Map<String, Value>> {

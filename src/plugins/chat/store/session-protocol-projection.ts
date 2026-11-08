@@ -1,10 +1,11 @@
+import { shallow } from 'zustand/vanilla/shallow';
 import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
 import { currentSessionSend, recordSendTerminals } from '@/plugins/chat/store/send-state';
 import { getSessionMessageReplacementIndex, reconcileSessionMessageItems, prepareSessionProjectionItems, projectSessionMessages, sessionTerminalRunIds } from '@/plugins/chat/store/session-presentation';
 import type { ApprovalItem, ChatSessionRuntimeState, ChatSessionViewportState, ChatStoreState } from '@/plugins/chat/store/types';
 import { deriveSessionImageGenerationPendingStateFromItems, type SessionRenderItem } from '@/types/session/render-item';
-import type { SessionDelta, SessionFact, SessionView, SessionWireItem, SessionWireRuntime, SessionWireTool, SessionWireWindow } from '@/types/session/snapshot';
+import type { SessionDelta, SessionFact, SessionRunTiming, SessionView, SessionWireItem, SessionWireRuntime, SessionWireTool, SessionWireWindow } from '@/types/session/snapshot';
 import { syncViewportState } from '@/plugins/chat/store/viewport-state';
 import { useTaskCenterStore } from '@/plugins/tasks/stores/task-center-store';
 import { getCronSessionBaseKey } from '@/plugins/chat/store/cron-session-utils';
@@ -13,8 +14,8 @@ import { reconcileSessionDirectory } from '@/plugins/chat/store/session-director
 import { getSessionRecord, patchSessionMeta, patchSessionRecord } from '@/plugins/chat/store/session-record-projection';
 import { commitSessionPreviewItems, projectControlledSessionViewItems } from '@/plugins/chat/store/session-render-projection';
 import { buildHydratedAttachmentItemsPatch, hasPendingItemPreviewLoads, hydrateAttachedFilesFromItems, loadMissingItemPreviews } from '@/plugins/chat/store/attachment-helpers';
-import { adoptSessionProjectionFact } from '@/plugins/chat/store/session-projection-facts';
-import { factValue, projectionStore, windowStore, renderProjectionStore, type SessionProjectionState } from '@/plugins/chat/store/session-projection-state';
+import { adoptSessionProjectionFact, isSessionProjectionFact } from '@/plugins/chat/store/session-projection-facts';
+import { approvalProjectionStore, factValue, projectionStore, windowStore, renderProjectionStore, type SessionApprovalProjectionCache, type SessionProjectionState } from '@/plugins/chat/store/session-projection-state';
 export { getSessionProjectionWatermark, resetSessionProjection, getSessionWindowCacheStats } from '@/plugins/chat/store/session-projection-state';
 import type { SessionProjectionApplyResult } from '@/plugins/chat/store/types';
 export type { SessionProjectionApplyResult } from '@/plugins/chat/store/types';
@@ -32,6 +33,22 @@ function displayRecordKey(state: ChatStoreState, identity: SessionIdentity): str
 function displayProjectionKey(state: ChatStoreState, identity: SessionIdentity): string {
   const recordKey = displayRecordKey(state, identity);
   return buildSessionIdentityKey(state.loadedSessions[recordKey]?.meta.sessionIdentity ?? identity);
+}
+
+function mergeRunTimings(current: readonly SessionRunTiming[] | undefined, incoming: readonly SessionRunTiming[]): SessionRunTiming[] {
+  const timings = new Map((current ?? []).map((timing) => [timing.runId, timing]));
+  const merged = incoming.map((timing) => {
+    const previous = timings.get(timing.runId);
+    const next = previous?.endedAtMs != null && timing.endedAtMs === null ? previous : timing;
+    const startedAtMs = previous ? Math.min(previous.startedAtMs, timing.startedAtMs) : timing.startedAtMs;
+    const inputMessageId = next.inputMessageId ?? previous?.inputMessageId ?? timing.inputMessageId;
+    return startedAtMs === next.startedAtMs && inputMessageId === next.inputMessageId ? next : { ...next, startedAtMs, inputMessageId };
+  });
+  for (const timing of merged) {
+    if (!timings.has(timing.runId) && timings.size === 200) timings.delete(timings.keys().next().value!);
+    timings.set(timing.runId, timing);
+  }
+  return [...timings.values()];
 }
 
 function mergeWireItems(current: SessionWireItem[], incoming: SessionWireItem[]): SessionWireItem[] {
@@ -70,7 +87,7 @@ function scheduleSessionPreviewLoads(
   input.set((state) => {
     if (!isCurrent()) return state;
     const restored = reuse ? buildHydratedAttachmentItemsPatch(state, recordKey, previousItems) : state;
-    const current = { ...state, ...restored };
+    const current = restored === state ? state : { ...state, ...restored };
     return buildHydratedAttachmentItemsPatch(current, recordKey,
       hydrateAttachedFilesFromItems(getSessionRecord(current, recordKey).items));
   });
@@ -157,6 +174,23 @@ function projectionRecordKey(
   return state.sessionRecordKeyByIdentityKey[identityKey] ?? identityKey;
 }
 
+function patchProjectionRunTimings(state: ChatStoreState, view: SessionProjectionState): ChatStoreState['loadedSessions'] {
+  if (!view.runTimings.length) return state.loadedSessions;
+  const identity = sessionIdentityForProjection(state, view);
+  if (!identity) return state.loadedSessions;
+  const recordKey = displayRecordKey(state, identity);
+  const current = state.loadedSessions[recordKey];
+  if (!current?.meta.sessionIdentity
+    || buildSessionIdentityKey(current.meta.sessionIdentity) !== buildSessionIdentityKey(view.identity)) return state.loadedSessions;
+  const runTimings = mergeRunTimings(current.runTimings, view.runTimings);
+  if (current.runTimings?.length === runTimings.length && current.runTimings.every((timing, index) => {
+    const next = runTimings[index];
+    return timing.runId === next.runId && timing.startedAtMs === next.startedAtMs
+      && timing.endedAtMs === next.endedAtMs && timing.inputMessageId === next.inputMessageId;
+  })) return state.loadedSessions;
+  return patchSessionRecord(state, recordKey, { runTimings });
+}
+
 function projectionRuntimePhase(phase: SessionWireRuntime['phase']): ChatSessionRuntimeState['runPhase'] {
   switch (phase) {
     case 'queued': return 'submitted';
@@ -176,15 +210,29 @@ function projectionRuntime(
   fact: SessionFact<SessionWireRuntime>,
   items: SessionRenderItem[],
   runtimeNotice: ChatSessionRuntimeState['runtimeNotice'],
+  unchangedFact: boolean,
 ): ChatSessionRuntimeState {
   const runtime = factValue(fact);
   if (!runtime) return current;
-  const imageGeneration = deriveSessionImageGenerationPendingStateFromItems(items);
+  const runtimeUnknown = runtime.issue === 'unknown' || runtime.issue === 'unavailable';
+  const imageGeneration = !runtimeUnknown && deriveSessionImageGenerationPendingStateFromItems(items);
+  const sameImages = imageGeneration && imageGeneration.active
+    ? current.imageGeneration?.active === true && shallow(current.imageGeneration.pendingTaskIds, imageGeneration.pendingTaskIds)
+    : current.imageGeneration === undefined;
   const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
+  const runPhase = runtimeUnknown && !isTerminalRunPhase(runtime.phase) ? 'error' : projectionRuntimePhase(runtime.phase);
+  // updatedAt is also the error-dismiss generation and the in-flight abort fence.
+  if (unchangedFact && runtime.issue === null && current.lastIssue === null && current.lastError === null
+    && current.runPhase !== 'stopping' && runPhase !== 'stopping'
+    && current.activeRunId === runtime.activeRunId && current.runPhase === runPhase
+    && current.activeTurnItemKey === null && current.pendingTurnKey === null && current.pendingTurnLaneKey === null
+    && shallow(current.runProgress, runtime.runProgress) && current.runtimeActivity === runtime.runtimeActivity
+    && shallow(current.errorDetail, runtime.errorDetail) && shallow(current.runtimeNotice, runtimeNotice)
+    && sameImages && current.lastUserMessageAt === null) return current;
   return {
     ...current,
     activeRunId: runtime.activeRunId,
-    runPhase: projectionRuntimePhase(runtime.phase),
+    runPhase,
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
@@ -192,10 +240,10 @@ function projectionRuntime(
     runtimeActivity: runtime.runtimeActivity,
     errorDetail: runtime.errorDetail,
     runtimeNotice,
-    imageGeneration: imageGeneration.active ? imageGeneration : undefined,
+    imageGeneration: imageGeneration && imageGeneration.active ? imageGeneration : undefined,
     lastUserMessageAt: null,
     lastError: runtime.issue === 'rejected' ? issueMessage : null,
-    lastIssue: issueMessage ? { message: issueMessage, source: 'runtime', at: Date.now(), retryable: runtime.issue !== 'rejected' } : null,
+    lastIssue: issueMessage ? { code: `session.runtime.${runtime.issue}`, message: issueMessage, source: 'runtime', at: Date.now(), retryable: runtime.issue !== 'rejected' } : null,
     updatedAt: Date.now(),
   };
 }
@@ -240,29 +288,56 @@ function projectionApprovals(
   state: ChatStoreState,
   recordKey: string,
   view: SessionProjectionState,
+  caches: Map<string, SessionApprovalProjectionCache>,
 ): Record<string, ApprovalItem[]> {
   const fact = factValue(view.approvals);
-  if (!fact) {
-    return state.pendingApprovalsBySession;
-  }
+  if (!fact) return state.pendingApprovalsBySession;
   const identity = sessionIdentityForProjection(state, view);
   if (!identity) {
-    return { ...state.pendingApprovalsBySession, [recordKey]: [] };
+    caches.delete(recordKey);
+    return state.pendingApprovalsBySession[recordKey]?.length === 0 ? state.pendingApprovalsBySession
+      : { ...state.pendingApprovalsBySession, [recordKey]: [] };
   }
+  const identityKey = buildSessionIdentityKey(identity);
   const endpointSessionId = view.endpointSessionId ?? state.loadedSessions[recordKey]?.meta.endpointSessionId;
-  const approvals = fact
-    .filter((approval) => approval.phase === 'requested')
-    .map((approval) => ({
+  const previous = caches.get(recordKey);
+  const reusable = fact.every(isSessionProjectionFact) && previous?.identityKey === identityKey
+    && previous.endpointSessionId === endpointSessionId && previous.epoch === view.epoch;
+  // list/resolve may have replaced or cleared pending state since these facts were projected.
+  if (reusable && previous.facts.length === fact.length
+    && previous.facts.every((approval, index) => approval === fact[index])) return state.pendingApprovalsBySession;
+  const previousById = new Map(reusable ? previous.facts.map((approval) => [approval.approvalId, approval]) : []);
+  const current = state.pendingApprovalsBySession[recordKey];
+  const currentById = new Map(current?.map((approval) => [approval.id, approval]));
+  const approvals: ApprovalItem[] = [];
+  for (const approval of fact) {
+    if (approval.phase !== 'requested') continue;
+    if (previousById.get(approval.approvalId) === approval) {
+      const existing = currentById.get(approval.approvalId);
+      if (existing) approvals.push(existing);
+      continue;
+    }
+    approvals.push({
       id: approval.approvalId,
       sessionKey: recordKey,
       ...(endpointSessionId ? { endpointSessionId } : {}),
       sessionIdentity: identity,
       ...(approval.runId ? { runId: approval.runId } : {}),
-      title: 'Approval required',
+      title: approval.details?.kind === 'tool' ? approval.details.toolName
+        : approval.details?.kind === 'plugin' || approval.details?.kind === 'system-agent' ? approval.details.title.text
+          : 'Approval required',
       allowedDecisions: approvalOptionIdsToDecisions(approval.optionIds),
       request: { optionIds: approval.optionIds },
+      ...(approval.details ? { details: approval.details } : {}),
       createdAtMs: Date.now(),
-    }));
+    });
+  }
+  if (fact.every(isSessionProjectionFact)) {
+    caches.set(recordKey, { identityKey, endpointSessionId, epoch: view.epoch, facts: [...fact] });
+  } else caches.delete(recordKey);
+  if (current?.length === approvals.length && current.every((approval, index) => approval === approvals[index])) {
+    return state.pendingApprovalsBySession;
+  }
   return { ...state.pendingApprovalsBySession, [recordKey]: approvals };
 }
 
@@ -313,7 +388,7 @@ function applyDecodedSessionView(
   input.set((nextState) => {
     const current = getSessionRecord(nextState, recordKey);
     const nextIdentity = current.meta.sessionIdentity ?? identity;
-    const nextMeta = nextIdentity ? {
+    const projectedMeta = nextIdentity ? {
       ...current.meta,
       runtimeScopeKey: buildRuntimeScopeKey(nextIdentity.endpoint),
       agentId: nextIdentity.agentId,
@@ -326,9 +401,10 @@ function applyDecodedSessionView(
       ...(modelState !== undefined ? { ownership: view.ownership } : {}),
       sessionIdentity: nextIdentity,
     } : current.meta;
+    const nextMeta = shallow(current.meta, projectedMeta) ? current.meta : projectedMeta;
     const windows = windowStore(input.get);
     const displayKey = displayProjectionKey(nextState, view.identity);
-    const messageRecord = { ...current, meta: nextMeta };
+    const messageRecord = nextMeta === current.meta ? current : { ...current, meta: nextMeta };
     const ownTerminatedRunIds = buildSessionIdentityKey(nextIdentity!) === buildSessionIdentityKey(view.identity)
       ? terminatedRunIds : [];
     const projectionStartedAt = timing ? performance.now() : 0;
@@ -351,7 +427,9 @@ function applyDecodedSessionView(
       buildSessionIdentityKey(nextIdentity!) === buildSessionIdentityKey(view.identity) ? factValue(view.items) ?? [] : []);
     const messages = projectSessionMessages(messageRecord, reconciledItems, {
       identityKey: buildSessionIdentityKey(view.identity),
-      runtime: wireRuntime ? projectionRuntime(current.runtime, view.runtime, reconciledItems, view.runtimeNotice ?? null) : null,
+      runtime: wireRuntime ? projectionRuntime(current.runtime, view.runtime, reconciledItems, view.runtimeNotice ?? null,
+        previous?.epoch === view.epoch && previous.runtime === view.runtime
+          && previous.runtimeNotice === view.runtimeNotice && isSessionProjectionFact(wireRuntime)) : null,
       terminalRunIds: terminals,
       terminatedRunIds: ownTerminatedRunIds,
       retiredItemIds: new Set([...(view.retiredItemIds ?? []), ...(display.retiredItemIds ?? [])]),
@@ -361,25 +439,22 @@ function applyDecodedSessionView(
     const nextItems = messages.items;
     const traceStartedAt = timing ? performance.now() : 0;
     if (timing) timing.reconcileElapsedMs += traceStartedAt - reconcileStartedAt;
-    if (traceId) logSessionTrace('session.assembly.reconcile', traceId, () => ({
-      identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
-      recordKey: summarizeIdentifier(recordKey), displayEpoch: display.epoch, displaySeq: display.seq, displayCursor: display.cursor,
-      display: summarizeWireAssistantTurns(factValue(display.items)),
-      before: summarizeRenderAssistantTurns(current.items), projected: summarizeRenderAssistantTurns(projectedItems),
-      reconciled: summarizeRenderAssistantTurns(nextItems),
-    }));
+    if (traceId) logSessionTrace('session.assembly.reconcile', traceId, () => {
+      // Placeholder diagnostics observe the same nextItems before this updater commits.
+      const pendingAssistant = nextItems.find((item) => item.kind === 'assistant-turn' && item.key.startsWith('renderer-assistant:'));
+      return {
+        identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
+        recordKey: summarizeIdentifier(recordKey), displayEpoch: display.epoch, displaySeq: display.seq, displayCursor: display.cursor,
+        display: summarizeWireAssistantTurns(factValue(display.items)),
+        before: summarizeRenderAssistantTurns(current.items), projected: summarizeRenderAssistantTurns(projectedItems),
+        reconciled: summarizeRenderAssistantTurns(nextItems),
+        pendingItemHash: summarizeIdentifier(pendingAssistant?.key).hash, pendingTurnHash: summarizeIdentifier(current.runtime.pendingTurnKey).hash,
+      };
+    });
     if (timing) timing.traceEmitElapsedMs += performance.now() - traceStartedAt;
-    const pendingAssistant = nextItems.find((item) => item.kind === 'assistant-turn' && item.key.startsWith('renderer-assistant:'));
-    const placeholderTraceStartedAt = timing ? performance.now() : 0;
-    if (traceId) logSessionTrace('session.assembly.placeholder.after', traceId, () => ({
-      identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
-      pendingItemHash: summarizeIdentifier(pendingAssistant?.key).hash, pendingTurnHash: summarizeIdentifier(current.runtime.pendingTurnKey).hash,
-      items: summarizeRenderAssistantTurns(nextItems),
-    }));
-    if (timing) timing.traceEmitElapsedMs += performance.now() - placeholderTraceStartedAt;
     const nextWindow = projectionWindow(current.window, display.window);
     windows.set(displayKey, { ...display, recordKey, previewLoad: previous?.previewLoad });
-    const loadedSessions = patchSessionRecord(nextState, recordKey, {
+    const messageSessions = patchSessionRecord(nextState, recordKey, {
       meta: nextMeta,
       items: nextItems,
       runtime: nextRuntime,
@@ -387,7 +462,8 @@ function applyDecodedSessionView(
       abort: messages.abort,
       window: nextWindow,
     });
-    const nextApprovals = projectionApprovals(nextState, recordKey, view);
+    const loadedSessions = patchProjectionRunTimings({ ...nextState, loadedSessions: messageSessions }, view);
+    const nextApprovals = projectionApprovals(nextState, recordKey, view, approvalProjectionStore(input.get));
     return {
       loadedSessions,
       ...reconcileSessionDirectory(nextState, loadedSessions, [recordKey]),
@@ -407,6 +483,7 @@ function adoptProjectionView(view: SessionView): SessionView {
   return {
     ...view,
     identity: adoptSessionProjectionFact(view.identity),
+    runTimings: view.runTimings.map(adoptSessionProjectionFact),
     items: adoptFact(view.items), tools: adoptFact(view.tools), approvals: adoptFact(view.approvals),
     runtime: adoptSessionProjectionFact(view.runtime), window: adoptSessionProjectionFact(view.window),
     completeness: adoptSessionProjectionFact(view.completeness),
@@ -462,7 +539,7 @@ export function applySessionView(
   const store = projectionStore(input.get);
   const projectionKey = buildSessionIdentityKey(view.identity);
   const previous = store.get(projectionKey);
-  const { inputReceipts, ...timelineView } = view;
+  const { inputReceipts, ...timelineView } = { ...view, runTimings: mergeRunTimings(previous?.runTimings, view.runTimings) };
   input.set((state) => {
     const current = getSessionRecord(state, recordKey);
     if (!current.meta.sessionIdentity || buildSessionIdentityKey(current.meta.sessionIdentity) !== projectionKey) return state;
@@ -480,6 +557,7 @@ export function applySessionView(
       && (view.seq < previous.seq || view.cursor < previous.cursor))) {
       return finish({ status: 'stale', sessionKey: recordKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
     }
+    if (previous) store.set(projectionKey, { ...previous, runTimings: view.runTimings });
     const currentItems = new Map((previous ? factValue(previous.items) : [])?.map((item) => [item.itemId, item]) ?? []);
     const preserveLive = previous && view.epoch === previous.epoch && (view.seq <= previous.seq || view.cursor <= previous.cursor);
     const display: SessionProjectionState = {
@@ -513,10 +591,11 @@ export function applySessionView(
         projected: summarizeRenderAssistantTurns(projectedItems), reconciled: summarizeRenderAssistantTurns(items),
       }));
       if (timing) timing.traceEmitElapsedMs += performance.now() - traceStartedAt;
-      const loadedSessions = patchSessionRecord(state, recordKey, {
+      const messageSessions = patchSessionRecord(state, recordKey, {
         items,
         window: projectionWindow(current.window, view.window),
       });
+      const loadedSessions = patchProjectionRunTimings({ ...state, loadedSessions: messageSessions }, view);
       return { loadedSessions, ...reconcileSessionDirectory(state, loadedSessions, [recordKey]) };
     });
     scheduleSessionPreviewLoads(input, recordKey, display, previousDisplay, previousItems);
@@ -531,14 +610,16 @@ export function applySessionView(
         return finish({ status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
       }
       if (view.cursor === previous.cursor && view.seq === previous.seq) {
+        store.set(projectionKey, { ...previous, runTimings: view.runTimings.map(adoptSessionProjectionFact) });
         input.set((state) => {
           const current = getSessionRecord(state, recordKey);
-          const loadedSessions = patchSessionMeta(state, recordKey, {
+          const metaSessions = patchSessionMeta(state, recordKey, {
             ownership: view.ownership,
             goal: view.goal,
             goalReadRevision: current.meta.goalReadRevision + 1,
             modelState: current.meta.modelState?.overrideSource === 'user' ? current.meta.modelState : view.modelState ?? current.meta.modelState,
           });
+          const loadedSessions = patchProjectionRunTimings({ ...state, loadedSessions: metaSessions }, store.get(projectionKey)!);
           return loadedSessions === state.loadedSessions ? state : {
             loadedSessions,
             ...reconcileSessionDirectory(state, loadedSessions, [recordKey]),
@@ -786,6 +867,8 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
       };
     case 'runtimeNoticeUpdated':
       return { ...view, runtimeNotice: change.notice };
+    case 'runTimingUpdated':
+      return { ...view, runTimings: mergeRunTimings(view.runTimings, [change.timing]) };
     case 'windowChanged':
       return { ...view, window: { incomplete: { facts: change.window, gaps: ['bounded_history'] } } };
     case 'runPhaseChanged':
@@ -829,7 +912,7 @@ export function applySessionDelta(
   const recordKey = displayRecordKey(state, delta.identity);
   let previous = store.get(projectionKey);
   if (!previous && delta.seq === 1 && delta.cursor === 1) {
-    previous = { sessionKey: delta.sessionKey, identity: adoptSessionProjectionFact(delta.identity), endpointSessionId: state.loadedSessions[recordKey]?.meta.endpointSessionId ?? null, ownership: state.loadedSessions[recordKey]?.meta.ownership ?? null, goal: { kind: 'unknown' }, epoch: delta.epoch, seq: 0, cursor: 0, items: 'unknown', tools: 'unknown', approvals: 'unknown', runtime: 'unknown', window: 'unknown', completeness: { incomplete: { missing: ['event_only'] } } };
+    previous = { sessionKey: delta.sessionKey, identity: adoptSessionProjectionFact(delta.identity), endpointSessionId: state.loadedSessions[recordKey]?.meta.endpointSessionId ?? null, ownership: state.loadedSessions[recordKey]?.meta.ownership ?? null, goal: { kind: 'unknown' }, runTimings: [], epoch: delta.epoch, seq: 0, cursor: 0, items: 'unknown', tools: 'unknown', approvals: 'unknown', runtime: 'unknown', window: 'unknown', completeness: { incomplete: { missing: ['event_only'] } } };
   }
   const traceTurnState = !!traceId && shouldTraceDeltaTurnState(delta);
   const traceRuntimeState = traceId && delta.changes.some((change) => (
@@ -956,7 +1039,7 @@ export function applySessionDelta(
     display = { ...readingDisplay, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
   } else if (loaded && !epochChanged && buildSessionIdentityKey(loaded.identity) !== projectionKey) {
     try {
-      display = changes.reduce((view, change) => applyProjectionChange(view, change), loaded);
+      display = changes.reduce((view, change) => change.kind === 'runTimingUpdated' ? view : applyProjectionChange(view, change), loaded);
       display = { ...display, runtime: projected.runtime, approvals: projected.approvals, runtimeNotice: projected.runtimeNotice };
       if (!state.loadedSessions[recordKey]?.window.isAtLatest) display = { ...display, window: loaded.window };
     } catch (error) {

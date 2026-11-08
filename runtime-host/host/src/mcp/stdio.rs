@@ -27,11 +27,17 @@ async fn run_connection(capability: Option<super::iab::Capability>) -> ExitCode 
         let client = Arc::clone(&team_client);
         Box::pin(async move { client.call(Family::Team, name, arguments).await })
     }));
+    let maintenance_client = Arc::clone(&client);
+    let maintenance = maintenance::MaintenanceMcpFacade::new(move |name, arguments| {
+        let client = Arc::clone(&maintenance_client);
+        Box::pin(async move { client.call(Family::Maintenance, name, arguments).await })
+    });
     let wiki = WikiMcpFacade::new(move |name, arguments| {
         let client = Arc::clone(&client);
         Box::pin(async move { client.call(Family::Wiki, name, arguments).await })
     });
-    let providers: Vec<Box<dyn ToolProvider>> = vec![Box::new(team_run), Box::new(wiki)];
+    let providers: Vec<Box<dyn ToolProvider>> =
+        vec![Box::new(team_run), Box::new(wiki), Box::new(maintenance)];
     let Ok(registry) = Registry::new(ToolCatalog::new(providers)) else {
         eprintln!("runtime-host mcp: builtin tool catalog is invalid");
         return ExitCode::FAILURE;

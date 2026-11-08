@@ -398,11 +398,7 @@ exports.beforePack = async function beforePack(context) {
   const arch = resolveArch(context.arch);
   const info = context.packager.info;
   const pty = join(info.appDir, 'node_modules', '@lydell', 'node-pty', 'package.json');
-  const ptyRequire = require('module').createRequire(pty);
-  for (const targetArch of targetArchitectures(arch)) {
-    const target = ptyRequire.resolve(`@lydell/node-pty-${platform}-${targetArch}`);
-    if (!existsSync(target)) throw new Error(`Missing target node-pty asset: ${target}`);
-  }
+  const ptyRequire = require('module').createRequire(realpathSafe(pty));
   const builderRequire = require('module').createRequire(require.resolve('electron-builder/package.json'));
   const { getCollectorByPackageManager } = builderRequire('app-builder-lib/out/node-module-collector');
   const { nodeModules } = await getCollectorByPackageManager(
@@ -423,16 +419,16 @@ exports.beforePack = async function beforePack(context) {
   const previousExclusions = nativePackageExclusions.get(files) || new Set();
   files.filter = files.filter.filter(pattern => !previousExclusions.has(pattern)).concat([...exclusions]);
   nativePackageExclusions.set(files, exclusions);
-  // pnpm's collector can omit Koffi's optional native package in isolated layouts.
+  // pnpm's collector can omit optional native packages in isolated layouts.
   const koffiRequire = require('module').createRequire(realpathSafe(join(info.appDir, 'node_modules', 'koffi', 'package.json')));
   const previousFileSets = nativePackageFileSets.get(files) || [];
-  const fileSets = targetArchitectures(arch).map(targetArch => {
-    const name = `@koromix/koffi-${platform}-${targetArch}`;
-    return {
-      from: dirname(koffiRequire.resolve(`${name}/package.json`)),
-      to: `node_modules/${name}`,
-      filter: ['**/*'],
-    };
+  const fileSets = targetArchitectures(arch).flatMap(targetArch => {
+    const koffi = `@koromix/koffi-${platform}-${targetArch}`;
+    const pty = `@lydell/node-pty-${platform}-${targetArch}`;
+    return [
+      { from: dirname(koffiRequire.resolve(`${koffi}/package.json`)), to: `node_modules/${koffi}`, filter: ['**/*'] },
+      { from: dirname(dirname(ptyRequire.resolve(pty))), to: `node_modules/${pty}`, filter: ['**/*'] },
+    ];
   });
   context.packager.config.files = context.packager.config.files.filter(fileSet => !previousFileSets.includes(fileSet)).concat(fileSets);
   nativePackageFileSets.set(files, fileSets);
@@ -494,7 +490,7 @@ exports.default = async function afterPack(context) {
   const { isNativeExecutable } = await import('../electron/main/runtime-host-delivery/native-artifact.mjs');
   const matchaAgentDist = join(__dirname, '..', 'matcha-agent', 'dist');
   const matchaAgentDest = join(resourcesDir, 'matcha-agent', 'dist');
-  for (const entry of ['cli.js', 'cli-bun.js', 'cli-node.js']) {
+  for (const entry of ['cli.js', 'cli-bun.js', 'cli-node.js', 'skills-catalog.json']) {
     if (!require('fs').statSync(join(matchaAgentDist, entry)).isFile()) {
       throw new Error(`Missing Matcha CLI artifact: ${entry}`);
     }

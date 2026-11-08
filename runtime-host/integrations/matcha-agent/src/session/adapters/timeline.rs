@@ -94,7 +94,7 @@ async fn read_view(
         for message in normalization::messages(raw, managed_input).inspect_err(|error| {
             error.trace("timeline.normalize", None, record.session_id.as_str());
         })? {
-            if let Some(message) =
+            if let Some(mut projected) =
                 projection::message(&message.row, ItemStatus::Final, record.session_id.as_str())
                     .inspect_err(|error| {
                         error.trace(
@@ -104,7 +104,8 @@ async fn read_view(
                         );
                     })?
             {
-                group.push(message);
+                let retained = projected.retain_transcript_item(&message.row);
+                group.push((projected, retained));
             }
         }
         // Never split a raw row at the display budget: native offsets cannot
@@ -128,7 +129,7 @@ async fn read_view(
     }
     let mut items = Vec::with_capacity(item_count);
     let mut tools = Vec::<ToolView>::new();
-    for message in groups.into_iter().flatten() {
+    for (message, retained) in groups.into_iter().flatten() {
         if items
             .iter()
             .any(|item: &SessionItem| item.item_id() == message.item.item_id())
@@ -158,7 +159,9 @@ async fn read_view(
                 }
             }
         }
-        items.push(item);
+        if retained {
+            items.push(item);
+        }
         for tool in message.tools {
             projection::merge_tool(&mut tools, tool).inspect_err(|error| {
                 error.trace("timeline.merge_tool", None, record.session_id.as_str());
@@ -212,7 +215,23 @@ pub(super) async fn load(
     command: timeline::Command,
     epoch: u64,
 ) -> timeline::Outcome {
-    match read(client, &command, epoch).await {
+    let result = async {
+        let mut view = read(client, &command, epoch).await?;
+        let id = view
+            .endpoint_session_id
+            .as_deref()
+            .ok_or(Failure::InvalidReadback)?;
+        let runs = super::runtime::runs(client, id, None)
+            .await
+            .inspect_err(|error| error.trace("timeline.runs", Some("runs.list"), id))?;
+        for run in runs.runs.iter().chain(runs.current_run.iter()) {
+            run.update_timing(&mut view.run_timings);
+        }
+        view.validate().map_err(|_| Failure::InvalidReadback)?;
+        Ok::<_, Failure>(view)
+    }
+    .await;
+    match result {
         Ok(view) => timeline::Outcome::Incomplete(view),
         Err(error) => timeline::Outcome::unavailable(reason(&error)),
     }

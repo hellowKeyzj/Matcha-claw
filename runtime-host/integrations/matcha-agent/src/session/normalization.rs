@@ -1,6 +1,8 @@
 use super::{projection, rpc::Failure};
+use regex::Regex;
 use serde_json::{Map, Value, json};
 use sessions_module::state::MAX_SEGMENTS;
+use std::{cell::OnceCell, sync::LazyLock};
 
 pub(crate) struct Message<'a> {
     pub row: Value,
@@ -10,10 +12,17 @@ pub(crate) struct Message<'a> {
 pub(crate) struct Source<'a> {
     pub raw: &'a Value,
     pub block_index: Option<usize>,
+    local_output: OnceCell<Option<Value>>,
 }
 
 impl Source<'_> {
     pub fn block(&self, index: usize) -> Result<&Value, Failure> {
+        if let Some(output) = self
+            .local_output
+            .get_or_init(|| local_command_output(self.raw).map(Value::String))
+        {
+            return (index == 0).then_some(output).ok_or(Failure::InvalidInput);
+        }
         let row = if self.raw["type"] == "progress" {
             &self.raw["data"]["message"]
         } else {
@@ -48,6 +57,45 @@ fn invalid(raw: &Value, reason: &'static str) -> Failure {
 
 fn trim(text: &str) -> &str {
     text.trim_matches(|ch: char| ch == '\u{feff}' || (ch.is_whitespace() && ch != '\u{85}'))
+}
+
+pub(crate) fn local_command_output(row: &Value) -> Option<String> {
+    if row["type"] != "system" || row["subtype"] != "local_command" {
+        return None;
+    }
+    let raw = row.get("content")?.as_str()?;
+    if !raw.contains("<local-command-stdout>") && !raw.contains("<local-command-stderr>") {
+        return None;
+    }
+    // Match native strip-ansi's ansi-regex@6.2.2 before unwrapping the first pair of each tag.
+    static ANSI: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"\x1b\](?s:.*?)(?:\x07|\x1b\\|\x{9c})|[\x1b\x{9b}][\[\]()#;?]*(?:[0-9]{1,4}(?:[;:][0-9]{0,4})*)?[0-9A-PR-TZcf-nq-uy=><~]",
+        )
+        .expect("native ANSI pattern")
+    });
+    let mut output = ANSI.replace_all(raw, "").into_owned();
+    for name in ["local-command-stdout", "local-command-stderr"] {
+        let open = format!("<{name}>");
+        let close = format!("</{name}>");
+        if let Some(start) = output.find(&open)
+            && let Some(end) = output[start + open.len()..].find(&close)
+        {
+            let end = start + open.len() + end;
+            output.replace_range(end..end + close.len(), "");
+            output.replace_range(start..start + open.len(), "");
+        }
+    }
+    let output = trim(&output);
+    // QueryEngine yields the builder result directly, without SDK empty-message filtering.
+    Some(
+        if output.is_empty() {
+            "(no content)"
+        } else {
+            output
+        }
+        .to_owned(),
+    )
 }
 
 fn truthy(value: &Value) -> bool {
@@ -246,6 +294,7 @@ pub(crate) fn messages(raw: &Value, managed_input: bool) -> Result<Vec<Message<'
                 source: Source {
                     raw,
                     block_index: None,
+                    local_output: OnceCell::new(),
                 },
             }]
         });
@@ -267,6 +316,7 @@ pub(crate) fn messages(raw: &Value, managed_input: bool) -> Result<Vec<Message<'
             source: Source {
                 raw,
                 block_index: None,
+                local_output: OnceCell::new(),
             },
         }]);
     }
@@ -323,6 +373,7 @@ pub(crate) fn messages(raw: &Value, managed_input: bool) -> Result<Vec<Message<'
             source: Source {
                 raw,
                 block_index: Some(index),
+                local_output: OnceCell::new(),
             },
         });
     }

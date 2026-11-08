@@ -34,6 +34,7 @@ pub(crate) async fn run_loop<R, W>(
     private_control: PrivateControlRegistry,
     observation: ObservationSink,
     gateway_auto_start: bool,
+    peer_autostart: crate::composition::PeerAutostart,
     http_completion: &mut Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
     control_input: R,
     mut control_output: W,
@@ -56,14 +57,13 @@ where
         );
     }
     let peer_autostart = tokio::spawn({
-        let peer = peer.clone();
         async move {
             if platform::trace::enabled() {
                 eprintln!(
                     "[startup-trace] source=runtime-host phase=openclaw-autostart-request detail=requesting-peer-autostart gateway_auto_start={gateway_auto_start}"
                 );
             }
-            let result = peer.request_peer_autostart(gateway_auto_start).await;
+            let result = peer_autostart.run().await;
             if platform::trace::enabled() {
                 match result {
                     Ok(()) => eprintln!(

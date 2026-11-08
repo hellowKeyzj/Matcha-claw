@@ -231,6 +231,9 @@
     "actionFailed": "团队操作未完成：{{error}}"
   },
   "chat": {
+    "leader": "Leader",
+    "memberSessions": "团队成员会话",
+    "moreMembers": "更多成员",
     "teamNotFound": "团队不存在",
     "backToList": "返回团队列表",
     "runStatus": "运行状态",
@@ -379,6 +382,13 @@
       "sessionRef": "成员会话",
       "selectRole": "选择成员",
       "selectSession": "选择会话",
+      "defaultSession": "默认会话",
+      "numberedSession": "会话 {{number}}",
+      "sessionUnavailable": "此会话已不可用",
+      "createSession": "新建会话",
+      "creatingSession": "正在创建",
+      "retryCreateSession": "重试创建",
+      "createSessionFailed": "暂未确认会话创建结果，请重试。节点草稿已保留。",
       "noRoleBindings": "暂无可用成员",
       "invalidBinding": "不可用：{{value}}",
       "roleBindingRequired": "请选择可用的成员及其会话。",

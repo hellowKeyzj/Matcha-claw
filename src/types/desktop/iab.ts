@@ -5,13 +5,20 @@ export type IabBrowserMode = 'iab' | 'native' | 'relay' | 'off';
 export type IabJsonValue = null | boolean | number | string | IabJsonValue[] | IabJsonObject;
 export type IabJsonObject = { [key: string]: IabJsonValue };
 export type IabBounds = { x: number; y: number; width: number; height: number };
+export type IabViewPlacement = { tabId: IabTabId; bounds: IabBounds };
 export type IabToolAnchor = IabBounds & { keyboard: boolean; browserBounds?: IabBounds };
 export type IabTheme = 'light' | 'dark';
 export type IabInternalPage = 'history' | 'downloads';
 
+/** Presentation only; never grants Agent access or changes a page claim. */
+export type IabTabDisplay =
+  | { kind: 'scope'; scope: string }
+  | { kind: 'sessions'; sessionIds: string[] };
+
 export interface IabTab {
   id: IabTabId;
   ownerId: IabOwnerId;
+  display: IabTabDisplay;
   /** Session grouping and executor claims are independent of native resource ownership. */
   sessionGroupId: string | null;
   createdBy: string | null;
@@ -34,8 +41,7 @@ export interface IabSnapshot {
   revision: number;
   tabs: IabTab[];
   activeTabId: IabTabId | null;
-  bounds: IabBounds;
-  visible: boolean;
+  views: IabViewPlacement[];
 }
 
 export interface IabHistoryEntry {
@@ -98,22 +104,35 @@ export interface IabOverlayContext {
   locale: string;
   error?: string;
 }
-export type IabOverlayState = (IabOverlayContext & (
+export type IabPageOverlayState = (IabOverlayContext & (
   | { kind: 'menu'; zoomFactor: number; canOpenExternal: boolean; canCapturePage: boolean; findShortcut: string }
   | { kind: 'toast'; message: string }
   | { kind: 'download'; download: IabDownload }
   | { kind: 'downloads'; entries: IabDownload[] }
   | { kind: 'suggestions'; entries: IabHistoryEntry[]; selectedIndex: number }
 )) | null;
+export interface IabChoiceMenu {
+  requestId: string;
+  anchor: IabBounds;
+  align: 'start' | 'end';
+  keyboard: boolean;
+  items: { id: string; label: string; icon?: string; selected?: boolean; badge?: string; disabled?: boolean }[];
+  initialPage: number;
+  labels: { empty: string; previous: string; next: string; page: string };
+  theme: IabTheme;
+  locale: string;
+}
+export type IabChoiceOverlayState = IabChoiceMenu & { kind: 'choices'; sessionId: number; ownerId: IabOwnerId };
+export type IabOverlayState = IabPageOverlayState | IabChoiceOverlayState;
 export type IabOverlayInput = Exclude<IabOverlayState, null> extends infer State
-  ? State extends IabOverlayContext ? Omit<State, 'sessionId'> : never
+  ? State extends { sessionId: number } ? Omit<State, 'sessionId'> : never
   : never;
 export type IabOverlayCommand = { sessionId: number } & (
   | { action: 'dismiss' }
   | { action: 'refresh-downloads' }
   | { action: 'menu'; command: IabMenuAction }
   | { action: 'download'; command: IabDownloadCommand }
-  | { action: 'select-suggestion' | 'remove-suggestion'; id: string }
+  | { action: 'select-suggestion' | 'remove-suggestion' | 'select-choice'; id: string }
 );
 
 /** Both actions affect persist:agent-iab, not just this owner/tab. UI must show an app confirmation.
@@ -127,21 +146,23 @@ export interface IabClearDataConfirmation {
 
 export type IabUiCommand =
   | { action: 'snapshot' | 'list-all' }
-  | { action: 'open'; url: string; background?: boolean }
+  | { action: 'open'; url: string; displayScope: string; background?: boolean }
+  | { action: 'promote-display-scope'; from: string; to: string }
   | { action: 'switch' | 'close' | 'back' | 'forward' | 'reload'; tabId: IabTabId }
   | { action: 'navigate'; tabId: IabTabId; url: string }
-  | { action: 'set-bounds'; bounds: IabBounds }
-  | { action: 'set-visible'; visible: boolean }
+  | { action: 'set-views'; views: IabViewPlacement[] }
+  | { action: 'show-choices'; menu: IabChoiceMenu }
+  | { action: 'dismiss-choices'; requestId: string }
   | { action: 'set-presentation'; theme: IabTheme; locale: string }
   | { action: 'find'; tabId: IabTabId; text: string; searchId: number; forward?: boolean }
   | { action: 'stop-find'; tabId: IabTabId; mode?: 'clearSelection' | 'keepSelection' | 'activateSelection' }
   | { action: 'set-zoom'; tabId: IabTabId; zoomFactor: number }
-  | { action: 'open-internal'; page: IabInternalPage }
+  | { action: 'open-internal'; page: IabInternalPage; tabId: IabTabId }
   | { action: 'history-query'; query: IabHistoryQuery }
   | { action: 'history-remove'; ids: string[] | 'all' }
   | { action: 'history-remove-origin'; url: string }
   | { action: 'history-suggest'; tabId: IabTabId; query: string; selectedIndex: number; anchor: IabBounds }
-  | { action: 'hide-suggestions' }
+  | { action: 'hide-suggestions'; tabId: IabTabId }
   | { action: 'downloads-list'; refreshFileState?: boolean }
   | { action: 'downloads-clear' }
   | { action: 'download'; command: IabDownloadCommand }
@@ -179,6 +200,7 @@ export type IabEvent =
   | { type: 'history-changed' | 'downloads-changed' }
   | { type: 'download-completed'; ownerId: IabOwnerId; tabId: IabTabId; download: IabDownload }
   | { type: 'overlay-state'; state: IabOverlayState }
+  | { type: 'choice-selected'; requestId: string; id: string }
   | { type: 'clear-data-requested'; ownerId: IabOwnerId; tabId: IabTabId; token: string; data: 'cache' | 'site-storage' }
   | { type: 'suggestion-selected'; ownerId: IabOwnerId; tabId: IabTabId; entry: IabHistoryEntry }
   | { type: 'suggestion-remove-started'; ownerId: IabOwnerId; tabId: IabTabId };

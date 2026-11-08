@@ -7,7 +7,34 @@ use super::actor::{SessionLane, SessionShared};
 use crate::{
     command::SessionCommand,
     terminal_hook::SessionTerminalCloseError,
+    state::{ItemStatus, OmissionReason, SessionContent, SessionFact, SessionItem, TerminalBodies},
+    timeline::{ContentCommand, ContentOutcome},
 };
+
+impl TerminalBodies {
+    pub(crate) fn capture(items: &SessionFact<Vec<SessionItem>>, endpoint_session_id: Option<&str>, run_id: &str) -> Self {
+        let items = match items {
+            SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. } => items.as_slice(),
+            SessionFact::Unknown | SessionFact::Unavailable => &[],
+        };
+        Self::Items {
+            endpoint_session_id: endpoint_session_id.map(str::to_owned),
+            items: items.iter().filter(|item| matches!(item,
+                SessionItem::AssistantTurn { run_id: Some(owner), status: ItemStatus::Final, .. } if owner == run_id
+            )).cloned().collect(),
+        }
+    }
+
+    pub(crate) fn texts(&self) -> Vec<String> {
+        match self {
+            Self::Complete(texts) => texts.clone(),
+            Self::Items { items, .. } => items.iter().filter_map(|item| match item {
+                SessionItem::AssistantTurn { text, .. } => Some(text.clone()),
+                _ => None,
+            }).collect(),
+        }
+    }
+}
 
 pub(crate) type TerminalPermit = Arc<Mutex<Option<OwnedSemaphorePermit>>>;
 
@@ -104,6 +131,64 @@ impl TerminalDelivery {
 }
 
 impl SessionShared {
+    async fn complete_terminal_texts(&self, identity: &crate::state::SessionIdentity, bodies: TerminalBodies) -> Option<Vec<String>> {
+        let (endpoint_session_id, items) = match bodies {
+            TerminalBodies::Complete(texts) => return Some(texts),
+            TerminalBodies::Items { endpoint_session_id, items } => (endpoint_session_id, items),
+        };
+        let mut texts = Vec::new();
+        // Keep the existing maximum run text allocation; LargeText is not limited to one preview.
+        let mut remaining = crate::state::MAX_ITEMS * crate::state::MAX_TEXT_BYTES;
+        for item in items {
+            let SessionItem::AssistantTurn { text, segments, .. } = item else { return None };
+            if segments.iter().any(|segment| matches!(segment, SessionContent::Omitted { reason: OmissionReason::Unknown })) {
+                return None;
+            }
+            if !segments.iter().any(|segment| matches!(segment, SessionContent::LargeText { .. })) {
+                remaining = remaining.checked_sub(text.len())?;
+                texts.push(text);
+                continue;
+            }
+            for segment in &segments {
+                let bytes = match segment {
+                    SessionContent::Text { text } => text.len(),
+                    SessionContent::LargeText { total_bytes, .. } => usize::try_from(*total_bytes).ok()?,
+                    _ => 0,
+                };
+                remaining = remaining.checked_sub(bytes)?;
+            }
+            let mut observed = String::new();
+            let mut complete = String::new();
+            for segment in segments {
+                match segment {
+                    SessionContent::Text { text } => { observed.push_str(&text); complete.push_str(&text); }
+                    SessionContent::LargeText { text, content_ref, total_bytes, loaded_bytes } => {
+                        if text.len() as u64 != loaded_bytes || loaded_bytes > total_bytes { return None; }
+                        observed.push_str(&text);
+                        let mut full = text;
+                        while (full.len() as u64) < total_bytes {
+                            let offset = full.len() as u64;
+                            let command = ContentCommand::new(
+                                identity.clone(), endpoint_session_id.clone(), content_ref.clone(), offset, 64 * 1024,
+                            )?;
+                            let ContentOutcome::Complete(chunk) = self.handle_content(command).await else { return None };
+                            if chunk.content_ref != content_ref || chunk.offset != offset || chunk.total_bytes != total_bytes
+                                || chunk.text.is_empty() || offset.checked_add(chunk.text.len() as u64)? != chunk.next_offset
+                                || chunk.next_offset > total_bytes || chunk.complete != (chunk.next_offset == total_bytes)
+                            { return None; }
+                            full.push_str(&chunk.text);
+                        }
+                        complete.push_str(&full);
+                    }
+                    _ => {},
+                }
+            }
+            if observed != text { return None; }
+            texts.push(complete);
+        }
+        Some(texts)
+    }
+
     pub(crate) fn producer(&self) -> Result<Producer, ()> {
         self.terminal_delivery.producer()
     }
@@ -122,7 +207,13 @@ impl SessionShared {
                 changed.as_mut().enable();
                 let pending = shared.snapshot.load().states.values()
                     .find_map(|state| state.pending_terminals.first().cloned());
-                if let Some(mut snapshot) = pending {
+                if let Some(crate::state::PendingTerminal { mut snapshot, bodies }) = pending {
+                    let collected = tokio::select! {
+                        texts = shared.complete_terminal_texts(&snapshot.identity, bodies) => texts,
+                        _ = cancellation.cancelled() => return Err(SessionTerminalCloseError::Unsettled),
+                    };
+                    let use_native_texts = collected.as_ref().is_some_and(Vec::is_empty);
+                    snapshot.assistant_texts = collected.unwrap_or_default();
                     let read = crate::execution::SessionRunReadCommand::try_new(
                         snapshot.identity.clone(), None,
                         crate::execution::SessionRunSelector::RunId(snapshot.native_run_id.clone()),
@@ -150,7 +241,7 @@ impl SessionShared {
                                 snapshot.native_request_id = Some(request_id);
                                 snapshot.native_message_id = Some(record.message_id);
                                 snapshot.measurement = record.measurement;
-                                snapshot.assistant_texts = record.assistant_texts;
+                                if use_native_texts { snapshot.assistant_texts = record.assistant_texts; }
                                 if snapshot.delivery_context.is_none() {
                                     snapshot.delivery_context = shared.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
                                         .and_then(|state| snapshot.native_request_id.as_ref()
@@ -301,7 +392,10 @@ impl SessionLane {
         if state.pending_terminals.len() + terminals.len() > crate::state::MAX_CHANGE_COUNT { return false; }
         let Some(permit) = &self.terminal_permit else { return false; };
         if state.terminal_permit.as_ref().is_some_and(|current| !Arc::ptr_eq(current, permit)) { return false; }
-        state.pending_terminals.extend_from_slice(terminals);
+        for terminal in terminals {
+            let bodies = TerminalBodies::capture(state.items(), state.native_session_id(), &terminal.native_run_id);
+            state.pending_terminals.push(crate::state::PendingTerminal { snapshot: terminal.clone(), bodies });
+        }
         state.terminal_permit = Some(Arc::clone(permit));
         true
     }
@@ -315,7 +409,7 @@ impl SessionLane {
     ) -> bool {
         let Some(state) = &mut self.state else { return false; };
         if state.identity() != &identity { return false; }
-        let Some(index) = state.pending_terminals.iter().position(|snapshot| snapshot.native_run_id == run_id) else { return false; };
+        let Some(index) = state.pending_terminals.iter().position(|pending| pending.snapshot.native_run_id == run_id) else { return false; };
         state.pending_terminals.remove(index);
         state.run_delivery_contexts.remove(&run_id);
         let execution = state.run_execution_contexts.remove(&run_id);

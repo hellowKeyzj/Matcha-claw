@@ -10,13 +10,11 @@ export class IabTabHost implements TabHostContract {
   private readonly tabs = new Map<string, IabTabHandle>();
   private readonly appliedBounds = new Map<string, IabBounds>();
   private readonly cleanup = new Map<string, () => void>();
-  private active: string | null = null;
   private disposed = false;
 
   constructor(private readonly options: IabTabHostOptions) {}
   get session() { return this.options.session; }
   get size() { return this.tabs.size; }
-  get activeTabId() { return this.active; }
   get(tabId: string) { return this.tabs.get(tabId); }
   has(tabId: string) { return this.tabs.has(tabId); }
   getWebContents(tabId: string): WebContents | null {
@@ -24,7 +22,7 @@ export class IabTabHost implements TabHostContract {
     return contents && !contents.isDestroyed() ? contents : null;
   }
 
-  createTab(tabId: string, url: string, options: { activate?: boolean; view?: WebContentsView; skipWarmup?: boolean } = {}): Promise<void> {
+  createTab(tabId: string, url: string, options: { view?: WebContentsView; skipWarmup?: boolean } = {}): Promise<void> {
     if (this.disposed) throw new Error('IAB tab host is disposed');
     if (this.tabs.has(tabId)) throw new Error(`Duplicate IAB tab: ${tabId}`);
     if (!isIabUrl(url)) throw new Error('Invalid IAB navigation URL');
@@ -70,7 +68,6 @@ export class IabTabHost implements TabHostContract {
       view.setBounds(OFFSCREEN);
       this.appliedBounds.set(tabId, { ...OFFSCREEN });
       window.contentView.addChildView(view);
-      if (options.activate !== false) this.active = tabId;
       this.applyBounds();
       tab.ready = this.prepare(tabId, tab, options.skipWarmup === true);
       return options.skipWarmup ? tab.ready : this.initialNavigate(tabId, tab);
@@ -149,27 +146,16 @@ export class IabTabHost implements TabHostContract {
       return contents ? [{ tabId, url: contents.getURL() || tab.initialUrl, title: contents.getTitle() }] : [];
     });
   }
-  activateTab(tabId: string, options: { focusWindow?: boolean } = {}): void {
-    if (!this.tabs.has(tabId)) return;
-    this.active = tabId;
-    this.applyBounds();
-    if (options.focusWindow) {
-      const window = this.options.window();
-      if (window && !window.isDestroyed()) { window.show(); window.focus(); }
-    }
-  }
-  deactivateAll(): void { this.active = null; this.applyBounds(); }
   showInternalPage(tabId: string, page: IabInternalPage): void {
     const tab = this.tabs.get(tabId);
     if (tab) { tab.internalPage = page; this.applyBounds(); }
   }
   applyBounds(): void {
-    const bounds = this.options.getBounds();
     for (const [tabId, tab] of this.tabs) {
       const contents = this.getWebContents(tabId);
       if (!contents) continue;
       const blank = tab.emptyPage && (!contents.getURL() || contents.getURL() === 'about:blank');
-      const next = tabId === this.active && !tab.internalPage && !blank ? bounds : OFFSCREEN;
+      const next = !tab.internalPage && !blank ? this.options.getBounds(tabId) ?? OFFSCREEN : OFFSCREEN;
       const previous = this.appliedBounds.get(tabId);
       if (previous && previous.x === next.x && previous.y === next.y && previous.width === next.width && previous.height === next.height) continue;
       tab.view.setBounds(next);
@@ -184,7 +170,6 @@ export class IabTabHost implements TabHostContract {
     if (this.tabs.get(tabId) !== tab) return;
     this.tabs.delete(tabId);
     this.appliedBounds.delete(tabId);
-    if (this.active === tabId) this.active = [...this.tabs.keys()].pop() ?? null;
     this.cleanup.get(tabId)?.();
     this.cleanup.delete(tabId);
     try {
@@ -197,6 +182,5 @@ export class IabTabHost implements TabHostContract {
     if (this.disposed) return;
     this.disposed = true;
     for (const [tabId, tab] of this.tabs) this.remove(tabId, tab);
-    this.active = null;
   }
 }

@@ -126,6 +126,13 @@ export async function handleAccountRoutes(
     return sendCloudAccountResult(ctx, (service) => service.refreshSession());
   }
 
+  if (url.pathname === '/api/account/console/open' && req.method === 'POST') {
+    return sendCloudAccountResult(ctx, async (service) => {
+      await service.openConsole();
+      return { success: true };
+    });
+  }
+
   if (url.pathname === '/api/account/logout' && req.method === 'POST') {
     return sendCloudAccountResult(ctx, async (service) => {
       await service.logout();

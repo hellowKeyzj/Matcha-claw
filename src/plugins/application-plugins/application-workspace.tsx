@@ -22,6 +22,8 @@ function ApplicationWorkspacePage({ record, application, pageId, sessionIdentity
     && plugin.manifest.contributes.applications?.some((entry) => entry.id === application.id && entry.entry === application.entry));
   useEffect(() => { if (!available) removePage(pageId); }, [available, pageId, removePage]);
   if (!available) return null;
+  if (application.scope === 'workspace') return <InstalledApplication pluginId={record.manifest.id} digest={record.digest} entry={application.entry} title={application.name}
+    registerCloseHandler={registerCloseHandler} />;
   const target: ComposerTarget | undefined = sessionIdentity ? { kind: 'session', identity: sessionIdentity }
     : workspaceDraftId ? { kind: 'draft', id: workspaceDraftId } : undefined;
   return <InstalledApplication pluginId={record.manifest.id} digest={record.digest} entry={application.entry} title={application.name}
@@ -31,9 +33,10 @@ function ApplicationWorkspacePage({ record, application, pageId, sessionIdentity
 
 export function applicationWorkspacePage(record: InstalledAppPlugin, application: AppApplicationManifest): WorkspacePage {
   const providerId = `application:${record.manifest.id}`;
-  const id = JSON.stringify([providerId, application.entry]);
+  const id = JSON.stringify([providerId, application.id]);
   return {
-    id, providerId, title: application.name, icon: AppWindow, promoteWithDraft: true,
+    id, providerId, title: application.name, icon: AppWindow,
+    ...(application.scope === 'workspace' ? { lifetime: 'workspace' as const } : { promoteWithDraft: true }),
     render: (props) => createElement(ApplicationWorkspacePage, { ...props, record, application, pageId: id }),
   };
 }

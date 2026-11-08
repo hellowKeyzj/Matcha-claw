@@ -201,14 +201,15 @@ function isCapabilityDescriptor(value: unknown): value is CapabilityDescriptor {
 
 function isCapabilityOperation(value: unknown): boolean {
   return isRecord(value)
-    && hasOnlyKeys(value, ['id', 'title', 'targetKind', 'targetRequired'])
+    && hasOnlyKeys(value, ['id', 'title', 'targetKind', 'targetRequired', 'inputSchema'])
     && Object.hasOwn(value, 'id')
     && Object.hasOwn(value, 'title')
     && Object.hasOwn(value, 'targetKind')
     && isCapabilityText(value.id)
     && isCapabilityText(value.title)
     && isCapabilityText(value.targetKind)
-    && (value.targetRequired === undefined || typeof value.targetRequired === 'boolean');
+    && (value.targetRequired === undefined || typeof value.targetRequired === 'boolean')
+    && (value.inputSchema === undefined || isRecord(value.inputSchema));
 }
 
 function isPublicFailure(value: unknown): boolean {

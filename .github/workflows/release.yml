@@ -49,12 +49,14 @@ jobs:
           event="${{ github.event_name }}"
           platform="${{ github.event.inputs.platform }}"
 
+          mac='[{"os":"macos-15-intel","platform":"mac","arch":"x64","target":"x86_64-apple-darwin"},{"os":"macos-15","platform":"mac","arch":"arm64","target":"aarch64-apple-darwin"}]'
+          win='[{"os":"windows-latest","platform":"win","arch":"x64","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","platform":"win","arch":"arm64","target":"aarch64-pc-windows-msvc"}]'
           if [ "$event" = "push" ] || [ -z "$platform" ] || [ "$platform" = "all" ]; then
-            include='[{"os":"macos-15","platform":"mac"},{"os":"windows-latest","platform":"win"}]'
+            include="$(jq -cn --argjson mac "$mac" --argjson win "$win" '$mac + $win')"
           elif [ "$platform" = "win" ]; then
-            include='[{"os":"windows-latest","platform":"win"}]'
+            include="$win"
           elif [ "$platform" = "mac" ]; then
-            include='[{"os":"macos-15","platform":"mac"}]'
+            include="$mac"
           else
             echo "Unsupported platform input: $platform"
             exit 1
@@ -64,6 +66,7 @@ jobs:
           echo "Resolved matrix: $include"
 
   release:
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
     needs: resolve-matrix
     strategy:
       fail-fast: false
@@ -102,7 +105,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
-          targets: ${{ matrix.platform == 'mac' && 'aarch64-apple-darwin, x86_64-apple-darwin' || 'aarch64-pc-windows-msvc, x86_64-pc-windows-msvc' }}
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@v2
@@ -110,6 +113,8 @@ jobs:
           workspaces: |
             runtime-host -> target
             matcha-agent/app-server -> target
+            network-access -> target
+          shared-key: ${{ matrix.platform }}-${{ matrix.arch }}
           cache-on-failure: true
 
       - name: Prefer HTTPS for public GitHub git dependencies
@@ -127,51 +132,53 @@ jobs:
 
       - name: Prepare matcha-agent ripgrep
         if: env.SKIP_MATCHA_AGENT_BUILD != '1'
-        run: node scripts/download-matcha-ripgrep.mjs --arch x64 --arch arm64
+        run: node scripts/download-matcha-ripgrep.mjs --arch ${{ matrix.arch }}
 
       - name: Download bundled protoc
         run: pnpm run protoc:download
 
       - name: Prepare Windows bundled runtime dependencies
         if: matrix.platform == 'win'
-        run: pnpm run prep:win-binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm exec zx scripts/download-bundled-uv.mjs --target=win32-x64
+          pnpm exec zx scripts/download-bundled-bun.mjs --target=win32-x64
+          if [ '${{ matrix.arch }}' = arm64 ]; then
+            pnpm exec zx scripts/download-bundled-uv.mjs --target=win32-arm64
+            pnpm exec zx scripts/download-bundled-bun.mjs --target=win32-arm64
+          fi
+          node scripts/download-bundled-git-bash.mjs --arch ${{ matrix.arch }}
 
       - name: Prepare Windows ARM64 Design native dependencies
-        if: matrix.platform == 'win'
+        if: matrix.platform == 'win' && matrix.arch == 'arm64'
         run: node apps/design/prepare-win-arm64.mjs
 
       - name: Validate OpenClaw plugin source inputs
         run: pnpm run check:openclaw-plugin-inputs
 
-      - name: Download Wiki assets for packaged architectures
-        shell: bash
-        run: |
-          set -euo pipefail
-          pnpm run download:wiki-assets -- --arch arm64
-          pnpm run download:wiki-assets -- --arch x64
+      - name: Download Wiki assets for target architecture
+        run: pnpm run download:wiki-assets -- --arch ${{ matrix.arch }}
 
       - name: Download uv binaries for macOS
         if: matrix.platform == 'mac'
-        run: pnpm run uv:download:mac
+        run: pnpm exec zx scripts/download-bundled-uv.mjs --target=darwin-${{ matrix.arch }}
 
       - name: Download Bun binaries for macOS
         if: matrix.platform == 'mac'
-        run: pnpm run bun:download:mac
-
-      - name: Download uv binaries for Windows
-        if: matrix.platform == 'win'
-        run: pnpm run uv:download:win
+        run: pnpm exec zx scripts/download-bundled-bun.mjs --target=darwin-${{ matrix.arch }}
 
       - name: Build pinned SearXNG resources
         env:
           UV_PYTHON_INSTALL_DIR: ${{ github.workspace }}/build/searxng-toolchain/python
           UV_CACHE_DIR: ${{ github.workspace }}/build/searxng-toolchain/cache
+          TARGET_ARCH: ${{ matrix.arch }}
         run: |
-          node -e "const cp = require('node:child_process'); const path = require('node:path'); const target = process.platform + '-' + process.arch; const uv = path.resolve('resources/bin', target, process.platform === 'win32' ? 'uv.exe' : 'uv'); cp.execFileSync(uv, ['python', 'install', '3.12'], {stdio: 'inherit'}); const targets = process.platform === 'win32' ? ['--target', 'win32-x64', '--target', 'win32-arm64'] : ['--target', 'darwin-x64', '--target', 'darwin-arm64']; cp.execFileSync(process.execPath, ['scripts/bundle-searxng.mjs', ...targets], {stdio: 'inherit'});"
+          node -e "const cp = require('node:child_process'); const path = require('node:path'); const host = process.platform + '-' + process.arch; const uv = path.resolve('resources/bin', host, process.platform === 'win32' ? 'uv.exe' : 'uv'); cp.execFileSync(uv, ['python', 'install', '3.12'], {stdio: 'inherit'}); cp.execFileSync(process.execPath, ['scripts/bundle-searxng.mjs', '--target', process.platform + '-' + process.env.TARGET_ARCH], {stdio: 'inherit'});"
 
       # macOS specific steps
       - name: Prepare macOS x64 Design native dependencies
-        if: matrix.platform == 'mac'
+        if: matrix.platform == 'mac' && matrix.arch == 'x64'
         shell: bash
         run: |
           set -euo pipefail
@@ -246,9 +253,20 @@ jobs:
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --validate
 
+      - name: Build macOS network component
+        if: matrix.platform == 'mac'
+        run: node scripts/build-network-access.mjs --platform darwin --arch ${{ matrix.arch }}
+
+      - name: Build macOS native runtime hosts
+        if: matrix.platform == 'mac'
+        run: |
+          ulimit -n 65536
+          node scripts/build-runtime-host-native.mjs --platform darwin --arch ${{ matrix.arch }}
+
       - name: Build macOS
         if: matrix.platform == 'mac'
         env:
+          TARGET_ARCH: ${{ matrix.arch }}
           UV_PYTHON_INSTALL_DIR: ${{ github.workspace }}/build/searxng-toolchain/python
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.MAC_CERTS }}
@@ -262,10 +280,8 @@ jobs:
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
 
-          node scripts/build-runtime-host-native.mjs --platform darwin --arch x64
-          node scripts/build-runtime-host-native.mjs --platform darwin --arch arm64
           pnpm run build:vite
-          pnpm run build:matcha-agent --arch x64 --arch arm64
+          pnpm run build:matcha-agent --arch "$TARGET_ARCH"
           pnpm exec zx scripts/bundle-openclaw.mjs
           pnpm exec zx scripts/bundle-openclaw-plugins.mjs
           pnpm run check:openclaw-plugin-mirrors
@@ -444,47 +460,112 @@ jobs:
             done
           }
 
-          pnpm exec electron-builder --mac dir --x64 --arm64 --publish never -c.mac.notarize=false -c.forceCodeSigning=true
+          app_path="release/mac/MatchaClaw.app"
+          if [ "$TARGET_ARCH" = arm64 ]; then
+            app_path="release/mac-arm64/MatchaClaw.app"
+          fi
+          pnpm exec electron-builder --mac dir "--$TARGET_ARCH" --publish never -c.mac.notarize=false -c.forceCodeSigning=true
+          submit_notary "$TARGET_ARCH" "$app_path"
+          wait_notary "$TARGET_ARCH" "$app_path"
+          pnpm exec electron-builder --mac dmg zip "--$TARGET_ARCH" --prepackaged "$app_path" --publish never -c.mac.notarize=false
 
-          submit_notary x64 "release/mac/MatchaClaw.app"
-          submit_notary arm64 "release/mac-arm64/MatchaClaw.app"
+      - name: Prove macOS x64 mounted and extracted package runtime host
+        if: matrix.platform == 'mac' && matrix.arch == 'x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" != "macOS" ] || [ "$RUNNER_ARCH" != "X64" ]; then
+            echo "macOS x64 package proof requires a macOS/X64 runner; got $RUNNER_OS/$RUNNER_ARCH."
+            exit 1
+          fi
+          release_directory="$GITHUB_WORKSPACE/release"
+          unpacked_root="$release_directory/mac/MatchaClaw.app"
+          shopt -s nullglob
+          dmg_packages=("$release_directory"/*-mac-x64.dmg)
+          zip_packages=("$release_directory"/*-mac-x64.zip)
+          if [ "${#dmg_packages[@]}" -ne 1 ] || [ "${#zip_packages[@]}" -ne 1 ]; then
+            echo "Expected exactly one macOS x64 DMG and ZIP from the release build; found DMG=${#dmg_packages[@]} ZIP=${#zip_packages[@]}."
+            exit 1
+          fi
+          if [ ! -d "$unpacked_root" ]; then
+            echo "macOS x64 unpacked application required by package smoke is missing: $unpacked_root"
+            exit 1
+          fi
 
-          wait_notary x64 "release/mac/MatchaClaw.app"
-          wait_notary arm64 "release/mac-arm64/MatchaClaw.app"
-
-          pnpm exec electron-builder --mac dmg zip --x64 --prepackaged "release/mac/MatchaClaw.app" --publish never -c.mac.notarize=false
-          mkdir -p release/mac-update-x64
-          mv release/*-mac.yml release/mac-update-x64/
-          pnpm exec electron-builder --mac dmg zip --arm64 --prepackaged "release/mac-arm64/MatchaClaw.app" --publish never -c.mac.notarize=false
-
-          # Separate prepackaged invocations overwrite the same channel file; retain both architectures.
-          node --input-type=module <<'NODE'
-          import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
-          import { parse, stringify } from 'yaml';
-          const channels = readdirSync('release').filter(name => name.endsWith('-mac.yml')).sort();
-          const x64Channels = readdirSync('release/mac-update-x64').sort();
-          if (!channels.length || JSON.stringify(channels) !== JSON.stringify(x64Channels)) {
-            throw new Error('macOS architecture channel sets do not match.');
+          mount_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-mounted-x64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
+          zip_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-unzipped-x64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
+          mounted=false
+          cleanup_package_roots() {
+            if [ "$mounted" = true ]; then
+              hdiutil detach "$mount_root" -quiet || true
+            fi
+            rmdir "$mount_root" 2>/dev/null || true
+            rm -rf "$zip_root"
           }
-          for (const name of channels) {
-            const arm64 = parse(readFileSync(`release/${name}`, 'utf8'));
-            const x64 = parse(readFileSync(`release/mac-update-x64/${name}`, 'utf8'));
-            if (arm64.version !== x64.version) throw new Error(`macOS channel versions do not match: ${name}`);
-            arm64.files.push(...x64.files);
-            for (const arch of ['x64', 'arm64']) {
-              for (const extension of ['dmg', 'zip']) {
-                if (arm64.files.filter(file => file.url.endsWith(`-mac-${arch}.${extension}`)).length !== 1) {
-                  throw new Error(`macOS channel ${name} must contain one ${arch} ${extension}.`);
-                }
-              }
-            }
-            writeFileSync(`release/${name}`, stringify(arm64));
+          trap cleanup_package_roots EXIT
+
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_root" "${dmg_packages[0]}"
+          mounted=true
+          dmg_installed_root="$mount_root/MatchaClaw.app"
+          if [ ! -d "$dmg_installed_root" ]; then
+            echo "Mounted DMG did not contain the expected application root: $dmg_installed_root"
+            exit 1
+          fi
+
+          prove_package() {
+            local target="$1"
+            local package_path="$2"
+            local installed_root="$3"
+            local receipt_path="$4"
+            local smoke_report
+            local smoke_status
+            set +e
+            smoke_report="$(node scripts/package-smoke-runtime-host.mjs --platform darwin --arch x64 --target "$target" --unpacked "$unpacked_root" --package "$package_path" --installed "$installed_root" --receipt "$receipt_path" --repository "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_WORKFLOW_REF" --source-revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --run 2>&1)"
+            smoke_status=$?
+            set -e
+            printf '%s\n' "$smoke_report"
+            if [ "$smoke_status" -ne 0 ]; then
+              echo "Mounted or extracted macOS x64 ${target} package smoke failed with exit code $smoke_status."
+              exit "$smoke_status"
+            fi
+            if ! printf '%s\n' "$smoke_report" | grep -Fx 'package-execution=installed-native-run (bootstrap-rejection-passed)' >/dev/null; then
+              echo "Mounted or extracted macOS x64 ${target} package smoke did not record installed-native-run."
+              exit 1
+            fi
+            if [ ! -f "$receipt_path" ]; then
+              echo "Mounted or extracted macOS x64 ${target} package smoke did not produce its evidence receipt."
+              exit 1
+            fi
           }
-          NODE
-          tar -cf release/macos-x64-unpacked.tar -C release/mac MatchaClaw.app
+
+          dmg_receipt_path="$release_directory/runtime-host-package-evidence-darwin-x64-dmg.json"
+          prove_package dmg "${dmg_packages[0]}" "$dmg_installed_root" "$dmg_receipt_path"
+
+          unzip -q "${zip_packages[0]}" -d "$zip_root"
+          zip_installed_root="$zip_root/MatchaClaw.app"
+          if [ ! -d "$zip_installed_root" ]; then
+            echo "Extracted ZIP did not contain the expected application root: $zip_installed_root"
+            exit 1
+          fi
+          zip_receipt_path="$release_directory/runtime-host-package-evidence-darwin-x64-zip.json"
+          prove_package zip "${zip_packages[0]}" "$zip_installed_root" "$zip_receipt_path"
+          echo "MACOS_X64_DMG_EVIDENCE_RECEIPT=$dmg_receipt_path" >> "$GITHUB_ENV"
+          echo "MACOS_X64_ZIP_EVIDENCE_RECEIPT=$zip_receipt_path" >> "$GITHUB_ENV"
+
+      - name: Attest macOS x64 mounted DMG package execution evidence
+        if: matrix.platform == 'mac' && matrix.arch == 'x64' && env.MACOS_X64_DMG_EVIDENCE_RECEIPT != ''
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ env.MACOS_X64_DMG_EVIDENCE_RECEIPT }}
+
+      - name: Attest macOS x64 extracted ZIP package execution evidence
+        if: matrix.platform == 'mac' && matrix.arch == 'x64' && env.MACOS_X64_ZIP_EVIDENCE_RECEIPT != ''
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ env.MACOS_X64_ZIP_EVIDENCE_RECEIPT }}
 
       - name: Prove macOS arm64 mounted package runtime host
-        if: matrix.platform == 'mac'
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64'
         shell: bash
         run: |
           set -euo pipefail
@@ -579,13 +660,13 @@ jobs:
           echo "MACOS_ARM64_ZIP_EVIDENCE_RECEIPT=$zip_receipt_path" >> "$GITHUB_ENV"
 
       - name: Attest macOS arm64 mounted DMG package execution evidence
-        if: matrix.platform == 'mac' && env.MACOS_ARM64_DMG_EVIDENCE_RECEIPT != ''
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64' && env.MACOS_ARM64_DMG_EVIDENCE_RECEIPT != ''
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: ${{ env.MACOS_ARM64_DMG_EVIDENCE_RECEIPT }}
 
       - name: Attest macOS arm64 extracted ZIP package execution evidence
-        if: matrix.platform == 'mac' && env.MACOS_ARM64_ZIP_EVIDENCE_RECEIPT != ''
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64' && env.MACOS_ARM64_ZIP_EVIDENCE_RECEIPT != ''
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: ${{ env.MACOS_ARM64_ZIP_EVIDENCE_RECEIPT }}
@@ -600,33 +681,37 @@ jobs:
             echo Windows MSVC build tools are unavailable.
             exit /b 1
           )
-          call "%VS_INSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64
-          where cl.exe | findstr /i /c:"\Hostx64\x64\cl.exe" >nul || (
-            echo Windows x64 MSVC compiler is unavailable.
+          if "${{ matrix.arch }}"=="arm64" (
+            call "%VS_INSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64_arm64
+            set "CARGO_PROFILE_RELEASE_LTO=thin"
+          ) else (
+            call "%VS_INSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64
+          )
+          if errorlevel 1 exit /b 1
+          where cl.exe | findstr /i /c:"\Hostx64\${{ matrix.arch }}\cl.exe" >nul || (
+            echo Windows ${{ matrix.arch }} MSVC compiler is unavailable.
             exit /b 1
           )
-          node scripts/build-runtime-host-native.mjs --platform win32 --arch x64
-          call "%VS_INSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64_arm64
-          where cl.exe | findstr /i /c:"\Hostx64\arm64\cl.exe" >nul || (
-            echo Windows ARM64 MSVC compiler is unavailable.
-            exit /b 1
-          )
-          set "CARGO_PROFILE_RELEASE_LTO=thin"
-          node scripts/build-runtime-host-native.mjs --platform win32 --arch arm64
+          node scripts/build-network-access.mjs --platform win32 --arch ${{ matrix.arch }}
+          if errorlevel 1 exit /b 1
+          node scripts/build-runtime-host-native.mjs --platform win32 --arch ${{ matrix.arch }}
 
       - name: Build Windows
         if: matrix.platform == 'win'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pnpm run build:vite && pnpm run build:matcha-agent --arch x64 --arch arm64 && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs
-          pnpm exec electron-builder --win --x64 --arm64 --publish never
+          pnpm run build:vite && pnpm run build:matcha-agent --arch ${{ matrix.arch }} && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          pnpm exec electron-builder --win --${{ matrix.arch }} --publish never
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
       - name: Prove Windows x64 installed NSIS runtime host
-        if: matrix.platform == 'win'
+        if: matrix.platform == 'win' && matrix.arch == 'x64'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -684,7 +769,7 @@ jobs:
           }
 
       - name: Attest Windows x64 NSIS package execution evidence
-        if: matrix.platform == 'win' && env.WINDOWS_NSIS_EVIDENCE_RECEIPT != ''
+        if: matrix.platform == 'win' && matrix.arch == 'x64' && env.WINDOWS_NSIS_EVIDENCE_RECEIPT != ''
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: ${{ env.WINDOWS_NSIS_EVIDENCE_RECEIPT }}
@@ -692,144 +777,15 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.platform }}
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             release/*.dmg
             release/*.zip
-            release/macos-x64-unpacked.tar
             release/*.exe
             release/win-arm64-unpacked/**
             release/runtime-host-package-evidence-*.json
             release/*.yml
             !release/builder-*.yml
-          retention-days: 7
-
-  prove-macos-x64-packages:
-    needs: release
-    if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'mac'
-    runs-on: macos-15-intel
-    steps:
-      - name: Require macOS x64 native package-proof runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "$RUNNER_OS" != "macOS" ] || [ "$RUNNER_ARCH" != "X64" ]; then
-            echo "macOS x64 package proof requires a macOS/X64 runner; got $RUNNER_OS/$RUNNER_ARCH."
-            exit 1
-          fi
-
-      - name: Checkout package smoke runner
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
-      - name: Download macOS release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: release-mac
-          path: release
-
-      - name: Prove macOS x64 mounted and extracted package runtime host
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_directory="$GITHUB_WORKSPACE/release"
-          unpacked_root="$release_directory/mac/MatchaClaw.app"
-          mkdir -p "$release_directory/mac"
-          tar -xf "$release_directory/macos-x64-unpacked.tar" -C "$release_directory/mac"
-          shopt -s nullglob
-          dmg_packages=("$release_directory"/*-mac-x64.dmg)
-          zip_packages=("$release_directory"/*-mac-x64.zip)
-          if [ "${#dmg_packages[@]}" -ne 1 ] || [ "${#zip_packages[@]}" -ne 1 ]; then
-            echo "Expected exactly one macOS x64 DMG and ZIP from the release build; found DMG=${#dmg_packages[@]} ZIP=${#zip_packages[@]}."
-            exit 1
-          fi
-          if [ ! -d "$unpacked_root" ]; then
-            echo "macOS x64 unpacked application required by package smoke is missing: $unpacked_root"
-            exit 1
-          fi
-
-          mount_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-mounted-x64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          zip_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-unzipped-x64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          mounted=false
-          cleanup_package_roots() {
-            if [ "$mounted" = true ]; then
-              hdiutil detach "$mount_root" -quiet || true
-            fi
-            rmdir "$mount_root" 2>/dev/null || true
-            rm -rf "$zip_root"
-          }
-          trap cleanup_package_roots EXIT
-
-          hdiutil attach -nobrowse -readonly -mountpoint "$mount_root" "${dmg_packages[0]}"
-          mounted=true
-          dmg_installed_root="$mount_root/MatchaClaw.app"
-          if [ ! -d "$dmg_installed_root" ]; then
-            echo "Mounted DMG did not contain the expected application root: $dmg_installed_root"
-            exit 1
-          fi
-
-          prove_package() {
-            local target="$1"
-            local package_path="$2"
-            local installed_root="$3"
-            local receipt_path="$4"
-            local smoke_report
-            local smoke_status
-            set +e
-            smoke_report="$(node scripts/package-smoke-runtime-host.mjs --platform darwin --arch x64 --target "$target" --unpacked "$unpacked_root" --package "$package_path" --installed "$installed_root" --receipt "$receipt_path" --repository "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_WORKFLOW_REF" --source-revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --run 2>&1)"
-            smoke_status=$?
-            set -e
-            printf '%s\n' "$smoke_report"
-            if [ "$smoke_status" -ne 0 ]; then
-              echo "Mounted or extracted macOS x64 ${target} package smoke failed with exit code $smoke_status."
-              exit "$smoke_status"
-            fi
-            if ! printf '%s\n' "$smoke_report" | grep -Fx 'package-execution=installed-native-run (bootstrap-rejection-passed)' >/dev/null; then
-              echo "Mounted or extracted macOS x64 ${target} package smoke did not record installed-native-run."
-              exit 1
-            fi
-            if [ ! -f "$receipt_path" ]; then
-              echo "Mounted or extracted macOS x64 ${target} package smoke did not produce its evidence receipt."
-              exit 1
-            fi
-          }
-
-          dmg_receipt_path="$release_directory/runtime-host-package-evidence-darwin-x64-dmg.json"
-          prove_package dmg "${dmg_packages[0]}" "$dmg_installed_root" "$dmg_receipt_path"
-
-          unzip -q "${zip_packages[0]}" -d "$zip_root"
-          zip_installed_root="$zip_root/MatchaClaw.app"
-          if [ ! -d "$zip_installed_root" ]; then
-            echo "Extracted ZIP did not contain the expected application root: $zip_installed_root"
-            exit 1
-          fi
-          zip_receipt_path="$release_directory/runtime-host-package-evidence-darwin-x64-zip.json"
-          prove_package zip "${zip_packages[0]}" "$zip_installed_root" "$zip_receipt_path"
-          echo "MACOS_X64_DMG_EVIDENCE_RECEIPT=$dmg_receipt_path" >> "$GITHUB_ENV"
-          echo "MACOS_X64_ZIP_EVIDENCE_RECEIPT=$zip_receipt_path" >> "$GITHUB_ENV"
-
-      - name: Attest macOS x64 mounted DMG package execution evidence
-        if: env.MACOS_X64_DMG_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.MACOS_X64_DMG_EVIDENCE_RECEIPT }}
-
-      - name: Attest macOS x64 extracted ZIP package execution evidence
-        if: env.MACOS_X64_ZIP_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.MACOS_X64_ZIP_EVIDENCE_RECEIPT }}
-
-      - name: Upload macOS x64 package evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-package-evidence-macos-x64
-          path: release/runtime-host-package-evidence-darwin-x64-*.json
-          if-no-files-found: error
           retention-days: 7
 
   prove-windows-arm64-package:
@@ -856,7 +812,7 @@ jobs:
       - name: Download Windows release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-win
+          name: release-win-arm64
           path: release
 
       - name: Prove Windows ARM64 installed NSIS runtime host
@@ -926,16 +882,57 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Packages precede channel metadata; GitHub is a manual download mirror.
-  publish:
-    needs: [release, prove-macos-x64-packages, prove-windows-arm64-package]
+  assemble:
+    needs: [release, prove-windows-arm64-package]
     if: >-
       ${{
-        always() &&
+        always() && needs.release.result == 'success' &&
+        (needs.prove-windows-arm64-package.result == 'success' ||
+          (needs.prove-windows-arm64-package.result == 'skipped' && github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'mac'))
+      }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install assembly dependencies
+        run: pnpm install --prod --frozen-lockfile --ignore-scripts
+
+      - name: Download architecture artifacts and package evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-artifacts
+
+      - name: Assemble packages and architecture channel metadata
+        run: node scripts/assemble-release-artifacts.mjs release-artifacts deploy-bundle
+
+      - name: Upload verified release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: deploy-bundle/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Packages precede channel metadata; GitHub is a manual download mirror.
+  publish:
+    needs: assemble
+    if: >-
+      ${{
         github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') &&
-        needs.release.result == 'success' &&
-        needs.prove-macos-x64-packages.result == 'success' &&
-        needs.prove-windows-arm64-package.result == 'success'
+        needs.assemble.result == 'success'
       }}
     runs-on: ubuntu-latest
     concurrency:
@@ -966,29 +963,11 @@ jobs:
       - name: Install publisher dependencies
         run: pnpm install --prod --frozen-lockfile --ignore-scripts
 
-      - name: Download all artifacts
+      - name: Download verified release bundle
         uses: actions/download-artifact@v4
         with:
-          path: release-artifacts
-
-      - name: Prepare deploy bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p deploy-bundle
-          # Artifact roots hold release files; unpacked app binaries are proof inputs only.
-          while IFS= read -r -d '' file; do
-            destination="deploy-bundle/$(basename "$file")"
-            if [ -f "$destination" ] && ! cmp -s "$file" "$destination"; then
-              echo "Conflicting release artifact: $(basename "$file")"
-              exit 1
-            fi
-            cp "$file" "$destination"
-          done < <(find release-artifacts -mindepth 2 -maxdepth 2 -type f \
-            \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o \
-               -name '*.yml' -o -name 'runtime-host-package-evidence-*.json' \) \
-            ! -name 'builder-*.yml' -print0)
-          ls -lh deploy-bundle
+          name: release-bundle
+          path: deploy-bundle
 
       - name: Publish full-package updates to WebDAV
         env:

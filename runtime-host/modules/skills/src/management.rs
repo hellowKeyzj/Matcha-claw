@@ -75,6 +75,7 @@ pub enum Outcome {
     Config {
         outcome: ConfigOutcome,
         invalid_keys: Vec<String>,
+        application: Option<ConfigApplication>,
     },
     Upload(UploadOutcome),
     Uninstall(RemoveOutcome),
@@ -138,6 +139,28 @@ pub enum ConfigOutcome {
     Partial,
     Rejected,
     Unknown,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigApplication {
+    pub persisted: bool,
+    pub sessions: Vec<ConfigSessionApplication>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigSessionApplication {
+    pub session_id: String,
+    pub instance_id: String,
+    pub status: ConfigSessionStatus,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfigSessionStatus {
+    Acknowledged,
+    Unconfirmed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

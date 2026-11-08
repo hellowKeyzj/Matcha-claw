@@ -258,6 +258,13 @@ async fn graph_patch(
     args: &Map<String, Value>,
     resolver: Arc<dyn RoleSessionIdentityResolver>,
 ) -> Result<Value, RequestAdmissionClosed> {
+    if args.get("operations").and_then(Value::as_array).is_some_and(|operations| {
+        operations.iter().any(|operation| {
+            operation.get("op").and_then(Value::as_str) == Some("create_role_session")
+        })
+    }) {
+        return role_session_create(owner, args).await;
+    }
     let parsed = (|| {
         require_exact_keys(
             args,
@@ -327,6 +334,75 @@ async fn graph_patch(
         .design_operation(operation, resolver)
         .await?
         .unwrap_or_else(design_rejected))
+}
+
+async fn role_session_create(
+    owner: &OrganizationHandle,
+    args: &Map<String, Value>,
+) -> Result<Value, RequestAdmissionClosed> {
+    use super::team_runtime::{RoleSessionCreateError, RoleSessionCreateScope, TeamRuntimeStatus};
+    let parsed = (|| {
+        require_exact_keys(args, &[
+            "teamId", "runId", "designEpoch", "promptGeneration", "idempotencyKey", "operations",
+        ])?;
+        let operations = args.get("operations").and_then(Value::as_array)
+            .ok_or_else(|| invalid_field("operations", "Provide one create_role_session operation."))?;
+        if operations.len() != 1 {
+            return Err(invalid_field("operations", "Create one role session per call; do not mix creation with graph or prompt operations."));
+        }
+        let operation = operations[0].as_object()
+            .ok_or_else(|| invalid_field("operations[0]", "Provide a create_role_session object with op and roleId."))?;
+        if operation.keys().any(|key| !matches!(key.as_str(), "op" | "roleId"))
+            || operation.get("op").and_then(Value::as_str) != Some("create_role_session")
+        {
+            return Err(invalid_field("operations[0]", "Use only op=create_role_session and roleId; native session identities are assigned by the server."));
+        }
+        let team = TeamId::try_new(required_string(args, "teamId")?)
+            .map_err(|_| invalid_field("teamId", "Use a valid team identifier from current design context."))?;
+        let run = GraphRunId::new(opaque(args, "runId")?.as_str());
+        let role = arguments::required_string(operation, "roleId").ok()
+            .and_then(|role| crate::RoleId::try_new(role).ok())
+            .ok_or_else(|| invalid_field("operations[0].roleId", "Use a valid roleId from current context.roles."))?;
+        let key = crate::IdempotencyKey::try_new(required_string(args, "idempotencyKey")?)
+            .map_err(|_| invalid_field("idempotencyKey", "Provide a valid creation key; keep the original key when retrying."))?;
+        let scope = RoleSessionCreateScope::Design {
+            epoch: required_string(args, "designEpoch")?.to_owned(),
+            generation: required_string(args, "promptGeneration")?.to_owned(),
+        };
+        Ok((team, run, role, key, scope))
+    })();
+    let (team, run, role, key, scope) = match parsed {
+        Ok(request) => request,
+        Err(error) => return Ok(error),
+    };
+    let result = owner.create_role_session(team, run, role, key, scope).await?;
+    let status = match result {
+        Ok(binding) => return Ok(json!({
+            "success": true,
+            "roleId": binding.role().as_str(),
+            "sessionRef": binding.session_ref().as_str(),
+        })),
+        Err(RoleSessionCreateError::Store(crate::StoreFault::InvalidFacts | crate::StoreFault::RuntimeReceipt(_))) => TeamRuntimeStatus::Rejected,
+        Err(RoleSessionCreateError::Store(crate::StoreFault::CommitOutcomeUnknown(_) | crate::StoreFault::RecoveryRequired)) => TeamRuntimeStatus::OutcomeUnknown,
+        Err(RoleSessionCreateError::Store(error @ crate::StoreFault::Design(_))) => return Ok(design_rejected(error)),
+        Err(RoleSessionCreateError::Store(_)) => TeamRuntimeStatus::Unavailable,
+        Err(RoleSessionCreateError::Runtime(status)) => status,
+    };
+    let (code, message) = match status {
+        TeamRuntimeStatus::Rejected => (
+            "role_session_rejected",
+            "Creation was rejected; read current context.roles and check the run, role and original idempotencyKey. Do not change the key to bypass a conflict.",
+        ),
+        TeamRuntimeStatus::Unavailable => (
+            "role_session_unavailable",
+            "The session runtime is unavailable; retry the original request with the same idempotencyKey when it is available.",
+        ),
+        TeamRuntimeStatus::OutcomeUnknown => (
+            "role_session_outcome_unknown",
+            "Creation is not confirmed; retry the original request with the same idempotencyKey to reconcile it. Do not use a new key or guess sessionRef.",
+        ),
+    };
+    Ok(json!({"success": false, "errorCode": code, "error": message}))
 }
 
 async fn node_event(

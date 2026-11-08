@@ -3,8 +3,10 @@
  */
 
 import type { ToolResultBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
+import { getDefaultFileReadingLimits } from '@claude-code-best/builtin-tools/tools/FileReadTool/limits.js'
 import { mkdir, writeFile } from 'fs/promises'
 import { join } from 'path'
+import { quote } from 'shell-quote'
 import { getOriginalCwd, getSessionId } from '../bootstrap/state.js'
 import {
   BYTES_PER_TOKEN,
@@ -84,6 +86,45 @@ export type PersistedToolResult = {
   isJson: boolean
   preview: string
   hasMore: boolean
+  lineStats?: OutputLineStats
+}
+
+export type OutputLineStats = { count: number; maxLen: number }
+
+function getOutputLineStats(content: string): OutputLineStats {
+  let count = 0
+  let maxLen = 0
+  let start = 0
+  while (start < content.length) {
+    const newline = content.indexOf('\n', start)
+    const end = newline === -1 ? content.length : newline
+    count++
+    maxLen = Math.max(maxLen, end - start)
+    start = end + 1
+  }
+  return { count: Math.max(1, count), maxLen }
+}
+
+export function getOutputReadingInstructions(
+  lineStats?: OutputLineStats,
+  jsonFilepath?: string,
+): string {
+  if (!lineStats && jsonFilepath) {
+    return (
+      'Use jq to make structured queries (find a value, filter by field).\n' +
+      `- Note: this file is JSON, so a long value (or the whole file) is a single line. Read's offset/limit cannot split a line, so reading in chunks works only if every line is short. If a shell tool is available, first probe the structure (e.g., jq 'type, length, keys?' ${quote([jsonFilepath])}), then extract slices with jq or python.`
+    )
+  }
+  const charsPerChunk = Math.floor(
+    getDefaultFileReadingLimits().maxTokens * 4 * 0.8,
+  )
+  if (lineStats && (lineStats.count <= 1 || lineStats.maxLen > charsPerChunk)) {
+    return (
+      'Search within the file for specific content, and use jq if the content is JSON.\n' +
+      "- Note: this file's lines are too long for Read's offset/limit chunking. If a shell tool is available, slice by character range (e.g. python read()[A:B], dd, or cut -c) instead."
+    )
+  }
+  return 'Use offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.'
 }
 
 // Error result when persistence fails
@@ -180,6 +221,7 @@ export async function persistToolResult(
     isJson,
     preview,
     hasMore,
+    lineStats: getOutputLineStats(contentStr),
   }
 }
 
@@ -191,6 +233,9 @@ export function buildLargeToolResultMessage(
 ): string {
   let message = `${PERSISTED_OUTPUT_TAG}\n`
   message += `Output too large (${formatFileSize(result.originalSize)}). Full output saved to: ${result.filepath}\n\n`
+  if (result.lineStats) {
+    message += `${getOutputReadingInstructions(result.lineStats)}\n`
+  }
   message += `Preview (first ${formatFileSize(PREVIEW_SIZE_BYTES)}):\n`
   message += result.preview
   message += result.hasMore ? '\n...\n' : '\n'

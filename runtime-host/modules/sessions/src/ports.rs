@@ -305,6 +305,14 @@ pub trait SessionOps: Send + Sync {
         Box::pin(async { crate::execution::SessionRunReadOutcome::Unsupported })
     }
 
+    /// Reads native-proven assistant results without submitting or reconstructing work.
+    fn read_execution_result<'a>(
+        &'a self,
+        _command: crate::execution::SessionRunReadCommand,
+    ) -> SessionFuture<'a, Option<crate::execution::SessionExecutionResult>> {
+        Box::pin(async { None })
+    }
+
     fn select_session_model<'a>(
         &'a self,
         command: ResolvedSessionModelSelection,

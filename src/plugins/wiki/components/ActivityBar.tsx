@@ -87,7 +87,7 @@ export function ActivityBar(props: ActivityBarProps): JSX.Element {
                   <span className="min-w-0 flex-1 truncate text-foreground" title={task.sourcePath}>{task.sourcePath}</span>
                   <span className="shrink-0 text-muted-foreground">{formatDateTime(task.updatedAtMs, t('time.unrecorded'))}</span>
                   {isActiveSourceTask(task) && task.cancelRequestedAtMs === null ? <Button size="sm" variant="ghost" className="h-6 px-2" disabled={cancellingSourcePaths.has(task.sourcePath)} onClick={() => onCancelSourceTask(task.sourcePath)}>{t(cancellingSourcePaths.has(task.sourcePath) ? 'sourceProgress.cancelling' : 'common.cancel')}</Button> : null}
-                  {task.error ? <AlertCircle className="h-3.5 w-3.5 shrink-0 text-destructive" aria-label={task.error} /> : null}
+                  {task.error ? <AlertCircle className="h-3.5 w-3.5 shrink-0 text-destructive" aria-label={t(task.error, { defaultValue: task.error, keySeparator: false, nsSeparator: false })} /> : null}
                 </div>
               ))}
             </div>

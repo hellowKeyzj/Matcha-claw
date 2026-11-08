@@ -101,6 +101,7 @@ pub fn management_session_descriptor(scope: Value) -> Value {
         scope,
         vec![
             operation("sessions.window", "Get session window", "session"),
+            operation("sessions.run.read", "Read session run", "session"),
             operation("sessions.content.load", "Load session content", "session"),
             operation("sessions.delete", "Delete session", "session"),
             operation("sessions.rename", "Rename session", "session"),

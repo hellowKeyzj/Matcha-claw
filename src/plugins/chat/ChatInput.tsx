@@ -101,6 +101,7 @@ interface SkillManagerState {
   title: string;
   options: AgentSkillOption[];
   loading: boolean;
+  error?: string | null;
   savingSkillId: string | null;
   selectedSkillIds: string[];
   skillPreview: AgentSkillPreviewState | null;
@@ -162,20 +163,6 @@ interface ChatInputProps {
   endpointSessionId?: string | null;
   activeRunId?: string | null;
   runPhase?: SessionRunPhase | null;
-}
-
-function resolveInputPlaceholder(
-  disabled: boolean,
-  approvalWaiting: boolean,
-  translate: (key: string) => string,
-): string {
-  if (disabled) {
-    return translate('input.gatewayDisconnectedPlaceholder');
-  }
-  if (approvalWaiting) {
-    return translate('input.approvalWaitingPlaceholder');
-  }
-  return translate('input.messagePlaceholder');
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -554,7 +541,7 @@ export const ChatInput = memo(function ChatInput({
   const skillsScopeMatches = useSkillsStore((state) => skillsScopeKey !== null && state.scopeKey === skillsScopeKey);
   const skills = skillsScopeMatches ? storedSkills : EMPTY_SKILLS;
   const skillsSnapshotReady = useSkillsStore((state) => skillsScopeMatches && state.snapshotReady);
-  const skillsInitialLoading = useSkillsStore((state) => skillsScopeMatches && state.initialLoading);
+  const skillsError = useSkillsStore((state) => skillsScopeMatches ? state.error : null);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const allowedSkillIdSet = useMemo(() => {
     if (!Array.isArray(allowedSkillIds)) {
@@ -595,7 +582,7 @@ export const ChatInput = memo(function ChatInput({
       ? [{ kind: 'goal', id: 'goal', name: t('goal.set') }] : [];
     return [...goalItems, ...skillItems];
   }, [allowedSkillIdSet, goal?.mode, goal?.supported, input, selectedSkills, skills, slashEnd, slashOpen, slashStart, t]);
-  const slashSkillsLoading = slashOpen && !skillsSnapshotReady;
+  const slashSkillsLoading = slashOpen && !skillsSnapshotReady && !skillsError;
 
   const rememberDraftSelection = useCallback((textarea = textareaRef.current) => {
     if (!onDraftSelectionChange || !textarea || !textarea.value) return;
@@ -633,11 +620,11 @@ export const ChatInput = memo(function ChatInput({
   }, [disabled, draftKey]);
 
   useEffect(() => {
-    if (!slashOpen || !skillsScope || skillsSnapshotReady || skillsInitialLoading) {
-      return;
-    }
-    void fetchSkills({ scope: skillsScope });
-  }, [fetchSkills, skillsInitialLoading, skillsScope, skillsSnapshotReady, slashOpen]);
+    if ((!slashOpen && !skillManagerOpen) || !skillsScope) return;
+    const state = useSkillsStore.getState();
+    if (state.scopeKey === buildCapabilityScopeKey(skillsScope) && state.snapshotReady && !state.error) return;
+    void fetchSkills({ scope: skillsScope, force: Boolean(state.error) });
+  }, [fetchSkills, skillManagerOpen, skillsScope, skillsScopeMatches, slashOpen]);
 
   useEffect(() => {
     if (!slashOpen || slashItems.length === 0) {
@@ -1791,8 +1778,7 @@ export const ChatInput = memo(function ChatInput({
     [stageBufferFiles, stageDroppedPathFiles],
   );
 
-  const placeholderText = reconnecting ? t('input.gatewayRecoveringNotice')
-    : goal?.mode && !disabled && !approvalWaiting ? t('goal.placeholder') : resolveInputPlaceholder(disabled, approvalWaiting, t);
+  const placeholderText = goal?.mode && !disabled && !approvalWaiting ? t('goal.placeholder') : t('input.messagePlaceholder');
 
   return (
     <div
@@ -1973,7 +1959,9 @@ export const ChatInput = memo(function ChatInput({
             )}
             {slashOpen && (
               <ComposerSuggestions anchorRef={textareaRef}>
-                {slashSkillsLoading && slashItems.length === 0 ? (
+                {skillsError && slashItems.length === 0 ? (
+                  <div role="alert" className="px-2.5 py-2 text-xs text-destructive">{t('skillConfigDialog.loadFailed')}</div>
+                ) : slashSkillsLoading && slashItems.length === 0 ? (
                   <div className="px-2.5 py-2 text-xs text-muted-foreground">{t('skillConfigDialog.loading')}</div>
                 ) : slashItems.length === 0 ? (
                   <div className="px-2.5 py-2 text-xs text-muted-foreground">{t('input.noSkillsFound')}</div>
@@ -2010,7 +1998,7 @@ export const ChatInput = memo(function ChatInput({
           </div>
 
           <div className={cn(CHAT_LAYOUT_TOKENS.inputActionsRow, 'chat-input-actions border-t border-border/35 pt-1.5')}>
-            <ChatInputStatus contextUsage={contextUsage} imageGenerationActive={imageGenerationActive} />
+            <ChatInputStatus contextUsage={contextUsage} />
             <div className="chat-input-toolbar w-full min-w-0">
               <ChatInputToolbar
                 key={`toolbar:${draftKey ?? ''}:${sessionIdentityKey ?? ''}`}
@@ -2083,6 +2071,7 @@ export const ChatInput = memo(function ChatInput({
             title={skillManager.title}
             skillOptions={skillManager.options}
             skillsLoading={skillManager.loading}
+            skillsError={skillManager.error}
             savingSkillId={skillManager.savingSkillId}
             selectedSkillIds={skillManager.selectedSkillIds}
             skillPreview={skillManager.skillPreview}

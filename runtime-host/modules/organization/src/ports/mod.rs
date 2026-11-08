@@ -35,6 +35,7 @@ pub use native_effects::{
     NativeEffectFailure, OrganizationNativeRuntime, OrganizationRuntimeDirectory,
     RoleSessionAbortOutcome, RoleSessionAbortReceipt, RoleSessionDeleteOutcome,
     RoleSessionDeleteReceipt, RoleSessionReadbackOutcome, RoleSessionReadbackReceipt,
+    RoleSessionCreationOutcome, RoleSessionSubmission,
     RuntimeReceiptOutcome, TeamActivityExecutor, TeamNativeEffectsPort,
 };
 pub use provision_progress::{

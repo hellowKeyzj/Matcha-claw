@@ -49,6 +49,10 @@ pub enum SessionQuery {
         command: crate::execution::SessionRunReadCommand,
         reply: oneshot::Sender<crate::execution::SessionRunReadOutcome>,
     },
+    ExecutionResult {
+        command: crate::execution::SessionRunReadCommand,
+        reply: oneshot::Sender<Option<crate::execution::SessionExecutionResult>>,
+    },
     /// Native cancellation control; never queued behind a session send.
     Abort {
         command: SessionAbortCommand,
@@ -106,6 +110,9 @@ impl SessionQuery {
             Self::ReadRun { reply, .. } => {
                 let _ = reply.send(crate::execution::SessionRunReadOutcome::Unavailable);
             }
+            Self::ExecutionResult { reply, .. } => {
+                let _ = reply.send(None);
+            }
             Self::Abort { reply, .. } => {
                 let _ = reply.send(SessionAbortOutcome::Unavailable);
             }
@@ -145,6 +152,7 @@ impl SessionQuery {
         match self {
             Self::Audited { query, .. } | Self::Producing { query, .. } => query.route(),
             Self::ReadRun { .. }
+            | Self::ExecutionResult { .. }
             | Self::Abort { .. }
             | Self::Thinking { .. }
             | Self::BoundaryOutcome { .. }

@@ -1,6 +1,12 @@
 {
   "title": "ワークスペース",
   "tabs": "ワークスペースのタブ",
+  "mainTabs": "メイン領域のタブ",
+  "sideTabs": "サイド領域のタブ",
+  "chat": "チャット",
+  "dragTabHint": "もう一方の領域にドラッグするか、Alt+Shift+矢印キーで移動",
+  "dropToMain": "離してメイン領域に移動",
+  "dropToSide": "離して右側に移動",
   "addPage": "ページを開く",
   "allTabs": "開いているすべてのタブ（{{count}}）",
   "closePage": "「{{title}}」を閉じる",

@@ -107,7 +107,24 @@ impl OpenClawConfigStore {
 
     pub(crate) fn ensure_canonical_document(&self) -> Result<(), OpenClawConfigStoreError> {
         self.update_private_document(|document| {
-            if super::config_defaults::apply_gateway_startup_defaults(document) {
+            if super::config_defaults::apply_gateway_startup_defaults(
+                document,
+                self.state_dir.as_path(),
+            ) {
+                OpenClawConfigMutation::changed()
+            } else {
+                OpenClawConfigMutation::unchanged()
+            }
+        })
+        .map(|_| ())
+    }
+
+    pub(crate) fn ensure_logging_defaults(&self) -> Result<(), OpenClawConfigStoreError> {
+        if !super::config_defaults::needs_logging_defaults(&self.read_private()?) {
+            return Ok(());
+        }
+        self.update_private_document(|document| {
+            if super::config_defaults::apply_logging_defaults(document, self.state_dir.as_path()) {
                 OpenClawConfigMutation::changed()
             } else {
                 OpenClawConfigMutation::unchanged()

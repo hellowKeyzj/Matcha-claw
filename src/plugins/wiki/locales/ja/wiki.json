@@ -1,4 +1,12 @@
 {
+  "Add credentials to the selected provider account": "選択したプロバイダーのアカウントに認証情報を設定してください",
+  "Provider credentials could not be read; check the provider account credentials": "プロバイダーの認証情報を読み取れません。アカウントの認証設定を確認してください",
+  "The text provider rejected its credentials; update the provider account credentials": "テキスト生成プロバイダーで認証に失敗しました。アカウントの認証情報を更新してください",
+  "The text provider denied this request; check account and model permissions": "テキスト生成プロバイダーがリクエストを拒否しました。アカウントとモデルの利用権限を確認してください",
+  "The text provider rate limit was reached; wait before retrying": "テキスト生成プロバイダーのリクエスト制限に達しました。しばらく待ってから再試行してください",
+  "Text generation exceeded its time limit; the provider request may already have occurred. Check the provider service before retrying": "テキスト生成がタイムアウトしました。プロバイダーでリクエストがすでに実行された可能性があります。サービスの状態を確認してから再試行してください",
+  "The text provider returned an invalid response; check the model and provider configuration": "テキスト生成プロバイダーから無効な応答が返されました。モデルとプロバイダーの設定を確認してください",
+  "The text provider is unavailable; check the provider service and connection": "テキスト生成プロバイダーを利用できません。サービスの状態とネットワーク接続を確認してください",
   "selection": {
     "title": "選択範囲アシスタント",
     "close": "選択範囲アシスタントを閉じる",
@@ -85,6 +93,7 @@
   "home": {
     "title": "資料ライブラリ",
     "search": "検索",
+    "noResults": "検索条件に一致する資料ライブラリがありません",
     "myLibraries": "自分の資料",
     "recent": "最近",
     "newLibrary": "資料ライブラリを作成",
@@ -133,6 +142,7 @@
   },
   "content": {
     "selectPage": "ページを選択",
+    "loading": "内容を読み込み中…",
     "history": "バージョン履歴",
     "previewUnavailable": "プレビューできません",
     "inlineUnsupported": "インラインプレビュー未対応",
@@ -339,7 +349,7 @@
     "cancelling": "キャンセルを要求中…",
     "cancelRequested": "キャンセル要求済み・停止を待機中",
     "cancelFailed": "キャンセルを確認できません。タスクを更新して状態を確認してから再試行してください。",
-    "readFailed": "進捗の更新は停止しています。バックグラウンドの状態は変更されていません。記録を更新して確認を再開してください。",
+    "readFailed": "一時的に進捗を読み取れません。バックグラウンドのタスクには影響しません。",
     "status": {
       "pending": "待機中",
       "running": "処理中",

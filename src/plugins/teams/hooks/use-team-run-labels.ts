@@ -25,19 +25,10 @@ function buildTeamRunLabels(
 ): Record<string, string> {
   const labels: Record<string, string> = {};
   for (const runs of Object.values(runsByTeamId)) {
-    const titles = runs.map((run) => {
+    for (const run of runs) {
       const leader = run.sessions.find((role) => role.roleId === 'leader');
-      return leader ? titleForIdentity(leader.sessionIdentity) : null;
-    });
-    const counts = new Map<string | null, number>();
-    for (const title of titles) counts.set(title, (counts.get(title) ?? 0) + 1);
-    runs.forEach((run, index) => {
-      const title = titles[index];
-      const shortId = run.runId.replace(/^teamrun-/, '').slice(0, 8);
-      labels[run.runId] = title === null
-        ? `${unnamedLabel} · ${shortId}`
-        : counts.get(title)! > 1 ? `${title} · ${shortId}` : title;
-    });
+      labels[run.runId] = (leader ? titleForIdentity(leader.sessionIdentity) : null) ?? unnamedLabel;
+    }
   }
   return labels;
 }
@@ -64,9 +55,9 @@ function createTeamRunLabelsSelector(runsByTeamId: Record<string, readonly TeamR
 }
 
 export function useTeamRunLabels(): Record<string, string> {
-  const { t } = useTranslation('teams');
+  const { t } = useTranslation('common');
   const runsByTeamId = useTeamsStore((state) => state.runListByTeamId);
-  const unnamedLabel = t('run.unnamed');
+  const unnamedLabel = t('sidebar.newSession');
   const selectLabels = useMemo(() => createTeamRunLabelsSelector(runsByTeamId, unnamedLabel), [runsByTeamId, unnamedLabel]);
   return useChatStore(useShallow(selectLabels));
 }

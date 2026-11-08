@@ -8,6 +8,7 @@ import { hostWikiReindexState, hostWikiStartReindex } from '@/lib/host-api';
 import type { CallReceipt } from '@/types/call-log';
 import type { WikiReindexState } from '@/types/wiki-capabilities';
 import { WikiSurface } from '@/plugins/wiki/components/WikiChrome';
+import { classifyWikiObservationFailure } from '@/plugins/wiki/observation-error';
 
 export type ReindexProgressProps = Readonly<{
   projectId: string;
@@ -26,6 +27,7 @@ function ReindexBody({ projectId, busy }: ReindexProgressProps): JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState('');
+  const [pollError, setPollError] = useState('');
   const [pollVersion, setPollVersion] = useState(0);
   const observing = useRef<AbortController | null>(null);
   const inflight = useRef<Promise<WikiReindexState> | null>(null);
@@ -43,13 +45,13 @@ function ReindexBody({ projectId, busy }: ReindexProgressProps): JSX.Element {
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let attempts = 0;
-    let failures = 0;
     const unconfirmed = () => new Error(t('reindex.unconfirmed', { defaultValue: '无法确认本次重建结果，请刷新查看；不要重复提交。' }));
     async function poll(): Promise<void> {
       let shouldContinue: boolean;
       try {
-        const reading = inflight.current ?? hostWikiReindexState({ projectId });
+        await inflight.current?.catch(() => undefined);
+        if (controller.signal.aborted) return;
+        const reading = hostWikiReindexState({ projectId });
         inflight.current = reading;
         let next: WikiReindexState;
         try {
@@ -58,15 +60,11 @@ function ReindexBody({ projectId, busy }: ReindexProgressProps): JSX.Element {
           if (inflight.current === reading) inflight.current = null;
         }
         if (controller.signal.aborted) return;
-        if (next.projectId !== projectId) throw unconfirmed();
+        if (next.projectId !== projectId || receipt && next.taskId !== receipt.callId) throw unconfirmed();
         setState(next);
-        setError('');
-        failures = 0;
         shouldContinue = next.status === 'running';
         if (receipt) {
-          if (next.taskId !== receipt.callId) {
-            shouldContinue = true;
-          } else if (next.status === 'done' || next.status === 'error') {
+          if (next.status === 'done' || next.status === 'error') {
             const call = await waitForCall(receipt, 'wiki', { signal: controller.signal, timeoutMs: null });
             if (controller.signal.aborted) return;
             if (call.command !== 'embedding.reindex' || call.detail.operation !== 'embedding.reindex' || call.status === 'unknown') throw unconfirmed();
@@ -77,16 +75,17 @@ function ReindexBody({ projectId, busy }: ReindexProgressProps): JSX.Element {
             shouldContinue = true;
           }
         }
-      } catch {
+        setPollError('');
+      } catch (cause) {
         if (controller.signal.aborted) return;
-        failures++;
+        const failure = classifyWikiObservationFailure(cause, unconfirmed().message);
+        setPollError(failure.message);
+        if (failure.reason === 'stopped') return;
         shouldContinue = true;
       }
       if (controller.signal.aborted) return;
-      if (shouldContinue && ++attempts < 300 && failures < 3) {
+      if (shouldContinue) {
         timer = setTimeout(() => { void poll(); }, 2000);
-      } else if (shouldContinue) {
-        setError(t('reindex.progressPaused', { defaultValue: '自动进度刷新已暂停；重建仍可能在后台执行，请点击刷新继续查看。' }));
       }
     }
     void poll();
@@ -139,6 +138,7 @@ function ReindexBody({ projectId, busy }: ReindexProgressProps): JSX.Element {
       </div>
       {state?.status === 'error' && matchesReceipt ? <p role="alert" className="text-xs text-destructive">{state.message || text('failed', '重建未完成；失败页面的旧索引已保留。')}</p> : null}
       {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
+      {pollError ? <p role="alert" className="text-xs text-destructive">{pollError}</p> : null}
     </WikiSurface>
   );
 }

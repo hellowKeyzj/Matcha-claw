@@ -2,7 +2,9 @@ import { createElement, lazy, Suspense } from 'react';
 import { Loader2, Workflow } from 'lucide-react';
 import i18n from '@/i18n';
 import { openWorkspacePage, type WorkspacePageRequest } from '@/plugins/workspace/actions';
-import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
+import type { SessionIdentity } from '@/types/desktop/runtime-address';
+import { useChatStore } from '@/plugins/chat/store';
+import { findSessionRecordKey } from '@/plugins/chat/session-catalog';
 
 export interface TeamGraphSurface {
   readonly kind: 'team-graph';
@@ -20,7 +22,14 @@ export function buildTeamGraphPageRequest(surface: TeamGraphSurface): WorkspaceP
   return {
     sessionIdentity: surface.sourceSessionIdentity,
     page: {
-      id: JSON.stringify(['team-graph', buildSessionIdentityKey(surface.sourceSessionIdentity), surface.teamId, surface.runId]),
+      id: JSON.stringify(['team-graph', surface.teamId, surface.runId]),
+      retainOnSessionChange: (identity) => {
+        if (!identity) return false;
+        const state = useChatStore.getState();
+        const recordKey = findSessionRecordKey(state, identity);
+        const ownership = recordKey ? state.loadedSessions[recordKey]?.meta.ownership : null;
+        return ownership?.kind === 'team' && ownership.teamId === surface.teamId && ownership.teamRunId === surface.runId;
+      },
       providerId: 'teams',
       title: surface.title || i18n.t('teams:run.graph'),
       icon: Workflow,

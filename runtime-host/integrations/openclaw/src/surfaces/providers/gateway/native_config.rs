@@ -18,6 +18,7 @@ use crate::{
         wire::{self, GatewayResponse},
     },
     native_config::{
+        agent_models::sort_models_by_id,
         config_store::OpenClawConfigDocument,
         provider_models::{
             ProviderModelProjection, ProviderModelProjectionError, canonical_provider_keys,
@@ -1060,6 +1061,7 @@ fn canonical_provider_entry(value: &Value) -> Value {
                 )
             });
         }
+        sort_models_by_id(models);
     }
     Value::Object(entry)
 }

@@ -14,6 +14,7 @@ import 'katex/dist/katex.min.css';
 import { initializeDefaultTransports } from './lib/api-client';
 import { isTraceEnabled, startupTrace } from './lib/trace-logger';
 import { applicationPluginsHost, observeApplicationPluginPackages } from './app/plugins';
+import type { PluginCleanup } from './plugin-host/core';
 import { PluginHostProvider } from './plugin-host/react';
 
 if (isTraceEnabled()) performance.mark('matchaclaw.renderer.module-body');
@@ -31,12 +32,12 @@ startupTrace('renderer.main', 'transport.init.end', () => ({
 // Install observers before any page can acquire a runtime observation.
 const stopBuiltinPlugins = applicationPluginsHost.start();
 const stopPackages = observeApplicationPluginPackages();
-const stopPlugins = () => {
+const stopPlugins: PluginCleanup = (reason) => {
   stopPackages();
-  stopBuiltinPlugins();
+  stopBuiltinPlugins(reason);
 };
 const onPageHide = (event: PageTransitionEvent) => {
-  if (!event.persisted) stopPlugins();
+  if (!event.persisted) stopPlugins('page-exit');
 };
 window.addEventListener('pagehide', onPageHide);
 

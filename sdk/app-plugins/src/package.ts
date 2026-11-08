@@ -63,7 +63,7 @@ function requireBoundedObject(value: unknown, label: string): Record<string, unk
 }
 
 export function validateAppPluginManifest(value: unknown): AppPluginManifest {
-  const manifest = requireObject(value, ['schemaVersion', 'id', 'name', 'version', 'description', 'apiVersion', 'main', 'backend', 'contributes']);
+  const manifest = requireObject(value, ['schemaVersion', 'id', 'name', 'version', 'description', 'apiVersion', 'minSdkVersion', 'main', 'backend', 'background', 'contributes']);
   requireValid(manifest.schemaVersion === 1, 'Only app plugin manifest schemaVersion 1 is supported.');
   requirePluginId(manifest.id);
   requireText(manifest.name, 120, 'plugin name');
@@ -71,6 +71,7 @@ export function validateAppPluginManifest(value: unknown): AppPluginManifest {
   requireValid(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(manifest.version), 'Plugin version must be a semantic version.');
   optionalText(manifest.description, 2000, 'plugin description');
   requireValid(manifest.apiVersion === undefined || manifest.apiVersion === 1, 'Only app plugin apiVersion 1 is supported.');
+  requireValid(manifest.minSdkVersion === undefined || (typeof manifest.minSdkVersion === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(manifest.minSdkVersion)), 'Minimum SDK version must use major.minor.patch.');
   if (manifest.main !== undefined) {
     requirePackagePath(manifest.main);
     requireValid(manifest.apiVersion === 1 && /\.(?:cjs|js)$/i.test(manifest.main), 'Plugin main requires apiVersion 1 and a package CommonJS .cjs or .js file.');
@@ -88,6 +89,7 @@ export function validateAppPluginManifest(value: unknown): AppPluginManifest {
         && ['x64', 'arm64'].includes(backend.arch as string), 'Rust backend requires a supported platform and architecture.');
     }
   }
+  requireValid(manifest.background === undefined || (manifest.background === true && (manifest.main !== undefined || manifest.backend !== undefined)), 'Background activation requires a declared backend and background: true.');
   const contributes = requireObject(manifest.contributes, ['readers', 'connectors', 'applications', 'chat', 'tools']);
   for (const key of ['readers', 'connectors', 'applications', 'tools'] as const) {
     requireValid(contributes[key] === undefined || (Array.isArray(contributes[key]) && contributes[key].length <= 32), `At most 32 ${key} are supported.`);
@@ -153,7 +155,7 @@ export function validateAppPluginManifest(value: unknown): AppPluginManifest {
   }
   const applicationIds = new Set<string>();
   for (const value of applications) {
-    const application = requireObject(value, ['id', 'name', 'entry', 'placement', 'imageEditor']);
+    const application = requireObject(value, ['id', 'name', 'entry', 'placement', 'scope', 'imageEditor']);
     requirePluginId(application.id);
     requireValid(!applicationIds.has(application.id), 'Duplicate application identifier.');
     applicationIds.add(application.id);
@@ -161,6 +163,7 @@ export function validateAppPluginManifest(value: unknown): AppPluginManifest {
     requirePackagePath(application.entry);
     requireValid(/\.html$/i.test(application.entry), 'Application entry must be a package HTML file.');
     requireValid(application.placement === undefined || ['page', 'chat-panel', 'both'].includes(application.placement as string), 'Invalid application placement.');
+    requireValid(application.scope === undefined || application.scope === 'session' || application.scope === 'workspace', 'Invalid application scope.');
     if (application.imageEditor !== undefined) {
       const editor = requireObject(application.imageEditor, ['label', 'tool', 'translations']);
       requireText(editor.label, 80, 'image editor label');

@@ -171,6 +171,7 @@ import {
 import { TEAMMATE_MESSAGE_TAG, TICK_TAG } from 'src/constants/xml.js'
 import {
   getSettings_DEPRECATED,
+  getSettingsForSource,
   getSettingsWithSources,
 } from 'src/utils/settings/settings.js'
 import { settingsChangeDetector } from 'src/utils/settings/changeDetector.js'
@@ -301,6 +302,7 @@ import {
   SDKControlTaskRequestSchema,
   SDKControlPrepareToSleepRequestSchema,
   SDKControlSetEffortRequestSchema,
+  SDKControlGetEffortCapabilitiesRequestSchema,
 } from 'src/entrypoints/sdk/controlSchemas.js'
 import { collectContextData } from 'src/commands/context/context-noninteractive.js'
 import { LOCAL_COMMAND_STDOUT_TAG } from 'src/constants/xml.js'
@@ -318,6 +320,7 @@ import { getModelOptions } from 'src/utils/model/modelOptions.js'
 import {
   getInitialEffortSetting,
   getModelEffortCapabilities,
+  getEffortCapabilities,
   resolveAdapterEffort,
   traceEffort,
 } from 'src/utils/effort.js'
@@ -1119,6 +1122,7 @@ function runHeadlessStreaming(
   let hasReplayableControlState = false
   let hasInitializationPromptState = false
   let hasSearchControlState = false
+  let hasPermissionControlState = false
   let pendingBackgroundOperations = 0
   function trackBackgroundOperation<T>(operation: Promise<T>): Promise<T> {
     pendingBackgroundOperations++
@@ -3428,6 +3432,11 @@ function runHeadlessStreaming(
       (getNodeEnv() === 'test' &&
         !isEnvTruthy(process.env.TEST_ENABLE_SESSION_PERSISTENCE)) ||
       hasSessionOnlyControlState ||
+      // The active permission mode is checked separately from its launch default.
+      (hasPermissionControlState && (!replayState?.permissions || !isEqual(
+        omit(replayState.permissions, 'defaultMode'),
+        omit({ deny: [], ...getSettingsForSource('flagSettings')?.permissions }, 'defaultMode'),
+      ))) ||
       (hasReplayableControlState && (!replayState || replayState.model === null)) ||
       (hasInitializationPromptState && !replayState?.initialization) ||
       (replayState?.initialization !== undefined && (
@@ -3695,6 +3704,23 @@ function runHeadlessStreaming(
           injectModelSwitchBreadcrumbs(requestedModel, model)
 
           sendControlResponseSuccess(msg)
+        } else if (msg.request.subtype === 'get_effort_capabilities') {
+          const parsed = SDKControlGetEffortCapabilitiesRequestSchema().safeParse(
+            req,
+          )
+          if (!parsed.success) {
+            sendControlResponseError(
+              msg,
+              'Invalid get_effort_capabilities request',
+            )
+            continue
+          }
+          const { model: requestedModel, effort } = parsed.data
+          const model =
+            requestedModel === 'default'
+              ? getDefaultMainLoopModel()
+              : parseUserSpecifiedModel(requestedModel)
+          sendControlResponseSuccess(msg, getEffortCapabilities(model, effort))
         } else if (msg.request.subtype === 'set_effort') {
           const parsed = SDKControlSetEffortRequestSchema().safeParse(req)
           if (!parsed.success) {
@@ -4763,10 +4789,10 @@ function runHeadlessStreaming(
             sendControlResponseSuccess(msg, {})
           }
         } else if (msg.request.subtype === 'apply_flag_settings') {
-          if (Object.keys(msg.request.settings).some(key => key !== 'webSearchAdapter' && key !== 'searxng')) {
-            hasSessionOnlyControlState = true
-          } else if (Object.keys(msg.request.settings).length > 0) {
-            hasSearchControlState = true
+          for (const key of Object.keys(msg.request.settings)) {
+            if (key === 'permissions') hasPermissionControlState = true
+            else if (key === 'webSearchAdapter' || key === 'searxng') hasSearchControlState = true
+            else hasSessionOnlyControlState = true
           }
           // Snapshot the current model before applying — we need to detect
           // model switches so we can inject breadcrumbs and notify listeners.

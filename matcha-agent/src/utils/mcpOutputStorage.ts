@@ -8,7 +8,12 @@ import type { MCPResultType } from '../services/mcp/client.js'
 import { toError } from './errors.js'
 import { formatFileSize } from './format.js'
 import { logError } from './log.js'
-import { ensureToolResultsDir, getToolResultsDir } from './toolResultStorage.js'
+import {
+  ensureToolResultsDir,
+  getOutputReadingInstructions,
+  getToolResultsDir,
+  type OutputLineStats,
+} from './toolResultStorage.js'
 
 /**
  * Generates a format description string based on the MCP result type and schema.
@@ -33,7 +38,8 @@ export function getFormatDescription(
  * @param rawOutputPath - Path to the saved output file
  * @param contentLength - Length of the content in characters
  * @param formatDescription - Description of the content format
- * @param maxReadLength - Optional max chars for Read tool (for Bash output context)
+ * @param maxReadLength - Optional max chars for shell output
+ * @param lineStats - Line count and longest line for raw text output
  * @returns Instruction text to include in the tool result
  */
 export function getLargeOutputInstructions(
@@ -41,11 +47,15 @@ export function getLargeOutputInstructions(
   contentLength: number,
   formatDescription: string,
   maxReadLength?: number,
+  lineStats?: OutputLineStats,
 ): string {
+  const sizeDescription = lineStats
+    ? `${contentLength.toLocaleString()} characters across ${lineStats.count.toLocaleString()} ${lineStats.count === 1 ? 'line' : 'lines'}`
+    : `${contentLength.toLocaleString()} characters`
   const baseInstructions =
-    `Error: result (${contentLength.toLocaleString()} characters) exceeds maximum allowed tokens. Output has been saved to ${rawOutputPath}.\n` +
+    `Error: result (${sizeDescription}) exceeds maximum allowed tokens. Output has been saved to ${rawOutputPath}.\n` +
     `Format: ${formatDescription}\n` +
-    `Use offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\n` +
+    `${getOutputReadingInstructions(lineStats, formatDescription.startsWith('JSON') ? rawOutputPath : undefined)}\n` +
     `REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n` +
     `- You MUST read the content from the file at ${rawOutputPath} in sequential chunks until 100% of the content has been read.\n`
 

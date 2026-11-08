@@ -9,12 +9,9 @@ use super::{
 };
 use crate::client::Event;
 use serde_json::{Value, json};
-use sessions_module::{
-    question::{QuestionAvailability, QuestionDelivery, QuestionTarget},
-    state::{
-        ApprovalPhase, ApprovalView, ItemAnchor, RuntimeIssue, RuntimeView, SessionChange,
-        SessionContent, SessionFact, SessionItem, SessionState, ToolView,
-    },
+use sessions_module::state::{
+    ItemAnchor, RuntimeIssue, RuntimeView, SessionChange, SessionContent, SessionFact, SessionItem,
+    SessionState, ToolView,
 };
 
 #[derive(Clone, Eq, PartialEq)]
@@ -89,39 +86,48 @@ pub(crate) fn project(
     let mut run_fact = None;
     match event.kind.as_str() {
         "native.message" | "cli.started" | "cli.exited" | "cli.fault" => {
-            if let Some(projected) = streaming.observe(event)? {
-                let items = items(state.items());
-                let replaced = |item: &SessionItem| {
-                    projected.retired.iter().any(|id| id == item.item_id())
-                        || projected
-                            .messages
-                            .iter()
-                            .any(|message| message.item.item_id() == item.item_id())
+            let items = items(state.items());
+            if let Some(projected) = streaming.observe(event, items)? {
+                let anchor = if projected.messages.is_empty() && projected.retired.is_empty() {
+                    ItemAnchor::Start
+                } else {
+                    let replaced = |item: &SessionItem| {
+                        projected.retired.iter().any(|id| id == item.item_id())
+                            || projected
+                                .messages
+                                .iter()
+                                .any(|message| message.item.item_id() == item.item_id())
+                    };
+                    let position = items.iter().position(replaced).unwrap_or(items.len());
+                    items[..position]
+                        .iter()
+                        .rev()
+                        .find(|item| !replaced(item))
+                        .map_or(ItemAnchor::Start, |item| ItemAnchor::After {
+                            item_id: item.item_id().to_owned(),
+                        })
                 };
-                let position = items.iter().position(replaced).unwrap_or(items.len());
-                let anchor = items[..position]
-                    .iter()
-                    .rev()
-                    .find(|item| !replaced(item))
-                    .map_or(ItemAnchor::Start, |item| ItemAnchor::After {
-                        item_id: item.item_id().to_owned(),
-                    });
                 let mut incoming_items = Vec::new();
-                let mut incoming_tools = Vec::new();
+                let mut incoming_tools = projected.tools;
                 for mut message in projected.messages {
+                    if !message.retain_transcript_item(&event.payload) {
+                        incoming_tools.extend(message.tools);
+                        continue;
+                    }
                     if let SessionItem::UserMessage {
                         input_ids, content, ..
                     } = &mut message.item
                     {
-                        if let Some(request_id) = input.request_id(&event.payload)
-                            && !content
-                                .iter()
-                                .any(|block| matches!(block, SessionContent::ToolResult { .. }))
+                        if !content
+                            .iter()
+                            .any(|block| matches!(block, SessionContent::ToolResult { .. }))
                         {
-                            input_ids.push(request_id.to_owned());
-                        } else {
-                            incoming_tools.extend(message.tools);
-                            continue;
+                            if let Some(request_id) = input.request_id(&event.payload) {
+                                input_ids.push(request_id.to_owned());
+                            } else {
+                                incoming_tools.extend(message.tools);
+                                continue;
+                            }
                         }
                     }
                     incoming_items.push(message.item);
@@ -194,6 +200,9 @@ pub(crate) fn project(
             if let Some(runtime) = runtime {
                 changes.push(SessionChange::RuntimeChanged { runtime });
             }
+            if let Some(timing) = run.timing() {
+                changes.push(SessionChange::RunTimingUpdated { timing });
+            }
             history_refresh = run.status.terminal();
             run_fact = Some(run);
         }
@@ -202,24 +211,11 @@ pub(crate) fn project(
             // Host's existing history_refresh -> session.resync path after this seq is consumed.
             history_refresh = true;
             if event.payload.get("category").and_then(Value::as_str) == Some("permission") {
-                let target = QuestionTarget {
-                    session_id: field(&event.payload, "sessionId").inspect_err(|error| {
-                        trace_failure(event, "interaction.session_id_field_invalid", error)
-                    })?,
-                    instance_id: field(&event.payload, "instanceId").inspect_err(|error| {
-                        trace_failure(event, "interaction.instance_id_field_invalid", error)
-                    })?,
-                    native_request_id: field(&event.payload, "nativeRequestId").inspect_err(
-                        |error| {
-                            trace_failure(
-                                event,
-                                "interaction.native_request_id_field_invalid",
-                                error,
-                            )
-                        },
-                    )?,
-                };
-                if target.session_id != event.session_id {
+                let pending: interaction::Pending = rpc::decode(event.payload.clone())
+                    .inspect_err(|error| {
+                        trace_failure(event, "interaction.receipt_invalid", error)
+                    })?;
+                if pending.session_id != event.session_id {
                     trace_failure(
                         event,
                         "interaction.session_mismatch",
@@ -227,31 +223,10 @@ pub(crate) fn project(
                     );
                     return Err(Failure::InvalidReadback);
                 }
-                let receipt = interaction::receipt(&event.payload, &target)
-                    .ok_or(Failure::InvalidReadback)
-                    .inspect_err(|error| {
-                        trace_failure(event, "interaction.receipt_invalid", error)
-                    })?;
-                let approval_id = interaction::approval_id(&target).inspect_err(|error| {
-                    trace_failure(event, "interaction.approval_id_invalid", error)
-                })?;
-                let requested = receipt.availability == QuestionAvailability::Pending
-                    && receipt.delivery == QuestionDelivery::NotSent;
                 changes.push(SessionChange::ApprovalUpdated {
-                    approval: ApprovalView {
-                        approval_id,
-                        run_id: receipt.run_id,
-                        phase: if requested {
-                            ApprovalPhase::Requested
-                        } else {
-                            ApprovalPhase::Resolved
-                        },
-                        option_ids: if requested {
-                            vec!["allow".into(), "deny".into()]
-                        } else {
-                            Vec::new()
-                        },
-                    },
+                    approval: pending.approval().inspect_err(|error| {
+                        trace_failure(event, "interaction.approval_id_invalid", error)
+                    })?,
                 });
             }
         }
@@ -292,13 +267,6 @@ pub(crate) fn trace_kind(kind: &str) -> &'static str {
         "interaction.instance_closed" => "interaction.instance_closed",
         _ => "other",
     }
-}
-fn field(value: &Value, key: &str) -> Result<String, Failure> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or(Failure::InvalidReadback)
 }
 pub(crate) fn run_runtime(
     run: &RunRecord,

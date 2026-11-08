@@ -6,11 +6,10 @@ export type FileState = {
   timestamp: number
   offset: number | undefined
   limit: number | undefined
-  // True when this entry was populated by auto-injection (e.g. CLAUDE.md) and
-  // the injected content did not match disk (stripped HTML comments, stripped
-  // frontmatter, truncated MEMORY.md). The model has only seen a partial view;
-  // Edit/Write must require an explicit Read first. `content` here holds the
-  // RAW disk bytes (for getChangedFiles diffing), not what the model saw.
+  // True when the model has only seen a partial view: transformed auto-injection
+  // (e.g. CLAUDE.md) or a token-capped Read. Edit/Write must require an explicit
+  // non-truncated Read first. Auto-injection stores raw disk content for diffing;
+  // a token-capped Read stores only the returned excerpt.
   isPartialView?: boolean
 }
 

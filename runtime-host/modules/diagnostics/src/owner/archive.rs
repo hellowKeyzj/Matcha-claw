@@ -84,16 +84,35 @@ impl ActiveArchive {
         let id = self.id;
         let completion = self.completion.clone();
         let (task, _) = OwnedTask::spawn(move |task_cancellation| async move {
-            let result = match host.state().await {
-                Ok(state) => {
+            tokio::pin!(admission_closed);
+            let snapshot = async {
+                let state = host.state().await?;
+                let runtime_logs = host.runtime_log_snapshot().await;
+                Ok::<_, DiagnosticsArchiveError>((state, runtime_logs))
+            };
+            let snapshot = tokio::select! {
+                biased;
+                _ = &mut admission_closed => {
+                    cancellation.cancel();
+                    None
+                }
+                _ = task_cancellation.cancelled() => {
+                    cancellation.cancel();
+                    None
+                }
+                _ = cancellation.cancelled() => None,
+                snapshot = snapshot => Some(snapshot),
+            };
+            let result = match snapshot {
+                Some(Ok((state, runtime_logs))) => {
                     let archive_cancellation = cancellation.clone();
-                    let admission = producer.admit(state);
+                    let admission = producer.admit(state).with_runtime_logs(runtime_logs);
                     let mut collection = tokio::task::spawn_blocking(move || {
                         admission.collect(&archive_cancellation)
                     });
                     tokio::select! {
                         result = &mut collection => result.map_err(|_| DiagnosticsArchiveError::OutputUnavailable),
-                        _ = admission_closed => {
+                        _ = &mut admission_closed => {
                             cancellation.cancel();
                             collection.await.map_err(|_| DiagnosticsArchiveError::OutputUnavailable)
                         }
@@ -101,9 +120,13 @@ impl ActiveArchive {
                             cancellation.cancel();
                             collection.await.map_err(|_| DiagnosticsArchiveError::OutputUnavailable)
                         }
+                        _ = cancellation.cancelled() => {
+                            collection.await.map_err(|_| DiagnosticsArchiveError::OutputUnavailable)
+                        }
                     }
                 }
-                Err(_) => Err(DiagnosticsArchiveError::OutputUnavailable),
+                Some(Err(_)) => Err(DiagnosticsArchiveError::OutputUnavailable),
+                None => DiagnosticsArchiveReceipt::cancelled(),
             };
             let mut current = archive.lock().await;
             if current.as_ref().is_some_and(|candidate| candidate.id == id) {

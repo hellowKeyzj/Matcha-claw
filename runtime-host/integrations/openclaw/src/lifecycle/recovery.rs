@@ -11,7 +11,10 @@ use foundation::process::supervision::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::logs::{LifecycleDiagnostic, LifecycleDiagnosticCategory, LifecycleDiagnosticState};
+use super::logs::{
+    LifecycleDiagnostic, LifecycleDiagnosticCategory, LifecycleDiagnosticState, LifecycleLogBuffer,
+    LogStream,
+};
 
 const MAX_STARTUP_RETRIES: u8 = 2;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -28,6 +31,7 @@ enum StartupFailure {
 pub struct OpenClawStartRecovery {
     first_episode_attempts: Arc<AtomicU8>,
     diagnostics: LifecycleDiagnosticState,
+    logs: Option<LifecycleLogBuffer>,
 }
 
 impl OpenClawStartRecovery {
@@ -39,6 +43,17 @@ impl OpenClawStartRecovery {
         Self {
             first_episode_attempts: Arc::new(AtomicU8::new(0)),
             diagnostics,
+            logs: None,
+        }
+    }
+
+    pub(crate) fn with_log_buffer(
+        diagnostics: LifecycleDiagnosticState,
+        logs: LifecycleLogBuffer,
+    ) -> Self {
+        Self {
+            logs: Some(logs),
+            ..Self::with_diagnostics(diagnostics)
         }
     }
 }
@@ -57,12 +72,13 @@ impl StartRecovery for OpenClawStartRecovery {
     ) -> PolicyFuture<StartRecoveryResult> {
         let first_episode_attempts = Arc::clone(&self.first_episode_attempts);
         let diagnostics = self.diagnostics.clone();
+        let logs = self.logs.clone();
 
         Box::pin(async move {
             if cancellation.is_cancelled() {
                 return StartRecoveryResult::Cancelled;
             }
-            match classify_startup_failure_with_diagnostics(&failure, &diagnostics) {
+            let result = match classify_startup_failure_with_diagnostics(&failure, &diagnostics) {
                 failure if is_recoverable_startup_failure(failure) => {
                     match first_episode_attempts.fetch_update(
                         Ordering::Relaxed,
@@ -76,7 +92,16 @@ impl StartRecovery for OpenClawStartRecovery {
                     }
                 }
                 _ => StartRecoveryResult::Fail,
+            };
+            if let Some(logs) = logs {
+                logs.append(
+                    LogStream::Stderr,
+                    format!("[gateway] startup recovery failure={failure:?} decision={result:?}")
+                        .as_bytes(),
+                );
+                logs.flush().await;
             }
+            result
         })
     }
 }

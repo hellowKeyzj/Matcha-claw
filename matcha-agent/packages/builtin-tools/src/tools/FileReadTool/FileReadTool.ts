@@ -89,11 +89,13 @@ import { matchWildcardPattern } from 'src/utils/permissions/shellRuleMatching.js
 import { readFileInRange } from 'src/utils/readFileInRange.js'
 import { semanticNumber } from 'src/utils/semanticNumber.js'
 import { jsonStringify } from 'src/utils/slowOperations.js'
+import { countCharInString } from 'src/utils/stringUtils.js'
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
 import { getDefaultFileReadingLimits } from './limits.js'
 import {
   DESCRIPTION,
   FILE_READ_TOOL_NAME,
+  FILE_READ_TOKEN_CAP_PREFIX,
   FILE_UNCHANGED_STUB,
   LINE_FORMAT_INSTRUCTION,
   OFFSET_INSTRUCTION_DEFAULT,
@@ -281,6 +283,12 @@ const outputSchema = lazySchema(() => {
           .describe('Number of lines in the returned content'),
         startLine: z.number().describe('The starting line number'),
         totalLines: z.number().describe('Total number of lines in the file'),
+        truncatedByTokenCap: z
+          .boolean()
+          .optional()
+          .describe(
+            'True when a whole-file read was auto-paginated because it exceeded the token cap (the content is a partial first page). A programmatic signal for internal consumers; survives output reconstruction (unlike the render-time banner).',
+          ),
       }),
     }),
     z.object({
@@ -353,10 +361,8 @@ export type Output = z.infer<OutputSchema>
 export const FileReadTool = buildTool({
   name: FILE_READ_TOOL_NAME,
   searchHint: 'read files, images, PDFs, notebooks',
-  // Output is bounded by maxTokens (validateContentTokens). Results exceeding
-  // 100KB are persisted to disk (reducing memory pressure in long sessions)
-  // rather than kept in the message array indefinitely.
-  maxResultSizeChars: 100_000,
+  // Text and media have their own budgets; do not persist a bounded Read again.
+  maxResultSizeChars: Infinity,
   strict: true,
   async description() {
     return DESCRIPTION
@@ -829,8 +835,21 @@ export const FileReadTool = buildTool({
         }
         let content: string
 
-        if (data.file.content) {
-          content = memoryFileFreshnessPrefix(data) + formatFileLines(data.file)
+        if (data.file.truncatedByTokenCap) {
+          const warning =
+            tokenCapWarnings.get(data) ??
+            (data.file.numLines < data.file.totalLines
+              ? `${data.file.filePath}: showing ${data.file.numLines} of ${data.file.totalLines} lines. Call ${FILE_READ_TOOL_NAME} with offset/limit to page through. Do NOT answer from this page alone if the answer may be further in the file.`
+              : `${data.file.filePath}: this view is incomplete and the file cannot be paginated by line. Do NOT answer from this view alone if the answer may be elsewhere in the file.`)
+          content =
+            `<system-reminder>${FILE_READ_TOKEN_CAP_PREFIX}${warning}]</system-reminder>\n` +
+            memoryFileFreshnessPrefix(data) +
+            formatFileLines(data.file)
+        } else if (data.file.content) {
+          content =
+            `<system-reminder>Read lines ${data.file.startLine}-${data.file.startLine + data.file.numLines - 1} of ${data.file.totalLines} total.</system-reminder>\n` +
+            memoryFileFreshnessPrefix(data) +
+            formatFileLines(data.file)
         } else {
           // Determine the appropriate warning message
           content =
@@ -884,6 +903,7 @@ function formatFileLines(file: { content: string; startLine: number }): string {
  * when the data object becomes unreachable after rendering.
  */
 const memoryFileMtimes = new WeakMap<object, number>()
+const tokenCapWarnings = new WeakMap<object, string>()
 
 function memoryFileFreshnessPrefix(data: object): string {
   const mtimeMs = memoryFileMtimes.get(data)
@@ -917,6 +937,59 @@ async function validateContentTokens(
 
   if (effectiveCount > effectiveMaxTokens) {
     throw new MaxFileReadTokenExceededError(effectiveCount, effectiveMaxTokens)
+  }
+}
+
+function truncateTextToTokenBudget(
+  content: string,
+  error: MaxFileReadTokenExceededError,
+): { content: string; numLines: number; isCharacterFragment: boolean } {
+  const lines = content.split('\n')
+  const charsPerToken = Math.max(
+    0.5,
+    content.length / Math.max(1, error.tokenCount),
+  )
+  const estimateTokens = (prefix: string): number =>
+    prefix.length / charsPerToken
+  let numLines = Math.max(
+    1,
+    Math.min(
+      lines.length,
+      Math.floor(
+        ((lines.length * error.maxTokens) / Math.max(1, error.tokenCount)) *
+          0.85,
+      ),
+    ),
+  )
+  let prefix = lines.slice(0, numLines).join('\n')
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (estimateTokens(prefix) <= error.maxTokens || numLines <= 1) break
+    numLines = Math.max(1, Math.floor(numLines * 0.7))
+    prefix = lines.slice(0, numLines).join('\n')
+  }
+  let isCharacterFragment = false
+  if (estimateTokens(prefix) > error.maxTokens || prefix.trim() === '') {
+    let numChars = Math.max(
+      1,
+      Math.floor(error.maxTokens * charsPerToken * 0.85),
+    )
+    for (let attempt = 0; attempt < 6; attempt++) {
+      prefix = content.slice(0, numChars)
+      if (estimateTokens(prefix) <= error.maxTokens) break
+      numChars = Math.max(1, Math.floor(numChars * 0.7))
+    }
+    const lastCodeUnit = prefix.charCodeAt(prefix.length - 1)
+    if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
+      prefix = prefix.slice(0, -1)
+    }
+    isCharacterFragment = true
+  }
+  return {
+    content: prefix,
+    numLines: isCharacterFragment
+      ? countCharInString(prefix, '\n') + 1
+      : numLines,
+    isCharacterFragment,
   }
 }
 
@@ -1167,22 +1240,45 @@ async function callInner(
 
   // --- Text file (single async read via readFileInRange) ---
   const lineOffset = offset === 0 ? 0 : offset - 1
-  const { content, lineCount, totalLines, totalBytes, readBytes, mtimeMs } =
-    await readFileInRange(
-      resolvedFilePath,
-      lineOffset,
-      limit,
-      limit === undefined ? maxSizeBytes : undefined,
-      context.abortController.signal,
-    )
+  const result = await readFileInRange(
+    resolvedFilePath,
+    lineOffset,
+    limit,
+    limit === undefined ? maxSizeBytes : undefined,
+    context.abortController.signal,
+  )
+  const { totalLines, totalBytes, mtimeMs } = result
+  let { content, lineCount, readBytes } = result
+  let tokenCapWarning: string | undefined
 
-  await validateContentTokens(content, ext, maxTokens)
+  try {
+    await validateContentTokens(content, ext, maxTokens)
+  } catch (error) {
+    if (
+      !(error instanceof MaxFileReadTokenExceededError) ||
+      offset > 1 ||
+      limit !== undefined ||
+      pages !== undefined
+    ) {
+      throw error
+    }
+    const prefix = truncateTextToTokenBudget(content, error)
+    content = prefix.content
+    lineCount = prefix.numLines
+    readBytes = Buffer.byteLength(content)
+    limit = lineCount
+    tokenCapWarning =
+      !prefix.isCharacterFragment && lineCount < totalLines
+        ? `${file_path}: showing lines 1-${lineCount} of ${totalLines} total (${error.tokenCount} tokens, cap ${maxTokens}). Call ${FILE_READ_TOOL_NAME} with offset=${lineCount + 1} limit=${lineCount} for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.`
+        : `${file_path}: showing the first ${content.length} of ${result.content.length} characters (${error.tokenCount} tokens, cap ${maxTokens}); this file has very long lines and cannot be paginated by line. Use Grep to find a specific section, or ${FILE_READ_TOOL_NAME} with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.`
+  }
 
   readFileState.set(fullFilePath, {
     content,
     timestamp: Math.floor(mtimeMs),
     offset,
     limit,
+    ...(tokenCapWarning !== undefined && { isPartialView: true }),
   })
   context.nestedMemoryAttachmentTriggers?.add(fullFilePath)
 
@@ -1198,9 +1294,13 @@ async function callInner(
       filePath: file_path,
       content,
       numLines: lineCount,
-      startLine: offset,
+      startLine: tokenCapWarning !== undefined ? Math.max(1, offset) : offset,
       totalLines,
+      ...(tokenCapWarning !== undefined && { truncatedByTokenCap: true }),
     },
+  }
+  if (tokenCapWarning !== undefined) {
+    tokenCapWarnings.set(data, tokenCapWarning)
   }
   if (isAutoMemFile(fullFilePath)) {
     memoryFileMtimes.set(data, mtimeMs)

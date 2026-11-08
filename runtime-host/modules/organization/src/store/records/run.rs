@@ -148,6 +148,8 @@ pub(crate) fn restore_runs(records: &[StoredRecord], contents: &ContentStore) ->
             header.gate,
         )
         .map_err(|_| StoreFault::InvalidFacts)?;
+        run.restore_role_session_intents(header.role_session_intents)
+            .map_err(|_| StoreFault::InvalidFacts)?;
         run.restore_retired_executions(header.retired_executions)
             .map_err(|_| StoreFault::InvalidFacts)?;
         run.restore_task_execution_context(header.task_execution_context)
@@ -172,7 +174,13 @@ pub(crate) fn apply_changes(run: &mut GraphRunFacts, changes: &[RecordChange], c
                         if run.task_execution_context() != header.task_execution_context.as_ref() {
                             return Err(StoreFault::InvalidFacts);
                         }
+                        let previous_runtime = run.runtime().cloned();
+                        let previous_intents = run.role_session_intents().clone();
                         run.replace_header(header.team, header.revision, header.runtime, header.lifecycle, header.gate);
+                        run.restore_role_session_intents(header.role_session_intents)
+                            .map_err(|_| StoreFault::InvalidFacts)?;
+                        run.validate_session_transition(previous_runtime.as_ref(), &previous_intents)
+                            .map_err(|_| StoreFault::InvalidFacts)?;
                     }
                     RecordKind::GraphDefinition => {
                         if !row.key.id.is_empty() { return Err(StoreFault::InvalidFacts); }

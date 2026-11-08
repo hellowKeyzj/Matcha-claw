@@ -231,6 +231,9 @@
     "actionFailed": "Действие не завершено: {{error}}"
   },
   "chat": {
+    "leader": "Лидер",
+    "memberSessions": "Диалоги участников команды",
+    "moreMembers": "Другие участники",
     "teamNotFound": "Team not found",
     "backToList": "Back to Teams",
     "runStatus": "Run status",
@@ -370,6 +373,13 @@
       "sessionRef": "Сессия участника",
       "selectRole": "Выберите участника",
       "selectSession": "Выберите сессию",
+      "defaultSession": "Сессия по умолчанию",
+      "numberedSession": "Сессия {{number}}",
+      "sessionUnavailable": "Эта сессия больше недоступна",
+      "createSession": "Новая сессия",
+      "creatingSession": "Создание сессии",
+      "retryCreateSession": "Повторить создание",
+      "createSessionFailed": "Не удалось подтвердить создание сессии. Повторите попытку. Черновик узла сохранён.",
       "noRoleBindings": "Нет доступных участников",
       "invalidBinding": "Недоступно: {{value}}",
       "roleBindingRequired": "Выберите доступного участника и его сессию.",

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode, type RefObject } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatSessionRuntimeState } from '@/plugins/chat/store';
@@ -70,6 +70,8 @@ function localizeGatewayIssueByCode(
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string | null {
   switch (issue.code) {
+    case 'session.runtime.unknown':
+      return t('errors.runOutcomeUnknown');
     case 'MODEL_UNAVAILABLE':
       return t('errors.modelUnavailable');
     case 'AUTH_REQUIRED':
@@ -168,16 +170,10 @@ function buildRunProgressPendingLabel(
   runProgress: ChatSessionRuntimeState['runProgress'],
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string | null {
-  if (!runProgress) {
-    return null;
-  }
-  if (runProgress.kind === 'retrying') {
-    return t('pending.retrying', {
-      attempt: runProgress.attempt,
-      maxAttempts: runProgress.maxAttempts,
-    });
-  }
-  return t(`pending.startup.${runProgress.phase}`);
+  return runProgress?.kind === 'retrying' ? t('pending.retrying', {
+    attempt: runProgress.attempt,
+    maxAttempts: runProgress.maxAttempts,
+  }) : null;
 }
 
 async function fetchChatMarkdownExportWindow(input: {
@@ -349,11 +345,6 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
     });
     return composerSubmission.status === 'submitting' ? item : { ...item, status: undefined };
   }, [composerSubmission, currentConversation, currentSession.window.isAtLatest, currentSessionRecordKey, currentWorkspaceDraftId, viewportItems]);
-  const submissionPendingLabel = submissionItem && composerSubmission?.status === 'submitting'
-    && composerInitialization?.operationId === composerSubmission.operationId
-    ? composerInitialization?.kind === 'creating' ? t('pending.creatingSession')
-      : composerInitialization?.kind === 'pending' && !composerInitialization.outcome ? t('pending.configuringSession') : null
-    : null;
   const scrollScopeKey = currentWorkspaceDraftId ? `composer-draft:${currentWorkspaceDraftId}` : currentSessionRecordKey;
   const liveView = useChatView({
     currentSessionKey: currentSessionRecordKey,
@@ -400,17 +391,20 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
     ? getSessionProjectionWatermark(useChatStore.getState, currentSession.meta.sessionIdentity) : null;
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
-    logSessionTrace('session.presentation.committed', 'session-presentation-boundary', () => ({
-      identity: summarizeSessionIdentity(connectorSessionIdentity), recordKey: summarizeIdentifier(currentSessionRecordKey),
-      projectionWatermark: presentationWatermark, // epoch:public seq:public cursor captured by this render, not a later store read.
-      boundary: 'react-passive-effect-after-commit', // Not a compositor/physical presentation acknowledgement.
-      runtimePhase: currentSession.runtime.runPhase, activeRunHash: summarizeIdentifier(currentSession.runtime.activeRunId).hash,
-      pendingTurnHash: summarizeIdentifier(currentSession.runtime.pendingTurnKey).hash,
-      viewport: summarizeRenderItems(viewportItems), presentation: summarizeRenderItems(renderItems),
-      placeholderHashes: renderItems.slice(0, 200).filter((item) => !viewportItems.some((original) => original.key === item.key))
-        .map((item) => summarizeIdentifier(item.key).hash),
-      placeholderCount: renderItems.length - viewportItems.length,
-    }));
+    logSessionTrace('session.presentation.committed', 'session-presentation-boundary', () => {
+      const viewportKeys = new Set(viewportItems.map((item) => item.key));
+      return {
+        identity: summarizeSessionIdentity(connectorSessionIdentity), recordKey: summarizeIdentifier(currentSessionRecordKey),
+        projectionWatermark: presentationWatermark, // epoch:public seq:public cursor captured by this render, not a later store read.
+        boundary: 'react-passive-effect-after-commit', // Not a compositor/physical presentation acknowledgement.
+        runtimePhase: currentSession.runtime.runPhase, activeRunHash: summarizeIdentifier(currentSession.runtime.activeRunId).hash,
+        pendingTurnHash: summarizeIdentifier(currentSession.runtime.pendingTurnKey).hash,
+        viewport: summarizeRenderItems(viewportItems), presentation: summarizeRenderItems(renderItems),
+        placeholderHashes: renderItems.slice(0, 200).filter((item) => !viewportKeys.has(item.key))
+          .map((item) => summarizeIdentifier(item.key).hash),
+        placeholderCount: renderItems.length - viewportItems.length,
+      };
+    });
   }, [connectorSessionIdentity, currentSession.runtime, currentSessionRecordKey, presentationWatermark, renderItems, viewportItems]);
   const localizedRuntimeError = useMemo(() => {
     const hasRuntimeError = hasVisibleRuntimeError({
@@ -552,56 +546,64 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
       }
     })();
   }, [assistantCatalogAgents, contextTags, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.meta.displayName, currentSession.meta.label, currentSession.window, currentSessionConversation, currentSessionRecordKey, exportingMarkdown, t, viewportItems]);
+  // Export the latest committed message/window snapshot without invalidating the header on every tool delta.
+  const exportMarkdownHandlerRef = useRef(handleExportMarkdown);
+  useLayoutEffect(() => { exportMarkdownHandlerRef.current = handleExportMarkdown; }, [handleExportMarkdown]);
+  const exportMarkdown = useCallback(() => exportMarkdownHandlerRef.current(), []);
   const handleReuseMessage = useCallback((text: string) => { composerRef.current?.replaceText(text); }, [composerRef]);
   const runtimeActionsMatchRenderedSession = !!currentWorkspaceIdentity && !!currentSession.meta.sessionIdentity
     && sessionIdentitiesEqual(currentWorkspaceIdentity, currentSession.meta.sessionIdentity);
-  const headerProps = {
+  const headerProps = useMemo(() => ({
     showThinking,
     onToggleThinking: toggleThinking,
     exportDisabled: exportingMarkdown || !currentSessionRecordKey,
-    onExportMarkdown: handleExportMarkdown,
+    onExportMarkdown: exportMarkdown,
     todoPanel: <SessionTodoPanel sessionKey={currentSessionRecordKey} />,
-  };
+  }), [currentSessionRecordKey, exportMarkdown, exportingMarkdown, showThinking, toggleThinking]);
+  const handleLoadOlder = useCallback(() => { if (currentSessionRecordKey) void loadOlderViewportItems(currentSessionRecordKey); }, [currentSessionRecordKey, loadOlderViewportItems]);
+  const handleJumpToLatest = useCallback(() => { if (currentSessionRecordKey) void jumpViewportToLatest(currentSessionRecordKey); }, [currentSessionRecordKey, jumpViewportToLatest]);
   const renderViewport = useCallback((artifacts: ChatArtifactViewportContent) => <ChatList
     ref={viewportPaneRef}
     isActive={workspaceActive}
     currentSessionKey={currentSessionRecordKey}
     scrollScopeKey={scrollScopeKey}
-    submissionPending={submissionItem && submissionPendingLabel ? { itemKey: submissionItem.key, label: submissionPendingLabel } : undefined}
     runtime={currentSession.runtime}
     viewport={currentSession.window}
     items={renderItems}
+    runTimings={currentSession.runTimings}
+    activeRunId={isRunActive(currentSession.runtime) ? currentSession.runtime.activeRunId : null}
     activity={sessionPending?.kind === 'activity' ? sessionPending.mode : null}
     assistantPresentation={assistantPresentation}
     onReuseMessage={handleReuseMessage}
     onRuntimeSendMessage={runtimeActionsMatchRenderedSession ? onRuntimeSendMessage : undefined}
     onRuntimeOpenLink={runtimeActionsMatchRenderedSession ? onRuntimeOpenLink : undefined}
     liveView={liveView}
-    errorMessage={localizedRuntimeError}
+    errorMessage={liveView.showBlockingError ? t('errors.historyUnavailable') : localizedRuntimeError}
     showThinking={showThinking}
     userAvatarDataUrl={userAvatarDataUrl}
     sessionIdentity={currentSession.meta.sessionIdentity ?? undefined}
     endpointSessionId={currentSession.meta.endpointSessionId}
-    onLoadOlder={() => { if (currentSessionRecordKey) void loadOlderViewportItems(currentSessionRecordKey); }}
+    onLoadOlder={handleLoadOlder}
     loadOlderLabel={t('liveThread.loadOlder')}
-    onJumpToLatest={() => { if (currentSessionRecordKey) void jumpViewportToLatest(currentSessionRecordKey); }}
+    onJumpToLatest={handleJumpToLatest}
     jumpToBottomLabel={t('liveThread.jumpToBottom')}
     workspaceContext={artifacts.workspaceContext}
     artifactGroups={artifacts.artifactGroups}
     onOpenArtifactFile={artifacts.onOpenArtifactFile}
     onOpenAttachedArtifact={artifacts.onOpenAttachedArtifact}
   />, [assistantPresentation, currentSession.meta.endpointSessionId, currentSession.meta.sessionIdentity,
-    currentSession.runtime, currentSession.window, currentSessionRecordKey, handleReuseMessage, jumpViewportToLatest,
-    liveView, loadOlderViewportItems, localizedRuntimeError, onRuntimeOpenLink, onRuntimeSendMessage, renderItems,
-    runtimeActionsMatchRenderedSession, scrollScopeKey, sessionPending, showThinking, submissionPendingLabel, submissionItem, t, userAvatarDataUrl, viewportPaneRef, workspaceActive]);
+    currentSession.runTimings, currentSession.runtime, currentSession.window, currentSessionRecordKey, handleJumpToLatest, handleLoadOlder, handleReuseMessage,
+    liveView, localizedRuntimeError, onRuntimeOpenLink, onRuntimeSendMessage, renderItems,
+    runtimeActionsMatchRenderedSession, scrollScopeKey, sessionPending, showThinking, t, userAvatarDataUrl, viewportPaneRef, workspaceActive]);
+  const emptyState = useMemo(() => <WelcomeScreen />, []);
+  const isEmptyState = liveView.isEmptyState && chatQuestions.questions.length === 0 && !chatQuestions.error && sessionQuestions.questions.length === 0 && !sessionQuestions.error;
+  const renderArtifactSlots = useCallback(({ viewportPane }: ChatArtifactSlots) => children({
+    viewportPane, headerProps, input, isEmptyState, emptyState,
+  }), [children, emptyState, headerProps, input, isEmptyState]);
   return (
     <AssistantPendingLabelProvider label={pendingRunProgressLabel}>
       <ChatArtifacts renderItems={renderItems} renderViewport={renderViewport}>
-        {({ viewportPane }) => children({
-          viewportPane, headerProps, input,
-          isEmptyState: liveView.isEmptyState && chatQuestions.questions.length === 0 && !chatQuestions.error && sessionQuestions.questions.length === 0 && !sessionQuestions.error,
-          emptyState: <WelcomeScreen />,
-        })}
+        {renderArtifactSlots}
       </ChatArtifacts>
     </AssistantPendingLabelProvider>
   );

@@ -11,6 +11,9 @@ import type { AppPluginAgentGateway } from '../main/app-plugins/agent-gateway';
 import type { AppPluginHost } from '../main/app-plugins/host';
 import type { ChannelAuthorizationActions } from '../main/channels/authorization';
 import type { AppTextModelRequest, AppTextModelResult } from '../../src/types/desktop/app-plugin-sdk';
+import type { AccessOwner } from '../main/access';
+import type { createNetworkAccess } from '../main/network-access';
+import type { createInterconnect } from '../main/interconnect';
 
 export type { RuntimeHostLifecycle } from '../main/runtime-host-delivery/lifecycle-owner';
 import type { RuntimeHostLifecycle } from '../main/runtime-host-delivery/lifecycle-owner';
@@ -24,6 +27,9 @@ export interface HostApiContext {
   cloudAccountService?: CloudAccountService;
   appPlugins: ApplicationPluginOwner;
   appPluginHost: AppPluginHost;
+  access: AccessOwner;
+  networkAccess: ReturnType<typeof createNetworkAccess>;
+  interconnect: ReturnType<typeof createInterconnect>;
   appPluginAgentGateway: Promise<AppPluginAgentGateway>;
   eventBus: HostEventBus;
   runtimeHost: RuntimeHostLifecycle;
@@ -37,7 +43,7 @@ export interface HostApiContext {
 }
 
 export type MainHostApiContext = Pick<HostApiContext,
-  'licenseService' | 'cloudAccountService' | 'appPlugins' | 'appPluginHost' | 'appPluginAgentGateway' | 'eventBus' | 'sessionObservers'
+  'licenseService' | 'cloudAccountService' | 'appPlugins' | 'appPluginHost' | 'appPluginAgentGateway' | 'access' | 'networkAccess' | 'interconnect' | 'eventBus' | 'sessionObservers'
 >;
 
 export type RuntimeHostApiDependencies = Omit<HostApiContext, keyof MainHostApiContext> & Readonly<{

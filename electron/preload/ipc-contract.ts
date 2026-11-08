@@ -10,6 +10,7 @@ export const SHELL_INVOKE_CHANNELS = [
   'iab:snapshot',
   'app-plugins:confirmation-owner',
   'app-plugins:confirmation-decide',
+  'app-plugins:execution-teams',
   'app:version',
   'app:name',
   'app:platform',

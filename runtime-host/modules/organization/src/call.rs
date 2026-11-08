@@ -202,6 +202,15 @@ pub struct OrganizationCallDetail {
     creation: Option<ProvisionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     creation_failure: Option<crate::TeamCreationFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_session: Option<RoleSessionSummary>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleSessionSummary {
+    role_id: String,
+    session_ref: String,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -380,6 +389,10 @@ impl CallWorkflow {
             TeamRuntimeCommand::RunCreate { team_id, run_id, idempotency_key, .. } => WorkflowScope {
                 team: team_id.clone(),
                 run: Some(run_id.clone().unwrap_or_else(|| crate::GraphRunId::new(format!("team-run:{}", idempotency_key.as_str())))),
+                idempotency: Some(idempotency_key.as_str().to_owned()), ..Default::default()
+            },
+            TeamRuntimeCommand::RoleSessionCreate { team_id, run_id, idempotency_key, .. } => WorkflowScope {
+                team: Some(team_id.clone()), run: Some(run_id.clone()),
                 idempotency: Some(idempotency_key.as_str().to_owned()), ..Default::default()
             },
             TeamRuntimeCommand::Resume { team_id } => WorkflowScope { team: Some(team_id.clone()), ..Default::default() },
@@ -1041,6 +1054,7 @@ fn command_name(request: &Request, runtime_route: bool) -> Option<&'static str> 
                 Some("team.delete") => "team.delete",
                 Some("team.runStart") => "team.runStart",
                 Some("team.runCreate") => "team.runCreate",
+                Some("team.roleSessionCreate") => "team.roleSessionCreate",
                 Some("team.runList") => "team.runList",
                 Some("team.triggerList") => "team.triggerList",
                 Some("team.webhookTriggerFire") => "team.webhookTriggerFire",
@@ -1204,6 +1218,6 @@ pub(crate) fn runtime_single_stage(command: &crate::TeamRuntimeCommand) -> bool 
     use crate::TeamRuntimeCommand::*;
     !matches!(
         command,
-        ProvisionAgents { .. } | Delete { .. } | RunCreate { .. } | RunSnapshot { .. } | Resume { .. } | RunDelete { .. }
+        ProvisionAgents { .. } | Delete { .. } | RunCreate { .. } | RunSnapshot { .. } | Resume { .. } | RunDelete { .. } | RoleSessionCreate { .. }
     )
 }

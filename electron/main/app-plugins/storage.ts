@@ -3,6 +3,7 @@ import { lstat, mkdir, mkdtemp, open, readdir, rename, rm } from 'node:fs/promis
 import { join } from 'node:path';
 import type { AppPluginCatalog, InstalledAppPlugin } from '../../../src/types/desktop/app-plugin';
 import { logger } from '../../utils/logger';
+import { readBoundedFile } from '../../utils/private-file';
 import { MAX_APP_PLUGIN_ZIP_BYTES, requireDigest, requireObject, requirePluginId, validateAppPluginManifest } from './package';
 import type { AppPluginPackageWorker } from './package-client';
 import type { PackageResults, StoredPackageRequest } from './package-contract';
@@ -14,25 +15,6 @@ async function requireDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const stat = await lstat(path);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('App plugin storage directory is invalid.');
-}
-
-export async function readBoundedFile(path: string, maximum: number): Promise<Buffer> {
-  const stat = await lstat(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximum) throw new Error('App plugin storage file is invalid.');
-  const file = await open(path, 'r');
-  try {
-    const bytes = Buffer.alloc(stat.size + 1);
-    let size = 0;
-    while (size < bytes.length) {
-      const { bytesRead } = await file.read(bytes, size, bytes.length - size, size);
-      if (!bytesRead) break;
-      size += bytesRead;
-    }
-    if (size !== stat.size) throw new Error('App plugin storage file changed during read.');
-    return bytes.subarray(0, size);
-  } finally {
-    await file.close();
-  }
 }
 
 async function writeSyncedFile(path: string, contents: string | Uint8Array): Promise<void> {

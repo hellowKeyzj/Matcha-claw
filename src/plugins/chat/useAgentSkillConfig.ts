@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { buildAgentSkillConfigKey, useAgentSkillConfigStore, type AgentSkillConfigView } from '@/plugins/agents/stores/agent-skill-config';
-import type { AgentScope } from '@/types/desktop/runtime-address';
+import { useSkillsStore } from '@/plugins/skills/stores/skills';
+import { buildCapabilityScopeKey, type AgentScope } from '@/types/desktop/runtime-address';
 import type { AgentSkillOption } from '@/plugins/chat/components/AgentSkillConfigPanel';
 
 interface UseAgentSkillConfigInput {
@@ -13,6 +14,7 @@ interface UseAgentSkillConfigResult {
   allowedSkillIdsForChat: string[] | null;
   availableSkillOptions: AgentSkillOption[];
   skillsLoading: boolean;
+  skillsError: string | null;
   savingSkillId: string | null;
   prepare: () => void;
   resetSession: () => void;
@@ -78,7 +80,8 @@ type LocalSkillSelection = {
 
 export function useAgentSkillConfig({ currentAgentId, scope }: UseAgentSkillConfigInput): UseAgentSkillConfigResult {
   const normalizedAgentId = currentAgentId?.trim() || null;
-  const configKey = normalizedAgentId && scope ? buildAgentSkillConfigKey(scope, normalizedAgentId) : null;
+  const nativeAgent = scope?.kind === 'agent' && scope.endpoint.kind === 'native-runtime' && scope.endpoint.runtimeAdapterId === 'matcha-agent';
+  const configKey = !nativeAgent && normalizedAgentId && scope ? buildAgentSkillConfigKey(scope, normalizedAgentId) : null;
   const view = useAgentSkillConfigStore((state) => (
     configKey ? state.viewByAgentId[configKey] : undefined
   ));
@@ -87,7 +90,24 @@ export function useAgentSkillConfig({ currentAgentId, scope }: UseAgentSkillConf
   ));
   const loadAgentSkillConfig = useAgentSkillConfigStore((state) => state.loadAgentSkillConfig);
   const setAgentSkillConfig = useAgentSkillConfigStore((state) => state.setAgentSkillConfig);
+  const skillsScopeKey = nativeAgent && scope ? buildCapabilityScopeKey(scope) : null;
+  const nativeSkills = useSkillsStore((state) => (
+    skillsScopeKey !== null && state.scopeKey === skillsScopeKey ? state.skills : undefined
+  ));
+  const nativeSkillsLoading = useSkillsStore((state) => skillsScopeKey !== null && (
+    state.scopeKey !== skillsScopeKey || (!state.snapshotReady && !state.error)
+  ));
+  const nativeSkillsError = useSkillsStore((state) => (
+    skillsScopeKey !== null && state.scopeKey === skillsScopeKey ? state.error : null
+  ));
+  const nativeApplications = useSkillsStore((state) => (
+    skillsScopeKey !== null && state.scopeKey === skillsScopeKey ? state.configApplicationBySkillId : undefined
+  ));
+  const nativeSavingSkillId = useSkillsStore((state) => (
+    skillsScopeKey !== null && state.scopeKey === skillsScopeKey ? Object.keys(state.mutatingBySkillId)[0] ?? null : null
+  ));
 
+  const [saveError, setSaveError] = useState<{ scopeKey: string; skillId: string } | null>(null);
   const [localSelection, setLocalSelection] = useState<LocalSkillSelection | null>(null);
   const [savingSelection, setSavingSelection] = useState<{ agentId: string; skillId: string } | null>(null);
   const savingAgentIdRef = useRef<string | null>(null);
@@ -96,11 +116,12 @@ export function useAgentSkillConfig({ currentAgentId, scope }: UseAgentSkillConf
   const localSelectedSkillIds = localSelection?.agentId === configKey
     ? localSelection.skillIds
     : null;
-  const savingSkillId = savingSelection?.agentId === configKey
+  const savingSkillId = nativeAgent ? nativeSavingSkillId : savingSelection?.agentId === configKey
     ? savingSelection.skillId
     : null;
   const isSavingCurrentAgentSkillConfig = savingSkillId !== null;
   const selectedSkillIds = useMemo(() => {
+    if (nativeAgent) return (nativeSkills ?? []).filter((skill) => skill.enabled).map((skill) => skill.id);
     if (localSelectedSkillIds) {
       return normalizeSkillIds(localSelectedSkillIds);
     }
@@ -108,31 +129,43 @@ export function useAgentSkillConfig({ currentAgentId, scope }: UseAgentSkillConf
       return [];
     }
     return normalizeSkillIds(view.effectiveSkillKeys);
-  }, [localSelectedSkillIds, normalizedAgentId, view]);
+  }, [localSelectedSkillIds, nativeAgent, nativeSkills, normalizedAgentId, view]);
   const allowedSkillIdsForChat = useMemo<string[] | null>(() => {
-    if (!view || loading || isSavingCurrentAgentSkillConfig) {
+    if (nativeAgent || !view || loading || isSavingCurrentAgentSkillConfig) {
       return null;
     }
     if (view.support.supportType === 'unsupported') {
       return view.support.reason === 'agentNotConfigured' ? [] : null;
     }
     return normalizeSkillIds(view.effectiveSkillKeys);
-  }, [isSavingCurrentAgentSkillConfig, loading, view]);
+  }, [isSavingCurrentAgentSkillConfig, loading, nativeAgent, view]);
 
-  const availableSkillOptions = useMemo<AgentSkillOption[]>(() => (
-    (view?.options ?? []).map((option) => ({
+  const availableSkillOptions = useMemo<AgentSkillOption[]>(() => {
+    if (nativeAgent) {
+      return (nativeSkills ?? []).filter((skill) => (
+        skill.source === 'bundled' && skill.eligible === true && skill.selectable === true
+      )).map((skill) => ({
+        id: skill.id,
+        name: skill.name.trim() || skill.id,
+        description: skill.description,
+        selectable: skill.selectable,
+        application: nativeApplications?.[skill.id],
+        saveError: saveError?.scopeKey === skillsScopeKey && saveError.skillId === skill.id,
+      }));
+    }
+    return (view?.options ?? []).map((option) => ({
       id: option.skillKey,
       name: option.displayName.trim() || option.skillKey,
       description: option.description,
       selectable: option.selectable,
       unavailableReason: option.unavailableReason,
-    }))
-  ), [view?.options]);
+    }));
+  }, [nativeAgent, nativeApplications, nativeSkills, saveError, skillsScopeKey, view?.options]);
 
   const prepare = useCallback(() => {
-    if (!normalizedAgentId || !scope) return;
+    if (nativeAgent || !normalizedAgentId || !scope) return;
     void loadAgentSkillConfig(normalizedAgentId, scope).catch(() => undefined);
-  }, [loadAgentSkillConfig, normalizedAgentId, scope]);
+  }, [loadAgentSkillConfig, nativeAgent, normalizedAgentId, scope]);
 
   const resetSession = useCallback(() => {
     writeSeqRef.current += 1;
@@ -142,6 +175,21 @@ export function useAgentSkillConfig({ currentAgentId, scope }: UseAgentSkillConf
   }, [configKey]);
 
   const toggleSkill = useCallback((skillId: string, checked: boolean) => {
+    if (nativeAgent && scope && skillsScopeKey) {
+      const state = useSkillsStore.getState();
+      if (state.scopeKey !== skillsScopeKey || state.mutating) return;
+      const skill = state.skills.find((entry) => entry.id === skillId);
+      if (!skill || skill.source !== 'bundled' || !skill.eligible || !skill.selectable || skill.enabled === checked) return;
+      const generation = state.scopeGeneration;
+      setSaveError(null);
+      void (checked ? state.enableSkill(skillId, scope) : state.disableSkill(skillId, scope)).catch(() => {
+        const current = useSkillsStore.getState();
+        if (current.scopeKey === skillsScopeKey && current.scopeGeneration === generation) {
+          setSaveError({ scopeKey: skillsScopeKey, skillId });
+        }
+      });
+      return;
+    }
     const agentId = normalizedAgentId;
     const currentView = view;
     if (!agentId || !scope || !configKey || !currentView || currentView.agentId !== agentId || !currentView.revision) {
@@ -208,13 +256,14 @@ export function useAgentSkillConfig({ currentAgentId, scope }: UseAgentSkillConf
         currentSavingSelection?.agentId === configKey ? null : currentSavingSelection
       ));
     });
-  }, [configKey, localSelectedSkillIds, normalizedAgentId, scope, selectedSkillIds, setAgentSkillConfig, view]);
+  }, [configKey, localSelectedSkillIds, nativeAgent, normalizedAgentId, scope, selectedSkillIds, setAgentSkillConfig, skillsScopeKey, view]);
 
   return {
     selectedSkillIds,
     allowedSkillIdsForChat,
     availableSkillOptions,
-    skillsLoading: loading && !view,
+    skillsLoading: nativeAgent ? nativeSkillsLoading : loading && !view,
+    skillsError: nativeSkillsError,
     savingSkillId,
     prepare,
     resetSession,

@@ -61,7 +61,7 @@ export class IabOverlay {
     this.attached = true;
     this.view!.setVisible(true);
     this.publish();
-    if (input.kind === 'menu' || input.kind === 'downloads') this.view!.webContents.focus();
+    if (input.kind === 'menu' || input.kind === 'downloads' || input.kind === 'choices') this.view!.webContents.focus();
     if (input.kind === 'toast') {
       this.toastTimer = setTimeout(() => {
         if (this.current?.sessionId === sessionId) this.dismiss();
@@ -142,6 +142,10 @@ export class IabOverlay {
       }
     } else if (command.action === 'refresh-downloads') {
       if (state.kind !== 'downloads') throw new Error('Downloads panel is no longer available');
+    } else if (command.action === 'select-choice') {
+      if (state.kind !== 'choices' || typeof command.id !== 'string' || !state.items.some((item) => item.id === command.id && !item.disabled)) {
+        throw new Error('Menu choice is no longer available');
+      }
     } else if (command.action === 'select-suggestion' || command.action === 'remove-suggestion') {
       if (state.kind !== 'suggestions' || typeof command.id !== 'string' || !state.entries.some((entry) => entry.id === command.id)) {
         throw new Error('History suggestion is no longer available');
@@ -154,7 +158,7 @@ export class IabOverlay {
     if (this.current === null && !this.attached) return;
     clearTimeout(this.toastTimer);
     this.toastTimer = undefined;
-    const shouldRestoreFocus = this.current?.kind === 'menu' || this.current?.kind === 'downloads';
+    const shouldRestoreFocus = this.current?.kind === 'menu' || this.current?.kind === 'downloads' || this.current?.kind === 'choices';
     this.current = null;
     if (this.attached && this.parent && !this.parent.isDestroyed() && this.view) {
       this.view.setVisible(false);

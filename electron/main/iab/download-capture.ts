@@ -245,11 +245,11 @@ export class DownloadCapture {
     }
   }
 
-  async reportSaved(contents: WebContents, owner: string, guid: string, finalPath: string, assertCurrent: () => void): Promise<void> {
-    assertCurrent();
+  async reportSaved(contents: WebContents, owner: string, guid: string, finalPath: string, assertCurrent: () => void | Promise<void>): Promise<void> {
     const capture = this.captures.get(contents);
     const download = capture?.downloads.get(guid);
-    if (!capture || capture.owner !== owner || !download || download.state === 'active' || download.state === 'failed') {
+    await assertCurrent();
+    if (!capture || this.captures.get(contents) !== capture || capture.owner !== owner || !download || capture.downloads.get(guid) !== download || download.state === 'active' || download.state === 'failed') {
       throw new Error('IAB download is not awaiting a final path for this lease');
     }
     if (!isAbsolute(finalPath) || pathKey(dirname(finalPath)) !== pathKey(capture.directory)) {
@@ -261,8 +261,8 @@ export class DownloadCapture {
       return;
     }
     const saved = await lstat(path);
-    assertCurrent();
-    if (this.captures.get(contents) !== capture || download.state !== 'awaiting-path') throw new Error('IAB download capture was released before path confirmation');
+    await assertCurrent();
+    if (this.captures.get(contents) !== capture || capture.downloads.get(guid) !== download || download.state !== 'awaiting-path') throw new Error('IAB download capture was released before path confirmation');
     if (!saved.isFile() || saved.size !== download.item.getReceivedBytes()) throw new Error('IAB download final file does not match its completed transfer');
     this.store.finish(download.id, download.item, 'completed', path);
     clearTimeout(download.pathTimer);

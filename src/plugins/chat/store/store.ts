@@ -375,9 +375,7 @@ export const useChatStore: UseBoundStore<StoreApi<ChatStoreState>> = create<Chat
     newSession: async (agentId) => {
       executeNewSessionDraft(sessionInput, agentId);
     },
-    newSessionForScope: async (scope) => {
-      await executeNewSessionForScope(sessionInput, scope);
-    },
+    newSessionForScope: (scope, initialText) => executeNewSessionForScope(sessionInput, scope, initialText),
     deleteSession: (key) => executeDeleteSession(sessionInput, key),
     deleteAgentSessions: async (scope, identities) => {
       sessionCatalogDeleteBatchDepth += 1;

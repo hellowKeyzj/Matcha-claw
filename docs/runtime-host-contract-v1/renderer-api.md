@@ -135,6 +135,10 @@ Draft 的权限／模型启动能力仅调用 `describe('session.prompt', AgentS
 
 Cron list 与 create/update result 的 `CronJob` 必填 `systemManaged:boolean`，两端严格校验，不接受缺失或原生 `declarationKey/owner`。页面隐藏已停用系统任务，列表、统计与空态判断共用同一可见集合；已启用系统任务显示但不提供启停、编辑、删除，普通暂停任务仍显示。原生任务与手动运行契约不变，原生保护仍有效。该字段是管理性质，不代表执行成功或替代授权。[VERIFY: src/types/cron.ts:49-65] [VERIFY: src/types/cron-operation-result.ts:22-43] [VERIFY: runtime-host/modules/cron/src/projection.rs:177] [VERIFY: src/pages/Cron/index.tsx:1177-1231] [VERIFY: src/pages/Cron/index.tsx:1304-1347] [VERIFY: src/pages/Cron/index.tsx:1471]
 
+### Skills 配置应用结果
+
+Skills 配置沿用 `POST /api/skills/config` 与原 `skills.updateConfig/updateState` capability、strict 202 `{callId,accepted:true}`、同 callId 的 CallLog 终态和 `/api/skills/operations/result` 短读；不新增 Renderer configure 路由。`config` 结果为 `{kind:'config',outcome,skillKey,invalidKeys,application?}`，可选 `application` 精确为 `{persisted:true,sessions:[{sessionId,instanceId,status:'acknowledged'|'unconfirmed'}]}`。Matcha 返回该应用结果时，任一 Session unconfirmed 对应 partial，空列表或全 ACK 对应 accepted；OpenClaw 无此结果时省略 application，不输出 null，不改变其原 outcome/invalidKeys 语义。Electron 与 Renderer 共用 strict decoder，核对同次身份及 application/outcome 一致性；CallLog 不保存 Session 明细。[VERIFY: runtime-host/modules/skills/src/management.rs] [VERIFY: runtime-host/modules/skills/src/result.rs] [VERIFY: runtime-host/integrations/matcha-agent/src/skills/management.rs] [VERIFY: electron/main/runtime-host-delivery/transport/skills/management.ts] [VERIFY: src/types/skills-operation-result.ts] [VERIFY: src/plugins/skills/services/client.ts]
+
 ### Skills 包状态与安全失败分类
 
 `GET /api/sealed-skills/status` 保留正常唯一 `skills` 与 `ready`，新增 `issues` 数组，每项仅 `{fileName,skillKey?,reason}`：fileName 是 basename（不含目录、斜杠或 NUL），skillKey 仅来自已验证 manifest identity；reason 闭合为 `duplicate-package / invalid-package / missing-authorization-key / unavailable-package`。同 key 多包每包一条 duplicate，整组不进 skills、不选 latest；单包错误隔离、不自动修改/删除包，根目录失败仍按原错误分类返回，缺根仍为空列表。issues 不携正文、密钥、包 bytes、云 envelope 或 raw error，也不扩大 read/uninstall 授权。Electron 严格拒绝额外字段、非法 basename/key/reason。[VERIFY: runtime-host/modules/sealed-resource/src/store/skill.rs:584-632] [VERIFY: runtime-host/modules/sealed-resource/src/store/skill.rs:712-751] [VERIFY: runtime-host/modules/skills/src/adapters/loopback/sealed_resource.rs:199-210] [VERIFY: runtime-host/modules/skills/src/adapters/loopback/sealed_resource.rs:584-589] [VERIFY: electron/main/runtime-host-delivery/transport/skills/sealed.ts:230-249]
@@ -267,6 +271,9 @@ Chat transport 进一步固定：调用会传 `deliver: false`、保持 idempote
 | `GET` | `/api/runtime-{adapters,connectors,endpoints}/...` | [host-api.ts](../../src/lib/host-api.ts#L558-L608) | child topology projection |
 | `POST` | `/api/runtime-connectors/{connect,disconnect}` | [host-api.ts](../../src/lib/host-api.ts#L578-L598) | `LEGACY-REJECTED` by child; Renderer wrapper exists, so replacement must preserve observed rejection unless API migration is separately approved. |
 | `POST` | `/api/gateway/stop` | [gateway.ts](../../src/stores/gateway.ts#L355) | Electron main-owned, not child |
+| `POST` | `/api/account/console/open` | [account.ts](../../src/plugins/account/api/account.ts) 的 `openCloudAccountConsole()`；[AccountFooter.tsx](../../src/plugins/account/AccountFooter.tsx) | Electron Main-owned；无 body → `{success:true}`，不返回 URL/ticket/token |
+
+控制台入口使用 Main 当前云 session 取一次性票据，再按同次配置 API base 的同站部署前缀打开 `/auth/desktop#ticket=...`，不是 Renderer 提供链接或直接打开 dashboard；HTTPS 或 loopback HTTP，取票失败不 fallback。`{success:true}` 只表示 Main 打开动作完成，不保证网页兑换/登录成功，也不表示服务已部署；流程与未验边界见 [Account flow](../architecture-knowledge/modules/account-cloud-subscription/flow.md#当前云账号打开系统浏览器控制台)。[VERIFY: electron/api/routes/account.ts] [VERIFY: electron/api/main-api-boundary.json] [VERIFY: electron/main/cloud-account/service.ts] [VERIFY: electron/main/cloud-account/client.ts]
 
 ### Existing World 独立评测身份配置
 

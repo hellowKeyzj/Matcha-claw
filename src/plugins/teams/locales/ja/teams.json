@@ -231,6 +231,9 @@
     "actionFailed": "チーム操作が完了しませんでした：{{error}}"
   },
   "chat": {
+    "leader": "リーダー",
+    "memberSessions": "チームの会話",
+    "moreMembers": "その他のメンバー",
     "teamNotFound": "チームが見つかりません",
     "backToList": "チーム一覧へ戻る",
     "runStatus": "実行状態",
@@ -370,6 +373,13 @@
       "sessionRef": "メンバーのセッション",
       "selectRole": "メンバーを選択",
       "selectSession": "セッションを選択",
+      "defaultSession": "デフォルトセッション",
+      "numberedSession": "セッション {{number}}",
+      "sessionUnavailable": "このセッションは利用できなくなりました",
+      "createSession": "新規セッション",
+      "creatingSession": "作成中",
+      "retryCreateSession": "作成を再試行",
+      "createSessionFailed": "セッションの作成結果を確認できませんでした。再試行してください。ノードの下書きは保持されています。",
       "noRoleBindings": "利用可能なメンバーがいません",
       "invalidBinding": "利用不可：{{value}}",
       "roleBindingRequired": "利用可能なメンバーとそのセッションを選択してください。",

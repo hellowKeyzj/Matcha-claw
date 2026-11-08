@@ -8,8 +8,12 @@
 
 import type { UUID } from 'crypto'
 import { open as fsOpen, readdir, realpath, stat } from 'fs/promises'
+import memoize from 'lodash-es/memoize.js'
 import { join } from 'path'
-import { getClaudeConfigHomeDir } from './envUtils.js'
+import {
+  getClaudeCodeProjectDirName,
+  getClaudeConfigHomeDir,
+} from './envUtils.js'
 import { getWorktreePathsPortable } from './getWorktreePathsPortable.js'
 import { djb2Hash } from './hash.js'
 
@@ -324,9 +328,21 @@ export function getProjectsDir(): string {
   return join(getClaudeConfigHomeDir(), 'projects')
 }
 
-export function getProjectDir(projectDir: string): string {
-  return join(getProjectsDir(), sanitizePath(projectDir))
-}
+// Shared with the CLI's hot-path callers; env changes must not reuse a cwd-only key.
+export const getProjectDir = memoize(
+  (projectDir: string): string => {
+    return join(
+      getProjectsDir(),
+      getClaudeCodeProjectDirName() ?? sanitizePath(projectDir),
+    )
+  },
+  projectDir =>
+    JSON.stringify([
+      process.env.CLAUDE_CONFIG_DIR,
+      process.env.CLAUDE_CODE_PROJECT_DIR_NAME,
+      projectDir,
+    ]),
+)
 
 /**
  * Resolves a directory path to its canonical form using realpath + NFC
@@ -343,37 +359,45 @@ export async function canonicalizePath(dir: string): Promise<string> {
 }
 
 /**
- * Finds the project directory for a given path, tolerating hash mismatches
- * for long paths (>200 chars). The CLI uses Bun.hash while the SDK under
- * Node.js uses simpleHash — for paths that exceed MAX_SANITIZED_LENGTH,
- * these produce different directory suffixes. This function falls back to
- * prefix-based scanning when the exact match doesn't exist.
+ * Finds project directories in write-key-first order, followed by the old cwd
+ * directory when an override is active. Without an override, preserves the
+ * Bun/Node long-path hash fallback when the exact directory does not exist.
  */
-export async function findProjectDir(
-  projectPath: string,
-): Promise<string | undefined> {
+export async function findProjectDirs(projectPath: string): Promise<string[]> {
   const exact = getProjectDir(projectPath)
+  const dirs: string[] = []
   try {
     await readdir(exact)
-    return exact
+    dirs.push(exact)
+  } catch {}
+
+  const sanitized = sanitizePath(projectPath)
+  const projectsDir = getProjectsDir()
+  if (getClaudeCodeProjectDirName() !== undefined) {
+    const legacy = join(projectsDir, sanitized)
+    const sameDir =
+      process.platform === 'win32'
+        ? legacy.toLowerCase() === exact.toLowerCase()
+        : legacy === exact
+    if (!sameDir) {
+      try {
+        await readdir(legacy)
+        dirs.push(legacy)
+      } catch {}
+    }
+    return dirs
+  }
+
+  if (dirs.length > 0 || sanitized.length <= MAX_SANITIZED_LENGTH) return dirs
+  const prefix = sanitized.slice(0, MAX_SANITIZED_LENGTH)
+  try {
+    const dirents = await readdir(projectsDir, { withFileTypes: true })
+    const match = dirents.find(
+      d => d.isDirectory() && d.name.startsWith(prefix + '-'),
+    )
+    return match ? [join(projectsDir, match.name)] : []
   } catch {
-    // Exact match failed — for short paths this means no sessions exist.
-    // For long paths, try prefix matching to handle hash mismatches.
-    const sanitized = sanitizePath(projectPath)
-    if (sanitized.length <= MAX_SANITIZED_LENGTH) {
-      return undefined
-    }
-    const prefix = sanitized.slice(0, MAX_SANITIZED_LENGTH)
-    const projectsDir = getProjectsDir()
-    try {
-      const dirents = await readdir(projectsDir, { withFileTypes: true })
-      const match = dirents.find(
-        d => d.isDirectory() && d.name.startsWith(prefix + '-'),
-      )
-      return match ? join(projectsDir, match.name) : undefined
-    } catch {
-      return undefined
-    }
+    return []
   }
 }
 
@@ -381,7 +405,7 @@ export async function findProjectDir(
  * Resolve a sessionId to its on-disk JSONL file path.
  *
  * When `dir` is provided: canonicalize it, look in that project's directory
- * (with findProjectDir fallback for Bun/Node hash mismatches), then fall back
+ * (with findProjectDirs fallback for Bun/Node hash mismatches), then fall back
  * to sibling git worktrees. `projectPath` in the result is the canonical
  * user-facing directory the file was found under.
  *
@@ -409,8 +433,7 @@ export async function resolveSessionFilePath(
 
   if (dir) {
     const canonical = await canonicalizePath(dir)
-    const projectDir = await findProjectDir(canonical)
-    if (projectDir) {
+    for (const projectDir of await findProjectDirs(canonical)) {
       const filePath = join(projectDir, fileName)
       try {
         const s = await stat(filePath)
@@ -429,14 +452,14 @@ export async function resolveSessionFilePath(
     }
     for (const wt of worktreePaths) {
       if (wt === canonical) continue
-      const wtProjectDir = await findProjectDir(wt)
-      if (!wtProjectDir) continue
-      const filePath = join(wtProjectDir, fileName)
-      try {
-        const s = await stat(filePath)
-        if (s.size > 0) return { filePath, projectPath: wt, fileSize: s.size }
-      } catch {
-        // ENOENT/EACCES — keep searching
+      for (const wtProjectDir of await findProjectDirs(wt)) {
+        const filePath = join(wtProjectDir, fileName)
+        try {
+          const s = await stat(filePath)
+          if (s.size > 0) return { filePath, projectPath: wt, fileSize: s.size }
+        } catch {
+          // ENOENT/EACCES — keep searching
+        }
       }
     }
     return undefined

@@ -1,6 +1,5 @@
-import { memo, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import * as RadioGroup from '@radix-ui/react-radio-group';
 import { Check, ChevronDown, Search, Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -73,43 +72,62 @@ function ThinkingPicker({ state }: { state: ThinkingPickerState }) {
     <div className="shrink-0 border-t border-border/60 px-4 py-3" aria-busy={busy}>
       <div className="flex min-w-0 items-center justify-between gap-3 text-xs">
         <span className="text-muted-foreground">{t('input.thinkingIntensity')}</span>
-        <span className="min-w-0 truncate font-medium" aria-live="polite" title={label}>{label}</span>
+        <span className="min-w-0 truncate rounded-md bg-secondary/70 px-1.5 py-0.5 font-medium" aria-live="polite" title={label}>{label}</span>
       </div>
       {state.options.length > 0 ? (
-        <input
-          type="range"
-          className="chat-thinking-range mt-3 w-full"
-          data-unpositioned={currentIndex < 0 || undefined}
-          min={0}
-          max={state.options.length - 1}
-          step={1}
-          value={currentIndex < 0 ? '' : currentIndex}
-          aria-disabled={disabled}
-          data-disabled={state.disabled || undefined}
-          aria-label={t('input.thinkingIntensity')}
-          aria-valuetext={label}
-          onChange={(event) => {
-            if (disabled) return;
-            const option = state.options[event.currentTarget.valueAsNumber];
-            setPreview({ id: option.id, currentId: state.currentId, options: state.options, submitted: false });
-          }}
-          onPointerDown={(event) => {
-            if (disabled) { event.preventDefault(); return; }
-            interactingRef.current = true;
-            event.currentTarget.setPointerCapture(event.pointerId);
-          }}
-          onPointerUp={(event) => commit(event.currentTarget)}
-          onPointerCancel={clearPreview}
-          onBlur={clearPreview}
-          onKeyDown={(event) => {
-            if (!selectionKeys.includes(event.key)) return;
-            if (disabled) event.preventDefault();
-            else interactingRef.current = true;
-          }}
-          onKeyUp={(event) => {
-            if (selectionKeys.includes(event.key)) commit(event.currentTarget);
-          }}
-        />
+        <>
+          <div
+            className="chat-thinking-slider mt-2"
+            data-unpositioned={currentIndex < 0 || undefined}
+            data-disabled={state.disabled || undefined}
+            style={{ '--thinking-progress': `${currentIndex < 0 || state.options.length < 2 ? 0 : currentIndex / (state.options.length - 1) * 100}%` } as CSSProperties}
+          >
+            <div className="chat-thinking-track" aria-hidden="true">
+              <div className="chat-thinking-fill" />
+              <div className="chat-thinking-steps">
+                {state.options.map((option, index) => (
+                  <span key={option.id} data-active={index <= currentIndex || undefined} />
+                ))}
+              </div>
+            </div>
+            <input
+              type="range"
+              className="chat-thinking-range"
+              min={0}
+              max={state.options.length - 1}
+              step={1}
+              value={currentIndex < 0 ? '' : currentIndex}
+              aria-disabled={disabled}
+              aria-label={t('input.thinkingIntensity')}
+              aria-valuetext={label}
+              onChange={(event) => {
+                if (disabled) return;
+                const option = state.options[event.currentTarget.valueAsNumber];
+                setPreview({ id: option.id, currentId: state.currentId, options: state.options, submitted: false });
+              }}
+              onPointerDown={(event) => {
+                if (disabled) { event.preventDefault(); return; }
+                interactingRef.current = true;
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerUp={(event) => commit(event.currentTarget)}
+              onPointerCancel={clearPreview}
+              onBlur={clearPreview}
+              onKeyDown={(event) => {
+                if (!selectionKeys.includes(event.key)) return;
+                if (disabled) event.preventDefault();
+                else interactingRef.current = true;
+              }}
+              onKeyUp={(event) => {
+                if (selectionKeys.includes(event.key)) commit(event.currentTarget);
+              }}
+            />
+          </div>
+          <div className="mt-0.5 flex justify-between gap-3 text-[10px] leading-4 text-muted-foreground" aria-hidden="true">
+            <span className="min-w-0 truncate">{state.options[0].label}</span>
+            <span className="min-w-0 truncate text-right">{state.options.at(-1)?.label}</span>
+          </div>
+        </>
       ) : null}
     </div>
   );
@@ -177,10 +195,8 @@ export const ChatModelPicker = memo(function ChatModelPicker({ state, open, onOp
               aria-label={t('input.searchModels')} placeholder={t('input.searchModels')}
               className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground" />
           </div>
-          <p role="status" className="sr-only">{state.loading || state.switching ? t(state.switching ? 'input.modelSwitching' : 'input.modelLoading') : ''}</p>
           <div data-chat-model-picker-viewport="true" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5" aria-busy={busy}>
-            <RadioGroup.Root value={state.currentModelId} aria-disabled={listDisabled} aria-label={t('input.pickModel')}
-              onValueChange={(id) => { if (!listDisabled) state.onSelect(id); }}>
+            <div role="radiogroup" aria-disabled={listDisabled} aria-label={t('input.pickModel')}>
               {groups.map(([groupId, group], index) => (
                 <div key={groupId ?? 'ungrouped'} role="group" aria-labelledby={group.provider ? `${titleId}-provider-${index}` : undefined}
                   className="border-t border-border/60 py-1.5 first:border-t-0">
@@ -190,21 +206,28 @@ export const ChatModelPicker = memo(function ChatModelPicker({ state, open, onOp
                     <span className="min-w-0 truncate">{group.provider}</span>
                   </div> : null}
                   {group.options.map((option) => (
-                    <RadioGroup.Item key={option.id} value={option.id} disabled={option.disabled}
-                      aria-disabled={listDisabled || option.disabled}
-                      title={option.description ? `${option.label} · ${option.description}` : option.label}
-                      className={cn('flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs text-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-45 data-[state=checked]:bg-secondary',
-                        state.disabled && 'cursor-not-allowed opacity-45')}>
+                    <label key={option.id} title={option.description ? `${option.label} · ${option.description}` : option.label}
+                      className={cn('relative flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs text-foreground hover:bg-muted has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-inset has-[:focus-visible]:ring-ring/30 has-[:checked]:bg-secondary',
+                        (listDisabled || option.disabled) && 'cursor-not-allowed opacity-45')}>
+                      <input type="radio" name={titleId} value={option.id} checked={option.id === state.currentModelId}
+                        disabled={listDisabled || option.disabled} aria-label={option.label}
+                        className="absolute inset-0 m-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+                        onChange={() => {
+                          if (listDisabled || option.disabled || option.id === state.currentModelId) return;
+                          setQuery('');
+                          onOpenChange(false);
+                          state.onSelect(option.id);
+                        }} />
                       <span className="min-w-0 flex-1">
                         <span className="block truncate">{option.label}</span>
                         {option.description ? <span className="block truncate text-muted-foreground">{option.description}</span> : null}
                       </span>
-                      <span className="flex h-4 w-4 shrink-0 items-center justify-center"><RadioGroup.Indicator><Check aria-hidden="true" className="h-3.5 w-3.5" /></RadioGroup.Indicator></span>
-                    </RadioGroup.Item>
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center">{option.id === state.currentModelId ? <Check aria-hidden="true" className="h-3.5 w-3.5" /> : null}</span>
+                    </label>
                   ))}
                 </div>
               ))}
-            </RadioGroup.Root>
+            </div>
             {!state.loading && groups.length === 0 ? <p role="status" className="px-2.5 py-3 text-xs text-muted-foreground">{t('input.noModelsFound')}</p> : null}
           </div>
           {thinking ? <ThinkingPicker

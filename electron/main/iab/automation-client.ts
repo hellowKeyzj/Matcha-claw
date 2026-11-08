@@ -136,7 +136,9 @@ export class IabAutomationWorker implements IabAutomation {
 
   private async run(params: BrowserActionParams, context: IabTrustedContext, signal: AbortSignal): Promise<IabJsonValue> {
     if (this.closed) throw iabError('IAB_AUTOMATION_CLOSED', 'IAB automation is closed');
-    signal.throwIfAborted(); context.assertCurrent(); this.start();
+    signal.throwIfAborted(); await context.assertCurrent(); signal.throwIfAborted();
+    if (this.closed) throw iabError('IAB_AUTOMATION_CLOSED', 'IAB automation is closed');
+    this.start();
     const id = ++this.nextId;
     const controller = new AbortController();
     let resolve!: (reply: AutomationReply) => void;
@@ -162,16 +164,16 @@ export class IabAutomationWorker implements IabAutomation {
       if (this.failure) for (const state of this.leases.values()) if (state.cleanup) await state.lease.drain(state.cleanup.signal);
       signal.throwIfAborted();
       if (!reply.ok) throw deserializeAutomationError(reply.error);
-      this.check(request);
+      await this.check(request);
       return reply.value as IabJsonValue;
     } catch (error) {
       if (request.openedTabId) {
         try {
           while (request.work.size) await Promise.all([...request.work]);
           await this.options.broker.drain(controller.signal);
+          await this.check(request);
           const ownership = this.options.manager.getPageOwnership(request.openedTabId);
           if (ownership && canClosePage(ownership, context.executorId)) {
-            context.assertCurrent();
             request.claims.get(request.openedTabId)?.unsubscribe(); request.claims.delete(request.openedTabId);
             this.options.manager.close(request.openedTabId, this.options.manager.ownerId, context);
           }
@@ -186,16 +188,19 @@ export class IabAutomationWorker implements IabAutomation {
     }
   }
 
-  private check(request: Invocation): void {
-    request.controller.signal.throwIfAborted(); request.context.assertCurrent();
+  private async check(request: Invocation): Promise<void> {
+    request.controller.signal.throwIfAborted();
+    await request.context.assertCurrent();
+    request.controller.signal.throwIfAborted();
     for (const [tabId, claim] of request.claims) {
       claim.signal.throwIfAborted();
       if (this.options.manager.agentAccess(tabId, request.context, false) !== claim.signal) throw iabError('IAB_CLAIM_RELEASED', 'Browser page claim changed during this invocation');
     }
   }
 
+  // Callers verify native currency before admitting a new page claim.
   private access(tabId: string, request: Invocation): AbortSignal {
-    this.check(request);
+    request.controller.signal.throwIfAborted();
     const signal = this.options.manager.agentAccess(tabId, request.context);
     signal.throwIfAborted();
     if (!request.claims.has(tabId)) {
@@ -273,7 +278,7 @@ export class IabAutomationWorker implements IabAutomation {
         const request = this.requests.get(message.invocation);
         if (!request) { void this.reply(message.id, Promise.reject(iabError('IAB_INVOCATION_STALE', 'Browser invocation has ended'))); return; }
         const work = this.effect(message.effect, request);
-        if (message.effect.kind !== 'drain') {
+        if (message.effect.kind !== 'drain' && message.effect.kind !== 'release-claims') {
           const settled = work.then(() => {}, () => {});
           request.work.add(settled);
           void settled.then(() => request.work.delete(settled));
@@ -306,7 +311,6 @@ export class IabAutomationWorker implements IabAutomation {
       if (!state || state.executorId !== context.executorId || state.lease.ownerId !== manager.ownerId || state.lease.generation !== this.generation) throw iabError('IAB_LEASE_INVALID', 'Screenshot lease does not belong to this worker and verified executor');
       return state.lease.executor.restoreScreenshotViewport(signal);
     }
-    check();
     const ownedLease = (id: string) => {
       const state = this.leases.get(id);
       if (!state || state.executorId !== context.executorId || state.lease.ownerId !== manager.ownerId || state.lease.generation !== this.generation) throw iabError('IAB_LEASE_INVALID', 'CDP lease does not belong to this worker and verified executor');
@@ -316,6 +320,19 @@ export class IabAutomationWorker implements IabAutomation {
       broker.bindTarget(state.lease.tabId, manager.ownerId, signal);
       return state.lease;
     };
+    // Existing-lease effects check native currency at the broker's physical dispatch boundary.
+    switch (effect.kind) {
+      case 'screenshot-viewport': return ownedLease(effect.leaseId).executor.setScreenshotViewport({ timeoutMs: effect.timeoutMs, signal, assertCurrent: check });
+      case 'command': {
+        const result = await ownedLease(effect.leaseId).executor.send(effect.method, effect.params, { sessionId: effect.sessionId, timeoutMs: effect.timeoutMs, signal, assertCurrent: check });
+        if (effect.method !== 'Page.captureScreenshot') return result;
+        await check();
+        return { ...result, data: await normalizeScreenshot(String(result.data), check) };
+      }
+      case 'frames': return ownedLease(effect.leaseId).executor.listChildFrames({ signal, timeoutMs: effect.timeoutMs, assertCurrent: check });
+      case 'intercept': return ownedLease(effect.leaseId).executor.setInterceptPolicy(effect.rules, { signal, assertCurrent: check });
+    }
+    await check();
     switch (effect.kind) {
       case 'tabs': {
         const tabs = manager.listAllTabs().filter((tab) => canAccessPage(tab, context.executorId, context.principalId));
@@ -323,10 +340,9 @@ export class IabAutomationWorker implements IabAutomation {
         return { tabs, activeTabId: tabs.some((tab) => tab.id === activeTabId) ? activeTabId : null };
       }
       case 'release-claims':
-        // Snapshot before receive tracks this release effect in the same work set.
         await Promise.all([...request.work]);
         await broker.drain(signal);
-        check();
+        await check();
         // The releasing invocation must not cancel itself or join its own settled promise.
         for (const claim of request.claims.values()) claim.unsubscribe();
         request.claims.clear();
@@ -358,41 +374,32 @@ export class IabAutomationWorker implements IabAutomation {
       case 'acquire': {
         const claim = this.access(effect.tabId, request);
         const lease = await broker.acquire(effect.tabId, manager.ownerId, signal, this.generation, check);
-        try { check(); } catch (error) { lease.release(); throw error; }
+        try { await check(); } catch (error) { lease.release(); throw error; }
         const unsubscribe = lease.executor.onEvent((event) => this.queueEvent(lease.id, event));
         this.leases.set(lease.id, { lease, executorId: context.executorId, claim, unsubscribe });
         return { id: lease.id, tabId: lease.tabId, ownerId: lease.ownerId, generation: lease.generation };
       }
-      case 'screenshot-viewport': return ownedLease(effect.leaseId).executor.setScreenshotViewport({ timeoutMs: effect.timeoutMs, signal, assertCurrent: check });
-      case 'command': {
-        const result = await ownedLease(effect.leaseId).executor.send(effect.method, effect.params, { sessionId: effect.sessionId, timeoutMs: effect.timeoutMs, signal, assertCurrent: check });
-        if (effect.method !== 'Page.captureScreenshot') return result;
-        check();
-        return { ...result, data: await normalizeScreenshot(String(result.data), check) };
-      }
-      case 'frames': return ownedLease(effect.leaseId).executor.listChildFrames({ signal, timeoutMs: effect.timeoutMs, assertCurrent: check });
-      case 'intercept': return ownedLease(effect.leaseId).executor.setInterceptPolicy(effect.rules, { signal, assertCurrent: check });
       case 'read-script': {
         const read = async () => {
-          const file = await resolveWorkspacePath(trusted, effect.path, false);
-          check();
+          const file = await resolveWorkspacePath(trusted, effect.path, false, signal);
+          await check();
           const expression = await readFile(file, { encoding: 'utf8', signal });
-          check(); return expression;
+          await check(); return expression;
         };
         try { return await read(); }
         catch (error) {
-          check();
+          await check();
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
           await delay(300, undefined, { signal });
-          check(); return read();
+          await check(); return read();
         }
       }
-      case 'resolve-files': return Promise.all(effect.paths.map((path) => resolveWorkspacePath(trusted, path, false)));
+      case 'resolve-files': return Promise.all(effect.paths.map((path) => resolveWorkspacePath(trusted, path, false, signal)));
       case 'save-file': return saveWorkspaceFile(trusted, effect.path, Buffer.from(effect.bytes), signal, effect.atomic);
       case 'prepare-download': {
-        const directory = await prepareWorkspaceDirectory(trusted, effect.dir ?? (effect.savePath ? dirname(effect.savePath) : 'downloads'));
-        if (effect.savePath && dirname(await resolveWorkspacePath(trusted, effect.savePath, true)) !== directory) throw iabError('IAB_DOWNLOAD_DIRECTORY_MISMATCH', 'Download savePath and dir must refer to the same directory');
-        check(); return directory;
+        const directory = await prepareWorkspaceDirectory(trusted, effect.dir ?? (effect.savePath ? dirname(effect.savePath) : 'downloads'), signal);
+        if (effect.savePath && dirname(await resolveWorkspacePath(trusted, effect.savePath, true, signal)) !== directory) throw iabError('IAB_DOWNLOAD_DIRECTORY_MISMATCH', 'Download savePath and dir must refer to the same directory');
+        await check(); return directory;
       }
       case 'finish-download': {
         const lease = ownedLease(effect.leaseId);
@@ -402,26 +409,26 @@ export class IabAutomationWorker implements IabAutomation {
   }
 }
 
-async function normalizeScreenshot(data: string, check: () => void): Promise<string> {
+async function normalizeScreenshot(data: string, check: () => Promise<void>): Promise<string> {
   const buffer = Buffer.from(data, 'base64');
   if (buffer.byteLength <= 5 * 1024 * 1024) return data;
   try {
     const sharp = (await import('sharp')).default;
-    check();
+    await check();
     const image = sharp(buffer);
     const metadata = await image.metadata();
-    check();
+    await check();
     const resize = { width: (metadata.width ?? 0) > (metadata.height ?? 0) ? 2000 : undefined, height: (metadata.height ?? 0) >= (metadata.width ?? 0) ? 2000 : undefined, fit: 'inside' as const, withoutEnlargement: true };
     let compressionLevel = 6;
     let output = await image.resize(resize).png({ compressionLevel }).toBuffer();
-    check();
+    await check();
     while (output.byteLength > 5 * 1024 * 1024 && compressionLevel < 9) {
       output = await sharp(buffer).resize(resize).png({ compressionLevel: ++compressionLevel }).toBuffer();
-      check();
+      await check();
     }
     return output.toString('base64');
   } catch {
-    check();
+    await check();
     return data;
   }
 }

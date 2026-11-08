@@ -1,4 +1,4 @@
-import { Fragment, memo, Suspense, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, Suspense, useCallback, useMemo, useRef, useState } from 'react';
 import { Check, Loader2, Plus, ShieldCheck } from 'lucide-react';
 import { useContributions } from '@/plugin-host/react';
 import { chatComposerActions, type ChatComposerAction, type ChatComposerActionState } from '../extensions';
@@ -56,9 +56,9 @@ export const ChatInputToolbar = memo(function ChatInputToolbar({
     t, sessionIdentity, disabled, actionsDisabled: disabled || sending || approvalWaiting,
     goalSupported, goalDisabled, skillManagerLabel, skillManagerOpen, quickPhraseOpen,
   };
-  const closePanel = (open: boolean) => {
+  const closePanel = useCallback((open: boolean) => {
     if (!open) setPanel(null);
-  };
+  }, []);
 
   return (
     <>
@@ -90,7 +90,7 @@ export const ChatInputToolbar = memo(function ChatInputToolbar({
               openSkillManager: onOpenSkillManager, startGoal: onStartGoal,
             });
           }}>
-          {actions.map((action) => {
+          {menuOpen ? actions.map((action) => {
             const state = action.resolve(context);
             if (state.hidden) return null;
             const Icon = action.icon;
@@ -102,7 +102,7 @@ export const ChatInputToolbar = memo(function ChatInputToolbar({
               </DropdownMenuItem>
               {action.separatorAfter ? <DropdownMenuSeparator /> : null}
             </Fragment>;
-          })}
+          }) : null}
         </DropdownMenuContent>
       </DropdownMenu>
       {permissionPicker ? (
@@ -142,22 +142,18 @@ export const ChatInputToolbar = memo(function ChatInputToolbar({
   );
 });
 
-export const ChatInputStatus = memo(function ChatInputStatus({ contextUsage, imageGenerationActive }: {
+export const ChatInputStatus = memo(function ChatInputStatus({ contextUsage }: {
   contextUsage: ChatContextUsageViewModel | null;
-  imageGenerationActive: boolean;
 }) {
   const { t } = useTranslation('chat');
-  if (!contextUsage && !imageGenerationActive) return null;
+  if (!contextUsage) return null;
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-2 pb-1 text-[11px] text-muted-foreground">
-      {imageGenerationActive ? <div data-testid="chat-composer-image-generation-indicator" role="status" aria-live="polite" className="inline-flex min-w-0 items-center gap-1.5">
-        <Loader2 aria-hidden="true" className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" /><span>{t('input.imageGenerationActive')}</span>
-      </div> : null}
-      {contextUsage ? <span role="status" title={t('input.contextUsageTitle', { detail: contextUsage.detail, pct: contextUsage.pct })}
+      <span role="status" title={t('input.contextUsageTitle', { detail: contextUsage.detail, pct: contextUsage.pct })}
         aria-label={t('input.contextUsageTitle', { detail: contextUsage.detail, pct: contextUsage.pct })}
         className={cn('min-w-0', contextUsage.level === 'danger' ? 'text-destructive' : contextUsage.level === 'warning' ? 'text-amber-700 dark:text-amber-300' : '')}>
         {t('input.contextUsageLabel', { pct: contextUsage.pct })}
-      </span> : null}
+      </span>
     </div>
   );
 });

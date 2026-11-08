@@ -344,6 +344,7 @@ pub use ports::{
     RoleAgentMaterialization, RoleMaterializationAgent, RoleMaterializationOwnership,
     RoleMaterializationReceipt, RoleSessionAbortOutcome, RoleSessionAbortReceipt,
     RoleSessionDeleteOutcome, RoleSessionDeleteReceipt, RoleSessionIdentityResolver,
+    RoleSessionCreationOutcome, RoleSessionSubmission,
     RoleSessionPort, RoleSessionReadbackOutcome, RoleSessionReadbackReceipt, RoleSessionReceipt,
     RoleSessionRef, RoleSessionSlot, RoleSessionWindow, RunRuntimeReceipt,
     RuntimeEndpointReference, RuntimeReceiptOutcome, SessionWindowReference, TeamActivityExecutor,

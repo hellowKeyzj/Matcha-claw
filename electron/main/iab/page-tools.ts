@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { dialog, shell, type BrowserWindow, type WebContents } from 'electron';
 
 import type {
-  IabBounds, IabDownload, IabHistoryEntry, IabOverlayCommand, IabOverlayInput, IabOverlayState,
+  IabBounds, IabDownload, IabHistoryEntry, IabOverlayCommand, IabOverlayInput, IabOverlayState, IabPageOverlayState,
   IabOwnerId, IabScreenshotResult, IabTabId, IabTheme, IabToolAnchor, IabUiCommand, IabUiResult,
 } from '../../../src/types/desktop/iab';
 import type { IabPageToolsOptions, IabUnsubscribe } from './contracts';
@@ -37,7 +37,7 @@ export class IabPageTools {
   private theme: IabTheme = 'light';
   private locale = 'en';
   private presentationGeneration = 0;
-  private presentation?: { tabId: IabTabId; kind: NonNullable<IabOverlayState>['kind']; anchor: IabBounds | IabToolAnchor };
+  private presentation?: { tabId: IabTabId; kind: NonNullable<IabPageOverlayState>['kind']; anchor: IabBounds | IabToolAnchor };
   private suggestionQuery?: { tabId: IabTabId; query: string };
   private clearRequest?: ClearRequest;
   private downloadsTimer?: ReturnType<typeof setTimeout>;
@@ -88,7 +88,7 @@ export class IabPageTools {
       if (search && ownerId) this.options.emit({ type: 'find-result', result: { ownerId, tabId,
         searchId: search.searchId, requestId: search.requestId, matches: 0, activeMatchOrdinal: 0, finalUpdate: true } });
     };
-    const onFocus = (): void => { if (this.overlay.state?.tabId === tabId) this.hideSuggestions(); };
+    const onFocus = (): void => { this.hideSuggestions(tabId); };
     const release = (): void => {
       contents.removeListener('before-input-event', onInput);
       contents.removeListener('found-in-page', onFound);
@@ -152,13 +152,24 @@ export class IabPageTools {
       case 'history-remove': await history.remove(command.ids); break;
       case 'history-remove-origin': await history.removeOrigin(command.url); break;
       case 'history-suggest': return { resultType: 'suggestions', entries: await this.suggest(command) };
-      case 'hide-suggestions': this.hideSuggestions(); break;
+      case 'hide-suggestions': this.hideSuggestions(command.tabId); break;
       case 'downloads-list': return { resultType: 'downloads', entries: await downloads.list(command.refreshFileState) };
       case 'downloads-clear': await downloads.clear(); break;
       case 'download': await downloads.control(command.command); break;
-      case 'open-internal': this.closeMenu(); this.options.openInternal(command.page); break;
+      case 'open-internal': this.closeMenu(); this.options.openInternal(command.page, command.tabId); break;
       case 'show-menu': await this.showMenu(command.tabId, command.anchor); break;
       case 'show-downloads': await this.showDownloads(command.tabId, command.anchor); break;
+      case 'show-choices': {
+        const window = this.options.window();
+        if (!window || window.isDestroyed()) throw new Error('Browser window is unavailable');
+        this.closeMenu();
+        await this.overlay.show({ ...command.menu, kind: 'choices', ownerId,
+          anchor: iabBoundsToDip(command.menu.anchor, window.webContents.getZoomFactor()) });
+        break;
+      }
+      case 'dismiss-choices':
+        if (this.overlay.state?.kind === 'choices' && this.overlay.state.requestId === command.requestId) this.closeMenu();
+        break;
       case 'overlay': {
         if (this.overlay.state?.ownerId !== ownerId) throw new Error('Browser overlay owner changed');
         await this.overlay.execute(command.command);
@@ -171,7 +182,7 @@ export class IabPageTools {
     return { resultType: 'complete' };
   }
 
-  private context(tabId: IabTabId, anchor: IabBounds | IabToolAnchor): Omit<NonNullable<IabOverlayState>, 'sessionId' | 'kind'> {
+  private context(tabId: IabTabId, anchor: IabBounds | IabToolAnchor): Omit<NonNullable<IabPageOverlayState>, 'sessionId' | 'kind'> {
     const ownerId = this.options.getOwner(tabId);
     const window = this.options.window();
     if (!ownerId || !window || window.isDestroyed()) throw new Error('Browser tab owner is unavailable');
@@ -184,17 +195,18 @@ export class IabPageTools {
     return { ownerId, tabId, anchor: nativeAnchor, theme: this.theme, locale: this.locale };
   }
 
-  private beginPresentation(tabId: IabTabId, kind: NonNullable<IabOverlayState>['kind'], anchor: IabBounds | IabToolAnchor): number {
+  private beginPresentation(tabId: IabTabId, kind: NonNullable<IabPageOverlayState>['kind'], anchor: IabBounds | IabToolAnchor): number {
     if (kind !== 'suggestions' || this.overlay.state?.kind !== 'suggestions') this.closeMenu();
     this.presentation = { tabId, kind, anchor };
     return ++this.presentationGeneration;
   }
 
   private isPresentationCurrent(generation: number, tabId: IabTabId): boolean {
-    return !this.disposed && generation === this.presentationGeneration && this.options.isPresentedTab(tabId);
+    return !this.disposed && this.overlay.state?.kind !== 'choices'
+      && generation === this.presentationGeneration && this.options.isPresentedTab(tabId);
   }
 
-  private async showPresentation(input: IabOverlayInput, generation: number): Promise<number | undefined> {
+  private async showPresentation(input: Exclude<IabOverlayInput, { kind: 'choices' }>, generation: number): Promise<number | undefined> {
     if (!this.isPresentationCurrent(generation, input.tabId)) return;
     const sessionId = await this.overlay.show(input);
     if (this.isPresentationCurrent(generation, input.tabId) && this.overlay.state?.sessionId === sessionId) return sessionId;
@@ -279,8 +291,8 @@ export class IabPageTools {
   }
 
   async notifyDownload(tabId: IabTabId, download: IabDownload): Promise<void> {
-    if (this.disposed || (this.presentation && !['toast', 'download'].includes(this.presentation.kind))) return;
-    const bounds = this.options.getBrowserBounds();
+    if (this.disposed || this.overlay.state?.kind === 'choices' || (this.presentation && !['toast', 'download'].includes(this.presentation.kind))) return;
+    const bounds = this.options.getBrowserBounds(tabId);
     if (!bounds || !this.options.isPresentedTab(tabId) || !this.options.getWebContents(tabId)) return;
     const generation = this.beginPresentation(tabId, 'download', bounds);
     await this.showPresentation({ ...this.context(tabId, bounds), kind: 'download', download }, generation);
@@ -290,7 +302,7 @@ export class IabPageTools {
     validateBounds(command.anchor);
     if (typeof command.query !== 'string' || command.query.length > 8_192 || !Number.isSafeInteger(command.selectedIndex) ||
       command.selectedIndex < -1 || command.selectedIndex > 7) throw new Error('Invalid browser history suggestions');
-    if (this.presentation && !['suggestions', 'toast'].includes(this.presentation.kind)) return [];
+    if (this.overlay.state?.kind === 'choices' || (this.presentation && !['suggestions', 'toast'].includes(this.presentation.kind))) return [];
     const contents = this.requireContents(command.tabId);
     const generation = this.beginPresentation(command.tabId, 'suggestions', command.anchor);
     const entries = await this.options.data.history.suggest(command.query, 8);
@@ -302,6 +314,13 @@ export class IabPageTools {
   }
 
   private async overlayCommand(command: IabOverlayCommand, state: NonNullable<IabOverlayState>): Promise<void> {
+    if (state.kind === 'choices') {
+      if (command.action === 'select-choice') {
+        this.options.emit({ type: 'choice-selected', requestId: state.requestId, id: command.id });
+        this.closeMenu();
+      }
+      return;
+    }
     const logicalAnchor = this.presentation?.anchor;
     const contents = this.requireContents(state.tabId, state.ownerId);
     if (command.action === 'refresh-downloads') { await this.refreshDownloads(true); return; }
@@ -345,14 +364,14 @@ export class IabPageTools {
       if (!window || window.isDestroyed()) throw new Error('Browser window is unavailable');
       const request: ClearRequest = { token: randomUUID(), ownerId: state.ownerId, tabId: state.tabId, contents, window,
         data: action === 'clear-cache' ? 'cache' : 'site-storage',
-        bounds: (logicalAnchor as IabToolAnchor | undefined)?.browserBounds ?? this.options.getBrowserBounds() };
+        bounds: (logicalAnchor as IabToolAnchor | undefined)?.browserBounds ?? this.options.getBrowserBounds(state.tabId) };
       this.clearRequest = request;
       this.closeMenu();
       this.options.emit({ type: 'clear-data-requested', ownerId: request.ownerId, tabId: request.tabId, token: request.token, data: request.data });
       return;
     }
     if (action === 'find') { this.closeMenu(); this.options.emit({ type: 'find-requested', ownerId: state.ownerId, tabId: state.tabId }); return; }
-    if (action === 'history' || action === 'downloads') { this.closeMenu(); this.options.openInternal(action); return; }
+    if (action === 'history' || action === 'downloads') { this.closeMenu(); this.options.openInternal(action, state.tabId); return; }
     this.closeMenu();
     const generation = this.presentationGeneration;
     try {
@@ -413,8 +432,8 @@ export class IabPageTools {
     return { resultType: 'saved', filename: result.filePath.split(/[\\/]/).pop()! };
   }
 
-  private async notify(tabId: IabTabId, message: string, bounds = this.options.getBrowserBounds()): Promise<void> {
-    if ((this.presentation && this.presentation.kind !== 'toast') || !this.options.isPresentedTab(tabId)) return;
+  private async notify(tabId: IabTabId, message: string, bounds = this.options.getBrowserBounds(tabId)): Promise<void> {
+    if (this.overlay.state?.kind === 'choices' || (this.presentation && this.presentation.kind !== 'toast') || !this.options.isPresentedTab(tabId)) return;
     if (bounds) {
       const generation = this.beginPresentation(tabId, 'toast', bounds);
       await this.showPresentation({ ...this.context(tabId, bounds), kind: 'toast', message }, generation);
@@ -439,13 +458,18 @@ export class IabPageTools {
   }
 
   closeMenu(tabId?: IabTabId): void {
-    if (tabId !== undefined && this.presentation?.tabId !== tabId && this.overlay.state?.tabId !== tabId) return;
-    if (this.overlay.state === null) this.cancelPresentation();
+    const state = this.overlay.state;
+    if (tabId !== undefined && this.presentation?.tabId !== tabId && (!state || state.kind === 'choices' || state.tabId !== tabId)) return;
+    this.cancelPresentation();
+    this.releaseDownloads();
     this.overlay.dismiss();
   }
-  hideSuggestions(): void {
+  hideSuggestions(tabId?: IabTabId): void {
+    const state = this.overlay.state;
+    if (tabId !== undefined && !(this.presentation?.kind === 'suggestions' && this.presentation.tabId === tabId)
+      && !(state?.kind === 'suggestions' && state.tabId === tabId)) return;
     this.suggestionQuery = undefined;
-    if (this.presentation?.kind === 'suggestions' || this.overlay.state?.kind === 'suggestions') this.closeMenu();
+    if (this.presentation?.kind === 'suggestions' || state?.kind === 'suggestions') this.closeMenu(tabId);
   }
   dispose(): void {
     if (this.disposed) return;

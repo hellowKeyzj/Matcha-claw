@@ -25,6 +25,28 @@ function download(value: unknown): boolean {
   return ['open', 'show-in-folder', 'cancel', 'pause', 'resume', 'remove'].includes(String(value.action))
     && keys(value, ['action', 'id']) && text(value.id, 256);
 }
+function choiceMenu(value: unknown): boolean {
+  if (!record(value) || !keys(value, ['requestId', 'anchor', 'align', 'keyboard', 'items', 'initialPage', 'labels', 'theme', 'locale'])
+    || !text(value.requestId, 256) || !bounds(value.anchor) || (value.align !== 'start' && value.align !== 'end')
+    || typeof value.keyboard !== 'boolean' || !Array.isArray(value.items) || value.items.length > 3_000
+    || !integer(value.initialPage) || value.initialPage > value.items.length
+    || (value.theme !== 'light' && value.theme !== 'dark') || !text(value.locale, 64)
+    || !record(value.labels) || !keys(value.labels, ['empty', 'previous', 'next', 'page'])
+    || !['empty', 'previous', 'next', 'page'].every((key) => text((value.labels as Record<string, unknown>)[key], 1_024))) return false;
+  try { Intl.getCanonicalLocales(value.locale); } catch { return false; }
+  const ids = new Set<string>();
+  return value.items.every((item) => {
+    if (!record(item) || !keys(item, ['id', 'label', 'icon', 'selected', 'badge', 'disabled'])
+      || !text(item.id, 256) || ids.has(item.id) || !text(item.label, 4_096)
+      || !optionalBoolean(item.selected) || !optionalBoolean(item.disabled)
+      || item.badge !== undefined && !text(item.badge, 256)
+      || item.icon !== undefined && (!text(item.icon, 99_999)
+        || !/^data:image\/(?:png|jpeg|webp|gif|x-icon|vnd\.microsoft\.icon|svg\+xml);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/i.test(item.icon)
+        || item.icon.endsWith(','))) return false;
+    ids.add(item.id);
+    return true;
+  });
+}
 function overlay(value: unknown): boolean {
   if (!record(value) || !integer(value.sessionId)) return false;
   switch (value.action) {
@@ -32,7 +54,7 @@ function overlay(value: unknown): boolean {
     case 'menu': return keys(value, ['sessionId', 'action', 'command'])
       && ['find', 'history', 'downloads', 'open-external', 'screenshot', 'clear-cache', 'clear-site-data', 'zoom-in', 'zoom-out', 'zoom-reset'].includes(String(value.command));
     case 'download': return keys(value, ['sessionId', 'action', 'command']) && download(value.command);
-    case 'select-suggestion': case 'remove-suggestion': return keys(value, ['sessionId', 'action', 'id']) && text(value.id, 256);
+    case 'select-suggestion': case 'remove-suggestion': case 'select-choice': return keys(value, ['sessionId', 'action', 'id']) && text(value.id, 256);
     default: return false;
   }
 }
@@ -40,14 +62,25 @@ function command(value: unknown): value is IabUiCommand {
   if (!record(value)) return false;
   const tab = () => text(value.tabId, 256);
   switch (value.action) {
-    case 'snapshot': case 'list-all': case 'hide-suggestions': case 'downloads-clear':
+    case 'snapshot': case 'list-all': case 'downloads-clear':
       return keys(value, ['action']);
-    case 'open': return keys(value, ['action', 'url', 'background']) && text(value.url) && optionalBoolean(value.background);
-    case 'switch': case 'close': case 'back': case 'forward': case 'reload': case 'screenshot-save':
+    case 'open': return keys(value, ['action', 'url', 'displayScope', 'background'])
+      && text(value.url) && text(value.displayScope) && optionalBoolean(value.background);
+    case 'promote-display-scope': return keys(value, ['action', 'from', 'to']) && text(value.from) && text(value.to);
+    case 'switch': case 'close': case 'back': case 'forward': case 'reload': case 'screenshot-save': case 'hide-suggestions':
       return keys(value, ['action', 'tabId']) && tab();
     case 'navigate': return keys(value, ['action', 'tabId', 'url']) && tab() && text(value.url);
-    case 'set-bounds': return keys(value, ['action', 'bounds']) && bounds(value.bounds);
-    case 'set-visible': return keys(value, ['action', 'visible']) && typeof value.visible === 'boolean';
+    case 'set-views': {
+      if (!keys(value, ['action', 'views']) || !Array.isArray(value.views) || value.views.length > 3_000) return false;
+      const ids = new Set<string>();
+      return value.views.every((view) => {
+        if (!record(view) || !keys(view, ['tabId', 'bounds']) || !text(view.tabId, 256) || ids.has(view.tabId) || !bounds(view.bounds)) return false;
+        ids.add(view.tabId);
+        return true;
+      });
+    }
+    case 'show-choices': return keys(value, ['action', 'menu']) && choiceMenu(value.menu);
+    case 'dismiss-choices': return keys(value, ['action', 'requestId']) && text(value.requestId, 256);
     case 'set-presentation': return keys(value, ['action', 'theme', 'locale'])
       && (value.theme === 'light' || value.theme === 'dark') && text(value.locale, 64);
     case 'find': return keys(value, ['action', 'tabId', 'text', 'searchId', 'forward']) && tab()
@@ -57,7 +90,7 @@ function command(value: unknown): value is IabUiCommand {
       && (value.mode === undefined || ['clearSelection', 'keepSelection', 'activateSelection'].includes(String(value.mode)));
     case 'set-zoom': return keys(value, ['action', 'tabId', 'zoomFactor']) && tab()
       && number(value.zoomFactor) && value.zoomFactor >= 0.25 && value.zoomFactor <= 5;
-    case 'open-internal': return keys(value, ['action', 'page']) && (value.page === 'history' || value.page === 'downloads');
+    case 'open-internal': return keys(value, ['action', 'page', 'tabId']) && tab() && (value.page === 'history' || value.page === 'downloads');
     case 'history-query': {
       const query = value.query;
       return keys(value, ['action', 'query']) && record(query) && keys(query, ['query', 'offset', 'limit', 'from', 'to'])

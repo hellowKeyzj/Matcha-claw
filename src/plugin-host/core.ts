@@ -18,12 +18,14 @@ export function contribute<T>(point: ExtensionPoint<T>, value: NoInfer<T>): Exte
   return { point, value };
 }
 
+export type PluginCleanup = (reason?: 'page-exit') => void;
+
 export interface ApplicationPlugin {
   readonly id: string;
   readonly requires?: readonly string[];
   readonly extensionPoints?: readonly ExtensionPoint<unknown>[];
   readonly contributes?: readonly ExtensionContribution[];
-  readonly activate?: () => void | (() => void);
+  readonly activate?: () => void | PluginCleanup;
 }
 
 export function definePlugin(plugin: ApplicationPlugin): ApplicationPlugin {
@@ -35,7 +37,7 @@ export interface PluginHost {
   get<T>(point: ExtensionPoint<T>): readonly T[];
   subscribe(point: ExtensionPoint<unknown>, listener: () => void): () => void;
   replaceInstalled(plugins: readonly ApplicationPlugin[]): void;
-  start(): () => void;
+  start(): PluginCleanup;
 }
 
 const EMPTY_CONTRIBUTIONS: readonly never[] = Object.freeze([]);
@@ -87,7 +89,7 @@ export function createPluginHost(plugins: readonly ApplicationPlugin[]): PluginH
   const builtins = [...plugins];
   let snapshot = resolvePlugins(builtins);
   const listeners = new Map<string, Set<() => void>>();
-  const cleanups = new Map<string, () => void>();
+  const cleanups = new Map<string, PluginCleanup>();
   let started = false;
 
   const publish = (next: ReturnType<typeof resolvePlugins>) => {
@@ -106,13 +108,13 @@ export function createPluginHost(plugins: readonly ApplicationPlugin[]): PluginH
     }
   };
 
-  const stop = () => {
+  const stop: PluginCleanup = (reason) => {
     started = false;
     const errors: unknown[] = [];
     for (const plugin of [...snapshot.ordered].reverse()) {
       const cleanup = cleanups.get(plugin.id);
       cleanups.delete(plugin.id);
-      try { cleanup?.(); } catch (error) { errors.push(error); }
+      try { cleanup?.(reason); } catch (error) { errors.push(error); }
     }
     if (errors.length) throw new AggregateError(errors, 'Application plugin cleanup failed');
   };

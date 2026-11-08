@@ -64,6 +64,7 @@ pub(crate) enum OrganizationQuery {
         run_id: GraphRunId,
         event_cursor: Option<u64>,
         event_limit: Option<u64>,
+        message_cursor: Option<crate::run::public_projection::TeamRunMessageCursor>,
         reply: crate::call::CallReply<(
             Option<TeamRunPublicSnapshotQueryOutcome>,
             Option<crate::TeamCreationFailure>,

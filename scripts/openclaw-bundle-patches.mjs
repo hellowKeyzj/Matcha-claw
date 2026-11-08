@@ -8,8 +8,11 @@ import { patchOpenClawBoard } from './openclaw-board-patches.mjs';
 import { patchOpenClawWorldInvestigation } from './openclaw-world-investigation-patches.mjs';
 import { patchOpenClawMedia } from './openclaw-media-patches.mjs';
 import { patchOpenClawImageTasks } from './openclaw-image-task-patches.mjs';
+import { patchOpenClawChatStream } from './openclaw-chat-stream-patches.mjs';
+import { patchOpenClawHistoryPath } from './openclaw-history-path-patches.mjs';
+import { patchOpenClawChatMedia } from './openclaw-chat-media-patches.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'native-account-media', 'native-image-task-cancellation', 'owned-stdin-stop']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'native-account-media', 'native-image-task-cancellation', 'native-chat-consistency', 'owned-stdin-stop']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -1721,6 +1724,20 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'native-image-task-cancellation',
     apply: patchOpenClawImageTasks,
+  },
+  {
+    id: 'native-chat-consistency',
+    apply(openclawDir) {
+      const results = [
+        patchOpenClawChatStream(openclawDir),
+        patchOpenClawHistoryPath(openclawDir),
+        patchOpenClawChatMedia(openclawDir),
+      ];
+      return {
+        status: results.some((result) => result.status === 'applied') ? 'applied' : 'clean',
+        detail: results.map((result) => result.detail).join('; '),
+      };
+    },
   },
   {
     id: 'owned-stdin-stop',

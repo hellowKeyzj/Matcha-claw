@@ -13,6 +13,7 @@ export type PageLinksPanelProps = Readonly<{
   projectId: string;
   relativePath: string;
   busy: string | null;
+  writeBusy: string | null;
   unsaved: boolean;
   onOpenFile(path: string): Promise<void>;
   onCreated(projectId: string, path: string): Promise<void>;
@@ -31,7 +32,7 @@ type Creation = {
   cancellation?: Promise<void>;
 };
 
-export function PageLinksPanel({ projectId, relativePath, busy, unsaved, onOpenFile, onCreated, onClose }: PageLinksPanelProps): JSX.Element {
+export function PageLinksPanel({ projectId, relativePath, busy, writeBusy, unsaved, onOpenFile, onCreated, onClose }: PageLinksPanelProps): JSX.Element {
   const { t } = useTranslation('wiki');
   const [links, setLinks] = useState<WikiPageLinks | null>(null);
   const [loading, setLoading] = useState(true);
@@ -128,7 +129,7 @@ export function PageLinksPanel({ projectId, relativePath, busy, unsaved, onOpenF
 
   async function createMissing(entry: WikiPageLink, draft: boolean): Promise<void> {
     const scope = scopeRef.current;
-    if (!scope || !isCurrent(scope) || useWikiProjectsStore.getState().switching || busy !== null || creationRef.current) return;
+    if (!scope || !isCurrent(scope) || useWikiProjectsStore.getState().switching || busy !== null || writeBusy !== null || creationRef.current) return;
     const task: Creation = { scope, taskId: crypto.randomUUID(), title: entry.title, draft, controller: new AbortController(), admission: 'pending', phase: 'creating' };
     creationRef.current = task;
     setCreation(task);
@@ -195,6 +196,7 @@ export function PageLinksPanel({ projectId, relativePath, busy, unsaved, onOpenF
   }
 
   const disabled = busy !== null || creation !== null;
+  const createDisabled = writeBusy !== null || disabled;
   const sections = [
     { key: 'outgoing', title: t('pageLinks.outgoing', { defaultValue: '出站链接' }), empty: t('pageLinks.noOutgoing', { defaultValue: '此页面没有出站链接。' }), icon: Link2 },
     { key: 'backlinks', title: t('pageLinks.backlinks', { defaultValue: '反向链接' }), empty: t('pageLinks.noBacklinks', { defaultValue: '暂无页面引用此页面。' }), icon: CornerUpLeft },
@@ -234,8 +236,8 @@ export function PageLinksPanel({ projectId, relativePath, busy, unsaved, onOpenF
                     {entry.snippet ? <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{entry.snippet}</p> : null}
                     {key === 'missing' && !entry.path ? (
                       <div className="mt-2 flex gap-1.5">
-                        <Button type="button" size="sm" variant="outline" className="h-7 px-2" disabled={disabled} onClick={() => { void createMissing(entry, false); }}><Plus className="h-3 w-3" aria-hidden="true" />{t('pageLinks.create', { defaultValue: '创建页面' })}</Button>
-                        <WikiPrimaryButton type="button" size="sm" className="h-7 px-2" disabled={disabled} onClick={() => { void createMissing(entry, true); }}><Sparkles className="h-3 w-3" aria-hidden="true" />{t('pageLinks.draft', { defaultValue: 'AI 起草' })}</WikiPrimaryButton>
+                        <Button type="button" size="sm" variant="outline" className="h-7 px-2" disabled={createDisabled} onClick={() => { void createMissing(entry, false); }}><Plus className="h-3 w-3" aria-hidden="true" />{t('pageLinks.create', { defaultValue: '创建页面' })}</Button>
+                        <WikiPrimaryButton type="button" size="sm" className="h-7 px-2" disabled={createDisabled} onClick={() => { void createMissing(entry, true); }}><Sparkles className="h-3 w-3" aria-hidden="true" />{t('pageLinks.draft', { defaultValue: 'AI 起草' })}</WikiPrimaryButton>
                       </div>
                     ) : null}
                   </div>

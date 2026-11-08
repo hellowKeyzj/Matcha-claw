@@ -206,7 +206,7 @@ export function DedupPanel({ projectId, modelRef, busy, onChanged }: Readonly<{
         {task.paused ? <Button type="button" size="sm" variant="outline" disabled={busy !== null || pendingKeys.has(groupKey(task.group.slugs))} onClick={() => { void runMerge('dedup.resume', undefined, task); }}><RotateCcw className="h-3.5 w-3.5" />{t('dedup.resume')}</Button> : null}
         {task.status === 'failed' && !task.paused ? <Button type="button" size="sm" variant="outline" disabled={busy !== null || pendingKeys.has(groupKey(task.group.slugs))} onClick={() => { void runMerge('dedup.retry', undefined, task); }}>{t('dedup.retry')}</Button> : null}
         <Button type="button" size="sm" variant="ghost" onClick={() => { void cancelTask(task); }}>{t(task.status === 'failed' ? 'common.delete' : 'common.cancel')}</Button>
-        {task.error ? <p className="basis-full text-xs text-destructive">{task.error}</p> : null}
+        {task.error ? <p className="basis-full text-xs text-destructive">{t(task.error, { defaultValue: task.error, keySeparator: false, nsSeparator: false })}</p> : null}
       </div>
     );
   }

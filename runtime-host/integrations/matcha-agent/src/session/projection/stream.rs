@@ -2,7 +2,8 @@ use super::{Message, id, message_with_event, payload, prefix, rejected, trace_sh
 use crate::{client::Event, session::rpc::Failure};
 use serde_json::{Value, json};
 use sessions_module::state::{
-    ItemStatus, MAX_ITEMS, MAX_SEGMENTS, MAX_TEXT_BYTES, MAX_TOOLS, ToolPhase,
+    ItemStatus, MAX_ITEMS, MAX_SEGMENTS, MAX_TEXT_BYTES, MAX_TOOLS, SessionContent, SessionItem,
+    ToolPhase, ToolView,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,6 +18,7 @@ struct Block {
     item_id: String,
     open: bool,
     published: bool,
+    tool_preview: Option<Arc<Message>>,
 }
 impl Block {
     fn meaningful(&self) -> bool {
@@ -51,8 +53,28 @@ struct Stream {
     identity: String,
     blocks: BTreeMap<usize, Block>,
     finals: Vec<Arc<Message>>,
+    rebuilding: bool,
 }
 impl Stream {
+    fn replacement_complete(&self) -> bool {
+        let mut segments = Vec::new();
+        for message in &self.finals {
+            let SessionItem::AssistantTurn { segments: content, .. } = &message.item else {
+                return false;
+            };
+            segments.extend(content);
+        }
+        if segments.len() != self.blocks.len() || self.blocks.values().any(|block| block.open) {
+            return false;
+        }
+        self.blocks.values().zip(segments).all(|(block, segment)| match segment {
+            SessionContent::Text { text } if block.body["type"] == "text" =>
+                block.body["text"].as_str() == Some(text.as_str()),
+            SessionContent::Thinking { text } if block.body["type"] == "thinking" =>
+                block.body["thinking"].as_str() == Some(text.as_str()),
+            _ => false,
+        })
+    }
     fn trace_state(&self) -> Value {
         json!({
             "parentHash": platform::trace::identifier_hash(&self.parent),
@@ -78,8 +100,50 @@ pub(crate) struct Streaming {
 pub(crate) struct StreamMessage {
     pub messages: Vec<Message>,
     pub retired: Vec<String>,
+    pub tools: Vec<ToolView>,
 }
 impl Streaming {
+    pub(crate) fn rebuild_stopped_preview(&mut self, native: &Event) -> bool {
+        if native.kind != "native.message"
+            || native.payload["type"] != "stream_event"
+            || native.payload.pointer("/event/type").and_then(Value::as_str) != Some("content_block_stop")
+            || self.instance.is_none()
+        {
+            return false;
+        }
+        let parent = match native.payload.get("parent_tool_use_id") {
+            None | Some(Value::Null) => "",
+            Some(Value::String(parent)) => parent.as_str(),
+            _ => return false,
+        };
+        let Some(index) = native.payload.pointer("/event/index").and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok()) else {
+            return false;
+        };
+        let mut matching = self.streams.iter().enumerate().filter(|(_, stream)| stream.parent == parent);
+        let Some((stream_index, stream)) = matching.next() else { return false; };
+        if matching.next().is_some()
+            || stream.rebuilding
+            || !stream.blocks.get(&index).is_some_and(|block| !block.open)
+            || !stream.blocks.values().all(|block| {
+                let field = match block.body["type"].as_str() {
+                    Some("text") => "text",
+                    Some("thinking") => "thinking",
+                    _ => return false,
+                };
+                block.body[field].as_str().is_some_and(|text| text.len() < MAX_TEXT_BYTES)
+            })
+        {
+            return false;
+        }
+        // Only the uncommitted durable-replay candidate may reach this transition.
+        // The rejected stop adds no content; exact SDK replacement must close it.
+        Arc::make_mut(&mut self.streams[stream_index]).rebuilding = true;
+        true
+    }
+    pub(crate) fn rebuilding(&self) -> bool {
+        self.streams.iter().any(|stream| stream.rebuilding)
+    }
     pub(crate) fn trace_state(&self, row: &Value) -> Value {
         let parent = row
             .get("parent_tool_use_id")
@@ -123,6 +187,12 @@ impl Streaming {
         native: &Event,
         abnormal: Option<ItemStatus>,
     ) -> Result<StreamMessage, Failure> {
+        let stream = &self.streams[index];
+        if stream.rebuilding
+            && (abnormal.is_some() || !stream.replacement_complete())
+        {
+            return Err(self.rejected(native, "stream.replacement_incomplete"));
+        }
         let stream = self.streams.remove(index);
         self.buffered_items -= stream.blocks.len() + stream.finals.len();
         let mut messages = Vec::new();
@@ -159,7 +229,11 @@ impl Streaming {
                 "messageCount": messages.len(),
             })
         });
-        Ok(StreamMessage { messages, retired })
+        Ok(StreamMessage {
+            messages,
+            retired,
+            tools: Vec::new(),
+        })
     }
     fn seal(
         &mut self,
@@ -169,6 +243,7 @@ impl Streaming {
         let mut projected = StreamMessage {
             messages: Vec::new(),
             retired: Vec::new(),
+            tools: Vec::new(),
         };
         while !self.streams.is_empty() {
             let closed = self.close(0, native, Some(status))?;
@@ -178,7 +253,11 @@ impl Streaming {
         Arc::make_mut(&mut self.stopped).clear();
         Ok((!projected.messages.is_empty() || !projected.retired.is_empty()).then_some(projected))
     }
-    pub fn observe(&mut self, native: &Event) -> Result<Option<StreamMessage>, Failure> {
+    pub fn observe(
+        &mut self,
+        native: &Event,
+        items: &[SessionItem],
+    ) -> Result<Option<StreamMessage>, Failure> {
         let row = &native.payload;
         if matches!(
             native.kind.as_str(),
@@ -278,6 +357,7 @@ impl Streaming {
             return Ok(Some(StreamMessage {
                 messages: vec![message],
                 retired: Vec::new(),
+                tools: Vec::new(),
             }));
         }
         let event = row
@@ -296,7 +376,8 @@ impl Streaming {
             if self
                 .streams
                 .iter()
-                .any(|stream| stream.parent == parent && stream.provider_id == provider)
+                .any(|stream| stream.parent == parent
+                    && (stream.provider_id == provider || stream.rebuilding))
             {
                 return Err(self.rejected(native, "stream.message_start_existing"));
             }
@@ -316,6 +397,7 @@ impl Streaming {
                 identity: format!("{:x}", hash.finalize()),
                 blocks: BTreeMap::new(),
                 finals: Vec::new(),
+                rebuilding: false,
             }));
             return Ok(None);
         }
@@ -377,6 +459,7 @@ impl Streaming {
                     item_id: format!("stream:{}:{index}", stream.identity),
                     open: true,
                     published: false,
+                    tool_preview: None,
                 },
             );
             self.buffered_items += 1;
@@ -428,12 +511,30 @@ impl Streaming {
                 .unwrap();
             if field == "input" {
                 Arc::make_mut(&mut block.input_text).push_str(suffix);
+                // Input fragments cannot change this block's published display position.
+                if let Some(preview) = &block.tool_preview
+                    && items.iter().any(|item| item == &preview.item)
+                {
+                    let mut tools = preview.tools.clone();
+                    for tool in &mut tools {
+                        tool.input_text = Some(block.input_text.as_ref().clone());
+                        tool.phase = ToolPhase::Updated;
+                    }
+                    return Ok(Some(StreamMessage {
+                        messages: Vec::new(),
+                        retired: Vec::new(),
+                        tools,
+                    }));
+                }
             } else {
                 let Value::String(text) = &mut Arc::make_mut(&mut block.body)[field] else {
                     unreachable!("preview text is validated")
                 };
                 text.push_str(suffix);
             }
+        }
+        if self.streams[stream_index].rebuilding {
+            return Ok(None);
         }
         let block = Arc::make_mut(&mut self.streams[stream_index])
             .blocks
@@ -443,10 +544,14 @@ impl Streaming {
             return Ok(None);
         }
         let message = block.project(native, ItemStatus::Streaming)?;
+        if !message.tools.is_empty() && block.tool_preview.is_none() {
+            block.tool_preview = Some(Arc::new(message.clone()));
+        }
         block.published = true;
         Ok(Some(StreamMessage {
             messages: vec![message],
             retired: Vec::new(),
+            tools: Vec::new(),
         }))
     }
 }

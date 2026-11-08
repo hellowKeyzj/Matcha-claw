@@ -72,6 +72,7 @@ class BrowserRelayRuntime {
     this.executions = new BrowserExecutions(
       (request) => backend.cleanupSession(request),
       (context) => resolveBrowserContext(context, config),
+      this.iab ? 'iab' : 'relay',
     )
   }
 

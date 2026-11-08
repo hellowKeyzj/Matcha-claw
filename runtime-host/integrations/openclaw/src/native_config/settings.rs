@@ -203,6 +203,9 @@ impl SettingsProjection {
         let mut relay_entry = object(entries.get(BROWSER_RELAY_PLUGIN));
         changed |= replace(&mut relay_entry, "enabled", Value::Bool(relay));
         if relay {
+            let mut hooks = object(relay_entry.get("hooks"));
+            changed |= replace(&mut hooks, "allowConversationAccess", Value::Bool(true));
+            changed |= replace(&mut relay_entry, "hooks", Value::Object(hooks));
             let mut config = object(relay_entry.get("config"));
             let mode = if self.browser_mode == BrowserMode::Iab {
                 "iab"
@@ -250,6 +253,13 @@ impl SettingsProjection {
             return false;
         }
         if relay {
+            if relay_entry
+                .get("hooks")
+                .and_then(|hooks| hooks.get("allowConversationAccess"))
+                != Some(&Value::Bool(true))
+            {
+                return false;
+            }
             let mode = if self.browser_mode == BrowserMode::Iab {
                 "iab"
             } else {

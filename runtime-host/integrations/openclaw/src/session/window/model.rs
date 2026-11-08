@@ -252,6 +252,7 @@ pub struct LargeTextFacts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Message {
     role: MessageRole,
+    notice: Option<sessions_module::state::SessionNotice>,
     text: String,
     content: Vec<MessageContent>,
     message_id: Option<String>,
@@ -261,6 +262,7 @@ pub struct Message {
     run_id: Option<String>,
     identity_run_id: Option<String>,
     identity_message_id: Option<String>,
+    identity_stream_id: Option<String>,
     identity_sequence: Option<u64>,
     idempotency_key: Option<String>,
     input_id: Option<String>,
@@ -312,6 +314,7 @@ impl Message {
     ) -> Self {
         Self {
             role,
+            notice: None,
             text,
             content,
             message_id,
@@ -320,6 +323,7 @@ impl Message {
             tool_call_id,
             identity_run_id: None,
             identity_message_id: None,
+            identity_stream_id: None,
             identity_sequence: None,
             idempotency_key: None,
             input_id: None,
@@ -352,11 +356,13 @@ impl Message {
     pub(crate) fn with_identity(
         mut self,
         message_id: Option<String>,
+        stream_id: Option<String>,
         run_id: Option<String>,
         sequence: Option<u64>,
         after_sequence: Option<Option<u64>>,
     ) -> Self {
         self.identity_message_id = message_id;
+        self.identity_stream_id = stream_id;
         self.identity_run_id = run_id;
         self.identity_sequence = sequence;
         self.after_sequence = after_sequence;
@@ -400,6 +406,13 @@ impl Message {
         self
     }
 
+    pub(super) fn with_notice(mut self, notice: Option<sessions_module::state::SessionNotice>) -> Self {
+        self.notice = notice;
+        self
+    }
+
+    pub(crate) const fn notice(&self) -> Option<sessions_module::state::SessionNotice> { self.notice }
+
     pub(crate) fn input_id(&self) -> Option<&str> { self.input_id.as_deref() }
     pub(crate) fn idempotency_key(&self) -> Option<&str> { self.idempotency_key.as_deref() }
     pub(crate) fn stop_reason(&self) -> Option<&str> { self.stop_reason.as_deref() }
@@ -412,6 +425,7 @@ impl Message {
     }
 
     pub(crate) fn identity_message_id(&self) -> Option<&str> { self.identity_message_id.as_deref() }
+    pub(crate) fn identity_stream_id(&self) -> Option<&str> { self.identity_stream_id.as_deref() }
     pub(crate) fn identity_run_id(&self) -> Option<&str> { self.identity_run_id.as_deref() }
     pub(crate) const fn identity_sequence(&self) -> Option<u64> { self.identity_sequence }
     pub(crate) const fn after_sequence(&self) -> Option<Option<u64>> { self.after_sequence }
@@ -656,10 +670,12 @@ pub struct SessionState {
     delta_cursor: Option<String>,
     complete_snapshot: Option<bool>,
     kind: HistoryKind,
+    history_path: Option<Option<crate::session::protocol::HistoryPath>>,
     active_leaf_entry_id: Option<Option<String>>,
     status: Option<String>,
     has_active_run: Option<bool>,
     active_run_ids: Option<Vec<String>>,
+    run_timings: Vec<crate::session::protocol::NativeRunTiming>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -682,10 +698,12 @@ impl SessionState {
             delta_cursor,
             complete_snapshot,
             kind: HistoryKind::Full,
+            history_path: None,
             active_leaf_entry_id: None,
             status: None,
             has_active_run: None,
             active_run_ids: None,
+            run_timings: Vec::new(),
         }
     }
 
@@ -707,6 +725,13 @@ impl SessionState {
         self
     }
 
+    pub(crate) fn with_run_timings(mut self, run_timings: Vec<crate::session::protocol::NativeRunTiming>) -> Self {
+        self.run_timings = run_timings;
+        self
+    }
+
+    pub(crate) fn run_timings(&self) -> &[crate::session::protocol::NativeRunTiming] { &self.run_timings }
+
     pub const fn has_active_run(&self) -> Option<bool> { self.has_active_run }
 
     pub fn active_run_ids(&self) -> Option<&[String]> { self.active_run_ids.as_deref() }
@@ -719,6 +744,15 @@ impl SessionState {
     }
 
     pub const fn kind(&self) -> HistoryKind { self.kind }
+
+    pub(crate) fn with_history_path(mut self, path: Option<Option<crate::session::protocol::HistoryPath>>) -> Self {
+        self.history_path = path;
+        self
+    }
+
+    pub(crate) fn history_path(&self) -> Option<Option<&crate::session::protocol::HistoryPath>> {
+        self.history_path.as_ref().map(Option::as_ref)
+    }
 
     pub fn active_leaf_entry_id(&self) -> Option<&str> { self.active_leaf_scope().flatten() }
 

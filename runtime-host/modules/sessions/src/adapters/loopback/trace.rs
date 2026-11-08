@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
-use crate::state::{ItemAnchor, SessionChange, SessionContent, SessionFact, SessionIdentity, SessionItem, SessionView};
+use crate::state::{ItemAnchor, RunTiming, SessionChange, SessionContent, SessionFact, SessionIdentity, SessionItem, SessionView};
 
 tokio::task_local! {
     static CONTEXT: Value;
@@ -62,10 +62,17 @@ pub fn items_shape(items: &[SessionItem]) -> Value {
         "values": items.iter().take(crate::state::MAX_ITEMS).map(item_shape).collect::<Vec<_>>() })
 }
 
+fn run_timing_shape(timing: &RunTiming) -> Value {
+    serde_json::json!({ "runHash": fingerprint(&timing.run_id), "startedAtMs": timing.started_at_ms,
+        "endedAtMs": timing.ended_at_ms, "inputMessageHash": timing.input_message_id.as_deref().map(fingerprint) })
+}
+
 pub fn view_shape(view: &SessionView) -> Value {
     let items = match &view.items { SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. } => items.as_slice(), _ => &[] };
     serde_json::json!({ "identity": identity_shape(&view.identity), "epoch": view.epoch, "seq": view.seq,
-        "cursor": view.cursor, "items": items_shape(items) })
+        "cursor": view.cursor, "items": items_shape(items),
+        "runTimingCount": view.run_timings.len(), "runTimingsTruncated": view.run_timings.len() > crate::state::MAX_ITEMS,
+        "runTimings": view.run_timings.iter().take(crate::state::MAX_ITEMS).map(run_timing_shape).collect::<Vec<_>>() })
 }
 
 pub fn changes_shape(changes: &[SessionChange]) -> Value {
@@ -81,6 +88,7 @@ pub fn changes_shape(changes: &[SessionChange]) -> Value {
             "itemHash": fingerprint(item_id), "runHash": run_id.as_deref().map(fingerprint), "messageHash": message_id.as_deref().map(fingerprint),
             "text": text_shape(text), "replace": replace, "status": status }),
         SessionChange::ToolUpdated { tool } => serde_json::json!({ "kind": "toolUpdated", "toolHash": fingerprint(&tool.tool_call_id), "runHash": tool.run_id.as_deref().map(fingerprint), "phase": tool.phase }),
+        SessionChange::RunTimingUpdated { timing } => serde_json::json!({ "kind": "runTimingUpdated", "timing": run_timing_shape(timing) }),
         SessionChange::RunPhaseChanged { run_id, phase } => serde_json::json!({ "kind": "runPhaseChanged", "runHash": fingerprint(run_id), "phase": phase }),
         SessionChange::RecoveryRequired { reason } => serde_json::json!({ "kind": "recoveryRequired", "reason": reason }),
         SessionChange::RuntimeChanged { runtime } => serde_json::json!({ "kind": "runtimeChanged", "phase": runtime.phase, "runHash": runtime.active_run_id.as_deref().map(fingerprint) }),

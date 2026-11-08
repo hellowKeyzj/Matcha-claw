@@ -40,7 +40,7 @@ impl Client {
         let signing_key = SigningKey::from_bytes(key);
         let body = serde_json::to_vec(&json!({ "name": name, "arguments": arguments }))
             .map_err(|_| ToolCallError::Internal)?;
-        if matches!(family, Family::Team) && body.len() > MAX_BYTES {
+        if matches!(family, Family::Team | Family::Maintenance) && body.len() > MAX_BYTES {
             return Err(ToolCallError::InvalidParams);
         }
         let now = now_millis().map_err(|_| ToolCallError::Internal)?;
@@ -71,7 +71,7 @@ impl Client {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
         let request = match family {
-            Family::Team => request.timeout(Duration::from_secs(30)),
+            Family::Team | Family::Maintenance => request.timeout(Duration::from_secs(30)),
             Family::Wiki => request,
         };
         let mut response = request.send().await.map_err(|_| ToolCallError::Internal)?;
@@ -80,10 +80,12 @@ impl Client {
             return Err(ToolCallError::InvalidParams);
         }
         let successful = match family {
-            Family::Team => status.is_success(),
+            Family::Team | Family::Maintenance => status.is_success(),
             Family::Wiki => status == reqwest::StatusCode::OK,
         };
-        if !successful {
+        let execution_error =
+            matches!(family, Family::Maintenance) && matches!(status.as_u16(), 409 | 422);
+        if !successful && !execution_error {
             return Err(ToolCallError::Internal);
         }
         let mut bytes = Vec::new();
@@ -92,11 +94,20 @@ impl Client {
             .await
             .map_err(|_| ToolCallError::Internal)?
         {
-            if matches!(family, Family::Team) && bytes.len() + chunk.len() > MAX_BYTES {
+            if matches!(family, Family::Team | Family::Maintenance)
+                && bytes.len() + chunk.len() > MAX_BYTES
+            {
                 return Err(ToolCallError::Internal);
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| ToolCallError::Internal)
+        let result = serde_json::from_slice(&bytes).map_err(|_| ToolCallError::Internal)?;
+        match (execution_error, status.as_u16()) {
+            (true, 409) => Err(ToolCallError::Execution(result)),
+            (true, 422) => Err(ToolCallError::ExecutionText(
+                serde_json::from_value(result).map_err(|_| ToolCallError::Internal)?,
+            )),
+            _ => Ok(result),
+        }
     }
 }

@@ -7,6 +7,7 @@ import type { createFleetTransport } from './fleet';
 import type { createFleetCredentialsTransport } from './fleet-credentials';
 import type { createSessionContentTransport } from './sessions/content';
 import type { createSessionTimelineTransport } from './sessions/timeline';
+import type { createSessionRunTransport } from './sessions/run';
 import type { createSessionObservationTransport } from './sessions/observation';
 import type { createDiagnosticsArchiveTransport } from './diagnostics';
 import type { createWorkspaceTextTransport } from './workspace/read-text';
@@ -88,6 +89,7 @@ export type RuntimeHostTransports = Readonly<{
   fleetCredentialsTransport: ReturnType<typeof createFleetCredentialsTransport>;
   sessionContentTransport: ReturnType<typeof createSessionContentTransport>;
   sessionTimelineTransport: ReturnType<typeof createSessionTimelineTransport>;
+  sessionRunTransport: ReturnType<typeof createSessionRunTransport>;
   sessionObservationTransport: ReturnType<typeof createSessionObservationTransport>;
   diagnosticsArchiveTransport: ReturnType<typeof createDiagnosticsArchiveTransport>;
   workspaceTextTransport: ReturnType<typeof createWorkspaceTextTransport>;

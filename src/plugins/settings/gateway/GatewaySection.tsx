@@ -245,18 +245,21 @@ export default function GatewaySection({ active }: SettingsSectionProps) {
       const logs = await hostApiFetch<{ content: string }>('/api/openclaw/logs?tailLines=100');
       if (request === openClawLogsReadRef.current) setOpenClawLogContent(logs.content);
     } catch {
-      if (request === openClawLogsReadRef.current) setOpenClawLogContent('(Failed to load logs)');
+      if (request === openClawLogsReadRef.current) setOpenClawLogContent(t('gateway.logsLoadFailed'));
     }
   };
 
   const handleOpenOpenClawLogDir = async () => {
     try {
       const { dir: logDir } = await hostApiFetch<{ dir: string | null }>('/api/openclaw/logs/dir');
-      if (logDir) {
-        await invokeIpc('shell:showItemInFolder', logDir);
+      if (!logDir?.trim()) {
+        toast.error(t('gateway.logDirUnavailable'));
+        return;
       }
+      const error = await invokeIpc<string>('shell:openPath', logDir);
+      if (error) toast.error(t('gateway.openLogDirFailed'));
     } catch {
-      // ignore
+      toast.error(t('gateway.openLogDirFailed'));
     }
   };
 

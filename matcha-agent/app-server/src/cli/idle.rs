@@ -46,6 +46,14 @@ impl Control {
         self.cli.instance_id()
     }
 
+    pub(crate) async fn apply_permissions(
+        &self,
+        patch: &Value,
+        states: &std::collections::BTreeMap<String, bool>,
+    ) -> rpc::Result<Vec<String>> {
+        self.cli.apply_permissions(patch, states).await
+    }
+
     pub(crate) async fn request(&self, request: Value) -> rpc::Result<Value> {
         match request.get("subtype").and_then(Value::as_str) {
             Some("initialize") => {
@@ -118,8 +126,11 @@ impl Cli {
             && self.0.instance.process.exited_gracefully()
     }
 
-    pub(crate) async fn prepare_to_sleep(&self) -> rpc::Result<Preparation> {
-        self.prepare(true, None).await
+    pub(crate) async fn prepare_to_sleep(
+        &self,
+        replay_state: Option<Value>,
+    ) -> rpc::Result<Preparation> {
+        self.prepare(true, replay_state).await
     }
 
     pub(crate) async fn prepare_handoff(

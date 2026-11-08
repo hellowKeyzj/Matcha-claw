@@ -67,6 +67,8 @@ const SEARCH_PATH: &str = "/api/wiki/search";
 const GRAPH_PATH: &str = "/api/wiki/graph";
 const RESCAN_SOURCES_PATH: &str = "/api/wiki/rescan-sources";
 const REFRESH_SOURCES_PATH: &str = "/api/wiki/refresh-sources";
+const ARCHIVE_ARTIFACT_PATH: &str = "/api/wiki/artifacts";
+const ARTIFACT_STATUS_PATH: &str = "/api/wiki/artifacts/status";
 const IMPORT_SOURCE_PATH: &str = "/api/wiki/import-source";
 const IMPORT_FOLDER_PATH: &str = "/api/wiki/import-folder";
 const APPLY_GENERATED_PAGES_PATH: &str = "/api/wiki/apply-generated-pages";
@@ -143,6 +145,8 @@ const ROUTE_PATHS: &[RoutePath] = &[
     RoutePath::ExactWithQuery(GRAPH_PATH),
     RoutePath::ExactWithQuery(RESCAN_SOURCES_PATH),
     RoutePath::ExactWithQuery(REFRESH_SOURCES_PATH),
+    RoutePath::ExactWithQuery(ARCHIVE_ARTIFACT_PATH),
+    RoutePath::ExactWithQuery(ARTIFACT_STATUS_PATH),
     RoutePath::ExactWithQuery(IMPORT_SOURCE_PATH),
     RoutePath::ExactWithQuery(IMPORT_FOLDER_PATH),
     RoutePath::ExactWithQuery(APPLY_GENERATED_PAGES_PATH),
@@ -216,7 +220,7 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     if !is_wiki_path(path) {
         return None;
     }
-    let max_bytes = if matches!(path, WRITE_FILE_PATH | APPLY_GENERATED_PAGES_PATH | GENERATE_SELECTION_PATH | APPLY_SELECTION_PATH) {
+    let max_bytes = if matches!(path, ARCHIVE_ARTIFACT_PATH | WRITE_FILE_PATH | APPLY_GENERATED_PAGES_PATH | GENERATE_SELECTION_PATH | APPLY_SELECTION_PATH) {
         WRITE_REQUEST_BYTES
     } else {
         DEFAULT_REQUEST_BYTES
@@ -772,6 +776,21 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             };
             deliver(dependencies.wiki.clear_resolved_reviews(input).await)
         }
+        Route::ArchiveArtifact => {
+            let Some(input) = decode_body::<crate::domain::WikiArtifactInput>(&request) else {
+                return invalid();
+            };
+            match dependencies.wiki.archive_artifact(input).await {
+                Ok(receipt) => Response::json(202, json!(receipt)),
+                Err(error) => failure(error),
+            }
+        }
+        Route::ArtifactStatus => {
+            let Some(input) = decode_body::<crate::domain::WikiArtifactSelector>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.artifact_status(input).await)
+        }
         Route::ImportSource => {
             let Some(input) =
                 decode_body::<ImportSourceInput>(&request).and_then(ImportSourceInput::import)
@@ -860,6 +879,8 @@ enum Route {
     Graph,
     RescanSources,
     RefreshSources,
+    ArchiveArtifact,
+    ArtifactStatus,
     ImportSource,
     ImportFolder,
     ApplyGeneratedPages,
@@ -946,6 +967,8 @@ impl Route {
             ("GET", GRAPH_PATH) => Self::Graph,
             ("POST", RESCAN_SOURCES_PATH) => Self::RescanSources,
             ("POST", REFRESH_SOURCES_PATH) => Self::RefreshSources,
+            ("POST", ARCHIVE_ARTIFACT_PATH) => Self::ArchiveArtifact,
+            ("POST", ARTIFACT_STATUS_PATH) => Self::ArtifactStatus,
             ("POST", IMPORT_SOURCE_PATH) => Self::ImportSource,
             ("POST", IMPORT_FOLDER_PATH) => Self::ImportFolder,
             ("POST", APPLY_GENERATED_PAGES_PATH) => Self::ApplyGeneratedPages,
@@ -1015,6 +1038,7 @@ impl Route {
             | Self::WriteFile
             | Self::RescanSources
             | Self::RefreshSources
+            | Self::ArchiveArtifact
             | Self::ImportSource
             | Self::ImportFolder
             | Self::ApplyGeneratedPages
@@ -1064,6 +1088,7 @@ impl Route {
             | Self::ReadSourcePreview
             | Self::Search
             | Self::Graph
+            | Self::ArtifactStatus
             | Self::SourceFiles
             | Self::SourceTasks
             | Self::SourceWatchConfig
@@ -1294,7 +1319,9 @@ async fn authorize(
         .is_ok_and(|decision| {
             !matches!(
                 endpoint,
-                APPLY_GENERATED_PAGES_PATH
+                ARCHIVE_ARTIFACT_PATH
+                    | ARTIFACT_STATUS_PATH
+                    | APPLY_GENERATED_PAGES_PATH
                     | DELETE_SOURCE_PATH
                     | DELETE_PAGE_PATH
                     | CALL_RESULT_PATH
@@ -1377,6 +1404,7 @@ fn timeout_response() -> Response {
 fn status_code(error: &WikiFailure) -> u16 {
     match error {
         WikiFailure::NotFound { .. } | WikiFailure::ProjectNotFound { .. } => 404,
+        WikiFailure::RequestKeyConflict => 409,
         WikiFailure::Cancelled => 409,
         WikiFailure::CurrentProjectUnset => 409,
         WikiFailure::InvalidInput { .. }
@@ -1392,25 +1420,7 @@ fn status_code(error: &WikiFailure) -> u16 {
 }
 
 fn error_message(error: &WikiFailure) -> String {
-    match error {
-        WikiFailure::OwnerUnavailable => "Wiki owner is unavailable".to_owned(),
-        WikiFailure::Cancelled => "Wiki source import was cancelled".to_owned(),
-        WikiFailure::StateUnavailable { message } => message.clone(),
-        WikiFailure::CurrentProjectUnset => "Current wiki project is not set".to_owned(),
-        WikiFailure::ProjectNotFound { project_id } => {
-            format!("Wiki project not found: {project_id}")
-        }
-        WikiFailure::InvalidInput { field, message } => format!("Invalid {field}: {message}"),
-        WikiFailure::InvalidPath { path } => format!("Invalid wiki path: {path}"),
-        WikiFailure::PathOutsideProject { path } => format!("Wiki path is outside project: {path}"),
-        WikiFailure::NotFound { path } => format!("Wiki path not found: {path}"),
-        WikiFailure::IsDirectory { path } => format!("Wiki path is a directory: {path}"),
-        WikiFailure::NotText { path } => format!("Wiki file is not text: {path}"),
-        WikiFailure::Io { path, message } => format!("Wiki file error at {path}: {message}"),
-        WikiFailure::IndexUnavailable { backend, reason } => {
-            format!("Wiki index backend {backend} is unavailable: {reason}")
-        }
-    }
+    error.to_string()
 }
 
 fn is_wiki_path(path: &str) -> bool {
@@ -1448,6 +1458,8 @@ fn is_wiki_path(path: &str) -> bool {
             | GRAPH_PATH
             | RESCAN_SOURCES_PATH
             | REFRESH_SOURCES_PATH
+            | ARCHIVE_ARTIFACT_PATH
+            | ARTIFACT_STATUS_PATH
             | IMPORT_SOURCE_PATH
             | IMPORT_FOLDER_PATH
             | APPLY_GENERATED_PAGES_PATH

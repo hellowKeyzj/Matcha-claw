@@ -27,6 +27,7 @@ pub(crate) struct RuntimeService {
     pub(crate) handles: HostHandles,
     pub(crate) http_completion: Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
     gateway_auto_start: bool,
+    peer_autostart: Option<crate::composition::PeerAutostart>,
 }
 
 pub(crate) async fn start(
@@ -35,6 +36,7 @@ pub(crate) async fn start(
 ) -> Result<RuntimeService, ControlError> {
     let (mut host, events, handles) = Host::new(input, verifier).map_err(ControlError::Construction)?;
     let gateway_auto_start = handles.settings.gateway_auto_start().await;
+    let peer_autostart = handles.peer.prepare_peer_autostart(gateway_auto_start);
     host.start_admission_only()
         .await
         .map_err(|error| ControlError::Start(error.to_string()))?;
@@ -46,6 +48,7 @@ pub(crate) async fn start(
         handles,
         http_completion: None,
         gateway_auto_start,
+        peer_autostart: Some(peer_autostart),
     })
 }
 
@@ -92,6 +95,10 @@ where
         private_control,
         runtime.handles.observation.clone(),
         runtime.gateway_auto_start,
+        runtime
+            .peer_autostart
+            .take()
+            .expect("peer autostart must be dispatched once"),
         &mut runtime.http_completion,
         control_input,
         control_output,
@@ -124,6 +131,7 @@ where
             mcp_verifier,
             runtime.handles.runtime_directory.clone(),
             runtime.handles.wiki.handle().clone(),
+            crate::composition::host::ports::maintenance::from_handles(&runtime.handles),
         ),
         verifier,
         webhook_token,

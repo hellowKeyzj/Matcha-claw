@@ -6,6 +6,7 @@ use crate::{
     config::{ConfigStore, validate_id},
     persistence::atomic_write,
     rpc::{self, Error},
+    session::Sessions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,6 +35,15 @@ struct Named {
     scope: String,
     agent_id: String,
     name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Configure {
+    scope: String,
+    agent_id: String,
+    name: String,
+    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -83,7 +93,12 @@ struct Bundle {
     resources: Vec<Resource>,
 }
 
-pub async fn dispatch(method: &str, params: Value, config: &ConfigStore) -> rpc::Result<Value> {
+pub async fn dispatch(
+    method: &str,
+    params: Value,
+    config: &ConfigStore,
+    sessions: &Sessions,
+) -> rpc::Result<Value> {
     match method {
         "skills.list" => {
             let target: Target = rpc::params(params)?;
@@ -117,11 +132,27 @@ pub async fn dispatch(method: &str, params: Value, config: &ConfigStore) -> rpc:
                 }
             }
             skills.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+            let snapshot = config.snapshot().await;
+            let bundled = crate::cli::skills::list(&snapshot, &target.agent_id).await?;
+            let agent = snapshot
+                .agents
+                .get(&target.agent_id)
+                .ok_or_else(|| Error::not_found("Agent"))?;
+            let bundled = bundled
+                .into_iter()
+                .map(|skill| {
+                    json!({
+                        "name": skill.name, "description": skill.description,
+                        "enabled": agent.skill_states.get(&skill.name).copied().unwrap_or(true),
+                    })
+                })
+                .collect::<Vec<_>>();
             Ok(json!({
                 "scope": "agent", "agentId": target.agent_id,
-                "skills": skills, "application": application()
+                "skills": skills, "bundledSkills": bundled, "application": application()
             }))
         }
+        "skills.configure" => configure(rpc::params(params)?, config, sessions).await,
         "skills.get" => {
             let target: Named = rpc::params(params)?;
             validate_name(&target.name)?;
@@ -188,6 +219,72 @@ pub async fn dispatch(method: &str, params: Value, config: &ConfigStore) -> rpc:
         }
         _ => Err(Error::method(method)),
     }
+}
+
+async fn configure(
+    request: Configure,
+    config: &ConfigStore,
+    sessions: &Sessions,
+) -> rpc::Result<Value> {
+    validate_scope(&request.scope)?;
+    validate_id(&request.agent_id)?;
+    crate::cli::skills::validate_name(&request.name)?;
+    let (_guard, instances) = sessions.stable_agent_instances(&request.agent_id).await?;
+    let catalog =
+        crate::cli::skills::list(&config.checked_snapshot().await?, &request.agent_id).await?;
+    if !catalog.iter().any(|skill| skill.name == request.name) {
+        return Err(Error::not_found("Bundled skill"));
+    }
+    let states = config
+        .update(|config| {
+            let agent = config
+                .agents
+                .get_mut(&request.agent_id)
+                .ok_or_else(|| Error::not_found("Agent"))?;
+            if request.enabled {
+                agent.skill_states.remove(&request.name);
+            } else {
+                agent.skill_states.insert(request.name.clone(), false);
+            }
+            Ok(agent.skill_states.clone())
+        })
+        .await?;
+    let mut checks = tokio::task::JoinSet::new();
+    for (session_id, instance_id) in &instances {
+        let sessions = sessions.clone();
+        let session_id = session_id.clone();
+        let instance_id = instance_id.clone();
+        let states = states.clone();
+        checks.spawn(async move {
+            let result = tokio::time::timeout(
+                crate::cli::effort::CONTROL_WINDOW,
+                sessions.apply_instance_permissions(&session_id, &instance_id, &json!({}), &states),
+            )
+            .await;
+            (session_id, instance_id, matches!(result, Ok(Ok(_))))
+        });
+    }
+    let mut acknowledged = BTreeSet::new();
+    while let Some(result) = checks.join_next().await {
+        if let Ok((session_id, instance_id, true)) = result {
+            acknowledged.insert((session_id, instance_id));
+        }
+    }
+    let receipts = instances
+        .into_iter()
+        .map(|(session_id, instance_id)| {
+            let status = if acknowledged.contains(&(session_id.clone(), instance_id.clone())) {
+                "acknowledged"
+            } else {
+                "unconfirmed"
+            };
+            json!({ "sessionId": session_id, "instanceId": instance_id, "status": status })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "scope": "agent", "agentId": request.agent_id, "name": request.name, "enabled": request.enabled,
+        "application": { "persisted": true, "sessions": receipts },
+    }))
 }
 
 fn bundle_sha256(bundle: &Bundle) -> String {

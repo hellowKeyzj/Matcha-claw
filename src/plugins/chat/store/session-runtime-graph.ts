@@ -390,10 +390,12 @@ export function createDraftCurrentConversation(
   endpoint: RuntimeEndpointRef,
   agentId: string,
 ): ChatCurrentDraftConversation {
+  const runtimeScopeKey = buildRuntimeScopeKey(endpoint);
   return {
     kind: 'draft',
     id: crypto.randomUUID(),
-    runtimeScopeKey: buildRuntimeScopeKey(endpoint),
+    composerDraftKey: `${runtimeScopeKey}:agent:${agentId}:draft`,
+    runtimeScopeKey,
     endpoint,
     agentId,
     sessionPromptScope: {

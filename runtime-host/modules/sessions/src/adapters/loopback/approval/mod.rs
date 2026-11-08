@@ -9,6 +9,7 @@ use crate::{
         SessionApprovalOutcome,
     },
     endpoint::NativeEndpoint,
+    state::SessionIdentity,
 };
 
 pub(crate) mod handler;
@@ -58,6 +59,7 @@ struct Scope {
     kind: String,
     endpoint: Endpoint,
     session_id: String,
+    identity: SessionIdentity,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +73,7 @@ struct Target {
 struct PendingApprovalsInput {
     endpoint: Endpoint,
     session_id: String,
+    identity: SessionIdentity,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +83,7 @@ struct SessionApprovalInput {
     session_id: String,
     approval_id: String,
     option_id: String,
+    identity: SessionIdentity,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -133,6 +137,13 @@ impl PendingApprovalsRequest {
             && self.target.kind == "session"
             && self.scope.endpoint == self.input.endpoint
             && self.scope.endpoint.parse().is_some()
+            && self.scope.identity == self.input.identity
+            && self.scope.identity.validate().is_ok()
+            && self.scope.endpoint.kind == self.scope.identity.endpoint.kind
+            && self.scope.endpoint.runtime_adapter_id
+                == self.scope.identity.endpoint.runtime_adapter_id.as_str()
+            && self.scope.endpoint.runtime_instance_id
+                == self.scope.identity.endpoint.runtime_instance_id
             && self.scope.session_id == self.input.session_id)
             .then_some(())
             .ok_or(RequestError::Invalid)
@@ -140,7 +151,7 @@ impl PendingApprovalsRequest {
 
     pub(crate) fn into_command(self) -> Result<PendingApprovalsCommand, RequestError> {
         let endpoint = self.scope.endpoint.parse().ok_or(RequestError::Invalid)?;
-        PendingApprovalsCommand::try_new(endpoint, self.input.session_id)
+        PendingApprovalsCommand::try_new(endpoint, self.input.session_id, self.input.identity)
             .map_err(|_| RequestError::Invalid)
     }
 }
@@ -178,6 +189,13 @@ impl SessionApprovalRequest {
             && self.target.kind == "approval"
             && self.scope.endpoint == self.input.endpoint
             && self.scope.endpoint.parse().is_some()
+            && self.scope.identity == self.input.identity
+            && self.scope.identity.validate().is_ok()
+            && self.scope.endpoint.kind == self.scope.identity.endpoint.kind
+            && self.scope.endpoint.runtime_adapter_id
+                == self.scope.identity.endpoint.runtime_adapter_id.as_str()
+            && self.scope.endpoint.runtime_instance_id
+                == self.scope.identity.endpoint.runtime_instance_id
             && self.scope.session_id == self.input.session_id)
             .then_some(())
             .ok_or(RequestError::Invalid)
@@ -190,6 +208,7 @@ impl SessionApprovalRequest {
             self.input.session_id,
             self.input.approval_id,
             self.input.option_id,
+            self.input.identity,
         )
         .map_err(|_| RequestError::Invalid)
     }
@@ -228,6 +247,7 @@ impl PendingApprovalsDelivery {
                         serde_json::json!({
                             "approvalId": &approval.approval_id,
                             "optionIds": &approval.option_ids,
+                            "details": &approval.details,
                         })
                     }).collect::<Vec<_>>()
                 })
@@ -393,6 +413,7 @@ mod tests {
                 approvals: vec![crate::approval::PendingApproval {
                     approval_id: "approval-1".into(),
                     option_ids: vec!["option-1".into()],
+                    details: None,
                 }],
             },
         ));

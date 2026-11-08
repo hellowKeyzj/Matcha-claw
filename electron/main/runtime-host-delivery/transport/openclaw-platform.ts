@@ -7,6 +7,7 @@ const WRITE_SCOPE = 'openclaw.platform:write';
 const STATUS_ENDPOINT = '/api/openclaw/status';
 const RUNTIME_PATHS_ENDPOINT = '/api/openclaw/runtime/paths';
 const CLI_COMMAND_ENDPOINT = '/api/openclaw/cli-command';
+const LOG_DIRECTORY_ENDPOINT = '/api/openclaw/logs/dir';
 const TOOL_PERMISSION_ENDPOINT = '/api/openclaw/tool-permission-mode';
 const SUBAGENT_TEMPLATES_ENDPOINT = '/api/openclaw/subagent-templates';
 const SUBAGENT_TEMPLATE_DETAIL_ENDPOINT = '/api/openclaw/subagent-template/detail';
@@ -23,6 +24,7 @@ export interface OpenClawPlatformTransport {
   environmentStatus(): Promise<OpenClawPlatformResponse>;
   runtimePaths(): Promise<OpenClawPlatformResponse>;
   cliCommand(): Promise<OpenClawPlatformResponse>;
+  logDirectory(): Promise<OpenClawPlatformResponse>;
   toolPermissionMode(): Promise<OpenClawPlatformResponse>;
   setToolPermissionMode(request: unknown): Promise<OpenClawPlatformResponse>;
   subagentTemplateCatalog(): Promise<OpenClawPlatformResponse>;
@@ -61,6 +63,7 @@ export function createOpenClawPlatformTransport(
     environmentStatus: () => send('GET', STATUS_ENDPOINT, READ_SCOPE, 'openclaw.environment.status', 'openclaw-environment-status'),
     runtimePaths: () => send('GET', RUNTIME_PATHS_ENDPOINT, READ_SCOPE, 'openclaw.runtime.paths', 'openclaw-runtime-paths'),
     cliCommand: () => send('GET', CLI_COMMAND_ENDPOINT, READ_SCOPE, 'openclaw.cli.command', 'openclaw-cli-command'),
+    logDirectory: () => send('GET', LOG_DIRECTORY_ENDPOINT, READ_SCOPE, 'openclaw.logs.directory', 'openclaw-log-directory'),
     toolPermissionMode: () => send('GET', TOOL_PERMISSION_ENDPOINT, READ_SCOPE, 'openclaw.tool-permission.get', 'openclaw-tool-permission'),
     setToolPermissionMode: (request) => send('POST', TOOL_PERMISSION_ENDPOINT, WRITE_SCOPE, 'openclaw.tool-permission.set', 'openclaw-tool-permission', request),
     subagentTemplateCatalog: () => send('GET', SUBAGENT_TEMPLATES_ENDPOINT, READ_SCOPE, 'openclaw.subagent-templates.list', 'openclaw-subagent-templates'),

@@ -20,14 +20,17 @@ impl RuntimeControlOps for OpenClawDriver {
         let gateway = Arc::clone(&self.gateway);
         let running = self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         Box::pin(async move {
+            lifecycle_logs.flush().await;
             let lifecycle = lifecycle_logs.snapshot_with_coverage();
+            let mut gateway_unavailable = false;
             let gateway = if running {
-                Some(
-                    gateway
-                        .tail_logs(cursor, 500, 250_000)
-                        .await
-                        .map_err(|_| RuntimeControlFailure::Unavailable)?,
-                )
+                match gateway.tail_logs(cursor, 500, 250_000).await {
+                    Ok(tail) => Some(tail),
+                    Err(_) => {
+                        gateway_unavailable = true;
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -40,7 +43,7 @@ impl RuntimeControlOps for OpenClawDriver {
                     crate::lifecycle::logs::LogStream::Stdout => "stdout",
                     crate::lifecycle::logs::LogStream::Stderr => "stderr",
                 };
-                let line = sanitize_log_line(entry.line().as_bytes());
+                let line = entry.line().to_owned();
                 if seen.insert((source, line.clone())) {
                     entries.push(RuntimeLogEntry { source, line });
                 }
@@ -58,8 +61,14 @@ impl RuntimeControlOps for OpenClawDriver {
                     }
                     (gateway.cursor, gateway.reset, gateway.truncated)
                 }
-                None => (cursor.unwrap_or(0), false, false),
+                None => (cursor.unwrap_or(0), false, gateway_unavailable),
             };
+            if gateway_unavailable {
+                entries.push(RuntimeLogEntry {
+                    source: "gateway",
+                    line: "Gateway logs unavailable; only retained lifecycle logs are shown. Retry after the Gateway reconnects.".to_owned(),
+                });
+            }
             Ok(RuntimeLogSnapshot {
                 entries,
                 cursor,

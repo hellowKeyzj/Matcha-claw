@@ -12,7 +12,7 @@ import {
   readTraceHeader,
   summarizeIdentifier,
 } from '../../main/runtime-host-delivery/transport/sessions/trace';
-import { isTeamRuntimeCapabilityRequest } from './team-runtime-capability';
+import { isTeamRuntimeCapabilityRequest } from '../../main/runtime-host-delivery/transport/teams/contract';
 import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { TaskManagerTransport } from '../../main/runtime-host-delivery/transport/task-manager';
 import { logger } from '../../utils/logger';

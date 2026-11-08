@@ -2,15 +2,21 @@ import { useContributions } from '@/plugin-host/react';
 import { isControlledSessionRenderTool } from '@/plugins/chat/store/session-render-projection';
 import { messageParts, resolveMessagePartRenderer } from '@/plugins/message-rendering/extensions';
 import { Suspense, useCallback, useEffect, useMemo, useState, memo, useReducer, type ReactNode } from 'react';
+import { useReplyDuration, type ReplyTiming } from '@/plugins/chat/reply-timing';
+import { useTranslation } from 'react-i18next';
 import type { ChatAssistantTurnItem } from '@/plugins/message-rendering/chat-render-item-model';
-import { buildToolGroupPlan, isCoveredToolOnlyItem } from '@/plugins/chat/tool-group-plan';
+import { buildAssistantTurnView } from '@/plugins/chat/assistant-turn-view';
+import { buildToolGroupPlan } from '@/plugins/chat/tool-group-plan';
 import type { ToolSlot } from '@/plugins/message-rendering/tool-groups';
 import type { ToolActivityDisclosure } from '@/plugins/message-rendering/tool-renderers/types';
 import { useToolActivityDisclosure } from '@/plugins/message-rendering/useToolActivityDisclosure';
 import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import { MessageShell, type MessageAvatarSlot } from '@/plugins/message-rendering/chat-message-shell';
+import { MESSAGE_LAYOUT_TOKENS, getAssistantBlockSpacing } from '@/plugins/message-rendering/message-layout-tokens';
 import { ChatImageLightbox } from '@/plugins/message-rendering/ChatImageLightbox';
 import { AssistantPendingIndicator } from '@/plugins/chat/components/AssistantPendingIndicator';
+import { AssistantWorkSummary } from '@/plugins/chat/components/AssistantWorkSummary';
+import type { ThreadWorkPresentation } from '@/plugins/chat/thread-work';
 import { getAssistantTurnPlainText } from '@/plugins/message-rendering/chat-message-view';
 import {
   AssistantMessageMetaBar,
@@ -22,8 +28,7 @@ import { buildToolRuntimeSurface } from '@/plugins/message-rendering/tool-activi
 import { isOpenClawSurfaceSessionIdentity } from '@/types/openclaw-runtime-surface';
 import { openChatRuntimeSurface, type ChatRuntimeSurfaceDescriptor } from '@/plugins/surfaces/chat/runtime-surfaces';
 import { useArtifactRefExtractor } from '@/plugins/chat/artifact-paths';
-import { createAttachedMediaMatcher } from '@/plugins/message-rendering/md-link';
-import { getSessionTextModel, type SessionTextModel } from '@/plugins/chat/store/session-presentation';
+import { getSessionTextModel } from '@/plugins/chat/store/session-presentation';
 import type { WorkspaceFileContext } from '@/lib/host-api';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeRenderItem, summarizeSessionIdentity, summarizeText } from '@/lib/session-trace';
 import { validateSessionIdentity, type SessionIdentity } from '@/types/desktop/runtime-address';
@@ -38,8 +43,12 @@ interface ChatAssistantTurnProps {
   toolSlots?: ReadonlyMap<string, ToolSlot>;
   latestBrowserTools?: ReadonlySet<SessionRenderToolCard>;
   disclosure?: ToolActivityDisclosure;
+  work?: ThreadWorkPresentation;
+  workDisclosure?: ToolActivityDisclosure;
   showThinking: boolean;
-  replyStartedAt?: number;
+  timing?: ReplyTiming;
+  footer?: string | null;
+  view?: ReturnType<typeof buildAssistantTurnView>;
   assistantAvatarSlot?: MessageAvatarSlot;
   userAvatarImageUrl?: string | null;
   sessionIdentity?: SessionIdentity;
@@ -48,78 +57,6 @@ interface ChatAssistantTurnProps {
   onOpenAttachedArtifact?: (file: AttachedFileMeta) => boolean | void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
-}
-
-type MarkdownFenceState = {
-  marker: '`' | '~';
-  length: number;
-} | null;
-
-function readFenceMarker(line: string): { marker: '`' | '~'; length: number; closingOnly: boolean } | null {
-  const match = /^(?: {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
-  if (!match) {
-    return null;
-  }
-  const fence = match[1] ?? '';
-  const rest = match[2] ?? '';
-  const marker = fence[0] === '~' ? '~' : '`';
-  return {
-    marker,
-    length: fence.length,
-    closingOnly: rest.trim().length === 0,
-  };
-}
-
-function advanceMarkdownFenceState(text: string, initialState: MarkdownFenceState): MarkdownFenceState {
-  let state = initialState;
-  for (const rawLine of text.split(/\n/)) {
-    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-    const fence = readFenceMarker(line);
-    if (!fence) {
-      continue;
-    }
-    if (state) {
-      if (fence.marker === state.marker && fence.length >= state.length && fence.closingOnly) {
-        state = null;
-      }
-      continue;
-    }
-    state = {
-      marker: fence.marker,
-      length: fence.length,
-    };
-  }
-  return state;
-}
-
-function removeLeadingFenceClose(text: string, state: MarkdownFenceState): string {
-  if (!state) {
-    return text;
-  }
-  const match = /^(?: {0,3})(`{3,}|~{3,})[ \t]*(?:\r?\n|$)/.exec(text);
-  if (!match) {
-    return text;
-  }
-  const fence = match[1] ?? '';
-  const marker = fence[0] === '~' ? '~' : '`';
-  if (marker !== state.marker || fence.length < state.length) {
-    return text;
-  }
-  return text.slice(match[0].length);
-}
-
-function buildMessageSegmentRenderTextByKey(item: ChatAssistantTurnItem, textModel: SessionTextModel): Map<string, string> {
-  const renderTextByKey = new Map<string, string>();
-  let fenceState: MarkdownFenceState = null;
-  for (const segment of item.segments) {
-    if (segment.kind !== 'message') {
-      continue;
-    }
-    const renderText = textModel.assistant(removeLeadingFenceClose(segment.text, fenceState));
-    renderTextByKey.set(segment.key, renderText);
-    fenceState = advanceMarkdownFenceState(segment.text, fenceState);
-  }
-  return renderTextByKey;
 }
 
 function buildRuntimeSurfaceDescriptor(tool: SessionRenderToolCard, sessionIdentity: SessionIdentity): ChatRuntimeSurfaceDescriptor | null {
@@ -138,76 +75,38 @@ function isActiveReplyStatus(status: ChatAssistantTurnItem['status']): boolean {
   return status === 'streaming' || status === 'waiting_tool';
 }
 
-function resolveReplyDurationEndAt(item: ChatAssistantTurnItem, now: number): number | undefined {
-  if (isActiveReplyStatus(item.status)) {
-    return now;
-  }
-  if (item.status === 'final' || item.status === 'error' || item.status === 'aborted') {
-    return item.updatedAt ?? item.createdAt;
-  }
-  return undefined;
-}
-
-function formatReplyDurationSeconds(durationMs: number): string | undefined {
-  if (!Number.isFinite(durationMs) || durationMs < 1000) {
-    return undefined;
-  }
-  return `${Math.floor(durationMs / 1000)}秒`;
-}
-
-function getReplyDurationLabel(input: {
-  item: ChatAssistantTurnItem;
-  replyStartedAt?: number;
-  now: number;
-}): string | undefined {
-  const startedAt = input.replyStartedAt;
-  const endedAt = resolveReplyDurationEndAt(input.item, input.now);
-  if (typeof startedAt !== 'number' || typeof endedAt !== 'number') {
-    return undefined;
-  }
-  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) {
-    return undefined;
-  }
-  if (endedAt < startedAt) {
-    return undefined;
-  }
-  const durationLabel = formatReplyDurationSeconds(endedAt - startedAt);
-  if (!durationLabel) {
-    return undefined;
-  }
-  return isActiveReplyStatus(input.item.status) ? `等待响应… ${durationLabel}` : `已完成，耗时 ${durationLabel}`;
+function AssistantTurnMetaBar({ timing, status, plainText }: {
+  timing?: ReplyTiming;
+  status: ChatAssistantTurnItem['status'];
+  plainText: string;
+}) {
+  const { t } = useTranslation('chat');
+  const duration = useReplyDuration(timing);
+  const replyDurationLabel = duration
+    ? t(timing?.kind === 'running' ? 'replyTiming.running' : status === 'aborted' ? 'replyTiming.stopped' : status === 'error' ? 'replyTiming.failed' : 'replyTiming.completed', { duration })
+    : null;
+  return plainText || replyDurationLabel
+    ? <AssistantMessageMetaBar text={plainText} statusLabel={replyDurationLabel ?? undefined} />
+    : null;
 }
 
 function AssistantTurnShell({
   item,
-  replyStartedAt,
+  timing,
   assistantAvatarSlot,
   userAvatarImageUrl,
   plainText,
   visible,
+  showMeta,
+  pending,
   children,
-}: Pick<ChatAssistantTurnProps, 'item' | 'replyStartedAt' | 'assistantAvatarSlot' | 'userAvatarImageUrl'> & {
+}: Pick<ChatAssistantTurnProps, 'item' | 'timing' | 'assistantAvatarSlot' | 'userAvatarImageUrl'> & {
+  showMeta: boolean;
+  pending: boolean;
   plainText: string;
   visible: boolean;
   children?: ReactNode;
 }) {
-  const [now, setNow] = useState(() => Date.now());
-  const isStreaming = isActiveReplyStatus(item.status);
-  const replyDurationLabel = getReplyDurationLabel({ item, replyStartedAt, now });
-
-  useEffect(() => {
-    if (!isStreaming || typeof replyStartedAt !== 'number') {
-      return;
-    }
-    const intervalId = window.setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [isStreaming, replyStartedAt]);
-
-  // Keep the clock mounted while the turn has no visible content.
   if (!visible) return null;
 
   return (
@@ -221,9 +120,7 @@ function AssistantTurnShell({
       userAvatarImageUrl={userAvatarImageUrl}
     >
       {children}
-      {(plainText || replyDurationLabel) ? (
-        <AssistantMessageMetaBar text={plainText} timestamp={item.createdAt} statusLabel={replyDurationLabel} />
-      ) : null}
+      {showMeta ? <AssistantTurnMetaBar timing={pending ? undefined : timing} status={item.status} plainText={plainText} /> : null}
     </MessageShell>
   );
 }
@@ -233,8 +130,12 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   toolSlots,
   latestBrowserTools,
   disclosure: sharedDisclosure,
+  work,
+  workDisclosure,
   showThinking,
-  replyStartedAt,
+  timing,
+  footer,
+  view: projectedView,
   assistantAvatarSlot,
   userAvatarImageUrl,
   sessionIdentity,
@@ -247,6 +148,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   const localDisclosure = useToolActivityDisclosure(sharedDisclosure ? undefined : sessionIdentity);
   const disclosure = sharedDisclosure ?? localDisclosure;
   const { collapse } = disclosure;
+  const workExpanded = !!work && !!workDisclosure?.expandedKeys.has(work.key);
   const handleBodyClick = useCallback(() => {
     requestCollapse();
     collapse();
@@ -267,72 +169,37 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
 
   const partRenderers = useContributions(messageParts);
   const textModel = getSessionTextModel(sessionIdentity);
-  const messageRenderTextByKey = useMemo(() => buildMessageSegmentRenderTextByKey(item, textModel), [item, textModel]);
   const resolvedToolSlots = useMemo(() => toolSlots ?? buildToolGroupPlan([item]).get(item.key), [item, toolSlots]);
-  const coveredOnly = isCoveredToolOnlyItem(item, resolvedToolSlots);
+  const view = useMemo(() => projectedView ?? buildAssistantTurnView(item, showThinking, textModel.assistant, resolvedToolSlots),
+    [projectedView, item, showThinking, textModel, resolvedToolSlots]);
+  const { segments, attachedFiles, messageRenderTextByKey, pendingMode, plainText, visible } = view;
+  const hasContentSegments = segments.length > 0;
   const toolSessionIdentity = sessionIdentity && !validateSessionIdentity(sessionIdentity)
     && item.sessionKey === sessionIdentity.sessionKey
     && (item.agentId === undefined || item.agentId === sessionIdentity.agentId) ? sessionIdentity : undefined;
 
-  const hasContentSegments = item.segments.some((segment) => {
-    if (segment.kind === 'thinking') {
-      return showThinking && segment.text.trim().length > 0;
-    }
-    if (segment.kind === 'message') {
-      return !!segment.largeText || (messageRenderTextByKey.get(segment.key) ?? segment.text).trim().length > 0;
-    }
-    if (segment.kind === 'tool') {
-      return resolvedToolSlots?.get(segment.key)?.kind !== 'covered';
-    }
-    return segment.images.length > 0 || segment.attachedFiles.length > 0 || !!segment.contentNotices?.length;
-  });
-  const pendingMode = !coveredOnly && !hasContentSegments && isStreaming
-    ? (item.pendingState ?? (item.status === 'waiting_tool' ? 'activity' : 'typing'))
-    : null;
   const rawPlainText = getAssistantTurnPlainText(item);
-  const plainText = textModel.assistant(rawPlainText);
-  const mediaPresentation = useMemo(() => {
-    const seen = new Set<string>();
-    const attachedFiles: AttachedFileMeta[] = [];
-    const segments = item.segments.map((segment) => {
-      if (segment.kind !== 'media') return segment;
-      const files = segment.attachedFiles.filter((file) => {
-        const refs = [file.resourceId, file.filePath, file.gatewayUrl, file.mediaReference].filter((ref): ref is string => !!ref);
-        const duplicate = refs.some((ref) => seen.has(ref));
-        for (const ref of refs) seen.add(ref);
-        if (!duplicate) attachedFiles.push(file);
-        return !duplicate;
-      });
-      return { ...segment, attachedFiles: files };
-    });
-    const attached = createAttachedMediaMatcher(attachedFiles);
-    return {
-      attachedFiles,
-      segments: segments.map((segment) => segment.kind !== 'media' ? segment : {
-        ...segment,
-        images: segment.images.filter((image) => {
-          const source = image.url || (image.data ? `data:${image.mimeType};base64,${image.data}` : '');
-          if (!source || attached(source) || seen.has(source)) return false;
-          seen.add(source);
-          return true;
-        }),
-      }),
-    };
-  }, [item.segments]);
   const extractArtifactRefs = useArtifactRefExtractor();
   const messageFileRefs = useMemo(() => extractArtifactRefs(rawPlainText).filter((file) => file.filePath), [extractArtifactRefs, rawPlainText]);
   const markdownAttachedFiles = useMemo(() => [
-    ...mediaPresentation.attachedFiles,
-    ...mediaPresentation.segments.flatMap((segment) => segment.kind === 'media'
+    ...attachedFiles,
+    ...segments.flatMap((segment) => segment.kind === 'media'
       ? segment.images.flatMap((image) => image.url ? [{ fileName: '', mimeType: image.mimeType, fileSize: 0, preview: null, gatewayUrl: image.url }] : [])
       : []),
     ...messageFileRefs,
-  ], [messageFileRefs, mediaPresentation]);
+  ], [messageFileRefs, attachedFiles, segments]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
+    const thinkingSegments = segments.filter((segment) => segment.kind === 'thinking');
+    const hasThinkingRenderer = !!resolveMessagePartRenderer('thinking', partRenderers);
     logSessionTrace('session.assistant-turn.committed', 'session-assistant-turn-boundary', () => ({
       identity: summarizeSessionIdentity(sessionIdentity), item: summarizeRenderItem(item),
-      hasContentSegments, pendingMode, rendered: hasContentSegments || !!pendingMode,
+      hasContentSegments, pendingMode, rendered: hasContentSegments || !!pendingMode, visible, showThinking,
+      thinkingSegmentCount: thinkingSegments.length, thinkingSegmentsTruncated: thinkingSegments.length > 64,
+      thinkingSegments: thinkingSegments.slice(0, 64).map((segment) => ({
+        segmentHash: summarizeIdentifier(segment.key).hash,
+        renderEligible: visible && showThinking && !!segment.text.trim() && hasThinkingRenderer,
+      })),
       rawPlainText: summarizeText(rawPlainText), cleanedPlainText: summarizeText(plainText),
       segmentCount: item.segments.length, summarizedSegmentCount: Math.min(item.segments.length, 64), truncated: item.segments.length > 64,
       messageSegments: item.segments.slice(0, 64).flatMap((segment, segmentIndex) => {
@@ -344,52 +211,67 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           rendered: !!segment.largeText || !!renderText.trim() }];
       }),
     }));
-  }, [hasContentSegments, item, messageRenderTextByKey, pendingMode, plainText, rawPlainText, sessionIdentity]);
-  const visible = hasContentSegments || !!pendingMode;
+  }, [hasContentSegments, item, messageRenderTextByKey, partRenderers, pendingMode, plainText, rawPlainText, segments, sessionIdentity, showThinking, visible]);
 
-  const renderedSegments = visible ? mediaPresentation.segments.map((segment) => {
+  const renderedSegments = visible ? segments.map((segment, index) => {
     const Part = resolveMessagePartRenderer(segment.kind, partRenderers)?.component;
+    const isWorkSegment = !!work?.segmentKeys.has(segment.key);
+    const isWorkHead = isWorkSegment && work?.headSegmentKey === segment.key;
     return Part ? (
-      <Suspense key={segment.key} fallback={null}>
-        <Part
-          segment={segment}
-          itemKey={item.key}
-          createdAt={item.createdAt}
-          renderText={messageRenderTextByKey.get(segment.key)}
-          attachedFiles={markdownAttachedFiles}
-          isStreaming={isStreaming}
-          showThinking={showThinking}
-          collapseVersion={collapseVersion}
-          toolSlot={resolvedToolSlots?.get(segment.key)}
-          disclosure={disclosure}
-          latestBrowserTools={latestBrowserTools}
-          sessionIdentity={sessionIdentity}
-          toolSessionIdentity={toolSessionIdentity}
-          toolIsImmutable={segment.kind === 'tool' && isControlledSessionRenderTool(segment.tool)}
-          endpointSessionId={endpointSessionId}
-          onBodyClick={handleBodyClick}
-          onPreview={(preview) => setLightboxImg({ ...preview, sessionIdentity })}
-          onOpenFile={onOpenAttachedArtifact}
-          onOpenToolSurface={openToolSurface}
-          onRuntimeSendMessage={onRuntimeSendMessage}
-          onRuntimeOpenLink={onRuntimeOpenLink}
-        />
-      </Suspense>
+      <div key={segment.key} data-chat-work-key={isWorkSegment ? work?.key : undefined} className={index > 0 && (!isWorkSegment || workExpanded || isWorkHead) ? getAssistantBlockSpacing(segments[index - 1].kind, segment.kind) : undefined}>
+        {isWorkHead && work && workDisclosure ? (
+          <AssistantWorkSummary work={work} expanded={workExpanded} onToggle={() => workDisclosure.toggle(work.key)} />
+        ) : null}
+        <div
+          hidden={isWorkSegment && !workExpanded}
+          data-chat-work-key={isWorkSegment ? work?.key : undefined}
+          className={isWorkHead ? 'pt-2' : undefined}
+        >
+          <Suspense fallback={null}>
+            <Part
+              segment={segment}
+              itemKey={item.key}
+              createdAt={item.createdAt}
+              renderText={messageRenderTextByKey.get(segment.key)}
+              attachedFiles={markdownAttachedFiles}
+              isStreaming={isStreaming}
+              showThinking={showThinking}
+              collapseVersion={collapseVersion}
+              toolSlot={resolvedToolSlots?.get(segment.key)}
+              disclosure={disclosure}
+              latestBrowserTools={latestBrowserTools}
+              sessionIdentity={sessionIdentity}
+              toolSessionIdentity={toolSessionIdentity}
+              toolIsImmutable={segment.kind === 'tool' && isControlledSessionRenderTool(segment.tool)}
+              endpointSessionId={endpointSessionId}
+              onBodyClick={handleBodyClick}
+              onPreview={(preview) => setLightboxImg({ ...preview, sessionIdentity })}
+              onOpenFile={onOpenAttachedArtifact}
+              onOpenToolSurface={openToolSurface}
+              onRuntimeSendMessage={onRuntimeSendMessage}
+              onRuntimeOpenLink={onRuntimeOpenLink}
+            />
+          </Suspense>
+        </div>
+      </div>
     ) : null;
   }) : null;
   return (
     <>
       <AssistantTurnShell
         item={item}
-        replyStartedAt={replyStartedAt}
+        timing={timing}
         assistantAvatarSlot={assistantAvatarSlot}
         userAvatarImageUrl={userAvatarImageUrl}
-        plainText={plainText}
+        plainText={footer ?? plainText}
         visible={visible}
+        showMeta={footer !== null}
+        pending={!!pendingMode}
       >
-        {renderedSegments}
-
-        {pendingMode ? <AssistantPendingIndicator mode={pendingMode} /> : null}
+        <div className={MESSAGE_LAYOUT_TOKENS.assistantSegments}>
+          {renderedSegments}
+          {pendingMode ? <AssistantPendingIndicator mode={pendingMode} timing={timing} /> : null}
+        </div>
       </AssistantTurnShell>
       {visible && lightboxImg && (
         <ChatImageLightbox

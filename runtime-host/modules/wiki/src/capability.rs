@@ -62,7 +62,9 @@ fn descriptor(scope: Value) -> Value {
             operation("wiki.dismissReview", "Dismiss wiki review item", "wiki"),
             operation("wiki.clearResolvedReviews", "Clear resolved wiki reviews", "wiki"),
             operation("wiki.embedPage", "Embed wiki page", "wiki"),
-            operation("wiki.retrieveContext", "Retrieve wiki context", "wiki")
+            operation("wiki.retrieveContext", "Retrieve wiki context", "wiki"),
+            operation("wiki.artifacts.archive", "Archive complete wiki source files", "wiki"),
+            operation("wiki.artifacts.status", "Read wiki source archive status", "wiki")
         ],
         "policyScope": "wiki",
         "ownerModuleId": "wiki",

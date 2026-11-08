@@ -1,6 +1,6 @@
 {
   "name": "@matcha/app-plugins-sdk",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Public Matcha application plugin SDK and local development tools",
   "type": "module",
   "main": "./dist/index.cjs",

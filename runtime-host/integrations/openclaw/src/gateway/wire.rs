@@ -974,6 +974,21 @@ pub fn decode_gateway_status(
     project_gateway_status(payload)
 }
 
+pub(crate) fn decode_gateway_log_file(response: GatewayResponse) -> Result<String, WireError> {
+    #[derive(Deserialize)]
+    struct LogFile {
+        file: String,
+    }
+
+    let payload = success_payload(response, WireError::InvalidGatewayLogsTail)?;
+    let payload: LogFile =
+        serde_json::from_value(payload).map_err(|_| WireError::InvalidGatewayLogsTail)?;
+    if payload.file.is_empty() || payload.file.contains('\0') {
+        return Err(WireError::InvalidGatewayLogsTail);
+    }
+    Ok(payload.file)
+}
+
 pub fn decode_gateway_logs_tail(response: GatewayResponse) -> Result<GatewayLogsTail, WireError> {
     let payload = success_payload(response, WireError::InvalidGatewayLogsTail)?;
     let payload: GatewayLogsTailWire =

@@ -8,8 +8,11 @@ pub mod prompt;
 
 pub use marketplace::Marketplace;
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
+use skills_module::management::ConfigApplication;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{Client, Delivery, Error};
@@ -32,11 +35,29 @@ pub struct Skill {
 }
 
 #[derive(Deserialize)]
+pub struct BundledSkill {
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Configuration {
+    scope: String,
+    agent_id: String,
+    name: String,
+    enabled: bool,
+    application: ConfigApplication,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
     pub scope: String,
     pub agent_id: String,
     pub skills: Vec<Skill>,
+    pub bundled_skills: Vec<BundledSkill>,
     pub application: Application,
 }
 
@@ -89,10 +110,30 @@ impl Skills {
     pub async fn list(&self, agent_id: &str) -> Result<Catalog, ResourceError> {
         let response = self.client.call("skills.list", json!({"scope":"agent", "agentId":agent_id})).await.map_err(ResourceError::from)?;
         let catalog: Catalog = serde_json::from_value(response).map_err(|_| ResourceError::Observation)?;
-        if catalog.scope != "agent" || catalog.agent_id != agent_id || catalog.skills.iter().any(|skill| !skill.belongs_to(agent_id)) {
+        let mut bundled_names = HashSet::new();
+        if catalog.scope != "agent" || catalog.agent_id != agent_id || catalog.skills.iter().any(|skill| !skill.belongs_to(agent_id))
+            || catalog.bundled_skills.iter().any(|skill| {
+                skill.name.is_empty() || skill.name.contains(['/', '\\']) || skill.name.chars().any(char::is_control)
+                    || !bundled_names.insert(skill.name.as_str())
+            }) {
             return Err(ResourceError::Observation);
         }
         Ok(catalog)
+    }
+
+    async fn configure(&self, agent_id: &str, name: &str, enabled: bool, cancellation: &CancellationToken) -> Result<ConfigApplication, ResourceError> {
+        let response = self.client.call_cancellable("skills.configure", json!({"scope":"agent", "agentId":agent_id, "name":name, "enabled":enabled}), cancellation).await.map_err(ResourceError::from)?;
+        let configuration: Configuration = serde_json::from_value(response).map_err(|_| ResourceError::Unknown)?;
+        let mut sessions = HashSet::new();
+        if configuration.scope != "agent" || configuration.agent_id != agent_id || configuration.name != name || configuration.enabled != enabled
+            || !configuration.application.persisted || configuration.application.sessions.iter().any(|session| {
+                session.session_id.trim().is_empty() || session.session_id.contains('\0')
+                    || session.instance_id.trim().is_empty() || session.instance_id.contains('\0')
+                    || !sessions.insert(session.session_id.as_str())
+            }) {
+            return Err(ResourceError::Unknown);
+        }
+        Ok(configuration.application)
     }
 
     pub async fn get(&self, agent_id: &str, name: &str) -> Result<Bundle, ResourceError> {

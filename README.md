@@ -104,7 +104,7 @@ We are committed to maintaining strict alignment with the upstream OpenClaw proj
 Complete the entire setup—from installation to your first AI interaction—through an intuitive graphical interface. No terminal commands, no YAML files, no environment variable hunting.
 
 ### 💬 Intelligent Chat Interface
-Communicate with AI agents through a modern chat experience. Support for multiple conversation contexts, message history, and rich content rendering with Markdown, including GitHub-style tables and KaTeX-powered LaTeX math via `$inline$`, `$$block$$`, `\\(inline\\)`, and `\\[block\\]`. The live thread keeps the latest 30 messages responsive, while full transcripts remain available in history mode.
+Communicate with AI agents through a modern chat experience. Support for multiple conversation contexts, message history, and rich content rendering with Markdown, including GitHub-style tables and KaTeX-powered LaTeX math via `$inline$`, `$$block$$`, `\\(inline\\)`, and `\\[block\\]`. The live thread keeps the latest 30 messages responsive, while full transcripts remain available in history mode. Running sessions show a small blue breathing dot in the sidebar, or beside the agent name when its group is collapsed; the dot disappears when the run ends. Drag workspace tabs between the main and right panes while keeping chat a click away.
 
 ### 🧠 Subagent Workspace
 Create and manage specialized subagents in a visual workspace. Built-in draft generation, line-level diff preview, controlled apply flow, and JSON import/export let teams share agent instruction files and selected skills without copying models, avatars, local workspaces, credentials, or sessions.

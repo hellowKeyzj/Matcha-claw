@@ -10,6 +10,7 @@ import { WikiEmpty, WikiIconButton, WikiPanel, WikiPanelHeader, WikiSurface } fr
 export type ReviewPanelProps = Readonly<{
   items: readonly WikiReviewItem[];
   busy: string | null;
+  writeBusy: string | null;
   onRefresh(): void;
   onResolve(id: string, action: string): void;
   onDismiss(id: string): void;
@@ -33,7 +34,7 @@ const TYPE_CONFIG: Record<WikiReviewItem['type'], ReviewTypeConfig> = {
 
 export function ReviewPanel(props: ReviewPanelProps): JSX.Element {
   const { t } = useTranslation('wiki');
-  const { items, busy, onRefresh, onResolve, onDismiss, onClearResolved, onCreatePage } = props;
+  const { items, busy, writeBusy, onRefresh, onResolve, onDismiss, onClearResolved, onCreatePage } = props;
   const pending = items.filter((item) => !item.resolved);
   const resolved = items.filter((item) => item.resolved);
   const isBusy = busy !== null;
@@ -65,6 +66,7 @@ export function ReviewPanel(props: ReviewPanelProps): JSX.Element {
                 key={item.id}
                 item={item}
                 busy={isBusy}
+                writeBusy={writeBusy !== null}
                 onResolve={onResolve}
                 onDismiss={onDismiss}
                 onCreatePage={onCreatePage}
@@ -82,12 +84,13 @@ export function ReviewPanel(props: ReviewPanelProps): JSX.Element {
 function ReviewCard(props: Readonly<{
   item: WikiReviewItem;
   busy: boolean;
+  writeBusy: boolean;
   onResolve(id: string, action: string): void;
   onDismiss(id: string): void;
   onCreatePage(item: WikiReviewItem): void;
 }>): JSX.Element {
   const { t } = useTranslation('wiki');
-  const { item, busy, onResolve, onDismiss, onCreatePage } = props;
+  const { item, busy, writeBusy, onResolve, onDismiss, onCreatePage } = props;
   const config = TYPE_CONFIG[item.type];
   const Icon = config.icon;
   const createAction = item.options.find((option) => !isResearchReviewAction(option.action) && (option.action === 'Create Page' || option.label === 'Create Page'));
@@ -115,7 +118,7 @@ function ReviewCard(props: Readonly<{
 
       <div className="mt-4 flex flex-wrap justify-end gap-2">
         {createAction ? (
-          <Button size="sm" onClick={() => onCreatePage(item)} disabled={busy || item.resolved} className="h-8 rounded-full">
+          <Button size="sm" onClick={() => onCreatePage(item)} disabled={busy || writeBusy || item.resolved} className="h-8 rounded-full">
             <FileQuestion className="h-4 w-4" />
             {createAction.label}
           </Button>

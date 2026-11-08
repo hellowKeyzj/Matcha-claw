@@ -24,6 +24,9 @@ export type TeamAssignmentEditorProps = EditorPresentation & {
   roles: readonly TeamRoleBindingRecord[];
   prompt: string;
   outputArtifactKind: string;
+  bindingRequired: boolean;
+  sessionCreation: 'idle' | 'pending' | 'failed';
+  onCreateSession?: () => void;
   onBindingChange: (roleId: string, sessionRef: string) => void;
   onPromptChange: (value: string) => void;
   onOutputArtifactKindChange: (value: string) => void;

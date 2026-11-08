@@ -17,6 +17,8 @@ use super::{
 const MCP_REQUIRES: &[CapabilityKey] = &[
     CapabilityKey::new("organization"),
     CapabilityKey::new("runtime.directory"),
+    CapabilityKey::new("runtime.control"),
+    CapabilityKey::new("call-log.read"),
     CapabilityKey::new("wiki"),
 ];
 
@@ -94,7 +96,7 @@ fn module_descriptors(
         &[],
         MCP_REQUIRES,
         &[EffectKind::Route],
-        &["host.mcp.team.call", "host.mcp.wiki.call"],
+        &["host.mcp.team.call", "host.mcp.wiki.call", "host.mcp.maintenance.call"],
         &[],
         Some(mcp),
     ));

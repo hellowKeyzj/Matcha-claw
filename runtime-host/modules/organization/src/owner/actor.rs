@@ -137,7 +137,7 @@ impl OrganizationOwner {
 }
 
 impl OrganizationShared {
-    fn team_runtime_for_endpoint(
+    pub(super) fn team_runtime_for_endpoint(
         &self,
         endpoint: &RuntimeEndpointReference,
     ) -> Option<Arc<dyn OrganizationNativeRuntime>> {
@@ -660,8 +660,8 @@ impl OrganizationGlobalState {
         let team_id = team_id.clone();
         let idempotency_key = idempotency_key.to_owned();
         let operation_cancellation = cancellation.child_token();
-        let mut native = shared.team_delete_role_sessions(
-            run_id.clone(), bindings, abort_first, operation_cancellation.clone(),
+        let mut native = super::run_delete::delete_run_sessions(
+            &self.store, shared, run_id.clone(), bindings, abort_first, operation_cancellation.clone(),
         );
         let (task, _) = OwnedTask::spawn(move |task_cancellation| async move {
             let native = tokio::select! {
@@ -1171,7 +1171,8 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::TaskNativeExecutionObserved { identity, .. } => {
                 CommandRoute::Keyed(OrganizationLaneKey::Run(identity.run_id.clone()))
             }
-            OrganizationCommand::RunDeleteAndPurge { run_id, .. }
+            OrganizationCommand::RoleSessionCreate { run_id, .. }
+            | OrganizationCommand::RunDeleteAndPurge { run_id, .. }
             | OrganizationCommand::RunCreate { run_id, .. }
             | OrganizationCommand::RunCreateFromTeamTemplate { run_id, .. }
             | OrganizationCommand::RunCancel { run_id, .. }
@@ -1294,6 +1295,16 @@ impl OwnerSpec for OrganizationOwner {
     ) {
         if !command.call_running().await { return; }
         match command {
+            OrganizationCommand::RoleSessionCreate { team_id, run_id, role_id, idempotency_key, scope, reply } => {
+                let result = with_session_trace(reply.trace_id(), async {
+                    match OrganizationRunLane::open_store(&mut state.store, &state.store_path) {
+                        Ok(store) => super::role_session::create(store, &shared, team_id, run_id, role_id,
+                            idempotency_key, scope, reply.cancellation(), &reply).await,
+                        Err(error) => Err(crate::application::team_runtime::RoleSessionCreateError::Store(error)),
+                    }
+                }).await;
+                let _ = reply.send(result).await;
+            }
             OrganizationCommand::ManualTeamMaterialize {
                 team_id,
                 team_name,
@@ -2088,10 +2099,12 @@ impl OwnerSpec for OrganizationOwner {
             OrganizationCommand::RecoverMaterializationReceipts { reply } => {
                 if state.refresh().is_ok() {
                     state.recover_materialization_receipts(&shared).await;
+                    super::role_session::recover(&mut state.store, &shared).await;
                 }
                 let _ = reply.send(());
             }
-            OrganizationCommand::ManualTeamMaterialize { .. }
+            OrganizationCommand::RoleSessionCreate { .. }
+            | OrganizationCommand::ManualTeamMaterialize { .. }
             | OrganizationCommand::ManualTeamCreate { .. }
             | OrganizationCommand::ManualTeamRunCreate { .. }
             | OrganizationCommand::RunDeleteAndPurge { .. }
@@ -2180,12 +2193,13 @@ impl OwnerSpec for OrganizationOwner {
                 run_id,
                 event_cursor,
                 event_limit,
+                message_cursor,
                 reply,
             } => {
                 let outcome = match OrganizationRunLane::open_store(&mut state.store, &state.store_path) {
                     Ok(store) => {
                         let snapshot = crate::application::projection::team_run_public_snapshot(
-                            &store, team_id, run_id, event_cursor, event_limit,
+                            &store, team_id, run_id, event_cursor, event_limit, message_cursor,
                         );
                         let failure = snapshot.is_none().then(|| TeamCreationFailure::new(
                             TeamCreationStage::LoadingTeam, TeamCreationFailureReason::InvalidInput,

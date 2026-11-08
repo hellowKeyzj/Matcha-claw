@@ -6,6 +6,7 @@ pub(crate) mod handle;
 mod manual_team;
 mod member_introduction;
 mod run_delete;
+mod role_session;
 pub(crate) mod query;
 mod receipt_router;
 mod run_actor;

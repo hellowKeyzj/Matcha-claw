@@ -1,6 +1,7 @@
 export type PlatformOperation =
   | 'openclaw.environment.status'
   | 'openclaw.runtime.paths'
+  | 'openclaw.logs.directory'
   | 'openclaw.cli.command'
   | 'openclaw.tool-permission.get'
   | 'openclaw.tool-permission.set'
@@ -24,6 +25,7 @@ export function decodePlatformCallDetail(value: unknown): PlatformCallDetail | u
   if (Object.keys(detail).length !== 2 || detail.runtime !== 'openclaw'
     || (detail.operation !== 'openclaw.environment.status'
       && detail.operation !== 'openclaw.runtime.paths'
+      && detail.operation !== 'openclaw.logs.directory'
       && detail.operation !== 'openclaw.cli.command'
       && detail.operation !== 'openclaw.tool-permission.get'
       && detail.operation !== 'openclaw.tool-permission.set'

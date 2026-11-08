@@ -6,7 +6,7 @@ import type {
   IabBounds, IabDownload, IabDownloadCommand, IabEvent, IabFindResult, IabHistoryEntry,
   IabHistoryPage, IabHistoryQuery, IabInternalPage, IabJsonObject, IabJsonValue,
   IabOverlayCommand, IabOverlayContext, IabOverlayInput, IabOverlayState, IabOwnerId,
-  IabSnapshot, IabTab, IabTabId, IabTheme, IabUiCommand, IabUiResponse,
+  IabSnapshot, IabTab, IabTabDisplay, IabTabId, IabTheme, IabUiCommand, IabUiResponse, IabViewPlacement,
 } from '../../../src/types/desktop/iab';
 
 export type IabUnsubscribe = () => void;
@@ -82,7 +82,7 @@ export interface IabDownloads {
   releaseDownloadCapture(contents: WebContents, owner: string): void;
   followDownloadPopup(opener: WebContents, popup: WebContents): void;
   resetPopup(contents: WebContents): void;
-  reportDownloadSaved(contents: WebContents, owner: string, guid: string, finalPath: string, assertCurrent: () => void): Promise<void>;
+  reportDownloadSaved(contents: WebContents, owner: string, guid: string, finalPath: string, assertCurrent: () => void | Promise<void>): Promise<void>;
   prepareForQuit(): Promise<void>;
   cancelQuit(): void;
   flush(): Promise<void>;
@@ -108,7 +108,7 @@ export interface IabTabHostOptions {
   window(): BrowserWindow | null;
   session: Session;
   ready: Promise<void>;
-  getBounds(): IabBounds;
+  getBounds(tabId: IabTabId): IabBounds | null;
   prepareCdp(tabId: IabTabId, contents: WebContents): Promise<void>;
   log?: IabLog;
   onTabLoadFail?(tabId: IabTabId): void;
@@ -117,15 +117,12 @@ export interface IabTabHostOptions {
 export interface IabTabHost {
   readonly session: Session;
   readonly size: number;
-  readonly activeTabId: IabTabId | null;
   get(tabId: IabTabId): IabTabHandle | undefined;
   getWebContents(tabId: IabTabId): WebContents | null;
   has(tabId: IabTabId): boolean;
-  createTab(tabId: IabTabId, url: string, options?: { activate?: boolean; view?: WebContentsView; skipWarmup?: boolean }): Promise<void>;
+  createTab(tabId: IabTabId, url: string, options?: { view?: WebContentsView; skipWarmup?: boolean }): Promise<void>;
   closeTab(tabId: IabTabId): void;
   listTabs(): { tabId: IabTabId; url: string; title: string }[];
-  activateTab(tabId: IabTabId, options?: { focusWindow?: boolean }): void;
-  deactivateAll(): void;
   showInternalPage(tabId: IabTabId, page: IabInternalPage): void;
   navigate(tabId: IabTabId, url: string): void;
   goBack(tabId: IabTabId): void;
@@ -146,13 +143,18 @@ export interface IabManagerOptions {
   log?: IabLog;
   emit?(event: IabEvent): void;
 }
+export type IabOpenOptions = { background?: boolean; retain?: boolean } & (
+  | { creator: Pick<IabTrustedContext, 'principalId' | 'executorId'>; display?: never }
+  | { creator?: never; display: IabTabDisplay }
+);
 /** manager.ts exports class IabManager(options). Main is the sole tab/owner/snapshot authority. */
 export interface IabManager {
   readonly session: Session;
   readonly data: IabData;
   readonly pageTools: IabPageTools;
   readonly ownerId: IabOwnerId;
-  agentAccess(tabId: IabTabId, context: IabTrustedContext, claim?: boolean): AbortSignal;
+  /** Caller awaits native currency before synchronous page admission; Main checks page ownership. */
+  agentAccess(tabId: IabTabId, identity: Pick<IabTrustedContext, 'executorId' | 'principalId'>, claim?: boolean): AbortSignal;
   getPageOwnership(tabId: IabTabId): Readonly<PageOwnership> | null;
   releaseSessionClaims(executorId: string): Promise<void>;
   cleanupSession(executorId: string, sessionGroupId: string, scope: 'executor' | 'group'): Promise<void>;
@@ -162,15 +164,14 @@ export interface IabManager {
   getWebContents(tabId: IabTabId): WebContents | null;
   getView(tabId: IabTabId): WebContentsView | null;
   resolveBrokerTarget(tabId: IabTabId, expectedOwnerId: IabOwnerId): WebContents;
-  open(url: string, options?: { background?: boolean; creator?: IabTrustedContext; retain?: boolean }): IabTabId;
+  open(url: string, options: IabOpenOptions): IabTabId;
   switch(tabId: IabTabId): void;
-  close(tabId: IabTabId, expectedOwnerId?: IabOwnerId, agent?: IabTrustedContext): void;
+  close(tabId: IabTabId, expectedOwnerId?: IabOwnerId, agent?: Pick<IabTrustedContext, 'principalId' | 'executorId'>): void;
   navigate(tabId: IabTabId, url: string): void;
   goBack(tabId: IabTabId): void;
   goForward(tabId: IabTabId): void;
   reload(tabId: IabTabId): void;
-  setBounds(bounds: IabBounds): void;
-  setVisible(visible: boolean): void;
+  setViews(views: readonly IabViewPlacement[]): void;
   listAllTabs(): IabTab[];
   snapshot(): IabSnapshot;
   execute(command: IabUiCommand): Promise<IabUiResponse>;
@@ -187,8 +188,9 @@ export interface IabPageToolsOptions {
   getOwner(tabId: IabTabId): IabOwnerId | null;
   /** Active-owner-only lookup for privileged user actions; broker uses resolveBrokerTarget instead. */
   getWebContents(tabId: IabTabId): WebContents | null;
-  getBrowserBounds(): IabBounds | null;
-  openInternal(page: IabInternalPage): void;
+  getBrowserBounds(tabId: IabTabId): IabBounds | null;
+  isPresentedTab(tabId: IabTabId): boolean;
+  openInternal(page: IabInternalPage, sourceTabId: IabTabId): void;
   emit(event: IabEvent): void;
   log?: IabLog;
 }
@@ -200,10 +202,10 @@ export interface IabPageTools {
   execute(command: IabUiCommand, ownerId: IabOwnerId): Promise<IabUiResponse['result']>;
   notifyDownload(tabId: IabTabId, download: IabDownload): Promise<void>;
   closeMenu(tabId?: IabTabId): void;
-  hideSuggestions(): void;
+  hideSuggestions(tabId?: IabTabId): void;
   dispose(): void;
 }
-/** Transient transparent native page-tools overlay only; never an independent IAB toolbar/right renderer.
+/** Transient transparent native menus/page-tools overlay; never an independent IAB toolbar/right renderer.
  * Clear-data confirmation belongs to the existing React UI; Main hides the page for that confirmation.
  */
 export interface IabOverlayOptions {
@@ -230,19 +232,19 @@ export interface IabTrustedContext {
   readonly identity?: SessionIdentity;
   readonly generation?: number;
   readonly workspaceDir?: string;
-  assertCurrent(): void;
+  assertCurrent(): void | Promise<void>;
 }
 export interface IabCdpEvent { method: string; params: IabJsonObject; sessionId?: string }
 export type IabFetchResolution = { method: 'Fetch.continueRequest' | 'Fetch.failRequest' | 'Fetch.fulfillRequest'; params: IabJsonObject };
 export interface IabCdpExecutor {
   send<T extends IabJsonValue = IabJsonObject>(method: string, params?: IabJsonObject, options?: {
-    sessionId?: string; timeoutMs?: number; signal?: AbortSignal; assertCurrent?: () => void;
+    sessionId?: string; timeoutMs?: number; signal?: AbortSignal; assertCurrent?: () => void | Promise<void>;
   }): Promise<T>;
-  setScreenshotViewport(options: { signal: AbortSignal; timeoutMs: number; assertCurrent?: () => void }): Promise<void>;
+  setScreenshotViewport(options: { signal: AbortSignal; timeoutMs: number; assertCurrent?: () => void | Promise<void> }): Promise<void>;
   restoreScreenshotViewport(signal: AbortSignal): Promise<void>;
   onEvent(listener: (event: IabCdpEvent) => void): IabUnsubscribe;
-  setInterceptPolicy(rules: readonly BrowserInterceptRule[], options: { signal: AbortSignal; assertCurrent?: () => void }): Promise<void>;
-  listChildFrames(options?: { signal?: AbortSignal; assertCurrent?: () => void; timeoutMs?: number }): Promise<readonly { sessionId: string; frameId: string }[]>;
+  setInterceptPolicy(rules: readonly BrowserInterceptRule[], options: { signal: AbortSignal; assertCurrent?: () => void | Promise<void> }): Promise<void>;
+  listChildFrames(options?: { signal?: AbortSignal; assertCurrent?: () => void | Promise<void>; timeoutMs?: number }): Promise<readonly { sessionId: string; frameId: string }[]>;
 }
 export interface IabCdpLease {
   readonly id: string;
@@ -270,7 +272,7 @@ export interface IabBroker {
   drain(signal: AbortSignal): Promise<void>;
   prepareTarget(tabId: IabTabId, ownerId: IabOwnerId, contents: WebContents): Promise<void>;
   readClientHintsPolicy(contents: WebContents, expression: string, signal?: AbortSignal): Promise<IabJsonValue | undefined>;
-  acquire(tabId: IabTabId, ownerId: IabOwnerId, signal: AbortSignal, generation?: number, assertCurrent?: () => void): Promise<IabCdpLease>;
+  acquire(tabId: IabTabId, ownerId: IabOwnerId, signal: AbortSignal, generation?: number, assertCurrent?: () => void | Promise<void>): Promise<IabCdpLease>;
   /** Revokes synchronously, then waits for all physical work belonging to affected controllers. */
   revokeGeneration(generation: number): Promise<void>;
   revokeTarget(tabId: IabTabId, ownerId: IabOwnerId): Promise<void>;

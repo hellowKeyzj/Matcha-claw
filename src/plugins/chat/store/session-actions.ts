@@ -80,6 +80,7 @@ import type {
 } from '@/plugins/chat/store/types';
 import { isDeletableSession, isOrdinarySessionCandidate, isRunActive } from '@/plugins/chat/store/types';
 import { reconcileSessionDirectory } from '@/plugins/chat/store/session-directory';
+import { promoteWorkspaceSession } from '@/plugins/workspace/actions';
 
 const SESSION_CATALOG_NOT_READY_RETRY_MS = 1200;
 const SESSION_CATALOG_ENDPOINT_TIMEOUT_MS = 30000;
@@ -1439,6 +1440,11 @@ async function executeNewSessionWithScopeResolver(
       sessionKey: created.sessionKey,
     });
     createdTarget = { outcome: 'created', sessionRecordKey: newKey, sessionIdentity: created.identity };
+    if (state.currentConversation?.kind === 'draft') promoteWorkspaceSession({
+      draftId: state.currentConversation.id,
+      fromScopeKey: state.currentConversation.composerDraftKey,
+      toScopeKey: newKey,
+    });
     const ownsSelection = ownsCurrentSelection();
     if (composerDraft) useComposerDraftStore.getState().promoteDraft(composerDraft.key, newKey, composerDraft.snapshot, {
       kind: 'pending', operationId: composerDraft.operationId, sessionRecordKey: newKey, sessionIdentity: created.identity,
@@ -1478,7 +1484,7 @@ async function executeNewSessionWithScopeResolver(
             ...conversation,
             promotedDraft: {
               id: state.currentConversation.id,
-              scopeKey: `${state.currentConversation.runtimeScopeKey}:agent:${state.currentConversation.agentId}:draft`,
+              scopeKey: state.currentConversation.composerDraftKey,
             },
           } : conversation,
         }) : {}),
@@ -1529,15 +1535,19 @@ export function executeNewSessionDraft(input: CreateStoreSessionActionsInput, ag
   }
 }
 
-function selectNewSessionDraft(input: CreateStoreSessionActionsInput, scope: AgentScope): void {
+function selectNewSessionDraft(input: CreateStoreSessionActionsInput, scope: AgentScope, initialText?: string): boolean {
   const endpoint = useRuntimeEndpointsStore.getState().endpoints.find((entry) => sameRuntimeEndpointScope(entry.endpointRef, scope.endpoint));
   if (!endpoint || !isSessionRuntimeEndpointReady(endpoint) || !supportsSessionChat(endpoint, scope.agentId)) {
     input.set({ error: 'Selected runtime agent is not ready for chat' });
-    return;
+    return false;
   }
-  const conversation = createDraftCurrentConversation(scope.endpoint, scope.agentId);
-  const key = `${conversation.runtimeScopeKey}:agent:${conversation.agentId}:draft`;
+  let conversation = createDraftCurrentConversation(scope.endpoint, scope.agentId);
   const composer = useComposerDraftStore.getState();
+  if (initialText !== undefined) {
+    conversation = { ...conversation, composerDraftKey: `${conversation.composerDraftKey}:${conversation.id}` };
+    composer.setDraft(conversation.composerDraftKey, initialText);
+  }
+  const key = conversation.composerDraftKey;
   const initialization = composer.initializations[key];
   if (initialization?.kind === 'createUnknown' || initialization?.kind === 'createRejected') {
     composer.setInitialization(key, null);
@@ -1552,13 +1562,15 @@ function selectNewSessionDraft(input: CreateStoreSessionActionsInput, scope: Age
     foregroundHistorySessionKey: null,
     error: null,
   }));
+  return true;
 }
 
 export async function executeNewSessionForScope(
   input: CreateStoreSessionActionsInput,
   scope: AgentScope,
-): Promise<void> {
-  selectNewSessionDraft(input, scope);
+  initialText?: string,
+): Promise<boolean> {
+  return selectNewSessionDraft(input, scope, initialText);
 }
 
 export function executeCleanupEmptySession(input: CreateStoreSessionActionsInput): void {

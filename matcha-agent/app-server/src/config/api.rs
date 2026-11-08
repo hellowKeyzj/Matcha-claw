@@ -41,6 +41,8 @@ struct CliUpdate {
     #[serde(default)]
     args: Field<Vec<String>>,
     #[serde(default)]
+    skills_catalog: Field<Option<PathBuf>>,
+    #[serde(default)]
     env: Field<BTreeMap<String, String>>,
 }
 
@@ -59,8 +61,10 @@ struct View<'a> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CliView<'a> {
     command: &'a std::path::Path,
+    skills_catalog: &'a Option<PathBuf>,
     env: &'a BTreeMap<String, String>,
 }
 
@@ -72,6 +76,7 @@ struct AgentView<'a> {
     model: &'a Option<String>,
     provider: &'a Option<String>,
     settings: &'a Value,
+    skill_states: &'a BTreeMap<String, bool>,
     tools: &'a Option<Vec<String>>,
     allowed_tools: &'a [String],
     disallowed_tools: &'a [String],
@@ -86,6 +91,7 @@ impl<'a> From<&'a AgentConfig> for AgentView<'a> {
             model: &agent.model,
             provider: &agent.provider,
             settings: &agent.settings,
+            skill_states: &agent.skill_states,
             tools: &agent.tools,
             allowed_tools: &agent.allowed_tools,
             disallowed_tools: &agent.disallowed_tools,
@@ -100,6 +106,7 @@ fn view(config: &Config, unresolved: bool) -> rpc::Result<Value> {
         auth_token_env: &config.auth_token_env,
         cli: CliView {
             command: &config.cli.command,
+            skills_catalog: &config.cli.skills_catalog,
             env: &config.cli.env,
         },
         agents: config
@@ -146,6 +153,9 @@ pub async fn dispatch(method: &str, params: Value, config: &ConfigStore) -> rpc:
                         }
                         if let Some(args) = cli.args.0 {
                             config.cli.args = args;
+                        }
+                        if let Some(skills_catalog) = cli.skills_catalog.0 {
+                            config.cli.skills_catalog = skills_catalog;
                         }
                         if let Some(env) = cli.env.0 {
                             config.cli.env = env;

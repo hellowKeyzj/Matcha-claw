@@ -1,4 +1,13 @@
 
+@keyframes session-running-breathe {
+  0%, 100% {
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* Chat pending indicator animation */
 @keyframes chat-pending-dot {
   0%, 60%, 100% {

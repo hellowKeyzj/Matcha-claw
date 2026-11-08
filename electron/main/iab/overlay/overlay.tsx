@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as Popover from '@radix-ui/react-popover';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
-  Camera, Check, ChevronRight, Download, Eraser, ExternalLink,
+  Camera, Check, ChevronLeft, ChevronRight, Download, Eraser, ExternalLink,
   Globe, History, Minus, Plus, RotateCcw, Search, X, ZoomIn,
 } from 'lucide-react';
 
@@ -190,6 +191,69 @@ function DownloadNotice({ state, labels, dismiss }: {
   </section>;
 }
 
+function Choices({ state, labels, dismiss }: {
+  state: Extract<State, { kind: 'choices' }>; labels: Labels; dismiss(): void;
+}) {
+  const pageCount = Math.max(1, Math.ceil(state.items.length / 40));
+  const [page, setPage] = useState(Math.min(state.initialPage, pageCount - 1));
+  const content = useRef<HTMLDivElement>(null);
+  const changingPage = useRef(false);
+  const initialFocus = useRef(true);
+  const { busy, failed, perform } = useAction(state.sessionId);
+  const items = state.items.slice(page * 40, (page + 1) * 40);
+  useLayoutEffect(() => {
+    if (!changingPage.current) return;
+    changingPage.current = false;
+    (content.current?.querySelector<HTMLElement>('[data-choice]:not([data-disabled])') ?? content.current)?.focus();
+  }, [page]);
+  const changePage = (event: Event, next: number): void => {
+    event.preventDefault();
+    changingPage.current = true;
+    setPage(next);
+  };
+  return <DropdownMenu.Root open modal onOpenChange={(open) => { if (!open) dismiss(); }}>
+    <DropdownMenu.Trigger asChild><span aria-hidden="true" tabIndex={-1} style={{
+      position: 'fixed', left: state.anchor.x, top: state.anchor.y,
+      width: state.anchor.width, height: state.anchor.height, pointerEvents: 'none',
+    }} /></DropdownMenu.Trigger>
+    <DropdownMenu.Portal>
+      <DropdownMenu.Content ref={content} className="panel choices" aria-labelledby={undefined} aria-busy={busy}
+        align={state.align} side="bottom" sideOffset={6} collisionPadding={12}
+        onCloseAutoFocus={(event) => event.preventDefault()}
+        onFocus={() => {
+          if (!initialFocus.current) return;
+          initialFocus.current = false;
+          if (state.keyboard) {
+            const selected = content.current?.querySelector<HTMLElement>('[data-choice][data-selected]:not([data-disabled])')
+              ?? content.current?.querySelector<HTMLElement>('[data-choice]:not([data-disabled])');
+            selected?.focus();
+          }
+        }}>
+        {items.length ? items.map((item) => <DropdownMenu.Item key={item.id} className="choice" data-choice=""
+          data-selected={item.selected ? '' : undefined} title={item.label} textValue={item.label} disabled={item.disabled || busy}
+          onSelect={(event) => { event.preventDefault(); perform({ action: 'select-choice', id: item.id }); }}>
+          {item.icon && <img className="choice-icon" src={item.icon} alt="" />}
+          <span className="grow truncate">{item.label}</span>
+          {item.badge && <span className="choice-badge">{item.badge}</span>}
+        </DropdownMenu.Item>) : <DropdownMenu.Item className="choice" disabled>{state.labels.empty}</DropdownMenu.Item>}
+        {pageCount > 1 && <>
+          <DropdownMenu.Separator className="separator" />
+          <DropdownMenu.Label className="choice-page" aria-live="polite">
+            {state.labels.page.replaceAll('{current}', String(page + 1)).replaceAll('{total}', String(pageCount))}
+          </DropdownMenu.Label>
+          <DropdownMenu.Item className="choice" disabled={page === 0} onSelect={(event) => changePage(event, page - 1)}>
+            <ChevronLeft aria-hidden="true" />{state.labels.previous}
+          </DropdownMenu.Item>
+          <DropdownMenu.Item className="choice" disabled={page + 1 >= pageCount} onSelect={(event) => changePage(event, page + 1)}>
+            <ChevronRight aria-hidden="true" />{state.labels.next}
+          </DropdownMenu.Item>
+        </>}
+        {failed && <p className="error" role="alert">{labels.failed}</p>}
+      </DropdownMenu.Content>
+    </DropdownMenu.Portal>
+  </DropdownMenu.Root>;
+}
+
 function Overlay() {
   const [state, setState] = useState<IabOverlayState>(null);
   useEffect(() => {
@@ -209,8 +273,9 @@ function Overlay() {
   const locale = state?.locale ?? 'en';
   const labels = useMemo(() => labelsFor(locale), [locale]);
   const dismiss = useCallback(() => {
-    if (sessionId !== undefined) void api.command({ sessionId, action: 'dismiss' });
+    if (sessionId !== undefined) void api.command({ sessionId, action: 'dismiss' }).catch(() => {});
   }, [sessionId]);
+  if (state?.kind === 'choices') return <Choices key={state.sessionId} state={state} labels={labels} dismiss={dismiss} />;
   if (state?.kind === 'suggestions') return <Suggestions state={state} labels={labels} />;
   if (state?.kind === 'toast') return <div className="toast-position"><section className="panel toast" role="status" aria-live="polite" aria-atomic="true">
     <span className="toast-check" aria-hidden="true"><Check /></span><p>{state.message}</p>

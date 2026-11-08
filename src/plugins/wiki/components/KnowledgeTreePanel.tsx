@@ -16,6 +16,7 @@ export type KnowledgeTreePanelProps = Readonly<{
   sourceFiles: readonly WikiFileItem[];
   selectedPath: string;
   busy: string | null;
+  writeBusy: string | null;
   loading: boolean;
   error: string | null;
   onSelectFile(path: string): void;
@@ -81,7 +82,7 @@ function isVisibleRawSource(file: WikiFileItem): boolean {
 }
 
 export function KnowledgeTreePanel({
-  pages, sourceFiles, selectedPath, busy, loading, error, onSelectFile, onDeletePage, onRetry,
+  pages, sourceFiles, selectedPath, busy, writeBusy, loading, error, onSelectFile, onDeletePage, onRetry,
 }: KnowledgeTreePanelProps): ReactElement {
   const { t } = useTranslation('wiki');
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
@@ -129,7 +130,8 @@ export function KnowledgeTreePanel({
     .map((file) => ({ file, segments: file.path.replace(/\\/g, '/').replace(/^\.\//, '').split('/') }))
     .sort((left, right) => compareSourcePaths(left.segments, right.segments))
     .map(({ file }) => file), [sourceFiles]);
-  const disabled = busy !== null || loading || error !== null || deletingPath !== null;
+  const disabled = busy !== null || loading;
+  const deleteDisabled = disabled || error !== null || writeBusy !== null || deletingPath !== null;
 
   function toggleType(type: string): void {
     setExpandedTypes((current) => {
@@ -141,7 +143,7 @@ export function KnowledgeTreePanel({
   }
 
   async function deletePage(page: WikiNavigationPage): Promise<void> {
-    if (disabled) return;
+    if (deleteDisabled) return;
     if (armedPath !== page.path) {
       setArmedPath(page.path);
       return;
@@ -166,20 +168,22 @@ export function KnowledgeTreePanel({
       <h3 className="px-2 py-1.5 text-xs font-semibold text-[hsl(var(--shell-text-muted))]">{t('sidebar.knowledge')}</h3>
       {loading ? (
         <p role="status" className="px-2 py-4 text-xs text-[hsl(var(--shell-text-muted))]">{t('sidebar.loading')}</p>
-      ) : error !== null ? (
+      ) : null}
+      {error !== null ? (
         <div className="space-y-2 px-2 py-3">
           <p role="alert" className="text-xs text-destructive">{t('sidebar.loadFailed')}</p>
           <p className="break-words text-xs text-[hsl(var(--shell-text-muted))]">{error}</p>
           <Button type="button" size="sm" variant="outline" disabled={busy !== null} onClick={onRetry}>{t('sidebar.retry')}</Button>
         </div>
-      ) : (
+      ) : null}
+      {!loading ? (
         <>
           {sourceOptions.length > 1 ? (
             <div className="px-2 pb-2">
               <Select
                 aria-label={t('sidebar.filterBySource')}
                 value={sourceFilter ?? ''}
-                disabled={busy !== null || deletingPath !== null}
+                disabled={busy !== null}
                 onChange={(event) => { setSelectedSource(event.target.value || null); setArmedPath(null); }}
                 className="h-8 rounded-md px-2 pr-8 text-xs"
               >
@@ -188,7 +192,7 @@ export function KnowledgeTreePanel({
               </Select>
             </div>
           ) : null}
-          {groups.length === 0 ? <p className="px-2 py-4 text-center text-xs text-[hsl(var(--shell-text-muted))]">{t('sidebar.noWikiPages')}</p> : null}
+          {groups.length === 0 && error === null ? <p className="px-2 py-4 text-center text-xs text-[hsl(var(--shell-text-muted))]">{t('sidebar.noWikiPages')}</p> : null}
           {groups.map(([type, items]) => {
             const config = PAGE_TYPES.find((candidate) => candidate.type === type);
             const Icon = config?.icon ?? FileText;
@@ -215,7 +219,7 @@ export function KnowledgeTreePanel({
                             type="button"
                             variant="ghost"
                             className={cn(ROW_CLASS, 'min-w-0 flex-1', selected && 'text-foreground')}
-                            disabled={disabled}
+                            disabled={disabled || deleting}
                             aria-current={selected ? 'page' : undefined}
                             title={page.path}
                             onClick={() => { setArmedPath(null); onSelectFile(page.path); }}
@@ -227,7 +231,7 @@ export function KnowledgeTreePanel({
                             type="button"
                             variant={armed ? 'destructive' : 'ghost'}
                             size={armed ? 'sm' : 'icon'}
-                            disabled={disabled}
+                            disabled={deleteDisabled}
                             aria-label={deleteLabel}
                             title={deleteLabel}
                             className={cn(
@@ -248,7 +252,7 @@ export function KnowledgeTreePanel({
             );
           })}
         </>
-      )}
+      ) : null}
       {rawSources.length > 0 ? (
         <section className="mt-2 border-t pt-2 [border-color:hsl(var(--shell-border))]" aria-label={t('sidebar.rawSources')}>
           <Button type="button" variant="ghost" className={ROW_CLASS} aria-expanded={sourcesExpanded} onClick={() => setSourcesExpanded((expanded) => !expanded)}>
@@ -265,7 +269,7 @@ export function KnowledgeTreePanel({
                   type="button"
                   variant="ghost"
                   className={cn(ROW_CLASS, selectedPath === file.path && 'bg-[hsl(var(--shell-surface-active))] text-foreground')}
-                  disabled={busy !== null || deletingPath !== null}
+                  disabled={busy !== null}
                   aria-current={selectedPath === file.path ? 'page' : undefined}
                   title={file.path}
                   onClick={() => { setArmedPath(null); onSelectFile(file.path); }}

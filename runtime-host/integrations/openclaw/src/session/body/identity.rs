@@ -8,7 +8,8 @@ pub(super) struct Provisional {
     pub keyed: bool,
     role: MessageRole,
     imported: bool,
-    native_id: Option<String>,
+    pub native_id: Option<String>,
+    stream_id: Option<String>,
     key: Option<String>,
     run: Option<String>,
     sequence: Option<u64>,
@@ -31,10 +32,18 @@ pub(super) struct InferredTerminal {
 }
 
 impl Provisional {
+    pub(super) fn commentary(id: &str, run: &str) -> Self {
+        Self { id: id.to_owned(), keyed: true, role: MessageRole::Assistant, imported: false,
+            native_id: None, stream_id: None, key: None, run: Some(run.to_owned()), sequence: None,
+            segment: Some((id.to_owned(), Some(run.to_owned()))), after_sequence: None, content: None,
+            tool_continuation: false, tool_stop: false, terminal_stop: false, run_terminal: false, mirrored: false }
+    }
+
     pub(super) fn new(id: String, message: &Message) -> Self {
         Self {
             id, keyed: false, role: message.role(), imported: message.is_imported(),
             native_id: message.identity_message_id().map(str::to_owned),
+            stream_id: message.identity_stream_id().map(str::to_owned),
             key: message.idempotency_key().map(str::to_owned),
             run: message.identity_run_id().map(str::to_owned), sequence: message.identity_sequence(),
             segment: message.display_item_id().map(|id| (id.to_owned(), message.identity_run_id().or(message.run_id()).map(str::to_owned))),
@@ -54,15 +63,25 @@ impl Provisional {
         } else { self.sequence.is_some() && self.sequence == other.sequence }
     }
 
+    fn fragment(&self, other: &Self) -> bool {
+        self.role == MessageRole::Assistant && other.role == MessageRole::Assistant && !self.imported && !other.imported
+            && self.segment.is_none() && other.segment.is_none()
+            && ((self.native_id.is_none() && self.sequence.is_none()) || (other.native_id.is_none() && other.sequence.is_none()))
+            && self.stream_id.is_some() && self.stream_id == other.stream_id
+            && self.run.as_ref().zip(other.run.as_ref()).is_none_or(|(left, right)| left == right)
+    }
+
     fn receipt(&self, other: &Self) -> bool {
         self.role == MessageRole::Assistant && other.role == MessageRole::Assistant && !self.imported && !other.imported
             && self.key.is_some() && self.key == other.key
+            && self.stream_id.as_ref().zip(other.stream_id.as_ref()).is_none_or(|(left, right)| left == right)
             && ((self.native_id.is_none() && self.sequence.is_none()) || (other.native_id.is_none() && other.sequence.is_none()))
     }
 
     fn matches(&self, current: &Self, live: bool, snapshot: bool) -> bool {
         if self.segment_id() != current.segment_id() { return false; }
-        if self.transcript(current) || self.receipt(current) { return true; }
+        if self.transcript(current) || self.fragment(current) || self.receipt(current) { return true; }
+        if self.stream_id.as_ref().zip(current.stream_id.as_ref()).is_some_and(|(left, right)| left != right) { return false; }
         if self.role == MessageRole::Assistant && current.role == MessageRole::Assistant
             && self.key.is_some() && current.key.is_some() && self.key != current.key { return false; }
         if self.role != current.role || self.imported || current.imported { return false; }
@@ -125,6 +144,8 @@ impl Body {
     fn selection(&self, entry: &Provisional, snapshot: &[Provisional], live: bool) -> Option<(usize, bool)> {
         // Transcript identity wins; a receipt cannot choose between durable occurrences.
         if let Some(index) = snapshot.iter().position(|row| row.segment_id() == entry.segment_id() && row.transcript(entry)) { return Some((index, false)); }
+        let fragments = snapshot.iter().enumerate().filter(|(_, row)| row.fragment(entry)).map(|(index, _)| index).collect::<Vec<_>>();
+        if !fragments.is_empty() { return (fragments.len() == 1).then(|| (fragments[0], false)); }
         let receipts = snapshot.iter().enumerate().filter(|(_, row)| row.segment_id() == entry.segment_id() && row.receipt(entry))
             .map(|(index, _)| index).collect::<Vec<_>>();
         if !receipts.is_empty() { return (receipts.len() == 1).then(|| (receipts[0], false)); }
@@ -135,14 +156,18 @@ impl Body {
         matches.next().is_none().then_some((index, false))
     }
 
-    pub(super) fn live_identity(&self, message: &Message) -> Option<String> {
+    pub(super) fn message_identity(&self, message: &Message, live: bool) -> Option<String> {
         let incoming = Provisional::new(String::new(), message);
         let entries = self.persisted.iter().map(|row| (Provisional::new(row.id.clone(), row), !self.history_ids.contains(&row.id)))
             .chain(self.streams.values().flat_map(|stream| stream.provisional.iter().cloned().map(|entry| (entry, true))))
             .collect::<Vec<_>>();
         if let Some((entry, _)) = entries.iter().find(|(entry, _)| entry.segment_id() == incoming.segment_id() && entry.transcript(&incoming)) { return Some(entry.id.clone()); }
+        let fragments = entries.iter().filter(|(entry, _)| entry.fragment(&incoming)).collect::<Vec<_>>();
+        if !fragments.is_empty() { return (fragments.len() == 1).then(|| fragments[0].0.id.clone()); }
+        if !live && message.display_item_id().is_none() { return None; }
         let receipts = entries.iter().filter(|(entry, _)| entry.segment_id() == incoming.segment_id() && entry.receipt(&incoming)).collect::<Vec<_>>();
         if !receipts.is_empty() { return (receipts.len() == 1).then(|| receipts[0].0.id.clone()); }
+        if let Some((entry, _)) = entries.iter().find(|(entry, _)| entry.keyed && incoming.matches(entry, true, false)) { return Some(entry.id.clone()); }
         let mut matches = entries.iter().filter(|(entry, live)| {
             let (durable, provisional, provisional_live) = if incoming.native_id.is_some() { (&incoming, entry, *live) } else { (entry, &incoming, true) };
             // Unsequenced terminal adoption is decided against the complete durable snapshot below.
@@ -165,7 +190,8 @@ impl Body {
         self.promote_entries(&snapshot, true)
     }
 
-    pub(in crate::session) fn promote_history(&mut self, _messages: &[(&Message, String)]) -> Option<()> {
+    pub(in crate::session) fn promote_history(&mut self, previous: &[SessionItem]) -> Option<()> {
+        self.merge_history(previous);
         let snapshot = self.persisted.iter().filter(|row| self.history_ids.contains(&row.id) && !row.hidden_control_reply())
             .map(|row| Provisional::new(row.id.clone(), row)).collect::<Vec<_>>();
         self.reconcile_inferred(&snapshot)?;
@@ -191,7 +217,7 @@ impl Body {
         Some(())
     }
 
-    fn adopt_entry(&mut self, entry: Provisional, replacement: &Provisional, inferred: bool) -> Option<()> {
+    pub(super) fn adopt_entry(&mut self, entry: Provisional, replacement: &Provisional, inferred: bool) -> Option<()> {
         let id = entry.id.clone();
         let run = entry.run.clone();
         if inferred {
@@ -217,6 +243,21 @@ impl Body {
             if let Some(id) = &thinking_id { stream.anchors.push(id.clone()); }
             stream.inferred = Some(InferredTerminal { entry, item, matched: replacement.clone(), thinking_id });
             if !stream.anchors.contains(&id) { stream.anchors.push(id.clone()); }
+            if !self.retired.contains(&id) { self.retired.push(id.clone()); }
+        } else if entry.fragment(replacement) {
+            self.items.retain(|item| item.item_id() != id);
+            for stream in self.streams.values_mut() {
+                stream.provisional.retain(|entry| entry.id != id);
+                if stream.thinking.iter().any(|thinking| thinking.stream_id == entry.stream_id) {
+                    if !stream.anchors.contains(&id) { stream.anchors.push(id.clone()); }
+                    for thinking in &mut stream.thinking {
+                        if thinking.stream_id == entry.stream_id {
+                            thinking.replacement = Some(replacement.id.clone());
+                            if !thinking.items.contains(&id) { thinking.items.push(id.clone()); }
+                        }
+                    }
+                }
+            }
             if !self.retired.contains(&id) { self.retired.push(id.clone()); }
         } else if let Some(run) = run.as_deref() {
             self.streams.entry(run.to_owned()).or_default();

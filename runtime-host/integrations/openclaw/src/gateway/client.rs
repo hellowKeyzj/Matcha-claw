@@ -629,7 +629,7 @@ impl GatewayClient {
         let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
         let params = crate::session::protocol::ChatHistoryParams::new(key).try_for_agent(identity.agent_id.clone())
             .and_then(|params| params.try_with_input_run_ids(input_ids.to_vec())).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
-        let paged = !matches!(page.direction(), Direction::Latest) || page.limit() == 0;
+        let paged = !matches!(page.direction(), Direction::Latest);
         let mut total = 0;
         let mut end = 0;
         let mut empty = false;
@@ -658,7 +658,7 @@ impl GatewayClient {
                         cursor_reuse_reason = Some(if !matches!(page.direction(), crate::session::window::Direction::Latest) { "not_latest" }
                             else if entry.cursor.is_none() { "no_cursor" } else if entry.cursor_page != Some(page) { "page_mismatch" } else { "same_page" });
                     }
-                    if entry.cursor_page == Some(page) { entry.cursor.clone() } else { None }
+                    if page.limit() > 0 && entry.cursor_page == Some(page) { entry.cursor.clone() } else { None }
                 })?;
             let request_trace = trace::enabled().then(|| serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
@@ -672,13 +672,20 @@ impl GatewayClient {
                     "sourceEpochMatched": entry_binding.map(|(_, epoch)| epoch == control.epoch.map(|epoch| epoch.as_u64())),
                     "cursorReuseReason": cursor_reuse_reason }));
             let mut params = params.clone();
+            if matches!(page.direction(), Direction::Latest) {
+                let epoch = control.epoch.ok_or(RuntimeOperationFailure::Unavailable)?.as_u64();
+                let anchor = self.event_ingest.as_ref().ok_or(RuntimeOperationFailure::Unavailable)?
+                    .history_anchor(identity.clone(), generation, epoch, Arc::clone(&self.observations)).await?;
+                params = params.with_history_anchor(anchor);
+            }
             let decode_page = if empty { PageRequest::new(page.direction(), 0, page.offset()).ok_or(RuntimeOperationFailure::TargetRejected)? } else { page };
             if paged {
                 params = params.try_with_limit(if empty { 1 } else { PageRequest::MAX_LIMIT as u64 })
                     .and_then(|params| params.try_with_offset(if empty { 9_007_199_254_740_991 } else { total.saturating_sub(end) as u64 }))
                     .map_err(|_| RuntimeOperationFailure::TargetRejected)?;
             } else {
-                params = params.try_with_limit(page.limit() as u64).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+                // Latest's empty display window still needs the current path, not an Older count page.
+                params = params.try_with_limit(page.limit().max(1) as u64).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
                 if let Some(cursor) = cursor { params = params.try_with_cursor(cursor).map_err(|_| RuntimeOperationFailure::TargetRejected)?; }
             }
             let id = next_request_id("chat-history");
@@ -805,6 +812,34 @@ impl GatewayClient {
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn pending_session_approvals(&self, identity: &sessions_module::state::SessionIdentity, session_id: &str) -> Result<crate::session::approval::ObservedApprovals, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let (generation, epoch) = {
+            let entries = self.observations.entries.lock().expect("observation registry lock poisoned");
+            let entry = entries.get(&identity_key(identity)).filter(|entry| !entry.paused
+                && entry.source_epoch.is_some() && entry.subscribed_epoch == entry.source_epoch).ok_or(RuntimeOperationFailure::Unavailable)?;
+            (entry.generation, entry.source_epoch.ok_or(RuntimeOperationFailure::Unavailable)?)
+        };
+        if !self.observations.is_active(identity, generation, epoch) { return Err(RuntimeOperationFailure::Unavailable); }
+        let ingest = self.event_ingest.as_ref().ok_or(RuntimeOperationFailure::Unavailable)?;
+        let approvals = ingest.pending_approvals(identity.clone(), session_id.to_owned(), generation, epoch, Arc::clone(&self.observations)).await?;
+        if !self.observations.is_active(identity, generation, epoch) { return Err(RuntimeOperationFailure::Unavailable); }
+        Ok(crate::session::approval::ObservedApprovals { generation, epoch, approvals })
+    }
+
+    pub(crate) async fn resolve_observed_approval(&self, identity: &sessions_module::state::SessionIdentity, session_id: &str, observed: &crate::session::approval::ObservedApprovals, pending: &sessions_module::state::ApprovalView, request: wire::RpcRequest) -> Result<MutationDelivery, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let control = self.control_dispatcher().await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        let current = self.pending_session_approvals(identity, session_id).await?;
+        if current.generation != observed.generation || current.epoch != observed.epoch
+            || control.epoch.map(|epoch| epoch.as_u64()) != Some(current.epoch)
+            || !current.approvals.iter().any(|approval| approval == pending)
+            || !self.observations.is_active(identity, current.generation, current.epoch) {
+            return Err(RuntimeOperationFailure::Unavailable);
+        }
+        Ok(control.dispatcher.mutate_with_deadline_cancellable(request, RPC_DEADLINE, &CancellationToken::new()).await)
     }
 
     pub(crate) async fn cancel_image_tasks(&self, identity: &sessions_module::state::SessionIdentity, run_id: &str) -> Result<Option<crate::session::image_tasks::ImageTaskCancellation>, sessions_module::ports::RuntimeOperationFailure> {

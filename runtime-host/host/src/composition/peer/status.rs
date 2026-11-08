@@ -21,47 +21,52 @@ use runtime_directory::{
     RuntimeControlStartupDiagnostic,
 };
 
+use super::PeerStartupState;
+
 pub(super) fn host_state(
     admission: &HostAdmission,
     directory: &RuntimeDriverDirectory,
     matcha_diagnostics: &RuntimeStartupDiagnostics,
     openclaw_diagnostics: &RuntimeStartupDiagnostics,
+    startup: &PeerStartupState,
 ) -> HostState {
-    let matcha = matcha_lifecycle_snapshot(directory);
-    let open_claw = open_claw_lifecycle_snapshot(directory);
     let phase = admission.state().phase();
     HostState::from_runtime_states(
         phase == crate::composition::HostPhase::Ready,
         project_host_lifecycle(phase),
-        RuntimeState::from_snapshot_with_startup_diagnostic(
-            &matcha,
-            matcha_diagnostics.category(),
-        ),
-        RuntimeState::from_snapshot_with_startup_diagnostic(
-            &open_claw,
-            openclaw_diagnostics.category(),
-        ),
+        matcha_state(directory, matcha_diagnostics, admission, startup),
+        open_claw_state(directory, openclaw_diagnostics, admission, startup),
     )
 }
 
 pub(super) fn matcha_state(
     directory: &RuntimeDriverDirectory,
     diagnostics: &RuntimeStartupDiagnostics,
+    admission: &HostAdmission,
+    startup: &PeerStartupState,
 ) -> RuntimeState {
-    RuntimeState::from_snapshot_with_startup_diagnostic(
-        &matcha_lifecycle_snapshot(directory),
-        diagnostics.category(),
-    )
+    startup.matcha_state(admission.state().phase(), || {
+        let snapshot = matcha_lifecycle_snapshot(directory);
+        (
+            RuntimeState::from_snapshot_with_startup_diagnostic(&snapshot, diagnostics.category()),
+            snapshot.process(),
+        )
+    })
 }
 
 pub(super) fn open_claw_state(
     directory: &RuntimeDriverDirectory,
     diagnostics: &RuntimeStartupDiagnostics,
+    admission: &HostAdmission,
+    startup: &PeerStartupState,
 ) -> RuntimeState {
-    RuntimeState::from_snapshot_with_startup_diagnostic(
-        &open_claw_lifecycle_snapshot(directory),
-        diagnostics.category(),
-    )
+    startup.open_claw_state(admission.state().phase(), || {
+        let snapshot = open_claw_lifecycle_snapshot(directory);
+        (
+            RuntimeState::from_snapshot_with_startup_diagnostic(&snapshot, diagnostics.category()),
+            snapshot.process(),
+        )
+    })
 }
 
 pub(super) fn matcha_lifecycle_snapshot(directory: &RuntimeDriverDirectory) -> SupervisorSnapshot {
@@ -119,6 +124,19 @@ pub(super) fn runtime_restart_result(
         Ok(RestartOutcome::Restarted) => Ok(()),
         Ok(RestartOutcome::Cancelled { .. }) => Err(crate::RuntimeLifecycleFailure::Cancelled),
         Err(error) => Err(map_lifecycle_failure(error)),
+    }
+}
+
+pub(super) const fn lifecycle_start_failure(error: DriverLifecycleFailure) -> DriverStartFailure {
+    match error {
+        DriverLifecycleFailure::SupervisorStopped => DriverStartFailure::SupervisorStopped,
+        DriverLifecycleFailure::Busy => DriverStartFailure::Busy,
+        DriverLifecycleFailure::ShuttingDown => DriverStartFailure::ShuttingDown,
+        DriverLifecycleFailure::Rejected(rejection) => DriverStartFailure::Rejected(rejection),
+        DriverLifecycleFailure::Unsupported => DriverStartFailure::Unsupported,
+        DriverLifecycleFailure::CompletionFailed | DriverLifecycleFailure::AlreadySatisfied => {
+            DriverStartFailure::CompletionFailed
+        }
     }
 }
 

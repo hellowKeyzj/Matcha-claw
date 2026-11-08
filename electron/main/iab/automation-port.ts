@@ -44,6 +44,7 @@ export type AutomationToWorker =
 
 /** Worker projections are not authority. Every effect re-enters the original Main invocation. */
 export interface AutomationContext extends IabTrustedContext {
+  assertCurrent(): void;
   readonly invocation: number;
   readScript(path: string, signal: AbortSignal): Promise<string>;
   resolveFiles(paths: string[], signal: AbortSignal): Promise<string[]>;

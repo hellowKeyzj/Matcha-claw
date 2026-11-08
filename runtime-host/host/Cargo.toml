@@ -23,6 +23,7 @@ cron = { version = "0.1.0", path = "../modules/cron" }
 board = { version = "0.1.0", path = "../modules/board" }
 usage = { version = "0.1.0", path = "../modules/usage" }
 diagnostics = { version = "0.1.0", path = "../modules/diagnostics" }
+maintenance = { version = "0.1.0", path = "../modules/maintenance" }
 task-manager = { version = "0.1.0", path = "../modules/task-manager" }
 subagents = { version = "0.1.0", path = "../modules/subagents" }
 workspace = { version = "0.1.0", path = "../modules/workspace" }

@@ -10,20 +10,30 @@ use super::Host;
 
 impl Host {
     pub fn state(&self) -> HostState {
-        let matcha = self.matcha_lifecycle_snapshot();
-        let open_claw = self.open_claw_lifecycle_snapshot();
         let phase = self.admission.state().phase();
         HostState::from_runtime_states(
             phase == HostPhase::Ready,
             project_host_lifecycle(phase),
-            RuntimeState::from_snapshot_with_startup_diagnostic(
-                &matcha,
-                self.matcha_startup_diagnostics.category(),
-            ),
-            RuntimeState::from_snapshot_with_startup_diagnostic(
-                &open_claw,
-                self.openclaw_startup_diagnostics.category(),
-            ),
+            self.peer_startup.matcha_state(phase, || {
+                let snapshot = self.matcha_lifecycle_snapshot();
+                (
+                    RuntimeState::from_snapshot_with_startup_diagnostic(
+                        &snapshot,
+                        self.matcha_startup_diagnostics.category(),
+                    ),
+                    snapshot.process(),
+                )
+            }),
+            self.peer_startup.open_claw_state(phase, || {
+                let snapshot = self.open_claw_lifecycle_snapshot();
+                (
+                    RuntimeState::from_snapshot_with_startup_diagnostic(
+                        &snapshot,
+                        self.openclaw_startup_diagnostics.category(),
+                    ),
+                    snapshot.process(),
+                )
+            }),
         )
     }
 
@@ -100,9 +110,10 @@ pub(super) fn forward_openclaw_runtime_changes(
 pub(super) fn forward_matcha_lifecycle_changes(
     scope: &mut ModuleScope,
     mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
-    events: tokio::sync::mpsc::Sender<SupervisorSnapshot>,
+    events: tokio::sync::mpsc::Sender<RuntimeState>,
     peer: crate::composition::peer::PeerHandle,
 ) {
+    let mut startup_changes = peer.subscribe_matcha_startup();
     let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
         let mut notified_process = None;
         loop {
@@ -126,14 +137,20 @@ pub(super) fn forward_matcha_lifecycle_changes(
                             }
                         }
                     }
-                    tokio::select! {
-                        _ = cancellation.cancelled() => break,
-                        sent = events.send(snapshot) => {
-                            if sent.is_err() {
-                                break;
-                            }
-                        }
+                }
+                changed = startup_changes.changed() => {
+                    if changed.is_err() {
+                        break;
                     }
+                }
+            }
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                sent = events.reserve() => {
+                    let Ok(permit) = sent else {
+                        break;
+                    };
+                    permit.send(peer.matcha_state());
                 }
             }
         }

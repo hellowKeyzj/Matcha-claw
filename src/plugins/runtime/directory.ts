@@ -35,7 +35,9 @@ interface RuntimeEndpointsState {
 }
 
 let runtimeEndpointLoadSequence = 0;
-let runtimeEndpointRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let runtimeEndpointRefreshPromise: Promise<void> | null = null;
+let runtimeEndpointRefreshPending = false;
+let runtimeEndpointRefreshDelay: Promise<void> | null = null;
 let runtimeEndpointEventUnsubscribers: Array<() => void> | null = null;
 
 function summarizeRuntimeEndpointTrace(endpoint: RuntimeEndpointSummary | null | undefined) {
@@ -122,8 +124,7 @@ export function isRuntimeEndpointReady(endpoint: RuntimeEndpointSummary): boolea
 
 export function isRuntimeEndpointStarting(endpoint: RuntimeEndpointSummary): boolean {
   const readiness = endpoint.controlState.readiness;
-  return endpoint.lifecycle.phase === 'declared'
-    || endpoint.lifecycle.phase === 'connecting'
+  return endpoint.lifecycle.phase === 'connecting'
     || endpoint.controlState.connection?.state === 'reconnecting'
     || readiness?.phase === 'starting'
     || readiness?.retryable === true
@@ -187,13 +188,16 @@ function isRuntimeEndpointRefreshEvent(payload: unknown): boolean {
 }
 
 function scheduleRuntimeEndpointRefresh(refresh: () => Promise<void>): void {
-  if (runtimeEndpointRefreshTimer != null) {
+  if (runtimeEndpointRefreshDelay != null) {
     return;
   }
-  runtimeEndpointRefreshTimer = setTimeout(() => {
-    runtimeEndpointRefreshTimer = null;
-    void refresh();
-  }, RUNTIME_ENDPOINT_EVENT_REFRESH_DELAY_MS);
+  runtimeEndpointRefreshDelay = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      runtimeEndpointRefreshDelay = null;
+      resolve();
+      if (runtimeEndpointRefreshPending) void refresh();
+    }, RUNTIME_ENDPOINT_EVENT_REFRESH_DELAY_MS);
+  });
 }
 
 function runtimeEndpointScopeKey(endpoint: RuntimeEndpointSummary): string {
@@ -305,84 +309,80 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
     set({ managementEndpoint: target.endpointRef });
   },
 
-  refresh: async () => {
-    const requestSequence = runtimeEndpointLoadSequence + 1;
-    const startedAtMs = isTraceEnabled() ? Date.now() : 0;
-    runtimeEndpointLoadSequence = requestSequence;
-    if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-start', {
-      sequence: requestSequence,
-      hasLoadedOnce: get().hasLoadedOnce,
-    });
-    set((state) => ({
-      status: state.hasLoadedOnce ? state.status : 'loading',
-      error: null,
-      changedRuntimeScopeKeys: [],
-    }));
-    try {
-      const { endpoints } = await hostRuntimeEndpointsList();
-      const durationMs = isTraceEnabled() ? Date.now() - startedAtMs : 0;
-      if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-success', {
-        sequence: requestSequence,
-        durationMs,
-        endpointCount: endpoints.length,
-        openClaw: summarizeRuntimeEndpointTrace(findRuntimeEndpointByAdapter(endpoints, 'openclaw')),
-        matchaAgent: summarizeRuntimeEndpointTrace(findRuntimeEndpointByAdapter(endpoints, 'matcha-agent')),
-      });
-      if (runtimeEndpointLoadSequence !== requestSequence) {
-        if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-stale', {
+  refresh: () => {
+    if (runtimeEndpointRefreshPromise) return runtimeEndpointRefreshPromise;
+    runtimeEndpointRefreshPromise = Promise.resolve().then(async () => {
+      do {
+        runtimeEndpointRefreshPending = false;
+        const requestSequence = ++runtimeEndpointLoadSequence;
+        const startedAtMs = isTraceEnabled() ? Date.now() : 0;
+        if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-start', {
           sequence: requestSequence,
-          currentSequence: runtimeEndpointLoadSequence,
-          durationMs,
+          hasLoadedOnce: get().hasLoadedOnce,
         });
-        return;
-      }
-      set((state) => {
-        const changedRuntimeScopeKeys = changedRuntimeEndpointScopeKeys(state.endpoints, endpoints);
-        const managementRuntime = selectManagementRuntime({ ...state, endpoints });
-        return {
-          managementEndpoint: state.managementEndpoint
-            ?? (managementRuntime && isRuntimeEndpointReady(managementRuntime) ? managementRuntime.endpointRef : null),
-          status: 'ready',
+        set((state) => ({
+          status: state.hasLoadedOnce ? state.status : 'loading',
           error: null,
-          endpoints: [...endpoints],
-          hasLoadedOnce: true,
-          revision: changedRuntimeScopeKeys.length > 0 ? state.revision + 1 : state.revision,
-          changedRuntimeScopeKeys,
-          revisionByRuntimeScopeKey: bumpRuntimeEndpointRevisions(state.revisionByRuntimeScopeKey, changedRuntimeScopeKeys),
-        };
-      });
-    } catch (error) {
-      if (runtimeEndpointLoadSequence !== requestSequence) {
-        if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-stale-error', {
-          sequence: requestSequence,
-          currentSequence: runtimeEndpointLoadSequence,
-          durationMs: Date.now() - startedAtMs,
-          ...summarizeRuntimeEndpointTraceError(error),
-        });
-        return;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      const pending = isRuntimeEndpointDirectoryPending(error);
-      if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-error', {
-        sequence: requestSequence,
-        durationMs: Date.now() - startedAtMs,
-        pending,
-        ...summarizeRuntimeEndpointTraceError(error),
-      });
-      set((state) => {
-        const nextEndpoints = pending ? state.endpoints : [];
-        const changedRuntimeScopeKeys = pending ? [] : changedRuntimeEndpointScopeKeys(state.endpoints, nextEndpoints);
-        return {
-          status: pending ? 'loading' : 'error',
-          error: pending ? null : message,
-          endpoints: nextEndpoints,
-          hasLoadedOnce: state.hasLoadedOnce,
-          revision: changedRuntimeScopeKeys.length > 0 ? state.revision + 1 : state.revision,
-          changedRuntimeScopeKeys,
-          revisionByRuntimeScopeKey: bumpRuntimeEndpointRevisions(state.revisionByRuntimeScopeKey, changedRuntimeScopeKeys),
-        };
-      });
-    }
+          changedRuntimeScopeKeys: [],
+        }));
+        try {
+          const { endpoints } = await hostRuntimeEndpointsList();
+          const durationMs = isTraceEnabled() ? Date.now() - startedAtMs : 0;
+          if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-success', {
+            sequence: requestSequence,
+            durationMs,
+            endpointCount: endpoints.length,
+            openClaw: summarizeRuntimeEndpointTrace(findRuntimeEndpointByAdapter(endpoints, 'openclaw')),
+            matchaAgent: summarizeRuntimeEndpointTrace(findRuntimeEndpointByAdapter(endpoints, 'matcha-agent')),
+          });
+          set((state) => {
+            const changedRuntimeScopeKeys = changedRuntimeEndpointScopeKeys(state.endpoints, endpoints);
+            const nextEndpoints = changedRuntimeScopeKeys.length === 0
+              && state.endpoints.length === endpoints.length
+              && state.endpoints.every((endpoint, index) => runtimeEndpointsEqual(endpoint.endpointRef, endpoints[index].endpointRef))
+              ? state.endpoints : [...endpoints];
+            const managementRuntime = selectManagementRuntime({ ...state, endpoints: nextEndpoints });
+            return {
+              managementEndpoint: state.managementEndpoint
+                ?? (managementRuntime && isRuntimeEndpointReady(managementRuntime) ? managementRuntime.endpointRef : null),
+              status: 'ready',
+              error: null,
+              endpoints: nextEndpoints,
+              hasLoadedOnce: true,
+              revision: changedRuntimeScopeKeys.length > 0 ? state.revision + 1 : state.revision,
+              changedRuntimeScopeKeys,
+              revisionByRuntimeScopeKey: bumpRuntimeEndpointRevisions(state.revisionByRuntimeScopeKey, changedRuntimeScopeKeys),
+            };
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const pending = isRuntimeEndpointDirectoryPending(error);
+          if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-error', {
+            sequence: requestSequence,
+            durationMs: Date.now() - startedAtMs,
+            pending,
+            ...summarizeRuntimeEndpointTraceError(error),
+          });
+          set((state) => {
+            const nextEndpoints = pending ? state.endpoints : [];
+            const changedRuntimeScopeKeys = pending ? [] : changedRuntimeEndpointScopeKeys(state.endpoints, nextEndpoints);
+            return {
+              status: pending ? 'loading' : 'error',
+              error: pending ? null : message,
+              endpoints: nextEndpoints,
+              hasLoadedOnce: state.hasLoadedOnce,
+              revision: changedRuntimeScopeKeys.length > 0 ? state.revision + 1 : state.revision,
+              changedRuntimeScopeKeys,
+              revisionByRuntimeScopeKey: bumpRuntimeEndpointRevisions(state.revisionByRuntimeScopeKey, changedRuntimeScopeKeys),
+            };
+          });
+        }
+        if (runtimeEndpointRefreshPending && runtimeEndpointRefreshDelay) await runtimeEndpointRefreshDelay;
+      } while (runtimeEndpointRefreshPending);
+    }).finally(() => {
+      runtimeEndpointRefreshPromise = null;
+    });
+    return runtimeEndpointRefreshPromise;
   },
 
   init: () => {
@@ -397,6 +397,7 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
         event: summarizeRuntimeReadinessTraceEvent(payload),
       });
       if (refreshable) {
+        runtimeEndpointRefreshPending = true;
         scheduleRuntimeEndpointRefresh(refresh);
       }
     };

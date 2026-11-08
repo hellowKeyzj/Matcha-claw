@@ -702,6 +702,7 @@ impl OrganizationHandle {
         run_id: GraphRunId,
         event_cursor: Option<u64>,
         event_limit: Option<u64>,
+        message_cursor: Option<crate::run::public_projection::TeamRunMessageCursor>,
     ) -> Result<(Option<TeamRunPublicSnapshotQueryOutcome>, Option<crate::TeamCreationFailure>), RequestAdmissionClosed> {
         let (reply, reply_rx) = self.reply_channel();
         self.inner
@@ -710,6 +711,7 @@ impl OrganizationHandle {
                 run_id,
                 event_cursor,
                 event_limit,
+                message_cursor,
                 reply,
             })
             .await
@@ -840,6 +842,25 @@ impl OrganizationHandle {
         self.inner.send_command(OrganizationCommand::RuntimeGraphPatch { scope, patch, reply })
             .await.map_err(closed)?;
         rx.await.map_err(|_| closed_error())
+    }
+
+    pub(crate) async fn create_role_session(
+        &self,
+        team_id: TeamId,
+        run_id: GraphRunId,
+        role_id: crate::RoleId,
+        idempotency_key: IdempotencyKey,
+        scope: crate::application::team_runtime::RoleSessionCreateScope,
+    ) -> Result<Result<crate::RoleSessionReceipt, crate::application::team_runtime::RoleSessionCreateError>, RequestAdmissionClosed> {
+        if let Some(call) = &self.call {
+            call.references(Some(team_id.as_str()), Some(run_id.as_str()), Some(idempotency_key.as_str())).await;
+        }
+        let (reply, receiver) = self.reply_channel();
+        self.inner.send_command(OrganizationCommand::RoleSessionCreate {
+            team_id, run_id, role_id, idempotency_key, scope, reply,
+        }).await.map_err(closed)?;
+        self.call_admitted().await;
+        receiver.await.map_err(|_| closed_error())
     }
 
     pub async fn execute_team_mcp(
@@ -1626,6 +1647,15 @@ async fn execute_team_runtime(
     command: TeamRuntimeCommand,
 ) -> Option<TeamRuntimeCommandOutcome> {
     Some(match command {
+        TeamRuntimeCommand::RoleSessionCreate { team_id, run_id, role_id, idempotency_key, endpoint } => {
+            use crate::application::team_runtime::{RoleSessionCreateError, RoleSessionCreateScope};
+            let result = owner.create_role_session(team_id, run_id, role_id, idempotency_key,
+                RoleSessionCreateScope::Runtime(endpoint)).await.ok()?;
+            TeamRuntimeCommandOutcome::RoleSessionCreate(result.map_err(|error| match error {
+                RoleSessionCreateError::Store(error) => super::role_session::store_status(error),
+                RoleSessionCreateError::Runtime(status) => status,
+            }))
+        }
         TeamRuntimeCommand::Design { .. } => TeamRuntimeCommandOutcome::Design {
             read: false,
             result: Err(StoreFault::InvalidFacts),
@@ -1814,8 +1844,9 @@ async fn execute_team_runtime(
             run_id,
             event_cursor,
             event_limit,
+            message_cursor,
         } => match owner
-            .team_run_public_snapshot(team_id.clone(), run_id.clone(), event_cursor, event_limit)
+            .team_run_public_snapshot(team_id.clone(), run_id.clone(), event_cursor, event_limit, message_cursor)
             .await
             .ok()?
         {

@@ -1,6 +1,6 @@
-import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 
-import { isTeamDesignPatchOperation, isTeamGraphVersion } from '../../../src/types/team-design';
+import { isTeamDesignPatchOperation, isTeamGraphVersion } from '../../../../../src/types/team-design';
 
 export const TEAM_RUNTIME_CAPABILITY_ID = 'team.runtime';
 
@@ -14,6 +14,7 @@ const TEAM_RUNTIME_OPERATIONS = [
   ['team.triggerList', 'List TeamRun armed triggers', 'team'],
   ['team.webhookTriggerFire', 'Fire TeamRun webhook trigger by path', 'team'],
   ['team.runSnapshot', 'Read TeamRun snapshot', 'team-run'],
+  ['team.roleSessionCreate', 'Create TeamRun role session', 'team-run'],
   ['team.designStart', 'Start TeamRun design', 'team'],
   ['team.runStart', 'Start TeamRun', 'team'],
   ['team.designExit', 'Exit TeamRun design', 'team'],
@@ -132,6 +133,12 @@ function validateOperation(
     case 'team.runDiagnostics':
     case 'team.nodePromptRetryDue':
       return matchingRunTarget(target, input) && optionalRunReadFields(operation, input);
+    case 'team.roleSessionCreate':
+      return isRecord(target) && hasExactKeys(target, ['kind', 'runId'])
+        && matchingString(target, 'team-run', 'runId', input, 'runId')
+        && hasExactKeys(input, ['teamId', 'runId', 'roleId', 'idempotencyKey'])
+        && isText(input.teamId) && typeof input.roleId === 'string' && input.roleId.trim().length > 0
+        && isOpaque(input.idempotencyKey);
     case 'team.runDelete':
       return hasExactKeys(input, ['runId']) && matchingRunTarget(target, input);
     case 'team.graphContext':
@@ -196,7 +203,13 @@ function matchingRequiredTeamRunTarget(target: unknown, input: Record<string, un
 function optionalRunReadFields(operation: TeamRuntimeOperationId, input: Record<string, unknown>): boolean {
   if (operation !== 'team.runSnapshot') return true;
   return (input.eventCursor === undefined || isNonNegativeInteger(input.eventCursor))
-    && (input.eventLimit === undefined || isNonNegativeInteger(input.eventLimit));
+    && (input.eventLimit === undefined || isNonNegativeInteger(input.eventLimit))
+    && (input.messageCursor === undefined || isTeamMessageCursor(input.messageCursor));
+}
+
+export function isTeamMessageCursor(value: unknown): value is { revision: string; messageId: string; bodyOffset: number } {
+  return isRecord(value) && hasExactKeys(value, ['revision', 'messageId', 'bodyOffset'])
+    && isTeamGraphVersion(value.revision) && isIdentifier(value.messageId) && isNonNegativeInteger(value.bodyOffset);
 }
 
 function isTriggerListTarget(target: unknown): boolean {

@@ -53,7 +53,7 @@ pub(crate) async fn handle_loopback(
         Ok(request) => request,
         Err(error) => return decode_error(error, creation_stage),
     };
-    if matches!(request.operation_id(), "team.provisionAgents" | "team.delete" | "team.runDelete") {
+    if matches!(request.operation_id(), "team.provisionAgents" | "team.delete" | "team.runDelete" | "team.roleSessionCreate") {
         return match owner.admit_team_capability(resolver, request).await {
             Ok(receipt) => Response::json(202, json!(receipt)),
             Err(error) => decode_error(error, None),

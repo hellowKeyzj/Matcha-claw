@@ -23,11 +23,10 @@ export function TeamGraphRuntimePanel({ surface }: { surface: TeamGraphSurface }
   const submitRunGraphPatch = useTeamsStore((state) => state.submitRunGraphPatch);
   const canRepairGraph = useChatStore((state) => {
     const conversation = state.currentConversation;
-    if (conversation?.kind !== 'session'
-      || !sessionIdentitiesEqual(conversation.sessionIdentity, surface.sourceSessionIdentity)) return false;
+    if (conversation?.kind !== 'session') return false;
     const meta = state.loadedSessions[conversation.sessionRecordKey]?.meta;
     const ownership = meta?.ownership;
-    return Boolean(meta?.sessionIdentity && sessionIdentitiesEqual(meta.sessionIdentity, surface.sourceSessionIdentity)
+    return Boolean(meta?.sessionIdentity && sessionIdentitiesEqual(meta.sessionIdentity, conversation.sessionIdentity)
       && ownership?.kind === 'team' && ownership.roleId === 'leader'
       && ownership.teamId === surface.teamId && ownership.teamRunId === surface.runId);
   });
@@ -93,7 +92,7 @@ export function TeamGraphRuntimePanel({ surface }: { surface: TeamGraphSurface }
             graph={snapshot.graph}
             graphVersion={snapshot.graphVersion}
             runtimeError={snapshot.runtimeError}
-            mutationPending={Boolean(record?.mutationPending || record?.loading)}
+            mutationPending={Boolean(record?.mutationPending)}
             onRepairGraph={canRepairGraph ? (operations) => submitRunGraphPatch(target, operations) : undefined}
             roles={snapshot.roles}
             emptyLabel={t('run.emptyWorkflow')}

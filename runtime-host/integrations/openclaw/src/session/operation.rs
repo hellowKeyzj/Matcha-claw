@@ -1,3 +1,5 @@
+#[path = "approval.rs"]
+pub(crate) mod approval;
 #[path = "artifacts.rs"]
 pub(crate) mod artifacts;
 #[path = "content.rs"]
@@ -35,6 +37,18 @@ static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 
 pub(crate) struct SessionOperation {
     gateway: Arc<GatewayClient>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum SessionCreateSubmission {
+    NotSent,
+    Responded,
+    Unknown,
+}
+
+pub(crate) struct SessionCreateDelivery {
+    pub outcome: InvocationOutcome<SessionCreateResult, OperationError>,
+    pub submission: SessionCreateSubmission,
 }
 
 impl SessionOperation {
@@ -362,14 +376,36 @@ impl SessionOperation {
         params: SessionCreateParams,
         cancellation: &CancellationToken,
     ) -> Result<InvocationOutcome<SessionCreateResult, OperationError>, OperationError> {
+        self.create_session_delivery(params, cancellation).await.map(|delivery| delivery.outcome)
+    }
+
+    pub(crate) async fn create_session_delivery(
+        &self,
+        params: SessionCreateParams,
+        cancellation: &CancellationToken,
+    ) -> Result<SessionCreateDelivery, OperationError> {
         let expected_key = params.key().clone();
         let request_id = next_request_id("sessions-create")?;
         let request = request(&request_id, protocol::SESSIONS_CREATE_METHOD, params)?;
-        Ok(self
-            .mutate_cancellable(request, |response| {
-                protocol::decode_session_create_result(&request_id, response, &expected_key)
-            }, cancellation)
-            .await)
+        let (outcome, submission) = match self.gateway.rpc_mutation_cancellable(request, cancellation).await {
+            MutationDelivery::Response(response) if response.request_id() != request_id => {
+                (InvocationOutcome::Unknown, SessionCreateSubmission::Unknown)
+            }
+            MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
+                (InvocationOutcome::TargetRejected(OperationError::gateway_rejected(error)), SessionCreateSubmission::Responded)
+            }
+            MutationDelivery::Response(response) => {
+                let outcome = match protocol::decode_session_create_result(&request_id, response, &expected_key) {
+                    Ok(result) => InvocationOutcome::Succeeded(result),
+                    Err(_) => InvocationOutcome::Unknown,
+                };
+                (outcome, SessionCreateSubmission::Responded)
+            }
+            MutationDelivery::NotWritten(_) if cancellation.is_cancelled() => (InvocationOutcome::Cancelled, SessionCreateSubmission::NotSent),
+            MutationDelivery::NotWritten(_) => (InvocationOutcome::Unknown, SessionCreateSubmission::NotSent),
+            MutationDelivery::MayHaveReached(_) => (InvocationOutcome::Unknown, SessionCreateSubmission::Unknown),
+        };
+        Ok(SessionCreateDelivery { outcome, submission })
     }
 
     pub(crate) async fn delete_session(

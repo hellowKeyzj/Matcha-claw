@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, path::Path};
 
 use platform::state_dir::{CanonicalStateDir, StateFileReplaceError};
 use serde_json::{Value, json};
@@ -60,6 +60,22 @@ fn patch(
         serde_json::to_value(&input.cli_executable).map_err(|_| FailureKind::InvalidConfig)?,
     );
     cli.insert("args".into(), json!(input.cli_args));
+    let entry = input
+        .cli_args
+        .first()
+        .map(Path::new)
+        .ok_or(FailureKind::InvalidConfig)?;
+    if !entry.is_absolute() {
+        return Err(FailureKind::InvalidConfig.into());
+    }
+    let catalog = entry
+        .parent()
+        .ok_or(FailureKind::InvalidConfig)?
+        .join("skills-catalog.json");
+    cli.insert(
+        "skillsCatalog".into(),
+        serde_json::to_value(catalog).map_err(|_| FailureKind::InvalidConfig)?,
+    );
     // Value mutation preserves every native/unknown field, including cli.env.
     let encoded = serde_json::to_vec_pretty(&config).map_err(|_| FailureKind::InvalidConfig)?;
     if stored.as_deref() == Some(encoded.as_slice()) {

@@ -38,10 +38,11 @@ pub fn team_runtime_descriptor(
             operation("team.provisionAgents", "Provision Team managed agents", "team"),
             operation("team.delete", "Delete Team", "team"),
             operation("team.runCreate", "Create TeamRun", "team"),
+            operation("team.roleSessionCreate", "Create TeamRun role session", "team-run"),
             operation("team.runList", "List TeamRuns", "team"),
             operation("team.triggerList", "List TeamRun armed triggers", "team"),
             operation("team.webhookTriggerFire", "Fire TeamRun webhook trigger by route", "team"),
-            operation("team.runSnapshot", "Read TeamRun snapshot", "team-run"),
+            team_run_snapshot_operation(),
             operation("team.designStart", "Begin TeamRun workflow design", "team"),
             operation("team.runStart", "Start TeamRun workflow", "team"),
             operation("team.designExit", "Return TeamRun workflow design to discussion", "team"),
@@ -105,6 +106,30 @@ fn runtime_identity_for_endpoint(
         }
     }
     None
+}
+
+fn team_run_snapshot_operation() -> Value {
+    let mut descriptor = operation("team.runSnapshot", "Read TeamRun snapshot", "team-run");
+    descriptor["inputSchema"] = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "teamId": { "type": "string" },
+            "runId": { "type": "string" },
+            "eventCursor": { "type": "integer", "minimum": 0 },
+            "eventLimit": { "type": "integer", "minimum": 0 },
+            "messageCursor": {
+                "type": "object", "additionalProperties": false,
+                "required": ["revision", "messageId", "bodyOffset"],
+                "properties": {
+                    "revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "messageId": { "type": "string", "minLength": 1, "maxLength": 512 },
+                    "bodyOffset": { "type": "integer", "minimum": 0, "maximum": 9007199254740991u64 },
+                },
+            },
+        },
+    });
+    descriptor
 }
 
 fn operation(id: &'static str, title: &'static str, target_kind: &'static str) -> Value {

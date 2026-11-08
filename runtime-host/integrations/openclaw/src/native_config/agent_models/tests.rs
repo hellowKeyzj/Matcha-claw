@@ -280,6 +280,7 @@ fn new_model_rows_do_not_inherit_metadata_from_previous_ids() {
                     "models": [{
                         "id": "gpt-5.6",
                         "name": "gpt-5.6",
+                        "reasoning": true,
                         "input": ["text"]
                     }]
                 }
@@ -345,6 +346,7 @@ fn existing_same_id_model_budget_and_user_fields_survive_missing_explicit_limits
                     "models": [{
                         "id": "gpt-5.6",
                         "name": "gpt-5.6",
+                        "reasoning": true,
                         "input": ["text"],
                         "contextWindow": 123_000,
                         "contextTokens": 120_000,

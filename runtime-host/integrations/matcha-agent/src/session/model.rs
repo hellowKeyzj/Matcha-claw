@@ -103,6 +103,10 @@ pub struct RunRecord {
     pub content_budget_digest: Option<String>,
     #[serde(default)]
     pub result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub finished_at_ms: Option<u64>,
     pub status: RunStatus,
 }
 
@@ -140,7 +144,36 @@ impl RunStatus {
 }
 impl RunRecord {
     pub fn validate(&self, session_id: &str) -> bool {
-        self.session_id == session_id && valid_uuid(&self.run_id) && valid_uuid(&self.message_id)
+        self.session_id == session_id
+            && valid_uuid(&self.run_id)
+            && valid_uuid(&self.message_id)
+            && self
+                .started_at_ms
+                .is_none_or(|value| value <= sessions_module::state::MAX_SAFE_INTEGER)
+            && self
+                .finished_at_ms
+                .is_none_or(|value| value <= sessions_module::state::MAX_SAFE_INTEGER)
+            && self
+                .started_at_ms
+                .zip(self.finished_at_ms)
+                .is_none_or(|(started, finished)| finished >= started)
+    }
+    pub(crate) fn timing(&self) -> Option<sessions_module::state::RunTiming> {
+        Some(sessions_module::state::RunTiming {
+            run_id: self.run_id.clone(),
+            started_at_ms: self.started_at_ms?,
+            ended_at_ms: self.finished_at_ms,
+            input_message_id: Some(self.message_id.clone()),
+        })
+    }
+    pub(crate) fn update_timing(&self, timings: &mut Vec<sessions_module::state::RunTiming>) {
+        if let Some(timing) = self.timing() {
+            if let Some(current) = timings.iter_mut().find(|item| item.run_id == self.run_id) {
+                *current = timing;
+            } else {
+                timings.push(timing);
+            }
+        }
     }
 }
 

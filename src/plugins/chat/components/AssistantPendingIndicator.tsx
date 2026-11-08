@@ -2,6 +2,7 @@ import { createContext, memo, useContext, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { MESSAGE_LAYOUT_TOKENS } from '@/plugins/message-rendering/message-layout-tokens';
+import { useReplyDuration, type ReplyTiming } from '@/plugins/chat/reply-timing';
 
 const AssistantPendingLabelContext = createContext<string | null>(null);
 
@@ -13,6 +14,7 @@ interface AssistantPendingLabelProviderProps {
 interface AssistantPendingIndicatorProps {
   mode: 'typing' | 'activity' | 'compacting';
   pendingLabel?: string | null;
+  timing?: ReplyTiming;
 }
 
 export function AssistantPendingLabelProvider({ label, children }: AssistantPendingLabelProviderProps) {
@@ -42,9 +44,15 @@ function PendingDots() {
   );
 }
 
+function PendingDuration({ timing }: { timing?: ReplyTiming }) {
+  const duration = useReplyDuration(timing);
+  return duration ? <span className="tabular-nums">{duration}</span> : null;
+}
+
 export const AssistantPendingIndicator = memo(function AssistantPendingIndicator({
   mode,
   pendingLabel,
+  timing,
 }: AssistantPendingIndicatorProps) {
   const { t } = useTranslation('chat');
   const contextLabel = useContext(AssistantPendingLabelContext);
@@ -65,6 +73,7 @@ export const AssistantPendingIndicator = memo(function AssistantPendingIndicator
       <div className="inline-flex items-center gap-2 rounded-full px-1 py-1 text-[13px] text-muted-foreground/90">
         <span className="leading-none">{label}</span>
         <PendingDots />
+        <PendingDuration timing={timing} />
       </div>
     </div>
   );

@@ -7,6 +7,7 @@ import type {
 import { hasBrowserActionReceipt } from '../browser-action-contract.js'
 import { isIncognitoSessionKey, parseAgentSessionKey } from 'openclaw/plugin-sdk/routing'
 import { browserPrincipalId } from '../state/page-ownership.js'
+import type { BrowserBackendMode } from '../manifest.js'
 
 type Run = {
   context: BrowserActionContext & { runId: string }
@@ -19,7 +20,7 @@ type Run = {
 
 type Group = {
   runs: Set<Run>
-  owners: Map<string, BrowserActionContext>
+  cleanupContext?: BrowserActionContext
   latestRoot?: Run
   activeRoot?: Run
   cleanup?: Promise<void>
@@ -56,6 +57,7 @@ export class BrowserExecutions {
   constructor(
     private readonly cleanup: (request: BrowserSessionCleanup) => Promise<void>,
     private readonly resolve: (context: BrowserActionContext) => BrowserActionContext,
+    private readonly mode: BrowserBackendMode,
   ) {}
 
   captureRun(context: BrowserActionContext & { runId: string }): void {
@@ -86,7 +88,7 @@ export class BrowserExecutions {
       ? AbortSignal.any([receipt.signal, receipt.run.controller.signal])
       : receipt.run.controller.signal
     const invocation: BrowserActionInvocation = {
-      context: receipt.run.context,
+      context: Object.freeze({ ...receipt.run.context, workspaceDir: expected.workspaceDir }),
       signal,
       assertInvocationCurrent: () => this.assertCurrent(receipt.run, signal),
     }
@@ -163,18 +165,24 @@ export class BrowserExecutions {
     for (const run of this.runs.values()) run.controller.abort(new Error('Browser execution owner stopped.'))
     for (const admin of this.administrators) admin.controller.abort(new Error('Browser execution owner stopped.'))
     this.closing = (async () => {
-      await Promise.allSettled([...this.administrators].flatMap((admin) => admin.work ? [admin.work] : []))
+      const administratorWork = Promise.allSettled([...this.administrators].flatMap((admin) => admin.work ? [admin.work] : []))
       const results = await Promise.allSettled([...this.groups.entries()].map(async ([groupId, group]) => {
         const targets = [...group.runs]
-        await Promise.allSettled([
-          ...(group.cleanup ? [group.cleanup] : []),
-          ...targets.flatMap((target) => [...target.work]),
-        ])
-        const context = group.owners.values().next().value
-        if (context) await this.cleanup({ context, scope: 'group' })
+        const previousCleanup = group.cleanup
+        const settling = Promise.allSettled(targets.flatMap((target) => [...target.work]))
+        const errors: unknown[] = []
+        if (previousCleanup) try { await previousCleanup } catch (error) { errors.push(error) }
+        try {
+          const context = group.cleanupContext
+          if (context) await this.cleanup({ context, scope: 'group' })
+          group.cleanupContext = undefined
+        } catch (error) { errors.push(error) }
+        finally { await settling }
+        if (errors.length) throw new AggregateError(errors, 'Browser session group cleanup failed during shutdown.')
         for (const target of targets) this.runs.delete(runKey(target.context))
         this.groups.delete(groupId)
       }))
+      await administratorWork
       const errors = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
       if (errors.length) throw new AggregateError(errors, 'Browser execution cleanup failed during shutdown.')
     })()
@@ -189,16 +197,19 @@ export class BrowserExecutions {
     const context = invocation.context ? this.resolve(invocation.context) : undefined
     const admin: AdminExecution = { context, controller: new AbortController(), admitted: false }
     const signal = invocation.signal ? AbortSignal.any([invocation.signal, admin.controller.signal]) : admin.controller.signal
-    const current = () => {
-      this.assertOpen()
-      signal.throwIfAborted()
-      invocation.assertInvocationCurrent?.()
+    const assertOwnershipCurrent = () => {
       if (context) {
         const latest = this.resolve(context)
         if (!sameSession(context, latest) || latest.sessionGroupId !== context.sessionGroupId) {
           throw new Error('Administrator browser session ownership is no longer current.')
         }
       }
+    }
+    const current = () => {
+      this.assertOpen()
+      signal.throwIfAborted()
+      invocation.assertInvocationCurrent?.()
+      if (this.mode === 'relay') assertOwnershipCurrent()
     }
     this.administrators.add(admin)
     const work = Promise.resolve().then(async () => {
@@ -209,14 +220,15 @@ export class BrowserExecutions {
         await pending
       }
       current()
+      if (this.mode === 'iab') assertOwnershipCurrent()
       admin.admitted = true
       if (context?.sessionGroupId) {
         let group = this.groups.get(context.sessionGroupId)
         if (!group) {
-          group = { runs: new Set(), owners: new Map() }
+          group = { runs: new Set() }
           this.groups.set(context.sessionGroupId, group)
         }
-        group.owners.set(browserPrincipalId(context), context)
+        group.cleanupContext = context
       }
       const result = await task(params, { ...invocation, context, signal, assertInvocationCurrent: current })
       if (!hasBrowserActionReceipt(result)) current()
@@ -257,7 +269,7 @@ export class BrowserExecutions {
     this.runs.set(key, run)
     let group = this.groups.get(captured.sessionGroupId)
     if (!group) {
-      group = { runs: new Set(), owners: new Map() }
+      group = { runs: new Set() }
       this.groups.set(captured.sessionGroupId, group)
     }
     group.runs.add(run)
@@ -272,6 +284,10 @@ export class BrowserExecutions {
     this.assertOpen()
     run.controller.signal.throwIfAborted()
     signal?.throwIfAborted()
+    if (this.mode === 'relay') this.assertOwnershipCurrent(run)
+  }
+
+  private assertOwnershipCurrent(run: Run): void {
     const current = this.resolve(run.context)
     if (!sameSession(current, run.context) || current.rootSessionKey !== run.context.rootSessionKey
       || current.sessionGroupId !== run.context.sessionGroupId) {
@@ -301,8 +317,9 @@ export class BrowserExecutions {
         continue
       }
       this.assertCurrent(run)
+      if (this.mode === 'iab') this.assertOwnershipCurrent(run)
       run.admitted = true
-      group.owners.set(browserPrincipalId(run.context), run.context)
+      group.cleanupContext = run.context
       if (root) group.activeRoot = root
       return
     }
@@ -314,7 +331,7 @@ export class BrowserExecutions {
     const wholeGroup = run.context.rootSessionKey === run.context.sessionKey
       && (group.activeRoot === run || !group.activeRoot && group.latestRoot === run)
     const targets = wholeGroup ? [...group.runs].filter((member) => member.admitted || member === run) : [run]
-    const cleanupContext = wholeGroup ? group.owners.values().next().value : run.admitted ? run.context : undefined
+    const cleanupContext = wholeGroup ? group.cleanupContext : run.admitted ? run.context : undefined
     const administrators = wholeGroup ? [...this.administrators].filter((admin) => admin.admitted
       && admin.context?.sessionGroupId === run.context.sessionGroupId) : []
     for (const admin of administrators) admin.controller.abort(new Error('Browser session group ended.'))
@@ -324,20 +341,24 @@ export class BrowserExecutions {
       for (const [toolCallId, receipt] of this.receipts) if (receipt.run === target) this.receipts.delete(toolCallId)
     }
     const previousCleanup = group.cleanup
+    const settling = Promise.allSettled([
+      ...targets.flatMap((target) => [...target.work]),
+      ...administrators.flatMap((admin) => admin.work ? [admin.work] : []),
+    ])
     const ending = (async () => {
-      if (previousCleanup) await previousCleanup
-      await Promise.allSettled([
-        ...targets.flatMap((target) => [...target.work]),
-        ...administrators.flatMap((admin) => admin.work ? [admin.work] : []),
-      ])
-      if (cleanupContext) await this.cleanup({ context: cleanupContext, scope: wholeGroup ? 'group' : 'executor' })
+      try {
+        if (previousCleanup) await previousCleanup
+        if (cleanupContext) await this.cleanup({ context: cleanupContext, scope: wholeGroup ? 'group' : 'executor' })
+      } finally {
+        await settling
+      }
       for (const target of targets) {
         this.runs.delete(runKey(target.context))
         group.runs.delete(target)
       }
       if (wholeGroup) {
         group.activeRoot = undefined
-        group.owners.clear()
+        group.cleanupContext = undefined
       }
       if (group.latestRoot === run) group.latestRoot = undefined
     })()
@@ -345,7 +366,7 @@ export class BrowserExecutions {
     if (cleanupContext) group.cleanup = ending
     void ending.then(() => {
       if (group.cleanup === ending) group.cleanup = undefined
-      if (!group.runs.size && !group.cleanup && !group.owners.size) this.groups.delete(run.context.sessionGroupId!)
+      if (!group.runs.size && !group.cleanup && !group.cleanupContext) this.groups.delete(run.context.sessionGroupId!)
     }, () => {})
     return ending
   }

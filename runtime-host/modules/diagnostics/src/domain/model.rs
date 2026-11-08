@@ -160,6 +160,11 @@ impl RuntimeState {
         }
     }
 
+    pub fn with_startup_lifecycle(mut self, lifecycle: RuntimeLifecycle) -> Self {
+        self.lifecycle = lifecycle;
+        self
+    }
+
     pub const fn lifecycle(&self) -> RuntimeLifecycle {
         self.lifecycle
     }

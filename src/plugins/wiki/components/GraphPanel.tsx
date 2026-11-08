@@ -15,6 +15,7 @@ export type GraphPanelProps = Readonly<{
   selectedPath: string;
   highlightedNodeIds?: readonly string[];
   busy: string | null;
+  writeBusy: string | null;
   onLoadGraph(): void;
   onEmbedPage(): void;
   onOpenNode(path: string): void;
@@ -22,7 +23,7 @@ export type GraphPanelProps = Readonly<{
 
 export function GraphPanel(props: GraphPanelProps): JSX.Element {
   const { t } = useTranslation('wiki');
-  const { graph, selectedPath, highlightedNodeIds, busy, onLoadGraph, onEmbedPage, onOpenNode } = props;
+  const { graph, selectedPath, highlightedNodeIds, busy, writeBusy, onLoadGraph, onEmbedPage, onOpenNode } = props;
   const [filters, setFilters] = useState(DEFAULT_GRAPH_FILTERS);
   const [showFilters, setShowFilters] = useState(false);
   const [showList, setShowList] = useState(false);
@@ -76,7 +77,7 @@ export function GraphPanel(props: GraphPanelProps): JSX.Element {
               <GitBranch className="h-4 w-4" />
               {t('graph.load')}
             </WikiPrimaryButton>
-            <Button size="sm" variant="outline" onClick={onEmbedPage} disabled={isBusy || !selectedPath.trim()} className="h-8 rounded-full bg-card">
+            <Button size="sm" variant="outline" onClick={onEmbedPage} disabled={isBusy || writeBusy !== null || !selectedPath.trim()} className="h-8 rounded-full bg-card">
               <Sparkles className="h-4 w-4" />
               {t('graph.embed')}
             </Button>

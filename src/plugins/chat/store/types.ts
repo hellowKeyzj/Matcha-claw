@@ -8,9 +8,11 @@ import type {
   SessionIdentity,
 } from '@/types/desktop/runtime-address';
 import type {
+  SessionApprovalDetails,
   SessionContextTokenSnapshot,
   SessionDelta,
   SessionModelState,
+  SessionRunTiming,
 } from '@/types/session/snapshot';
 import type {
   SessionRenderAttachedFile,
@@ -131,6 +133,7 @@ export interface ApprovalItem {
   command?: string;
   allowedDecisions: ApprovalDecision[];
   request?: Record<string, unknown>;
+  details?: SessionApprovalDetails;
   createdAtMs: number;
   expiresAtMs?: number;
   decision?: ApprovalDecision;
@@ -322,6 +325,7 @@ export interface ChatCurrentSessionConversation {
 export interface ChatCurrentDraftConversation {
   kind: 'draft';
   readonly id: string;
+  readonly composerDraftKey: string;
   runtimeScopeKey: string;
   endpoint: RuntimeEndpointRef;
   agentId: string;
@@ -371,6 +375,7 @@ export interface ChatSessionRecord {
   items: SessionRenderItem[];
   window: ChatSessionViewportState;
   contextTokens?: SessionContextTokenSnapshot;
+  runTimings?: readonly SessionRunTiming[];
 }
 
 export interface ChatSessionViewportState {
@@ -493,7 +498,7 @@ export interface ChatStoreActions {
   switchSession: (key: string, traceId?: string | null) => void;
   selectSessionRuntimeEndpoint: (endpoint: RuntimeEndpointRef) => void;
   newSession: (agentId?: string, traceId?: string | null) => Promise<void>;
-  newSessionForScope: (scope: AgentScope) => Promise<void>;
+  newSessionForScope: (scope: AgentScope, initialText?: string) => Promise<boolean>;
   deleteSession: (key: string) => Promise<HostSessionDeleteResult>;
   deleteAgentSessions: (scope: AgentScope, identities: readonly SessionIdentity[]) => Promise<HostSessionDeleteResult>;
   forgetAgentSessions: (agentId: string, endpoint: RuntimeEndpointRef) => void;

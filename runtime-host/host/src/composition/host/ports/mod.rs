@@ -1,5 +1,6 @@
 mod cron_history;
 mod diagnostics_archive;
+pub(crate) mod maintenance;
 pub(crate) mod organization;
 pub(crate) mod postgres;
 pub(crate) mod search;

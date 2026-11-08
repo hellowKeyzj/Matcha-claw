@@ -1,7 +1,8 @@
 use ::cron::CronExecutionTerminalEvent;
-use foundation::process::supervision::SupervisorSnapshot;
 use openclaw::session::events::SessionEvent as OpenClawEvent;
 use tokio::sync::{broadcast, mpsc, watch};
+
+use crate::RuntimeState;
 
 const EVENT_CAPACITY: usize = 256;
 
@@ -16,7 +17,7 @@ pub enum HostEvent {
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
     },
     OpenClawRuntime,
-    MatchaLifecycle(SupervisorSnapshot),
+    MatchaLifecycle(RuntimeState),
     CallChanged(platform::call::CallChanged),
     CallsResync,
     Board(board::BoardEvent),
@@ -31,7 +32,7 @@ pub struct HostEvents {
     cron_changed: Option<watch::Receiver<()>>,
     session_catalog_changed: Option<watch::Receiver<()>>,
     open_claw_runtime: mpsc::Receiver<()>,
-    matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
+    matcha_lifecycle: mpsc::Receiver<RuntimeState>,
     calls: Option<broadcast::Receiver<platform::call::CallChanged>>,
     board: Option<board::BoardEventSubscription>,
     world: Option<world::WorldHintSubscription>,
@@ -177,7 +178,7 @@ pub(super) struct EventSinks {
     cron_changed: Option<watch::Sender<()>>,
     session_catalog_changed: Option<watch::Sender<()>>,
     open_claw_runtime: Option<mpsc::Sender<()>>,
-    matcha_lifecycle: Option<mpsc::Sender<SupervisorSnapshot>>,
+    matcha_lifecycle: Option<mpsc::Sender<RuntimeState>>,
 }
 
 impl EventSinks {
@@ -201,7 +202,7 @@ impl EventSinks {
         self.open_claw_runtime.clone()
     }
 
-    pub(super) fn matcha_lifecycle(&self) -> Option<mpsc::Sender<SupervisorSnapshot>> {
+    pub(super) fn matcha_lifecycle(&self) -> Option<mpsc::Sender<RuntimeState>> {
         self.matcha_lifecycle.clone()
     }
 

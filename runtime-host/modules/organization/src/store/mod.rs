@@ -20,7 +20,7 @@ pub use migration::{MigrationError, MigrationReport, migrate_legacy_log};
 pub(crate) use facts::{ApprovalResolutionOutcome, TeamRunFactsRestoreInput, TeamTombstoneOutcome};
 pub use facts::OrganizationFactsError;
 pub(crate) use facts::{
-    GraphRunFacts, OrganizationFacts,
+    GraphRunFacts, OrganizationFacts, RoleSessionIntent,
     PendingWorkflowPlanAdmission, RunStartGate, TeamFacts,
     WorkflowTemplateFacts,
 };

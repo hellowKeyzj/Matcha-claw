@@ -55,14 +55,10 @@ function stripLeadingBootstrapPendingBlock(text: string): string {
   return text.slice(offset);
 }
 
-function isOpenClawGatewayRestartRecoveryPrompt(text: string): boolean {
-  return /^\s*\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\./i.test(text.trim());
-}
-
 function stripLeadingInternalPromptArtifacts(text: string): string {
   let output = text;
   while (true) {
-    const next = (isOpenClawGatewayRestartRecoveryPrompt(output) ? '' : stripLeadingBootstrapPendingBlock(output))
+    const next = stripLeadingBootstrapPendingBlock(output)
       .replace(/^\s*<relevant-memories>\s*[\s\S]*?<\/relevant-memories>\s*/i, '')
       .replace(/^\s*\[UNTRUSTED DATA[^\n]*\][\s\S]*?\[END UNTRUSTED DATA\]\s*/i, '');
     if (next === output) {
@@ -173,8 +169,7 @@ export function isImageGenerationStatusNarration(text: string): boolean {
 
 export function isOpenClawRuntimeEventPrompt(text: string): boolean {
   const value = text.trim();
-  return value.split(/\n+/).some((line) => /^Continue the OpenClaw runtime event\.?$/i.test(line.trim()))
-    || isOpenClawGatewayRestartRecoveryPrompt(value);
+  return value.split(/\n+/).some((line) => /^Continue the OpenClaw runtime event\.?$/i.test(line.trim()));
 }
 
 export function isInternalDeliveryPlanningText(text: string): boolean {

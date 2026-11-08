@@ -1,13 +1,19 @@
 use super::*;
 use crate::session::events::TerminalOutcome;
 
+enum TerminalText {
+    DisplayItem,
+    MessageChunk,
+    Stream { current: bool },
+}
+
 impl Body {
     pub(super) fn finish_observed(&mut self, run: &str, message: &Message, cache: &OpenClawReplayProjection) -> Option<bool> {
         let Some(stream) = self.streams.get(run) else { return Some(false); };
         // Closed byte ranges transfer only to a continuation of their own text baseline.
         let parts = stream.closed.iter().filter(|closed| message.text().starts_with(&closed.text))
             .flat_map(|closed| &closed.parts).chain(&stream.parts);
-        if message.identity_message_id().is_some() || message.identity_sequence().is_some()
+        if message.identity_message_id().is_some() || message.identity_stream_id().is_some() || message.identity_sequence().is_some()
             || message.display_item_id().is_some() || message.is_imported() || message.hidden_control_reply()
             || message.identity_run_id() != Some(run) || message.after_sequence() == Some(None)
             || message.text().is_empty() || stream.text() != Some(message.text())
@@ -76,14 +82,6 @@ impl Body {
         let thinking = message.content().iter().filter_map(|content| match content {
             crate::session::window::MessageContent::Thinking { text } => Some(text.as_str()), _ => None,
         }).collect::<String>();
-        if !thinking.is_empty() {
-            self.items.retain(|item| !matches!(item, SessionItem::AssistantTurn { run_id: Some(owner), message_id: None, segments, .. }
-                if owner == run && matches!(segments.as_slice(), [SessionContent::Thinking { .. }])));
-            if let Some(stream) = self.streams.get_mut(run) {
-                stream.anchors.retain(|id| self.retired.contains(id) || self.items.iter().any(|item| item.item_id() == id));
-                stream.thinking.clear();
-            }
-        }
         let stream = self.streams.entry(run.to_owned()).or_default();
         stream.final_content = message.final_content_identity();
         stream.terminal_observed = true;
@@ -91,7 +89,7 @@ impl Body {
         if outcome == TerminalOutcome::Completed && self.history_applied_for_run(run)
         {
             self.retire_body(run)?;
-            if !thinking.is_empty() { self.chunk(run, AssistantTurnChunkKind::Thinking, &thinking, true)?; }
+            if !thinking.is_empty() { self.thinking_chunk(run, message.identity_stream_id(), &thinking, true)?; }
             if super::super::trace::enabled() {
                 super::super::trace::log_unscoped("runtime.openclaw.body.final.result", || serde_json::json!({ "commitState": "candidate_only",
                     "runHash": trace::fingerprint(run), "branch": "suppress", "retiredAdded": self.retired.len().saturating_sub(retired_before.unwrap_or(0)) }));
@@ -122,7 +120,7 @@ impl Body {
         });
         let message = terminal.as_ref().unwrap_or(message);
         if tail.is_some() && message.text().is_empty() {
-            if !thinking.is_empty() { self.chunk(run, AssistantTurnChunkKind::Thinking, &thinking, true)?; }
+            if !thinking.is_empty() { self.thinking_chunk(run, message.identity_stream_id(), &thinking, true)?; }
             return Some(());
         }
         let Some(mut item) = transcript_session_item(message, self.items.len(), cache) else {
@@ -154,13 +152,17 @@ impl Body {
             let mut current = Vec::new();
             let mut cursor = 0;
             for item in &self.items[start..end] {
-                let Some((keyed, is_current)) = self.terminal_fallback(run, item) else { continue; };
+                let Some(kind) = self.terminal_text(run, item) else { continue; };
                 let SessionItem::AssistantTurn { text, .. } = item else { continue; };
                 let visible = text.trim_matches(reconciliation::whitespace);
-                if keyed {
-                    if !visible.is_empty() && visible == terminal_text { removed.push(item.item_id().to_owned()); }
-                    continue;
-                }
+                let is_current = match kind {
+                    TerminalText::DisplayItem => continue,
+                    TerminalText::MessageChunk => {
+                        if !visible.is_empty() && visible == terminal_text { removed.push(item.item_id().to_owned()); }
+                        continue;
+                    }
+                    TerminalText::Stream { current } => current,
+                };
                 if is_current { current.push(item.item_id().to_owned()); }
                 let remaining = terminal_text[cursor..].trim_start_matches(reconciliation::whitespace);
                 if !visible.is_empty() && remaining.starts_with(visible) {
@@ -225,7 +227,7 @@ impl Body {
             *run_id = Some(run.to_owned());
             *message_id = message.message_id().map(str::to_owned);
         }
-        if message.identity_message_id().is_some() {
+        if message.identity_message_id().is_some() || message.identity_stream_id().is_some() {
             self.apply_live_message(message, cache)?;
         } else {
             if let Some(index) = self.items.iter().position(|item| item.item_id() == id) { self.items[index] = item; }
@@ -237,32 +239,36 @@ impl Body {
         }
         if super::super::trace::enabled() {
             super::super::trace::log_unscoped("runtime.openclaw.body.final.result", || serde_json::json!({ "commitState": "candidate_only",
-                "runHash": trace::fingerprint(run), "branch": if message.identity_message_id().is_some() { "physical_apply" } else { "provisional_materialize" },
+                "runHash": trace::fingerprint(run), "branch": if message.identity_message_id().is_some() || message.identity_stream_id().is_some() { "message_apply" } else { "provisional_materialize" },
                 "retiredAdded": self.retired.len().saturating_sub(retired_before.unwrap_or(0)), "partsRemoved": removed.len(),
                 "provisionalCount": self.streams.get(run).map_or(0, |stream| stream.provisional.len()) }));
         }
         Some(())
     }
 
-    fn terminal_fallback(&self, run: &str, item: &SessionItem) -> Option<(bool, bool)> {
+    fn terminal_text(&self, run: &str, item: &SessionItem) -> Option<TerminalText> {
         let SessionItem::AssistantTurn { run_id, text, segments, .. } = item else { return None; };
         let id = item.item_id();
         if self.retired.iter().any(|retired| retired == id) { return None; }
         if let Some(fallback) = self.persisted.iter().find(|row|
             row.id == id).and_then(|row| row.stream_fallback())
         {
-            return Some((fallback.item_id.is_some(), fallback.source == super::super::window::StreamFallbackSource::Current));
+            return Some(if fallback.item_id.is_some() { TerminalText::DisplayItem }
+                else { TerminalText::Stream { current: fallback.source == super::super::window::StreamFallbackSource::Current } });
         }
         let stream = self.streams.get(run)?;
         if let Some(part) = stream.all_parts().find(|part| part.id.as_deref() == Some(id)) {
             if part.observed { return None; }
-            return Some((false, !stream.body_closed && stream.parts.iter().any(|part| part.id.as_deref() == Some(id))));
+            return Some(TerminalText::Stream { current: !stream.body_closed && stream.parts.iter().any(|part| part.id.as_deref() == Some(id)) });
         }
         if run_id.as_deref() == Some(run) && !text.is_empty()
             && segments.iter().all(|segment| matches!(segment, SessionContent::Text { .. } | SessionContent::Thinking { .. }))
             && !stream.provisional.iter().any(|entry| entry.id == id && !entry.keyed)
             && !self.persisted.iter().any(|row| row.id == id)
-        { return Some((true, false)); }
+        {
+            return Some(if stream.provisional.iter().any(|entry| entry.id == id && entry.keyed) { TerminalText::DisplayItem }
+                else { TerminalText::MessageChunk });
+        }
         None
     }
 
@@ -315,12 +321,12 @@ impl Body {
         let start = self.items[..end].iter().position(|item| matches!(item,
             SessionItem::AssistantTurn { run_id: Some(owner), text: persisted, .. }
                 if owner == run && !persisted.is_empty() && (text.starts_with(persisted) || persisted.starts_with(text)))
-            && !self.terminal_fallback(run, item).is_some_and(|(keyed, _)| keyed))
+            && !matches!(self.terminal_text(run, item), Some(TerminalText::DisplayItem | TerminalText::MessageChunk)))
             .unwrap_or_else(|| self.items[..end].iter().rposition(|item| matches!(item, SessionItem::UserMessage { .. })).map_or(0, |index| index + 1));
         let texts = self.items[start..end].iter().filter_map(|item| {
             let SessionItem::AssistantTurn { run_id, text, .. } = item else { return None; };
             (run_id.as_deref().is_none_or(|owner| owner == run)
-                && !self.terminal_fallback(run, item).is_some_and(|(keyed, _)| keyed)).then_some(text.as_str())
+                && !matches!(self.terminal_text(run, item), Some(TerminalText::DisplayItem | TerminalText::MessageChunk))).then_some(text.as_str())
         });
         let prefix = text.len() - reconciliation::tail_length(texts, text);
         (prefix > 0).then(|| (boundary.to_owned(), prefix, live.map_or_else(Vec::new, |(_, _, indexes)| indexes)))

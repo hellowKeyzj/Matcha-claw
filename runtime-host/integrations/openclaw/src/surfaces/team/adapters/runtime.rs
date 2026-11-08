@@ -5,14 +5,18 @@ use serde_json::json;
 
 use crate::{
     port::{OpenClawGateway, OpenClawSessionError},
-    session::protocol::{
-        AgentId, AgentScopedSessionKey, EndpointSessionId, ModelRef, SessionCreateParams,
-        SessionsListParams,
+    session::{
+        operation::SessionCreateSubmission,
+        protocol::{
+            AgentId, AgentScopedSessionKey, EndpointSessionId, ModelRef, SessionCreateParams,
+            SessionsListParams,
+        },
     },
 };
 use organization::{
     NativeEffectFailure, RoleSessionReadbackOutcome, RoleSessionReceipt, RunRuntimeReceipt,
-    RuntimeReceiptOutcome, TeamCreationFailure, TeamCreationFailureReason as FailureReason,
+    RoleSessionCreationOutcome, RoleSessionSubmission, RuntimeReceiptOutcome, TeamCreationFailure,
+    TeamCreationFailureReason as FailureReason,
     TeamCreationStage, TeamNativeEffectsPort,
 };
 use platform::exchange::InvocationOutcome;
@@ -27,6 +31,7 @@ async fn confirm_runtime_receipt_native(
     gateway: &OpenClawGateway,
     receipt: RunRuntimeReceipt,
     cancellation: &tokio_util::sync::CancellationToken,
+    submission: &mut RoleSessionSubmission,
 ) -> (RuntimeReceiptOutcome, Option<TeamCreationFailure>) {
     if cancellation.is_cancelled() {
         return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted);
@@ -87,18 +92,28 @@ async fn confirm_runtime_receipt_native(
                     Ok(params) => params,
                     Err(_) => return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig),
                 };
-            match gateway.create_session_cancellable(params, cancellation).await {
-                Ok(InvocationOutcome::Succeeded(_)) => {}
-                Ok(InvocationOutcome::TargetRejected(_)) => {
+            let delivery = match gateway.create_session_delivery(params, cancellation).await {
+                Ok(delivery) => delivery,
+                Err(error) => return map_runtime_receipt_error(error),
+            };
+            if matches!(delivery.submission, SessionCreateSubmission::Unknown) {
+                *submission = RoleSessionSubmission::Unknown;
+            }
+            match delivery.outcome {
+                InvocationOutcome::Succeeded(_) => {}
+                InvocationOutcome::TargetRejected(_) => {
                     return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::RpcRejected);
                 }
-                Ok(InvocationOutcome::Cancelled) => {
+                InvocationOutcome::Cancelled => {
                     return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted);
                 }
-                Ok(InvocationOutcome::Unknown) => {
-                    return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::OutcomeUnknown);
+                InvocationOutcome::Unknown => {
+                    return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, match delivery.submission {
+                        SessionCreateSubmission::NotSent => FailureReason::RpcUnavailable,
+                        SessionCreateSubmission::Responded => FailureReason::RpcProtocol,
+                        SessionCreateSubmission::Unknown => FailureReason::OutcomeUnknown,
+                    });
                 }
-                Err(error) => return map_runtime_receipt_error(error),
             }
             match native_session_exists(gateway, &agent, &session_key, cancellation).await {
                 Ok(true) => {}
@@ -437,7 +452,50 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
         cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)> {
         let gateway = Arc::clone(&self.gateway);
-        Box::pin(async move { confirm_runtime_receipt_native(&gateway, receipt, &cancellation).await })
+        Box::pin(async move {
+            confirm_runtime_receipt_native(&gateway, receipt, &cancellation, &mut RoleSessionSubmission::Settled).await
+        })
+    }
+
+    fn create_team_role_session_cancellable(
+        &self,
+        binding: RoleSessionReceipt,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<RoleSessionCreationOutcome> {
+        let gateway = Arc::clone(&self.gateway);
+        Box::pin(async move {
+            let receipt = RunRuntimeReceipt::try_new(binding.team_run().clone(), vec![binding])
+                .expect("one binding is a valid run receipt");
+            let mut submission = RoleSessionSubmission::Settled;
+            let (outcome, failure) = confirm_runtime_receipt_native(&gateway, receipt, &cancellation, &mut submission).await;
+            RoleSessionCreationOutcome { outcome, failure, submission }
+        })
+    }
+
+    fn readback_team_role_session_cancellable(
+        &self,
+        binding: RoleSessionReceipt,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)> {
+        let gateway = Arc::clone(&self.gateway);
+        Box::pin(async move {
+            let key = match super::super::native_effects::agent_scoped_session_key(&binding) {
+                Ok(key) => key,
+                Err(_) => return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig),
+            };
+            let agent = AgentId::try_new(key.agent_id().to_owned())
+                .expect("agent-scoped session key preserves its validated agent");
+            let Some(_binding) = gateway.client().role_session_transactions(
+                vec![key.as_str().to_owned()], &cancellation,
+            ).await else {
+                return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted);
+            };
+            match native_session_exists(&gateway, &agent, &key, &cancellation).await {
+                Ok(true) => readback_native_session(&gateway, &binding, &cancellation).await,
+                Ok(false) => receipt_failure(RuntimeReceiptOutcome::Unavailable, FailureReason::NativeReadbackMismatch),
+                Err(outcome) => outcome,
+            }
+        })
     }
 
     fn abort_role_sessions(

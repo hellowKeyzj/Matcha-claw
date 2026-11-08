@@ -12,14 +12,13 @@ use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 use super::OpenClawDriver;
-use crate::lifecycle::doctor::DoctorRepairOutcome;
+use crate::lifecycle::{doctor::DoctorRepairOutcome, logs::LogStream};
 
 pub trait StartupEffects: Sync {
     fn prepare(&self) -> impl Future<Output = Result<(), RuntimeStartFailure>> + Send;
     fn ready(&self) -> impl Future<Output = Result<(), RuntimeStartFailure>> + Send;
     fn is_shutting_down(&self) -> bool;
     fn wait_for_shutdown(&self) -> impl Future<Output = ()> + Send;
-    fn record_start(&self, result: Result<StartOutcome, RuntimeStartFailure>);
     fn notify(&self);
 }
 
@@ -40,7 +39,16 @@ impl OpenClawDriver {
                 return Err(RuntimeStartFailure::ShuttingDown);
             }
             self.begin_start_attempt();
-            effects.prepare().await?;
+            self.lifecycle_logs
+                .append(LogStream::Stdout, b"[gateway] startup preparation started");
+            self.lifecycle_logs.flush().await;
+            let prepared = effects.prepare().await;
+            self.lifecycle_logs.append(
+                LogStream::Stdout,
+                format!("[gateway] startup preparation result={prepared:?}").as_bytes(),
+            );
+            self.lifecycle_logs.flush().await;
+            prepared?;
         }
         let result = self.start_with_shutdown(effects).await;
         if effects.is_shutting_down() {
@@ -63,6 +71,7 @@ impl OpenClawDriver {
         effects: &impl StartupEffects,
     ) -> Result<(), RuntimeRepairFailure> {
         self.begin_repair(trigger);
+        self.lifecycle_logs.flush().await;
         let result = async {
             ensure_not_shutting_down(effects)?;
             self.confirm_stopped()
@@ -70,6 +79,7 @@ impl OpenClawDriver {
                 .map_err(|_| RuntimeRepairFailure::StopFailed)?;
             ensure_not_shutting_down(effects)?;
             self.advance_repair(RuntimeRepairPhase::Repairing);
+            self.lifecycle_logs.flush().await;
             let cancellation = CancellationToken::new();
             let shutdown = effects.wait_for_shutdown();
             let doctor = self.repair_native_state(cancellation.clone());
@@ -84,12 +94,14 @@ impl OpenClawDriver {
             }
             ensure_not_shutting_down(effects)?;
             self.advance_repair(RuntimeRepairPhase::Preparing);
+            self.lifecycle_logs.flush().await;
             effects
                 .prepare()
                 .await
                 .map_err(|_| RuntimeRepairFailure::PreparationFailed)?;
             ensure_not_shutting_down(effects)?;
             self.advance_repair(RuntimeRepairPhase::Starting);
+            self.lifecycle_logs.flush().await;
             let result = self.start_with_shutdown(effects).await;
             match result {
                 Ok(StartOutcome::Started) => {}
@@ -107,9 +119,9 @@ impl OpenClawDriver {
             Ok(()) => self.advance_repair(RuntimeRepairPhase::Succeeded),
             Err(failure) => {
                 self.fail_repair(failure);
-                effects.record_start(Err(RuntimeStartFailure::CompletionFailed));
             }
         }
+        self.lifecycle_logs.flush().await;
         effects.notify();
         result
     }
@@ -124,11 +136,10 @@ impl OpenClawDriver {
         let lifecycle = self.owner();
         let start = self.start();
         tokio::pin!(start);
-        let result = tokio::select! {
+        tokio::select! {
             biased;
             _ = effects.wait_for_shutdown() => {
                 let (shutdown, result) = tokio::join!(lifecycle.confirm_shutdown(), &mut start);
-                effects.record_start(result.clone());
                 return match shutdown {
                     Ok(ShutdownOutcome::Detached | ShutdownOutcome::Terminated(
                         TerminationOutcome::Graceful(_)
@@ -139,9 +150,7 @@ impl OpenClawDriver {
                 };
             }
             result = &mut start => result,
-        };
-        effects.record_start(result.clone());
-        result
+        }
     }
 
     pub async fn confirm_stopped(&self) -> Result<(), RuntimeLifecycleFailure> {
@@ -185,6 +194,10 @@ impl OpenClawDriver {
     }
 
     fn begin_repair(&self, trigger: RuntimeRepairTrigger) {
+        self.lifecycle_logs.append(
+            LogStream::Stdout,
+            format!("[repair] phase=Stopping trigger={trigger:?}").as_bytes(),
+        );
         *self
             .repair_state
             .lock()
@@ -196,6 +209,10 @@ impl OpenClawDriver {
     }
 
     fn advance_repair(&self, phase: RuntimeRepairPhase) {
+        self.lifecycle_logs.append(
+            LogStream::Stdout,
+            format!("[repair] phase={phase:?}").as_bytes(),
+        );
         self.repair_state
             .lock()
             .expect("OpenClaw repair state lock poisoned")
@@ -203,6 +220,10 @@ impl OpenClawDriver {
     }
 
     fn fail_repair(&self, failure: RuntimeRepairFailure) {
+        self.lifecycle_logs.append(
+            LogStream::Stderr,
+            format!("[repair] phase=Failed failure={failure:?}").as_bytes(),
+        );
         let mut state = self
             .repair_state
             .lock()

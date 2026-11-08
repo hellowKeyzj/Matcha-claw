@@ -902,6 +902,8 @@
             "signedIn": "Вход выполнен",
             "checking": "Проверка входа",
             "openMenu": "Открыть меню аккаунта",
+            "openConsole": "Консоль облачного аккаунта",
+            "openConsoleFailed": "Не удалось открыть консоль облачного аккаунта",
             "loginAria": "Войти в MatchaClaw",
             "quotaEmpty": "Войдите, чтобы увидеть использование",
             "subscription": "Подписка",
@@ -1086,6 +1088,15 @@
         "selectAgent": "Выбрать агента"
     },
     "switchboard": {
+        "runtimeStarting": "Запуск, ожидание загрузки агентов…",
+        "runtimeFailed": "Сбой запуска",
+        "runtimeStopped": "Не запущен",
+        "openClawRepair": "<status>Сбой запуска</status>. Диагностика и исправление с Matcha",
+        "openClawStart": "<status>Не запущен</status>. Проверить и запустить с Matcha",
+        "runtimeStatusUnavailable": "Состояние временно недоступно",
+        "openClawMatchaUnavailable": "Доступно, когда Matcha Agent будет готов",
+        "openClawDraftFailed": "Не удалось открыть черновик для диагностики. Попробуйте ещё раз",
+        "openClawDiagnosticPrompt": "Помоги проверить OpenClaw, которым Matcha управляет на этом компьютере. Выясни, почему он не запускается или не подключается, устрани причину, перезапусти его и убедись, что подключение и список агентов восстановлены. Сохрани существующие настройки и сессии, не удаляй данные.",
         "allAgents": "Все агенты",
         "allTeams": "Все команды",
         "searchSessions": "Поиск сессий",
@@ -1111,9 +1122,9 @@
         "runtime": "Runtime",
         "teamSession": "Team session",
         "tabs": {
-            "agents": "Agents",
-            "teams": "Teams",
-            "sessions": "Sessions"
+            "agents": "Агенты",
+            "teams": "Команды",
+            "sessions": "Сеансы"
         },
         "normalSessions": "Обычные"
     },

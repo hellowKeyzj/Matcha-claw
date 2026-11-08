@@ -128,6 +128,7 @@ export function renderToolResultMessage(output: Output): React.ReactNode {
         <MessageResponse height={1}>
           <Text>
             Read <Text bold>{numLines}</Text> {numLines === 1 ? 'line' : 'lines'}
+            {output.file.truncatedByTokenCap && ' (partial)'}
           </Text>
         </MessageResponse>
       );

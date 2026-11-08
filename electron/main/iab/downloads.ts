@@ -151,7 +151,7 @@ export class IabDownloads {
   resetPopup(contents: WebContents): void { this.captures.resetPopup(contents); }
   releaseDownloadCapture(contents: WebContents, owner: string): void { this.captures.release(contents, owner); }
   followDownloadPopup(opener: WebContents, popup: WebContents): void { this.captures.followPopup(opener, popup); }
-  reportDownloadSaved(contents: WebContents, owner: string, guid: string, finalPath: string, assertCurrent: () => void): Promise<void> {
+  reportDownloadSaved(contents: WebContents, owner: string, guid: string, finalPath: string, assertCurrent: () => void | Promise<void>): Promise<void> {
     return this.captures.reportSaved(contents, owner, guid, finalPath, assertCurrent);
   }
 

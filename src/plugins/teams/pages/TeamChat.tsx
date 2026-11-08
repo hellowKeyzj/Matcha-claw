@@ -70,6 +70,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const cancelRun = useTeamsStore((state) => state.cancelRun);
   const resolveApproval = useTeamsStore((state) => state.resolveApproval);
   const submitRunGraphPatch = useTeamsStore((state) => state.submitRunGraphPatch);
+  const createRoleSession = useTeamsStore((state) => state.createRoleSession);
   const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
   const refreshDesignSnapshot = useTeamsStore((state) => state.refreshDesignSnapshot);
   const exportGraphYaml = useTeamsStore((state) => state.exportGraphYaml);
@@ -210,6 +211,8 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const canCreateRun = !loading && !pendingActionId;
   const canCancel = canAct && (run?.status === 'provisioning' || run?.status === 'running' || run?.status === 'waiting_for_user' || run?.status === 'paused');
   const canDeleteRun = canAct;
+  const canCreateRoleSession = runtimeReady && canAct && (startGate?.status === 'intake' || startGate?.status === 'designing')
+    && run?.status !== 'cancelling' && run?.status !== 'cancelled';
   const canImportGraphYaml = canAct && Boolean(designSnapshot) && !designActive && !designRecord?.mutationPending;
   const hasGraphToExport = hasExportableGraph(graph);
   const canExportGraphYaml = canAct && hasGraphToExport;
@@ -314,8 +317,9 @@ export function TeamChat({ teamId }: { teamId?: string }) {
             <div role="status" className="mb-3 text-sm text-muted-foreground">{t('common:status.loading')}</div>
           ) : null}
           <TeamRunGraphCanvas
+            key={JSON.stringify([team.id, run?.runId])}
             mode={designSnapshot ? 'editable' : 'readonly'}
-            mutationPending={Boolean(designRecord?.mutationPending) || Boolean(designRecord?.loading)}
+            mutationPending={Boolean(designRecord?.mutationPending)}
             graph={graph}
             graphVersion={designSnapshot?.graphVersion}
             runtimeError={designSnapshot?.runtimeError}
@@ -456,6 +460,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
             webhookAuth={webhookAuth}
             labels={graphLabels}
             onPatchGraph={run && designSnapshot ? (operations) => submitRunGraphPatch({ teamId: team.id, runId: run.runId }, operations) : undefined}
+            onCreateSession={run && canCreateRoleSession ? (roleId, requestId) => createRoleSession({ teamId: team.id, runId: run.runId }, roleId, requestId) : undefined}
           />
         </CardContent>
       </Card>

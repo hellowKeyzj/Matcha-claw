@@ -109,6 +109,7 @@ impl Default for Config {
 pub struct CliConfig {
     pub command: PathBuf,
     pub args: Vec<String>,
+    pub skills_catalog: Option<PathBuf>,
     /// Target environment variable -> source environment variable name, never its value.
     pub env: BTreeMap<String, String>,
     #[serde(flatten)]
@@ -120,6 +121,7 @@ impl Default for CliConfig {
         Self {
             command: PathBuf::from("ccb"),
             args: Vec::new(),
+            skills_catalog: None,
             env: BTreeMap::new(),
             extra: BTreeMap::new(),
         }
@@ -141,6 +143,7 @@ pub struct AgentConfig {
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
     pub settings: Value,
+    pub skill_states: BTreeMap<String, bool>,
     pub tools: Option<Vec<String>>,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
@@ -160,6 +163,7 @@ impl Default for AgentConfig {
             system_prompt: None,
             append_system_prompt: None,
             settings: json!({}),
+            skill_states: BTreeMap::new(),
             tools: None,
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),

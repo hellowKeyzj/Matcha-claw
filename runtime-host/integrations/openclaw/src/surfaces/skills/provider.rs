@@ -179,6 +179,7 @@ impl OpenClawSkillProvider {
                 SkillManagementOutcome::Config {
                     outcome,
                     invalid_keys,
+                    application: None,
                 }
             }
             skills_module::management::Command::ClawHubInstall {

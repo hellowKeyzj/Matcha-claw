@@ -496,8 +496,11 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         get().applySessionDelta(sendResult.projection.delta);
       }
     }
+    const modelState = get().loadedSessions[currentSessionKey]?.meta.modelState;
+    const needsModelBinding = runtimeAdapterId === 'matcha-agent'
+      && !modelState?.selectionId && !modelState?.selected && !modelState?.active;
     const needsInputReceipt = getSessionInputIds(get().loadedSessions[currentSessionKey]).length > 0;
-    if (needsInputReceipt || params.intent || sendResult.outcome === 'succeeded' && sendResult.status !== 'started') {
+    if (needsModelBinding || needsInputReceipt || params.intent || sendResult.outcome === 'succeeded' && sendResult.status !== 'started') {
       void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: needsInputReceipt ? 'send_receipt' : 'manual_refresh' });
     }
     return { accepted: true };

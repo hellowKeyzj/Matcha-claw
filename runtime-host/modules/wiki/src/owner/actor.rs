@@ -519,6 +519,10 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             let result = shared.blocking.run(move || write_file(&state, input)).await;
             let _ = reply.send(result).await;
         }
+        WikiCommand::StageArtifacts { upload, call_id, reply } => {
+            let result = shared.blocking.run(move || super::artifacts::stage(&state, upload, call_id)).await;
+            let _ = reply.send(result).await;
+        }
         WikiCommand::StageImportSource { input, reply } => {
             let result = stage_import_source(&state, input);
             if let Ok(staged) = &result {
@@ -2095,28 +2099,58 @@ async fn parse_pdf_with_mineru(
     private: &MineruPrivateConfig,
     cancellation: CancellationToken,
 ) -> Result<(MineruParseResult, Option<String>), WikiFailure> {
-    let metadata = tokio::fs::metadata(&input.source_path)
-        .await
-        .map_err(|error| WikiFailure::io(path_text(&input.source_path), error))?;
-    if metadata.len() > MINERU_MAX_BYTES {
-        return Err(WikiFailure::state(
-            "MinerU accurate parsing supports files up to 200 MB",
-        ));
-    }
-    let source_url = (config.mineru_backend() != "local")
-        .then(|| mineru_source_url(input, private)).flatten();
-    // A URL parse has no proven relationship to the local file and must not populate its cache.
-    let bytes = if source_url.is_none() {
-        cancel_on_token(&cancellation, tokio::fs::read(&input.source_path)).await?
-            .map_err(|error| WikiFailure::io(path_text(&input.source_path), error))?
-    } else { Vec::new() };
-    let revision = source_url.is_none().then(|| stable_content_hash(&bytes));
-    let result = if config.mineru_backend() == "local" {
-        parse_pdf_with_local_mineru(input, config, private.local_token.as_deref(), bytes, cancellation).await
+    let is_local = config.mineru_backend() == "local";
+    let (budget, timeout_message) = if is_local {
+        (MINERU_LOCAL_TIMEOUT, "local MinerU parsing timed out")
     } else {
-        parse_pdf_with_cloud_mineru(input, config, private.token.as_deref(), source_url, bytes, cancellation).await
-    }?;
-    Ok((result, revision))
+        (MINERU_CLOUD_TIMEOUT, "MinerU parsing timed out after 5 minutes")
+    };
+    let parse = async {
+        let metadata = tokio::fs::metadata(&input.source_path)
+            .await
+            .map_err(|error| WikiFailure::io(path_text(&input.source_path), error))?;
+        if metadata.len() > MINERU_MAX_BYTES {
+            return Err(WikiFailure::state(
+                "MinerU accurate parsing supports files up to 200 MB",
+            ));
+        }
+        let source_url = (!is_local)
+            .then(|| mineru_source_url(input, private))
+            .flatten();
+        // A URL parse has no proven relationship to the local file and must not populate its cache.
+        let bytes = if source_url.is_none() {
+            cancel_on_token(&cancellation, tokio::fs::read(&input.source_path))
+                .await?
+                .map_err(|error| WikiFailure::io(path_text(&input.source_path), error))?
+        } else {
+            Vec::new()
+        };
+        let revision = source_url.is_none().then(|| stable_content_hash(&bytes));
+        let result = if is_local {
+            parse_pdf_with_local_mineru(
+                input,
+                config,
+                private.local_token.as_deref(),
+                bytes,
+                cancellation.clone(),
+            )
+            .await
+        } else {
+            parse_pdf_with_cloud_mineru(
+                input,
+                config,
+                private.token.as_deref(),
+                source_url,
+                bytes,
+                cancellation.clone(),
+            )
+            .await
+        }?;
+        Ok((result, revision))
+    };
+    cancel_on_token(&cancellation, tokio::time::timeout(budget, parse))
+        .await?
+        .map_err(|_| WikiFailure::state(timeout_message))?
 }
 
 async fn parse_pdf_with_cloud_mineru(
@@ -2183,13 +2217,7 @@ async fn parse_pdf_with_cloud_mineru(
     )
     .await?;
 
-    let started = std::time::Instant::now();
     let zip_url = loop {
-        if started.elapsed() >= MINERU_CLOUD_TIMEOUT {
-            return Err(WikiFailure::state(
-                "MinerU parsing timed out after 5 minutes",
-            ));
-        }
         let status = mineru_send(
             &cancellation,
             client
@@ -2260,13 +2288,7 @@ async fn parse_pdf_with_cloud_mineru_url(
     let task_id = json_string(&submit, &["data", "task_id"])
         .or_else(|| json_string(&submit, &["data", "taskId"]))
         .ok_or_else(|| WikiFailure::state("MinerU did not return a URL task ID"))?;
-    let started = std::time::Instant::now();
     let zip_url = loop {
-        if started.elapsed() >= MINERU_CLOUD_TIMEOUT {
-            return Err(WikiFailure::state(
-                "MinerU parsing timed out after 5 minutes",
-            ));
-        }
         let status = mineru_send(
             &cancellation,
             client
@@ -2386,8 +2408,7 @@ async fn parse_pdf_with_local_mineru(
     let encoded_task_id = percent_encode_path_segment(task_id);
     let status_url = format!("{endpoint}/tasks/{encoded_task_id}");
     let result_url = format!("{endpoint}/tasks/{encoded_task_id}/result");
-    let started = std::time::Instant::now();
-    while started.elapsed() < MINERU_LOCAL_TIMEOUT {
+    loop {
         let status = mineru_auth(client.get(&status_url), token);
         let status = mineru_send(&cancellation, status, "local MinerU status").await?;
         let status_json = mineru_json(&cancellation, status, "local MinerU status").await?;
@@ -2413,7 +2434,6 @@ async fn parse_pdf_with_local_mineru(
             _ => wait_mineru_poll(&cancellation).await?,
         }
     }
-    Err(WikiFailure::state("local MinerU parsing timed out"))
 }
 
 async fn mineru_download_zip_result(
@@ -4411,7 +4431,9 @@ fn copy_markdown_image(
     } else {
         source_dir.join(source)
     };
-    if !source.is_file() || !is_supported_image_path(&source) {
+    if !super::artifacts::allows_local_image(source_dir, &source)
+        || !source.is_file() || !is_supported_image_path(&source)
+    {
         return Ok(None);
     }
     let source_key = normalize_relative_path(&source);

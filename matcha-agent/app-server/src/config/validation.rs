@@ -164,6 +164,9 @@ pub(super) fn validate(config: &Config) -> rpc::Result<()> {
             return Err(agent_path_collision());
         }
         validate_settings(&agent.settings)?;
+        for name in agent.skill_states.keys() {
+            crate::cli::skills::validate_name(name)?;
+        }
     }
     for (provider_id, provider) in &config.providers {
         validate_id(provider_id)?;

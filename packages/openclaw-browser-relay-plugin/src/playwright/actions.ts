@@ -285,7 +285,7 @@ export class PlaywrightActions {
     }, { direction, amount }))
   }
 
-  async evaluate(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; fnBody: string; ref?: string; timeoutMs?: number } & PlaywrightInvocation): Promise<unknown> {
+  async evaluate(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; fnBody: string; ref?: string; frameId?: string; timeoutMs?: number } & PlaywrightInvocation): Promise<unknown> {
     input = this.session.withInvocationDeadline(input)
     const page = await this.session.getPageForTargetId(input)
     this.session.assertInvocationCurrent(input)
@@ -293,9 +293,19 @@ export class PlaywrightActions {
 
     const timeoutMs = this.session.remainingTimeout(input)
     const fnBody = requiredString(input.fnBody, 'fn')
+    const frameId = input.frameId === undefined ? undefined : requiredString(input.frameId, 'frameId')
 
-    if (input.ref) {
-      return await this.session.withNativeTransport(input, async (transport, owner, actorKey) => await evaluateNativeElement(await owner.resolve(actorKey, { ref: input.ref }, transport), fnBody, transport))
+    if (input.ref || frameId) {
+      return await this.session.withNativeTransport(input, async (transport, owner, actorKey) => {
+        if (input.ref) {
+          const target = await owner.resolve(actorKey, { ref: input.ref }, transport)
+          if (frameId && target.frame.id !== frameId) throw new Error(`Ref ${input.ref} does not belong to frame ${frameId}`)
+          return await evaluateNativeElement(target, fnBody, transport)
+        }
+        const frame = (await transport.frames()).find((entry) => entry.id === frameId)
+        if (!frame) throw new Error(`Frame ${frameId} has no current native execution context`)
+        return await transport.evaluate(`(() => { "use strict"; const candidate = eval(${JSON.stringify(`(${fnBody})`)}); return typeof candidate === "function" ? candidate() : candidate; })()`, frame)
+      })
     }
 
     return await this.session.runInvocation(input, () => evaluateFunctionOnPage(page, fnBody, timeoutMs))

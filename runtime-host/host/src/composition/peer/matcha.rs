@@ -8,6 +8,7 @@ pub(super) async fn start(
     shared: &PeerShared,
     lifecycle: &dyn LifecycleOps,
 ) -> Result<StartOutcome, RuntimeStartFailure> {
+    shared.startup().begin_matcha();
     let result = async {
         let outcome = lifecycle.start().await?;
         if outcome == StartOutcome::Started {
@@ -16,7 +17,7 @@ pub(super) async fn start(
         Ok(outcome)
     }
     .await;
-    shared.record_matcha_start(result.clone());
+    shared.record_matcha_start(result.clone()).await;
     result
 }
 

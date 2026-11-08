@@ -7,6 +7,7 @@ import {
   cosineSimilarity,
 } from '../skillSearch/localSearch.js'
 import { isDeferredTool } from '@claude-code-best/builtin-tools/tools/SearchExtraToolsTool/prompt.js'
+import { getToolInputSchema } from './toolSchema.js'
 
 export interface ToolIndexEntry {
   name: string
@@ -116,11 +117,6 @@ export async function buildToolIndex(tools: Tools): Promise<ToolIndexEntry[]> {
       { tokens: descTokens, weight: TOOL_FIELD_WEIGHT.description },
     ])
 
-    let inputSchema: object | undefined
-    if (tool.inputJSONSchema) {
-      inputSchema = tool.inputJSONSchema
-    }
-
     entries.push({
       name: tool.name,
       normalizedName,
@@ -128,7 +124,7 @@ export async function buildToolIndex(tools: Tools): Promise<ToolIndexEntry[]> {
       searchHint: tool.searchHint,
       isMcp: tool.isMcp === true,
       isDeferred: true,
-      inputSchema,
+      inputSchema: getToolInputSchema(tool),
       tokens: allTokens,
       tfVector,
     })

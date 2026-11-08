@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig, type Plugin, runnerImport } from 'vite'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { readFileSync } from 'fs'
@@ -105,6 +105,23 @@ export default defineConfig({
         rawAssetPlugin(['.md', '.txt', '.html', '.css']),
         featureFlagsPlugin(),
         importMetaRequirePlugin(),
+        {
+          name: 'skills-catalog',
+          async generateBundle() {
+            const { module, dependencies } = await runnerImport<
+              typeof import('./src/skills/bundled/appCatalogSkills.js')
+            >(resolve(projectRoot, 'src/skills/bundled/appCatalogSkills.ts'), {
+              root: projectRoot,
+              plugins: [rawAssetPlugin(['.md'])],
+            })
+            for (const dependency of dependencies) this.addWatchFile(dependency)
+            this.emitFile({
+              type: 'asset',
+              fileName: 'skills-catalog.json',
+              source: `${JSON.stringify(module.skillsCatalog)}\n`,
+            })
+          },
+        },
       ],
 
       onwarn(warning, defaultHandler) {

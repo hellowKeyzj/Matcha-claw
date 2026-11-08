@@ -40,6 +40,7 @@ export interface SessionMessageModel {
   deriveRuntime(record: ChatSessionRecord): ChatSessionRuntimeState;
   resolveAbortRunId(record: ChatSessionRecord): string | undefined;
   terminalRunIds(exactRunIds: readonly string[], observedRunIds: readonly string[]): readonly string[];
+  settleReceipts(record: ChatSessionRecord): ChatSessionRecord;
   createPending(record: ChatSessionRecord, sessionKey: string): ChatSessionPending | null;
 }
 
@@ -168,6 +169,10 @@ export function deriveSessionRecord(record: ChatSessionRecord): ChatSessionRecor
 
 export function sessionTerminalRunIds(record: ChatSessionRecord, exactRunIds: readonly string[], observedRunIds: readonly string[]): readonly string[] {
   return record.meta.sessionIdentity ? messageModel(record).terminalRunIds(exactRunIds, observedRunIds) : exactRunIds;
+}
+
+export function settleSessionReceipts(record: ChatSessionRecord): ChatSessionRecord {
+  return record.meta.sessionIdentity ? messageModel(record).settleReceipts(record) : record;
 }
 
 export function resolveSessionAbortRunId(record: ChatSessionRecord): string | undefined {

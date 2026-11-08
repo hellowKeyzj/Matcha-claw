@@ -1,3 +1,4 @@
+mod artifacts;
 mod chunk;
 mod error;
 mod graph;
@@ -11,6 +12,7 @@ mod search;
 mod selection;
 mod templates;
 
+pub(crate) use artifacts::*;
 pub use chunk::{WikiChunk, chunk_markdown_with_overlap};
 pub use error::WikiFailure;
 pub(crate) use graph::wiki_links;

@@ -268,8 +268,12 @@ fn skill_management_outcome(result: Result<management::Outcome, ()>) -> Manageme
         Ok(management::Outcome::Config {
             outcome,
             invalid_keys,
+            application,
         }) => {
-            let body = json!({ "success": outcome == management::ConfigOutcome::Accepted, "outcome": outcome, "invalidKeys": invalid_keys });
+            let mut body = json!({ "success": outcome == management::ConfigOutcome::Accepted, "outcome": outcome, "invalidKeys": invalid_keys });
+            if let Some(application) = application {
+                body["application"] = json!(application);
+            }
             if outcome == management::ConfigOutcome::Unknown {
                 ManagementOutcome::Unknown(body)
             } else {

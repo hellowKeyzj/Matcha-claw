@@ -58,6 +58,7 @@ export interface OrganizationCallDetail {
   provision: (OrganizationCommit & { progress?: OrganizationProvisionProgress }) | null;
   creation: OrganizationCommit | null;
   creationFailure?: TeamCreationFailure;
+  roleSession?: { roleId: string; sessionRef: string };
   /** Operation completion is not native delivery or graph business completion. */
   outcome:
     | 'read' | 'command_committed' | 'materialized' | 'created' | 'started' | 'intake'
@@ -74,7 +75,8 @@ declare module '../call-log' {
 
 export function decodeOrganizationCallDetail(value: unknown): OrganizationCallDetail | null {
   if (!isRecord(value) || !hasKeys(value, ['teamId', 'runId', 'teamIdHash', 'runIdHash', 'commandId', 'graph', 'outcome', 'provision', 'creation',
-    ...(Object.hasOwn(value, 'creationFailure') ? ['creationFailure'] : [])])
+    ...(Object.hasOwn(value, 'creationFailure') ? ['creationFailure'] : []),
+    ...(Object.hasOwn(value, 'roleSession') ? ['roleSession'] : [])])
     || !isReference(value.teamId) || !isRunReference(value.runId) || !isReference(value.commandId)
     || !isHash(value.teamIdHash) || !isHash(value.runIdHash)
     || (value.teamId !== null && value.teamIdHash !== null)
@@ -100,6 +102,14 @@ export function decodeOrganizationCallDetail(value: unknown): OrganizationCallDe
   if (provision === undefined || creation === undefined) return null;
   const creationFailure = Object.hasOwn(value, 'creationFailure') ? decodeTeamCreationFailure(value.creationFailure) : undefined;
   if (creationFailure === null) return null;
+  let roleSession: OrganizationCallDetail['roleSession'];
+  if (Object.hasOwn(value, 'roleSession')) {
+    const session = value.roleSession;
+    if (!isRecord(session) || !hasKeys(session, ['roleId', 'sessionRef'])
+      || typeof session.roleId !== 'string' || session.roleId.trim().length === 0
+      || typeof session.sessionRef !== 'string' || !/^rs[0-9]+$/.test(session.sessionRef)) return null;
+    roleSession = { roleId: session.roleId, sessionRef: session.sessionRef };
+  }
   return {
     teamId: value.teamId,
     runId: value.runId,
@@ -110,6 +120,7 @@ export function decodeOrganizationCallDetail(value: unknown): OrganizationCallDe
     provision,
     creation,
     ...(creationFailure === undefined ? {} : { creationFailure }),
+    ...(roleSession === undefined ? {} : { roleSession }),
     outcome: value.outcome as OrganizationCallDetail['outcome'],
   };
 }

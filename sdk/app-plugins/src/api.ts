@@ -1,5 +1,9 @@
 import type { AppPluginManifest } from './manifest.js';
 import type { SessionIdentity } from './identity.js';
+import type { AppExecutionApi } from './execution.js';
+import type { AppCapabilitiesApi, AppCredentialsApi, AppKnowledgeApi, AppWorkspaceApi } from './services.js';
+export * from './execution.js';
+export * from './services.js';
 
 export type AppJson = null | boolean | number | string | AppJson[] | { [key: string]: AppJson };
 
@@ -177,6 +181,11 @@ export interface AppPluginContext {
   /** Host-owned human decision for this active tool call only. Recheck business revisions after confirmation. Throws when no foreground owner is available. */
   requestConfirmation(request: AppConfirmationRequest, signal?: AbortSignal): Promise<boolean>;
   publish(topic: string, data: AppJson): void;
+  readonly execution: AppExecutionApi;
+  readonly workspace: AppWorkspaceApi;
+  readonly knowledge: AppKnowledgeApi;
+  readonly credentials: AppCredentialsApi;
+  readonly capabilities: AppCapabilitiesApi;
   readonly models: {
     list(request: AppMediaModelListRequest, signal?: AbortSignal): Promise<AppMediaModelList>;
     generate(request: AppModelRequest, signal?: AbortSignal): Promise<AppModelResult>;

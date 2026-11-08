@@ -13,7 +13,7 @@ use std::{
 
 pub(super) const HOST_STATE_ENTRY: &str = "diagnostics.json";
 pub(super) const ENTRY_LIMIT: usize = 64;
-pub(super) const ENTRY_BYTE_LIMIT: u64 = 128 * 1024;
+pub(super) const ENTRY_BYTE_LIMIT: u64 = crate::RUNTIME_LOG_SNAPSHOT_BYTE_LIMIT as u64;
 pub(super) const TOTAL_CONTENT_LIMIT: u64 = 512 * 1024;
 
 const RECENT_WINDOW_MS: u128 = 72 * 60 * 60 * 1000;
@@ -158,14 +158,35 @@ impl FileIdentity {
 }
 
 /// Collects the sealed Host state document plus safe projections of recent diagnostic logs.
+#[cfg(test)]
 pub(super) fn collect(
     state_root: &Path,
     app_log_root: Option<&Path>,
     host_state: Vec<u8>,
 ) -> Vec<ArchiveEntry> {
+    collect_with_runtime_logs(state_root, app_log_root, host_state, None)
+}
+
+pub(super) fn collect_with_runtime_logs(
+    state_root: &Path,
+    app_log_root: Option<&Path>,
+    host_state: Vec<u8>,
+    runtime_logs: Option<&str>,
+) -> Vec<ArchiveEntry> {
     let runtime = Source::new(state_root);
     let mut bundle = Bundle::new();
     bundle.push(HOST_STATE_ENTRY.to_owned(), host_state);
+    if let Some(logs) = runtime_logs {
+        let limit = ENTRY_BYTE_LIMIT as usize;
+        let content = if logs.len() > limit {
+            const MARKER: &str = "\n[archive snapshot truncated]\n";
+            let end = logs.floor_char_boundary(limit - MARKER.len());
+            format!("{}{MARKER}", &logs[..end]).into_bytes()
+        } else {
+            logs.as_bytes().to_vec()
+        };
+        bundle.push("runtime/openclaw-logs.txt".to_owned(), content);
+    }
     bundle.collect_runtime_logs(&runtime);
     if let Some(app_log_root) = app_log_root {
         bundle.collect_app_logs(&Source::new(app_log_root));

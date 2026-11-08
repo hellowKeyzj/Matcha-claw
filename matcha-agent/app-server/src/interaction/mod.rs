@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
-    events::Events,
+    events::{Event, Events},
     persistence::Database,
     rpc::{self, Error},
     session::Sessions,
@@ -34,7 +34,7 @@ struct Invalidations {
     requests: HashSet<Target>,
 }
 
-#[derive(Clone, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Target {
     session_id: String,
@@ -126,6 +126,14 @@ impl Pending {
             "requestedAtMs": self.requested_at_ms, "updatedAtMs": self.updated_at_ms,
             "failure": self.failure,
         })
+    }
+
+    fn event_payload(&self) -> Value {
+        let mut payload = self.receipt();
+        if self.category == Category::Permission {
+            payload["request"] = json!(self.request);
+        }
+        payload
     }
 
     fn view(&self) -> rpc::Result<Value> {
@@ -459,6 +467,10 @@ impl Interactions {
             .requests
             .retain(|target| target.session_id != session_id);
         Ok(())
+    }
+
+    pub async fn hydrate_events(&self, events: Vec<Event>) -> rpc::Result<Vec<Event>> {
+        self.store.hydrate_events(events).await
     }
 
     fn publication_lock(&self, session_id: &str) -> rpc::Result<Arc<AsyncMutex<()>>> {

@@ -299,6 +299,106 @@ export function patchBoardRpcReasons(source) {
 \t\t\t\tif (widget.revision !== boardParams.revision || widget.instanceId !== boardParams.instanceId || document.revision !== boardParams.revision || document.instanceId !== boardParams.instanceId) throw new BoardValidationError("not_found", \`board MCP App widget not found: \${boardParams.name}\`, "stale");`);
 }
 
+export function patchBoardRevisionPersistence(source) {
+  source = replace(source,
+    'runSqliteImmediateTransactionSync(database.db, () => ensureOpenClawAgentBoardSchemaInTransaction(database.db), {',
+    `runSqliteImmediateTransactionSync(database.db, () => {
+		ensureOpenClawAgentBoardSchemaInTransaction(database.db);
+		database.db.exec(\`CREATE TABLE IF NOT EXISTS board_revisions (
+			session_key TEXT NOT NULL PRIMARY KEY,
+			revision INTEGER NOT NULL CHECK (revision >= 0),
+			FOREIGN KEY (session_key) REFERENCES session_nodes(session_key) ON DELETE CASCADE
+		) STRICT;\`);
+	}, {`);
+  source = replace(source,
+    '\t\tconst tabRows = executeSqliteQuerySync(database.db, db.selectFrom("board_tabs")',
+    `		const persistedRevision = database.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'board_revisions'").get()
+			? database.db.prepare("SELECT revision FROM board_revisions WHERE session_key = ?").get(sessionKey)?.revision ?? 0 : 0;
+		const tabRows = executeSqliteQuerySync(database.db, db.selectFrom("board_tabs")`);
+  source = replace(source,
+    'revision: tabRows.reduce((revision, row) => Math.max(revision, row.revision), 0),',
+    'revision: tabRows.reduce((revision, row) => Math.max(revision, row.revision), persistedRevision),');
+  return replace(source,
+    'function upsertTabs(database, previous, next) {\n\tconst db = getNodeSqliteKysely(database.db);',
+    `function upsertTabs(database, previous, next) {
+	const db = getNodeSqliteKysely(database.db);
+	executeSqliteQuerySync(database.db, db.insertInto("board_revisions").values({
+		session_key: next.sessionKey,
+		revision: next.revision
+	}).onConflict((conflict) => conflict.column("session_key").doUpdateSet({ revision: next.revision })));`);
+}
+
+export function patchBoardRevisionArtifacts(source) {
+  source = replace(source,
+    '\tlet destinationTables = readSessionNodeArtifactTables(destination);',
+    `\tlet destinationTables = readSessionNodeArtifactTables(destination);
+\tif (sourceTables.has("board_revisions")) {
+\t\tconst revisions = executeSqliteQuerySync(source.db, sourceDb.selectFrom("board_revisions").selectAll().where("session_key", "in", keys)).rows;
+\t\tif (revisions.length > 0) destination.db.exec(\`CREATE TABLE IF NOT EXISTS board_revisions (
+\t\t\tsession_key TEXT NOT NULL PRIMARY KEY,
+\t\t\trevision INTEGER NOT NULL CHECK (revision >= 0),
+\t\t\tFOREIGN KEY (session_key) REFERENCES session_nodes(session_key) ON DELETE CASCADE
+\t\t) STRICT;\`);
+\t\tfor (const row of revisions) executeSqliteQuerySync(destination.db, destinationDb.insertInto("board_revisions").values({
+\t\t\tsession_key: canonicalKey,
+\t\t\trevision: row.revision
+\t\t}).onConflict((conflict) => conflict.column("session_key").doUpdateSet({ revision: row.revision }).where("revision", "<", row.revision)));
+\t}`);
+  source = replace(source,
+    '\tfor (const table of [\n\t\t"heartbeat_outcomes",',
+    '\tfor (const table of [\n\t\t"board_revisions",\n\t\t"heartbeat_outcomes",');
+  return replace(source,
+    '\t\t"board_tabs",\n\t\t"board_widgets",\n\t\t"heartbeat_outcomes",',
+    '\t\t"board_tabs",\n\t\t"board_widgets",\n\t\t"board_revisions",\n\t\t"heartbeat_outcomes",');
+}
+
+export function patchBoardRevisionReclamation(source) {
+  source = replace(source,
+    '.where("name", "in", ["board_tabs", "board_widgets"])',
+    '.where("name", "in", ["board_tabs", "board_widgets", "board_revisions"])');
+  return replace(source,
+    '\tif (!tables.has("board_tabs") || !tables.has("board_widgets")) return;',
+    '\tif (tables.has("board_revisions")) executeSqliteQuerySync(database.db, db.deleteFrom("board_revisions").where("session_key", "in", keys));\n\tif (!tables.has("board_tabs") || !tables.has("board_widgets")) return;');
+}
+
+export function patchBoardRevisionWorker(source) {
+  const seals = [];
+  for (let stamp; (stamp = source.match(/^\/\/ (native-chat-commentary-replacement|native-history-path) sha256=([a-f0-9]{64})\n/));) {
+    source = source.slice(stamp[0].length);
+    if (digest(source) !== stamp[2]) throw new Error(`${PATCH}: ${stamp[1]} source seal mismatch`);
+    seals.push(stamp[1]);
+  }
+  source = replace(source,
+    'runSqliteImmediateTransactionSync(Ot.db,()=>ensureOpenClawAgentBoardSchemaInTransaction(Ot.db),{databaseLabel:Ot.path,operationLabel:`board.ensure-schema`})',
+    'runSqliteImmediateTransactionSync(Ot.db,()=>{ensureOpenClawAgentBoardSchemaInTransaction(Ot.db);Ot.db.exec(`CREATE TABLE IF NOT EXISTS board_revisions (session_key TEXT NOT NULL PRIMARY KEY, revision INTEGER NOT NULL CHECK (revision >= 0), FOREIGN KEY (session_key) REFERENCES session_nodes(session_key) ON DELETE CASCADE) STRICT;`)},{databaseLabel:Ot.path,operationLabel:`board.ensure-schema`})');
+  source = replace(source,
+    'function readStoredBoard(Ot,Zt){return runSqliteDeferredTransactionSync(Ot.db,()=>{let _n=',
+    'function readStoredBoard(Ot,Zt){return runSqliteDeferredTransactionSync(Ot.db,()=>{let persistedRevision=Ot.db.prepare("SELECT 1 FROM sqlite_master WHERE type = \'table\' AND name = \'board_revisions\'").get()?Ot.db.prepare("SELECT revision FROM board_revisions WHERE session_key = ?").get(Zt)?.revision??0:0;let _n=');
+  source = replace(source,
+    'revision:Dn.reduce((Ot,Zt)=>Math.max(Ot,Zt.revision),0),...Fn',
+    'revision:Dn.reduce((Ot,Zt)=>Math.max(Ot,Zt.revision),persistedRevision),...Fn');
+  source = replace(source,
+    'function upsertTabs(Ot,Zt,_n){let Dn=getNodeSqliteKysely(Ot.db),kn=',
+    'function upsertTabs(Ot,Zt,_n){let Dn=getNodeSqliteKysely(Ot.db);executeSqliteQuerySync(Ot.db,Dn.insertInto(`board_revisions`).values({session_key:_n.sessionKey,revision:_n.revision}).onConflict(Ot=>Ot.column(`session_key`).doUpdateSet({revision:_n.revision})));let kn=');
+  source = replace(source,
+    'cr=readSessionNodeArtifactTables(Ot),pr=readSessionNodeArtifactTables(Zt);if(kn.includeParticipants',
+    'cr=readSessionNodeArtifactTables(Ot),pr=readSessionNodeArtifactTables(Zt);if(cr.has(`board_revisions`)){let revisions=executeSqliteQuerySync(Ot.db,Fn.selectFrom(`board_revisions`).selectAll().where(`session_key`,`in`,Pn)).rows;if(revisions.length>0)Zt.db.exec(`CREATE TABLE IF NOT EXISTS board_revisions (session_key TEXT NOT NULL PRIMARY KEY, revision INTEGER NOT NULL CHECK (revision >= 0), FOREIGN KEY (session_key) REFERENCES session_nodes(session_key) ON DELETE CASCADE) STRICT;`);for(let row of revisions)executeSqliteQuerySync(Zt.db,Ln.insertInto(`board_revisions`).values({session_key:Dn,revision:row.revision}).onConflict(conflict=>conflict.column(`session_key`).doUpdateSet({revision:row.revision}).where(`revision`,`<`,row.revision)))}if(kn.includeParticipants');
+  source = replace(source,
+    'for(let kn of[`heartbeat_outcomes`,`session_participants`,`session_progress_cards`])Dn.has(kn)',
+    'for(let kn of[`board_revisions`,`heartbeat_outcomes`,`session_participants`,`session_progress_cards`])Dn.has(kn)');
+  source = replace(source,
+    '[`board_tabs`,`board_widgets`,`heartbeat_outcomes`,`session_members`,`session_participants`,`session_progress_cards`,`session_suggestions`]',
+    '[`board_tabs`,`board_widgets`,`board_revisions`,`heartbeat_outcomes`,`session_members`,`session_participants`,`session_progress_cards`,`session_suggestions`]');
+  source = replace(source,
+    '.where(`name`,`in`,[`board_tabs`,`board_widgets`])',
+    '.where(`name`,`in`,[`board_tabs`,`board_widgets`,`board_revisions`])');
+  source = replace(source,
+    '!kn.has(`board_tabs`)||!kn.has(`board_widgets`)||(',
+    'kn.has(`board_revisions`)&&executeSqliteQuerySync(Ot.db,Dn.deleteFrom(`board_revisions`).where(`session_key`,`in`,_n));!kn.has(`board_tabs`)||!kn.has(`board_widgets`)||(');
+  for (const seal of seals.reverse()) source = `// ${seal} sha256=${digest(source)}\n${source}`;
+  return source;
+}
+
 export function patchOpenClawBoard(openclawDir) {
   const pkg = JSON.parse(read(path.join(openclawDir, 'package.json')));
   if (pkg.name !== 'openclaw' || pkg.version !== VERSION) throw new Error(`${PATCH}: requires openclaw@${VERSION}`);
@@ -315,6 +415,10 @@ export function patchOpenClawBoard(openclawDir) {
   const ticket = locate(dist, 'board-view-ticket-', ['function verifyBoardViewTicket(value, options = {})', 'function requireBoardViewTicketAuthority(claims, gatewayContext)']);
   const widgetView = locate(dist, 'board-widget-view-', ['function resolveAuthorizedBoardWidgetView(store, ticket, options = {})']);
   const board = locate(dist, 'board-', ['function respondBoardError(error, respond)', '"board.widget.appView":']);
+  const store = locate(dist, 'sqlite-board-store-', ['function ensureBoardSchema(database)', 'function readStoredBoard(database, sessionKey)', 'function upsertTabs(database, previous, next)']);
+  const artifacts = locate(dist, 'session-accessor.sqlite-entry-store-', ['function copySessionNodeArtifactsForRepair(', 'function deleteSessionNodeArtifacts(', 'function readSessionNodeArtifactTables(']);
+  const reclamation = locate(dist, 'session-accessor.sqlite-reclamation-', ['function deleteSessionBoardRows(database, sessionKeys)']);
+  const worker = path.join(dist, 'worker', 'worker.mjs');
   for (const file of [server, canvas]) {
     if (!read(file).includes(`from "./${path.basename(sandbox)}"`)) throw new Error(`${PATCH}: native sandbox resource import missing in ${path.basename(file)}`);
   }
@@ -329,6 +433,10 @@ export function patchOpenClawBoard(openclawDir) {
     [ticket, patchBoardTicketVerdict],
     [widgetView, patchBoardWidgetViewReasons],
     [board, patchBoardRpcReasons],
+    [store, patchBoardRevisionPersistence],
+    [artifacts, patchBoardRevisionArtifacts],
+    [reclamation, patchBoardRevisionReclamation],
+    [worker, patchBoardRevisionWorker],
   ].map(([file, transform]) => {
     const before = read(file);
     return { file, before, after: transform(before) };
@@ -337,6 +445,6 @@ export function patchOpenClawBoard(openclawDir) {
   for (const { file, after } of changed) fs.writeFileSync(file, after);
   return {
     status: changed.length ? 'applied' : 'clean',
-    detail: `OpenClaw ${VERSION} board-view events, typed reasons and file-parent sandbox capability; native MCP/Canvas resources verified (${[sandbox, mcp, canvas].map((file) => path.basename(file)).join(', ')})`,
+    detail: `OpenClaw ${VERSION} board-view events, persistent revisions, typed reasons and file-parent sandbox capability; native MCP/Canvas resources verified (${[sandbox, mcp, canvas].map((file) => path.basename(file)).join(', ')})`,
   };
 }

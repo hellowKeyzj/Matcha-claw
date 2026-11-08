@@ -378,6 +378,24 @@ impl SessionShared {
         outcome
     }
 
+    async fn handle_execution_result(
+        &self,
+        mut command: crate::execution::SessionRunReadCommand,
+    ) -> Option<crate::execution::SessionExecutionResult> {
+        if !command.valid() { return None; }
+        let bound = self.snapshot.load().states.get(&session_identity_lane_key(&command.identity))
+            .and_then(SessionState::native_session_id).map(str::to_owned);
+        if let Some(bound) = bound {
+            if command.endpoint_session_id.as_ref().is_some_and(|value| value != &bound) {
+                return None;
+            }
+            command.endpoint_session_id = Some(bound);
+        }
+        let driver = self.running_session_driver(identity_endpoint(&command.identity)).ok()?;
+        let result = driver.session_ops()?.read_execution_result(command.clone()).await?;
+        result.valid_for(&command).then_some(result)
+    }
+
     async fn handle_pending_approvals(
         &self,
         command: crate::approval::PendingApprovalsCommand,
@@ -434,7 +452,7 @@ impl SessionShared {
         }
     }
 
-    async fn handle_content(&self, command: ContentCommand) -> ContentOutcome {
+    pub(super) async fn handle_content(&self, command: ContentCommand) -> ContentOutcome {
         let driver = match self.running_session_driver(identity_endpoint(command.identity())) {
             Ok(driver) => driver,
             Err(failure) => {
@@ -522,7 +540,7 @@ impl SessionShared {
     ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
         crate::trace::log("runtime.matcha.model-selection.prepare.start", command.trace_id.as_deref(), || serde_json::json!({
             "sessionHash": crate::trace::fingerprint(&command.session_key),
-            "modelHash": crate::trace::fingerprint(&command.model),
+            "modelHash": command.model.as_deref().map(crate::trace::fingerprint),
             "selectionHash": command.model_selection_id.as_deref().map(crate::trace::fingerprint),
         }));
         let outcome = self
@@ -1552,14 +1570,14 @@ impl SessionLane {
         let requested = command.request_run_identity().map(str::to_owned);
         if let (Some(context), SessionSendOutcome::Queued { run_id } | SessionSendOutcome::Succeeded { run_id, .. }) = (&command.execution_context, outcome) {
             if let Some(state) = &mut self.state {
-                if !state.has_terminal_run(run_id) || state.pending_terminals.iter().any(|snapshot| &snapshot.native_run_id == run_id) {
+                if !state.has_terminal_run(run_id) || state.pending_terminals.iter().any(|pending| &pending.snapshot.native_run_id == run_id) {
                     if let Some(requested) = &requested {
                         state.run_execution_contexts.insert(run_id.clone(), (requested.clone(), context.clone()));
                     }
-                    for snapshot in &mut state.pending_terminals {
-                        if &snapshot.native_run_id == run_id {
-                            snapshot.execution_context = Some(context.clone());
-                            snapshot.native_request_id = requested.clone();
+                    for pending in &mut state.pending_terminals {
+                        if &pending.snapshot.native_run_id == run_id {
+                            pending.snapshot.execution_context = Some(context.clone());
+                            pending.snapshot.native_request_id = requested.clone();
                         }
                     }
                     shared.store_snapshot_state(state.clone()).await;
@@ -1568,7 +1586,7 @@ impl SessionLane {
         }
         if let Some(requested) = &requested {
             let remove = receive_demand_added
-                && !self.state.as_ref().is_some_and(|state| state.pending_terminals.iter().any(|snapshot| snapshot.native_run_id == *requested))
+                && !self.state.as_ref().is_some_and(|state| state.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id == *requested))
                 && !matches!(outcome, SessionSendOutcome::Unknown)
                 && self.send_receive_run(&identity, outcome) != Some(requested.as_str())
                 && self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested.as_str());
@@ -1636,13 +1654,20 @@ impl SessionLane {
         {
             return;
         }
-        let (run_id, runtime) = match send_outcome_runtime(outcome, failure_run_id) {
+        let (run_id, mut runtime) = match send_outcome_runtime(outcome, failure_run_id) {
             Some(projection) => projection,
             None => return,
         };
         if matches!(outcome, SessionSendOutcome::Queued { .. } | SessionSendOutcome::Succeeded { .. })
             && run_id.as_deref().is_some_and(|run_id| shared.received_terminal(&identity, run_id)) {
             return;
+        }
+        if !crate::state::terminal_run_phase(runtime.phase)
+            && shared.observation_failure(&identity).is_some()
+        {
+            runtime.issue = Some(RuntimeIssue::Unknown);
+            runtime.run_progress = None;
+            runtime.runtime_activity = None;
         }
         let delivery_context = match outcome {
             SessionSendOutcome::Queued { .. } | SessionSendOutcome::Succeeded { .. } => {
@@ -1949,7 +1974,7 @@ impl SessionLane {
                 let outcome = shared.handle_session_catalog(command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
-            query @ (SessionQuery::ReadRun { .. } | SessionQuery::Abort { .. } | SessionQuery::Thinking { .. } | SessionQuery::Audited { .. } | SessionQuery::Producing { .. }) => query.send_unavailable(),
+            query @ (SessionQuery::ReadRun { .. } | SessionQuery::ExecutionResult { .. } | SessionQuery::Abort { .. } | SessionQuery::Thinking { .. } | SessionQuery::Audited { .. } | SessionQuery::Producing { .. }) => query.send_unavailable(),
         }
     }
 }
@@ -2040,6 +2065,10 @@ impl OwnerSpec for SessionOwner {
             }
             SessionQuery::ReadRun { command, reply } => {
                 let outcome = shared.handle_read_run(command).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            SessionQuery::ExecutionResult { command, reply } => {
+                let outcome = shared.handle_execution_result(command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             SessionQuery::Abort { command, reply } => {
@@ -2375,6 +2404,7 @@ fn identity_endpoint(identity: &SessionIdentity) -> Option<RuntimeEndpoint> {
 
 fn state_from_view(view: &SessionView) -> Option<SessionState> {
     let facts = SessionFacts {
+        run_timings: view.run_timings.clone(),
         items: view.items.clone(),
         tools: view.tools.clone(),
         approvals: view.approvals.clone(),

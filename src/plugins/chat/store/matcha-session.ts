@@ -1,4 +1,5 @@
 import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
+import { hasVisibleUserOutput } from '@/plugins/message-rendering/chat-message-view';
 import { currentSessionSend, isSendPending } from '@/plugins/chat/store/send-state';
 import { bindSessionInputReceipts, isPendingUserItem, reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
 import type { SessionRenderUserMessageItem } from '@/types/session/render-item';
@@ -91,7 +92,7 @@ export const messageReplacementIndex: SessionMessageModel['messageReplacementInd
 export function deriveRuntime(record: ChatSessionRecord): ChatSessionRuntimeState {
   const abort = record.abort && record.meta.sessionIdentity
     && record.abort.identityKey === buildSessionIdentityKey(record.meta.sessionIdentity) ? record.abort : null;
-  return !abort ? record.runtime : {
+  return !abort || record.runtime.runPhase === 'error' || record.runtime.runPhase === 'done' || record.runtime.runPhase === 'aborted' ? record.runtime : {
     ...record.runtime,
     ...(abort.phase === 'stopping' ? { runPhase: 'stopping' as const, updatedAt: abort.startedAt } : {}),
     ...(abort.issue ? { lastError: abort.issue.message, lastIssue: abort.issue, updatedAt: abort.issue.at } : {}),
@@ -102,8 +103,28 @@ export const resolveAbortRunId: SessionMessageModel['resolveAbortRunId'] = (reco
 
 export const terminalRunIds: SessionMessageModel['terminalRunIds'] = (exactRunIds) => exactRunIds;
 
+export const settleReceipts: SessionMessageModel['settleReceipts'] = (record) => {
+  const receipt = currentSessionSend(record)?.receipt;
+  const sendRunId = receipt?.phase === 'accepted' || receipt?.phase === 'unknown' ? receipt.runId : null;
+  const abort = record.abort?.identityKey === buildSessionIdentityKey(record.meta.sessionIdentity!) ? record.abort : null;
+  if (!sendRunId && !abort?.runId) return record;
+  // Native ended timing and the receipt may arrive in either order; settle at record commit.
+  let sendEnded = false;
+  let abortEnded = false;
+  for (const timing of record.runTimings ?? []) {
+    if (timing.endedAtMs === null) continue;
+    if (timing.runId === sendRunId) sendEnded = true;
+    if (timing.runId === abort?.runId) abortEnded = true;
+  }
+  return sendEnded || abortEnded ? {
+    ...record,
+    send: sendEnded ? null : record.send,
+    abort: abortEnded ? null : record.abort,
+  } : record;
+};
+
 export const createPending: SessionMessageModel['createPending'] = (record) => {
-  if (!record.window.isAtLatest) return null;
+  if (!record.window.isAtLatest || record.runtime.runPhase === 'error') return null;
   const send = currentSessionSend(record);
   const awaitingOutput = send?.receipt.phase === 'awaiting-receipt' || send?.receipt.phase === 'accepted';
   const active = isRunActive(record.runtime);
@@ -112,7 +133,7 @@ export const createPending: SessionMessageModel['createPending'] = (record) => {
   for (let index = record.items.length - 1; index >= 0; index -= 1) {
     const item = record.items[index];
     if (item.kind === 'assistant-turn') return null;
-    if (item.kind === 'user-message') break;
+    if (item.kind === 'user-message' && hasVisibleUserOutput(item)) break;
   }
   const mode = record.runtime.runtimeActivity === 'compacting' ? 'compacting'
     : record.runtime.runPhase === 'waiting_tool' ? 'activity' : 'typing';

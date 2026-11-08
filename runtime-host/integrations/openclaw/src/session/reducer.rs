@@ -271,7 +271,8 @@ impl CanonicalChangeDebugSummary {
             CanonicalSessionChange::RecoveryRequired { .. } => {
                 self.recovery_required_count += 1;
             }
-            CanonicalSessionChange::ItemsReplaced { .. } | CanonicalSessionChange::RunYielded { .. } => {},
+            CanonicalSessionChange::ItemsReplaced { .. } | CanonicalSessionChange::RunYielded { .. }
+                | CanonicalSessionChange::RunTimingUpdated { .. } => {},
             CanonicalSessionChange::TranscriptMessage { .. } => {
                 self.transcript_message_count += 1;
             }
@@ -368,6 +369,7 @@ pub(crate) struct SessionReducerActor {
     window: Option<sessions_module::state::SessionWindow>,
     native_session_id: Option<String>,
     active_leaf: Option<Option<String>>,
+    history_anchor: Option<super::protocol::HistoryAnchor>,
     history_pagination: Option<super::window::PageMetadata>,
     goal: sessions_module::goal::SessionGoalView,
     approvals_known: bool,
@@ -387,6 +389,7 @@ impl SessionReducerActor {
             window: None,
             native_session_id: None,
             active_leaf: None,
+            history_anchor: None,
             history_pagination: None,
             goal: sessions_module::goal::SessionGoalView::Unknown,
             approvals_known: false,
@@ -402,11 +405,48 @@ impl SessionReducerActor {
         source_epoch: Option<GatewayEpoch>,
 
     ) -> Option<CanonicalIngressResult> {
+        let approval = event.approval.is_some();
+        let timing = (event.session_key == self.session_key).then(|| event.run_timing.clone()).flatten();
+        let timing_delta = timing.as_ref().and_then(|_| CanonicalSessionDeltaProducer::from_native_changes(&event, source_epoch, Vec::new()));
+        match self.reduce_event(event, source_epoch) {
+            Ok(mut result) => {
+                if let Some(timing) = timing.and_then(|timing| self.cache.observe_run_timing(&timing, false)) {
+                    let change = CanonicalSessionChange::RunTimingUpdated { timing };
+                    if let Some(CanonicalIngressResult::Produced(delta)) = &mut result {
+                        let mut changes = delta.changes().to_vec();
+                        changes.push(change);
+                        delta.replace_changes(changes);
+                    } else if let Some(mut delta) = timing_delta {
+                        delta.replace_changes(vec![change]);
+                        result = Some(CanonicalIngressResult::Produced(delta));
+                    }
+                }
+                result
+            },
+            Err(()) => {
+                if approval {
+                    self.approvals_known = false;
+                }
+                Some(CanonicalIngressResult::Unknown {
+                    provenance: super::events::SessionEventProvenance::recovery(
+                        self.session_key.clone(),
+                        source_epoch.map(GatewayEpoch::as_u64),
+                    ),
+                })
+            }
+        }
+    }
+
+    fn reduce_event(
+        &mut self,
+        event: SessionEventEnvelope,
+        source_epoch: Option<GatewayEpoch>,
+    ) -> Result<Option<CanonicalIngressResult>, ()> {
         if event.session_key != self.session_key {
             if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                 "reason": "session_key_mismatch", "sessionHash": sessions_module::trace::fingerprint(event.session_key.as_str()),
                 "targetSessionHash": sessions_module::trace::fingerprint(self.session_key.as_str()) })); }
-            return None;
+            return Err(());
         }
         trace_reducer_event(&event, source_epoch);
 
@@ -419,22 +459,22 @@ impl SessionReducerActor {
                 if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                     "reason": "body_message_candidate", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                 None
-            })?;
+            }).ok_or(())?;
             let mut changes = if admitted { vec![CanonicalSessionChange::TranscriptMessage { message: message.clone() }] } else { Vec::new() };
             if !admitted { cache = self.cache.clone(); }
             push_replacement(&mut changes, replacement);
-            self.commit_body(body, &mut changes, cache)?;
-            return produce_changes_debugged("persisted_message", event, source_epoch, changes);
+            self.commit_body(body, &mut changes, cache).ok_or(())?;
+            return Ok(produce_changes_debugged("persisted_message", event, source_epoch, changes));
         }
-        if let Some((id, _)) = event.commentary.as_ref() {
+        if let Some((id, text)) = event.commentary.as_ref() {
             let mut body = self.body.clone();
             body.begin_update();
-            let replacement = body.preamble_activity(event.run_id.as_ref()?.as_str(), id)?;
+            let replacement = body.preamble_activity(event.run_id.as_ref().ok_or(())?.as_str(), id, text).ok_or(())?;
             let mut changes = Vec::new();
             push_replacement(&mut changes, replacement);
-            self.commit_body(body, &mut changes, self.cache.clone())?;
-            if changes.is_empty() { return None; }
-            return produce_changes_debugged("keyed_commentary", event, source_epoch, changes);
+            self.commit_body(body, &mut changes, self.cache.clone()).ok_or(())?;
+            if changes.is_empty() { return Ok(None); }
+            return Ok(produce_changes_debugged("keyed_commentary", event, source_epoch, changes));
         }
         if event.run_id.as_ref().is_some_and(|run| self.body.terminal.iter().any(|(id, _)| id == run.as_str()))
             && !event.chat.as_ref().is_some_and(|chat| chat.state == ChatState::Final && chat.final_message.is_some())
@@ -442,28 +482,28 @@ impl SessionReducerActor {
             if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                 "reason": "terminal_fence", "runHash": event.run_id.as_ref().map(|run| sessions_module::trace::fingerprint(run.as_str())),
                 "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
-            return None;
+            return Ok(None);
         }
         if matches!(event.kind, SessionEventKind::Tool | SessionEventKind::Agent)
             && let Some(activity) = event.activity.as_ref()
             && matches!(activity.kind(), SessionActivityKind::Thinking { .. })
         {
-            if activity.session_key != self.session_key || event.run_id.as_ref() != Some(&activity.run_id) { return None; }
+            if activity.session_key != self.session_key || event.run_id.as_ref() != Some(&activity.run_id) { return Err(()); }
             let mut body = self.body.clone();
             body.begin_update();
-            let replacement = body.thinking(activity.run_id.as_str(), activity)?;
+            let replacement = body.thinking(activity.run_id.as_str(), activity).ok_or(())?;
             let mut changes = Vec::new();
             push_replacement(&mut changes, replacement);
-            self.commit_body(body, &mut changes, self.cache.clone())?;
-            if changes.is_empty() { return None; }
-            return produce_changes_debugged("agent_thinking", event, source_epoch, changes);
+            self.commit_body(body, &mut changes, self.cache.clone()).ok_or(())?;
+            if changes.is_empty() { return Ok(None); }
+            return Ok(produce_changes_debugged("agent_thinking", event, source_epoch, changes));
         }
         let active_run = self.active_run.clone();
         let approvals = self.approvals.clone();
         let mut committed = false;
         let result = (|| {
             let chat = event.chat.clone();
-            let mut result = match event.kind {
+            let Some(mut result) = (match event.kind {
                 SessionEventKind::Chat => self.reduce_chat(event, source_epoch),
                 SessionEventKind::Message => {
                     self.reduce_message_activity(event, source_epoch)
@@ -475,11 +515,11 @@ impl SessionReducerActor {
                     self.reduce_approval(event, source_epoch)
                 }
                 SessionEventKind::Changed => self.reduce_changed(event, source_epoch),
-            }.or_else(|| {
+            }) else {
                 if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                     "reason": "no_native_change", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
-                None
-            })?;
+                return Ok(None);
+            };
             if let CanonicalIngressResult::Produced(delta) = &mut result {
                 let mut cache = self.cache.clone();
                 if let Some(message) = chat.as_ref().and_then(|chat| chat.final_message.as_ref()) {
@@ -488,7 +528,7 @@ impl SessionReducerActor {
                 let mut canonical = delta.changes().to_vec();
                 for change in &mut canonical {
                     if matches!(change, CanonicalSessionChange::ToolActivity { .. }) {
-                        *change = cache.apply_tool_observation(change)?;
+                        *change = cache.apply_tool_observation(change).ok_or(())?;
                     }
                 }
                 let mut body = self.body.clone();
@@ -497,13 +537,13 @@ impl SessionReducerActor {
                     if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                         "reason": "body_observe_candidate", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                     None
-                })?;
+                }).ok_or(())?;
                 if let Some(message) = chat.as_ref().filter(|chat| chat.state == ChatState::Final)
                     .and_then(|chat| chat.final_message.as_ref())
                 {
                     canonical.push(CanonicalSessionChange::TranscriptMessage { message: message.clone() });
                 }
-                self.commit_body(body, &mut canonical, cache)?;
+                self.commit_body(body, &mut canonical, cache).ok_or(())?;
                 committed = true;
                 let mut changes = Vec::new();
                 push_replacement(&mut changes, replacement);
@@ -513,11 +553,11 @@ impl SessionReducerActor {
                 if changes.is_empty() {
                     if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.no_display_changes", || serde_json::json!({
                         "reason": "committed_without_display_change", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
-                    return None;
+                    return Ok(None);
                 }
                 delta.replace_changes(changes);
             }
-            Some(result)
+            Ok(Some(result))
         })();
         if !committed {
             self.active_run = active_run;
@@ -645,6 +685,8 @@ impl SessionReducerActor {
         })
     }
 
+    pub(crate) fn history_anchor(&self) -> Option<&super::protocol::HistoryAnchor> { self.history_anchor.as_ref() }
+
     pub(crate) fn sync_history(&mut self, window: &super::window::SessionWindow, page: super::window::PageRequest, epoch: GatewayEpoch)
         -> Result<Option<CanonicalIngressResult>, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure as Failure;
@@ -686,17 +728,28 @@ impl SessionReducerActor {
             .is_some_and(|(current, incoming)| current != incoming);
         let leaf_changed = self.active_leaf.as_ref().map(|leaf| leaf.as_deref()).zip(window.state().active_leaf_scope())
             .is_some_and(|(current, incoming)| current != incoming);
-        if session_changed && !full {
-            super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", || serde_json::json!({
-                "reason": "delta_session_changed", "sessionChanged": session_changed, "leafChanged": leaf_changed,
-                "resetScope": false, "before": history_before,
-                "incomingNativeSessionId": sessions_module::trace::id_shape(window.native_session_id()),
-                "incomingLeafScopeKnown": window.state().active_leaf_scope().is_some(),
-                "incomingLeafHash": window.state().active_leaf_scope().flatten().map(sessions_module::trace::fingerprint) }));
-            return Err(Failure::Unknown);
+        let latest = matches!(page.direction(), super::window::Direction::Latest);
+        let history_path = latest.then(|| window.state().history_path()).flatten();
+        let path = history_path.flatten();
+        let established = self.history_anchor.is_some() || (self.window.is_some() && self.native_session_id.is_some());
+        if latest {
+            if let Some(path) = path {
+                // A response may have crossed another accepted history read while hydrating content.
+                if path.previous.as_ref() != self.history_anchor.as_ref() { return Ok(None); }
+            } else if history_path.is_none() && established {
+                return Err(Failure::Unknown);
+            }
         }
-        let reset_scope = full && (session_changed || leaf_changed);
-        let full_latest = full && matches!(page.direction(), super::window::Direction::Latest);
+        let discontinuous = path.is_some_and(|path| matches!(path.relation,
+            Some(super::protocol::HistoryRelation::OffPath | super::protocol::HistoryRelation::Reset)))
+            || (matches!(history_path, Some(None)) && established);
+        if !full && latest && (discontinuous || session_changed || self.history_anchor.is_none() || path.is_none()) {
+            // Cursor recovery must retain the old accepted anchor for the following Full decision.
+            return Ok(None);
+        }
+        if session_changed && !full { return Err(Failure::Unknown); }
+        let full_latest = full && latest;
+        let reset_scope = full && (session_changed || if latest { discontinuous } else { leaf_changed });
         let prefix = (!reset_scope && full_latest && self.native_session_id.is_some()
             && self.native_session_id.as_deref() == window.native_session_id())
             .then(|| self.history_pagination.zip(window.pagination()).zip(self.window))
@@ -711,6 +764,7 @@ impl SessionReducerActor {
         body.begin_update();
         if full { body.rebuild_history(prefix, reset_scope); }
         let mut cache = if reset_scope { super::adapters::timeline::OpenClawReplayProjection::empty() } else { self.cache.clone() };
+        if !session_changed { cache.run_timings = self.cache.run_timings.clone(); }
         if reset_scope && !session_changed { cache.approvals = self.cache.approvals.clone(); }
         let runtime_after_scope = history_started.map(|_| runtime_trace_state(&cache.runtime));
         let in_flight_run = window.state().in_flight_run().filter(|run|
@@ -728,6 +782,13 @@ impl SessionReducerActor {
         let body_started = super::trace::enabled().then(std::time::Instant::now);
         cache.prepare_transcript_tools(&window.messages().iter().collect::<Vec<_>>());
         let mut changes = Vec::new();
+        if latest {
+            for timing in window.state().run_timings() {
+                if let Some(timing) = cache.observe_run_timing(timing, true) {
+                    changes.push(CanonicalSessionChange::RunTimingUpdated { timing });
+                }
+            }
+        }
         let mut projected_messages = Vec::new();
         for message in window.messages() {
             let projected = body.apply_message(message, window.state().kind() == super::window::HistoryKind::Delta, &cache).ok_or_else(|| {
@@ -740,7 +801,7 @@ impl SessionReducerActor {
             changes.push(CanonicalSessionChange::TranscriptMessage { message: message.clone() });
         }
         if full && !reset_scope {
-            body.promote_history(&projected_messages).ok_or(Failure::Unknown)?;
+            body.promote_history(&self.body.items).ok_or(Failure::Unknown)?;
         }
         body.apply_history(&self.body.items).ok_or_else(|| {
             if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", || serde_json::json!({
@@ -830,21 +891,24 @@ impl SessionReducerActor {
                 "historyAcceptedTraceElapsedMs": accepted_trace_elapsed_ms, "messageCount": window.messages().len(),
                 "itemCount": self.body.items.len(), "timingScope": "history_accepted_shape_hash_emit_excluding_this_log" }));
         }
+        if latest { self.history_anchor = path.map(|path| path.anchor.clone()); }
         Ok(Some(CanonicalIngressResult::Produced(result)))
     }
 
     pub(crate) fn sync_approvals(&mut self, approvals: &[SessionApprovalEvent], _epoch: GatewayEpoch)
         -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
-        use sessions_module::{ports::RuntimeOperationFailure as Failure, state::{ApprovalPhase, ApprovalView}};
-        if approvals.len() > 32 || approvals.iter().any(|approval| approval.session_key != self.session_key) { return Err(Failure::TargetRejected); }
-        self.cache.approvals = approvals.iter().map(|approval| ApprovalView {
-            approval_id: approval.approval_id.as_str().to_owned(), run_id: approval.run_id.as_ref().map(|id| id.as_str().to_owned()),
-            phase: if approval.lifecycle == SessionApprovalLifecycle::Requested { ApprovalPhase::Requested } else { ApprovalPhase::Resolved },
-            option_ids: approval.option_ids.iter().map(|id| id.as_str().to_owned()).collect(),
-        }).collect();
+        use sessions_module::ports::RuntimeOperationFailure as Failure;
+        self.approvals_known = false;
+        if approvals.len() > 32 || approvals.iter().any(|approval| approval.session_key != self.session_key || approval.lifecycle != SessionApprovalLifecycle::Requested) { return Err(Failure::TargetRejected); }
+        self.cache.approvals = approvals.iter().map(super::approval::event_view).collect();
         for approval in approvals { self.observe_approval(approval); }
         self.approvals_known = true;
         Ok(())
+    }
+
+    pub(crate) fn pending_approvals(&self) -> Result<Vec<sessions_module::state::ApprovalView>, sessions_module::ports::RuntimeOperationFailure> {
+        if !self.approvals_known { return Err(sessions_module::ports::RuntimeOperationFailure::Unavailable); }
+        Ok(self.cache.approvals.iter().filter(|approval| approval.phase == sessions_module::state::ApprovalPhase::Requested).cloned().collect())
     }
 
     fn view_parts(&self, epoch: u64, body: &super::body::Body, cache: &super::adapters::timeline::OpenClawReplayProjection)
@@ -862,6 +926,7 @@ impl SessionReducerActor {
             tools: SessionFact::Incomplete { facts: cache.tools.clone(), gaps: vec![MissingFact::BoundedHistory] },
             approvals: if self.approvals_known { SessionFact::Complete(cache.approvals.clone()) }
                 else { SessionFact::Incomplete { facts: cache.approvals.clone(), gaps: vec![MissingFact::EventOnly] } },
+            run_timings: cache.run_timings.clone(),
             runtime: SessionFact::Incomplete { facts: cache.runtime.clone(), gaps: vec![MissingFact::PartialRuntime] },
             window: self.window.map_or(SessionFact::Unknown, SessionFact::Complete),
             completeness: SessionCompleteness::Incomplete { missing: vec![MissingFact::BoundedHistory, MissingFact::PartialRuntime, MissingFact::Catalog, MissingFact::Usage] },
@@ -881,6 +946,7 @@ impl SessionReducerActor {
         let mut page = Self::new(self.session_key.clone());
         page.cache.approvals = self.cache.approvals.clone();
         page.cache.runtime = self.cache.runtime.clone();
+        page.cache.run_timings = self.cache.run_timings.clone();
         page.approvals_known = self.approvals_known;
         page.native_session_id = self.native_session_id.clone();
         page.active_leaf = self.active_leaf.clone();

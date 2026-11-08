@@ -1,7 +1,7 @@
 #!/usr/bin/env zx
 
 import 'zx/globals';
-import { readFileSync, existsSync, mkdirSync, rmSync, cpSync, writeFileSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, rmSync, cpSync, writeFileSync, readdirSync, lstatSync } from 'node:fs';
 import { join, dirname, relative, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -11,6 +11,7 @@ const ROOT = join(__dirname, '..');
 const MANIFEST_PATH = join(ROOT, 'resources', 'skills', 'preinstalled-manifest.json');
 const OUTPUT_ROOT = join(ROOT, 'build', 'preinstalled-skills');
 const TMP_ROOT = join(ROOT, 'build', '.tmp-preinstalled-skills');
+const REUSE_CACHE = process.argv.includes('--reuse-cache');
 $.cwd = ROOT;
 $.env.GIT_TERMINAL_PROMPT = '0';
 
@@ -63,8 +64,57 @@ function loadManifest() {
     if (!item.slug || sourceCount !== 1) {
       throw new Error(`Invalid manifest entry: ${JSON.stringify(item)}`);
     }
+    resolveSkillOutputDir(item.slug);
   }
   return parsed.skills;
+}
+
+function resolveSkillOutputDir(slug) {
+  if (typeof slug !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(slug)) {
+    throw new Error(`Invalid skill slug: ${slug}`);
+  }
+  return join(OUTPUT_ROOT, slug);
+}
+
+function loadCachedSkills() {
+  const lockPath = join(OUTPUT_ROOT, '.preinstalled-lock.json');
+  if (!existsSync(lockPath)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(lockPath, 'utf8'));
+    if (!Array.isArray(parsed?.skills)) throw new Error('Missing skills array');
+    const slugs = new Set();
+    for (const entry of parsed.skills) {
+      resolveSkillOutputDir(entry.slug);
+      const sources = [entry.repo && entry.repoPath, entry.sourceUrl, entry.localDir].filter(Boolean);
+      const fields = ['version', 'commit', 'ref', ...(entry.repo ? ['repo', 'repoPath'] : entry.sourceUrl ? ['sourceUrl'] : ['localDir'])];
+      if (sources.length !== 1 || slugs.has(entry.slug) || !fields.every((field) => typeof entry[field] === 'string' && entry[field])
+        || !(entry.repo ? /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/ : /^[a-f0-9]{64}$/).test(entry.commit)) {
+        throw new Error(`Invalid lock entry: ${entry.slug}`);
+      }
+      slugs.add(entry.slug);
+    }
+    return parsed.skills;
+  } catch (error) {
+    throw new Error(`Invalid preinstalled-skills lock: ${error.message}. Run without --reuse-cache to rebuild.`);
+  }
+}
+
+function canReuseSkill(entry, cached) {
+  if (!cached || entry.localDir) return false;
+  if (entry.repo) {
+    if (cached.repo !== entry.repo || cached.repoPath !== entry.repoPath || cached.ref !== (entry.ref || 'main')) return false;
+  } else if (cached.sourceUrl !== entry.sourceUrl || cached.ref !== 'url') {
+    return false;
+  }
+  const requestedVersion = (entry.version || '').trim();
+  const expectedVersion = !requestedVersion || requestedVersion === 'main'
+    ? (entry.repo ? cached.commit : `url-${cached.commit.slice(0, 12)}`)
+    : requestedVersion;
+  const targetDir = resolveSkillOutputDir(entry.slug);
+  const skillManifest = join(targetDir, 'SKILL.md');
+  return cached.version === expectedVersion
+    && existsSync(targetDir) && lstatSync(targetDir).isDirectory()
+    && existsSync(skillManifest) && lstatSync(skillManifest).isFile();
 }
 
 function groupByRepoRef(entries) {
@@ -186,8 +236,18 @@ if (process.env.SKIP_PREINSTALLED_SKILLS === '1') {
 }
 
 const manifestSkills = loadManifest();
+const cachedSkills = REUSE_CACHE ? loadCachedSkills() : [];
 
-rmSync(OUTPUT_ROOT, { recursive: true, force: true });
+if (REUSE_CACHE) {
+  const currentSlugs = new Set(manifestSkills.map((entry) => entry.slug));
+  for (const entry of cachedSkills) {
+    if (!currentSlugs.has(entry.slug)) {
+      rmSync(resolveSkillOutputDir(entry.slug), { recursive: true, force: true });
+    }
+  }
+} else {
+  rmSync(OUTPUT_ROOT, { recursive: true, force: true });
+}
 mkdirSync(OUTPUT_ROOT, { recursive: true });
 rmSync(TMP_ROOT, { recursive: true, force: true });
 mkdirSync(TMP_ROOT, { recursive: true });
@@ -197,8 +257,15 @@ const lock = {
   skills: [],
 };
 
-const repoBackedSkills = manifestSkills.filter((entry) => entry.repo && entry.repoPath);
-const urlBackedSkills = manifestSkills.filter((entry) => entry.sourceUrl);
+const pendingSkills = manifestSkills.filter((entry) => {
+  const cached = cachedSkills.find((skill) => skill.slug === entry.slug);
+  if (!canReuseSkill(entry, cached)) return true;
+  lock.skills.push(cached);
+  echo`Reusing cached skill ${entry.slug}`;
+  return false;
+});
+const repoBackedSkills = pendingSkills.filter((entry) => entry.repo && entry.repoPath);
+const urlBackedSkills = pendingSkills.filter((entry) => entry.sourceUrl);
 const localBackedSkills = manifestSkills.filter((entry) => entry.localDir);
 
 const groups = groupByRepoRef(repoBackedSkills);

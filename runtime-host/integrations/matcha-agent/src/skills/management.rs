@@ -7,8 +7,18 @@ impl Skills {
     pub(super) async fn manage(&self, agent: &str, command: Command, cancellation: &CancellationToken) -> Outcome {
         match command {
             Command::Detail {..} => Outcome::Detail(Err(host::ReadError::Unavailable)),
-            // Native skill discovery has no OpenClaw per-skill enabled/env/apiKey configuration.
-            Command::Config {..} => Outcome::Config {outcome:host::ConfigOutcome::Rejected,invalid_keys:Vec::new()},
+            Command::Config {skill_key,enabled:Some(enabled),api_key:None,env:None} => {
+                match self.configure(agent,&skill_key,enabled,cancellation).await {
+                    Ok(application) => {
+                        let outcome = if application.sessions.iter().any(|session| session.status == host::ConfigSessionStatus::Unconfirmed) {host::ConfigOutcome::Partial} else {host::ConfigOutcome::Accepted};
+                        Outcome::Config {outcome,invalid_keys:Vec::new(),application:Some(application)}
+                    }
+                    Err(ResourceError::Rejected|ResourceError::NotFound) => Outcome::Rejected,
+                    Err(ResourceError::Unavailable) => Outcome::Unavailable,
+                    Err(ResourceError::Unknown|ResourceError::Observation) => Outcome::Config {outcome:host::ConfigOutcome::Unknown,invalid_keys:Vec::new(),application:None},
+                }
+            }
+            Command::Config {..} => Outcome::Rejected,
             Command::ClawHubInstall {slug,version,force} => Outcome::Mutation(self.marketplace_install(agent,slug,version,force,cancellation).await),
             Command::ClawHubUpdate {slug,all} => {
                 // Only bundles carrying the existing ClawHub origin receipt can be updated.

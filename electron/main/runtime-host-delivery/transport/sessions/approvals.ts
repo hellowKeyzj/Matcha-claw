@@ -1,5 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { isApprovalDetails, isEndpoint as isNativeEndpoint, isSessionIdentity, sameSessionIdentity, type ApprovalDetails, type SessionIdentity } from './session-contract';
 const UNAVAILABLE = {
   success: false,
   error: 'Session approval is unavailable',
@@ -9,16 +10,13 @@ const UNSUPPORTED = {
   error: 'Session approval endpoint is unsupported',
 } as const;
 
-type NativeEndpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'matcha-agent';
-  runtimeInstanceId: 'local';
-}>;
+type NativeEndpoint = SessionIdentity['endpoint'];
 
 type SessionScope = Readonly<{
   kind: 'session';
   endpoint: NativeEndpoint;
   sessionId: string;
+  identity: SessionIdentity;
 }>;
 
 export type SessionApprovalListRequest = Readonly<{
@@ -29,6 +27,7 @@ export type SessionApprovalListRequest = Readonly<{
   input: Readonly<{
     endpoint: NativeEndpoint;
     sessionId: string;
+    identity: SessionIdentity;
   }>;
 }>;
 
@@ -40,6 +39,7 @@ export type SessionApprovalRespondRequest = Readonly<{
   input: Readonly<{
     endpoint: NativeEndpoint;
     sessionId: string;
+    identity: SessionIdentity;
     approvalId: string;
     optionId: string;
   }>;
@@ -48,6 +48,7 @@ export type SessionApprovalRespondRequest = Readonly<{
 export type PendingApproval = Readonly<{
   approvalId: string;
   optionIds: readonly string[];
+  details: ApprovalDetails | null;
 }>;
 
 type ApprovalListResponse = Readonly<{ approvals: readonly PendingApproval[] }>
@@ -164,10 +165,12 @@ function isListRequest(value: unknown): value is SessionApprovalListRequest {
     && hasExactKeys(value.target, ['kind'])
     && value.target.kind === 'session'
     && isRecord(value.input)
-    && hasExactKeys(value.input, ['endpoint', 'sessionId'])
+    && hasExactKeys(value.input, ['endpoint', 'sessionId', 'identity'])
     && isNativeEndpoint(value.input.endpoint)
     && value.input.sessionId === value.scope.sessionId
-    && sameEndpoint(value.input.endpoint, value.scope.endpoint);
+    && sameEndpoint(value.input.endpoint, value.scope.endpoint)
+    && isSessionIdentity(value.input.identity)
+    && sameSessionIdentity(value.input.identity, value.scope.identity);
 }
 
 function isRespondRequest(value: unknown): value is SessionApprovalRespondRequest {
@@ -180,10 +183,12 @@ function isRespondRequest(value: unknown): value is SessionApprovalRespondReques
     && hasExactKeys(value.target, ['kind'])
     && value.target.kind === 'approval'
     && isRecord(value.input)
-    && hasExactKeys(value.input, ['endpoint', 'sessionId', 'approvalId', 'optionId'])
+    && hasExactKeys(value.input, ['endpoint', 'sessionId', 'identity', 'approvalId', 'optionId'])
     && isNativeEndpoint(value.input.endpoint)
     && value.input.sessionId === value.scope.sessionId
     && sameEndpoint(value.input.endpoint, value.scope.endpoint)
+    && isSessionIdentity(value.input.identity)
+    && sameSessionIdentity(value.input.identity, value.scope.identity)
     && isIdentifier(value.input.approvalId)
     && isIdentifier(value.input.optionId);
 }
@@ -208,26 +213,21 @@ function isRespondResponse(value: unknown): value is ApprovalRespondResponse {
 
 function isPendingApproval(value: unknown): value is PendingApproval {
   return isRecord(value)
-    && hasExactKeys(value, ['approvalId', 'optionIds'])
+    && hasExactKeys(value, ['approvalId', 'optionIds', 'details'])
     && isIdentifier(value.approvalId)
     && Array.isArray(value.optionIds)
-    && value.optionIds.every((optionId) => isIdentifier(optionId));
+    && value.optionIds.every((optionId) => isIdentifier(optionId))
+    && (value.details === null || isApprovalDetails(value.details));
 }
 
 function isSessionScope(value: unknown): value is SessionScope {
   return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint', 'sessionId'])
+    && hasExactKeys(value, ['kind', 'endpoint', 'sessionId', 'identity'])
     && value.kind === 'session'
     && isNativeEndpoint(value.endpoint)
-    && isIdentifier(value.sessionId);
-}
-
-function isNativeEndpoint(value: unknown): value is NativeEndpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'matcha-agent'
-    && value.runtimeInstanceId === 'local';
+    && isIdentifier(value.sessionId)
+    && isSessionIdentity(value.identity)
+    && sameEndpoint(value.endpoint, value.identity.endpoint);
 }
 
 function sameEndpoint(left: NativeEndpoint, right: NativeEndpoint): boolean {

@@ -106,6 +106,13 @@ export type TeamRunGraphCanvasLabels = {
   sessionRef: string;
   selectRole: string;
   selectSession: string;
+  defaultSession: string;
+  numberedSession: string;
+  sessionUnavailable: string;
+  createSession: string;
+  creatingSession: string;
+  retryCreateSession: string;
+  createSessionFailed: string;
   noRoleBindings: string;
   invalidBinding: string;
   roleBindingRequired: string;
@@ -179,6 +186,7 @@ export type TeamRunGraphCanvasProps = {
   webhookAuth?: TeamWebhookAuthProjection | null;
   labels: TeamRunGraphCanvasLabels;
   onPatchGraph?: (operations: TeamGraphPatchOperation[]) => Promise<void> | void;
+  onCreateSession?: (roleId: string, requestId: string) => Promise<TeamRoleBindingRecord>;
   graphVersion?: string;
   runtimeError?: TeamDesignFailure | null;
   onRepairGraph?: (operations: TeamGraphPatchOperation[]) => Promise<void> | void;
@@ -194,10 +202,19 @@ type DragState = {
   pointerId: number;
   pointerStartX: number;
   pointerStartY: number;
-  nodeStartX: number;
-  nodeStartY: number;
+  pointerX: number;
+  pointerY: number;
+  offsetX: number;
+  offsetY: number;
+  canvasLeft: number;
+  canvasTop: number;
+  canvasRight: number;
+  canvasBottom: number;
   currentX: number;
   currentY: number;
+  panX: number;
+  panY: number;
+  frameTime: number | null;
   moved: boolean;
 };
 
@@ -744,6 +761,7 @@ export function TeamRunGraphCanvas({
   webhookAuth,
   labels,
   onPatchGraph,
+  onCreateSession,
   graphVersion,
   runtimeError,
   onRepairGraph,
@@ -763,6 +781,10 @@ export function TeamRunGraphCanvas({
   const [nodeMaxAttempts, setNodeMaxAttempts] = useState('');
   const [roleId, setRoleId] = useState('');
   const [sessionRef, setSessionRef] = useState('');
+  const [bindingRequired, setBindingRequired] = useState(false);
+  const [sessionCreation, setSessionCreation] = useState<'idle' | 'pending' | 'failed'>('idle');
+  const sessionRequestRef = useRef<{ requestId: string | null; pending: boolean } | null>(null);
+  const nodeDraftScopeRef = useRef<string | null>(null);
   const [newNode, setNewNode] = useState<{ node: TeamGraphNodeRecord; position: GraphPoint } | null>(null);
   const [prompt, setPrompt] = useState('');
   const [outputArtifactKind, setOutputArtifactKind] = useState('');
@@ -789,6 +811,7 @@ export function TeamRunGraphCanvas({
   const dragFrameRef = useRef<number | null>(null);
   const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
   const canvasScrollerRef = useRef<HTMLDivElement | null>(null);
+  const canvasSurfaceRef = useRef<HTMLDivElement | null>(null);
   const nodeElementsRef = useRef<Record<string, HTMLDivElement | null>>({});
   const suppressClickNodeIdRef = useRef<string | null>(null);
 
@@ -867,30 +890,47 @@ export function TeamRunGraphCanvas({
   const edgeActions = edgeActionCandidates(selectedEdgeSourceNode, patchSourcePort, selectedEdgeTargetNode);
   const edgeActionValid = edgeAction !== '' && edgeActions.includes(edgeAction);
   const roleBindings = useMemo(() => roles.filter((role) => role.runId === graphRunId && Boolean(role.sessionRef)), [roles, graphRunId]);
-  const roleBindingValid = roleBindings.some((role) => role.roleId === roleId && role.sessionRef === sessionRef);
-  const changeRoleBinding = (role: string, session: string) => { setRoleId(role); setSessionRef(session); };
-  const [origin, setOrigin] = useState({ scope: layoutScope, x: 0, y: 0 });
-  const canvasOrigin = {
-    x: Math.min(origin.scope === layoutScope ? origin.x : 0, visibleGeometry.bounds.x - CANVAS_PADDING),
-    y: Math.min(origin.scope === layoutScope ? origin.y : 0, visibleGeometry.bounds.y - CANVAS_PADDING),
+  const members = useMemo(() => [...new Map(roles.map((role) => [role.roleId, role])).values()], [roles]);
+  const roleSessions = roleBindings.filter((role) => role.roleId === roleId);
+  const selectedSessionRef = sessionRef || (roleSessions.length === 1 ? roleSessions[0].sessionRef! : '');
+  const roleBindingValid = roleSessions.some((role) => role.sessionRef === selectedSessionRef);
+  const changeRoleBinding = (role: string, session: string) => {
+    if (role !== roleId) sessionRequestRef.current = null;
+    setRoleId(role);
+    setSessionRef(session);
+    setBindingRequired(false);
   };
-  const canvasWidth = Math.max(NODE_WIDTH + CANVAS_PADDING * 2, visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING - canvasOrigin.x);
-  const canvasHeight = Math.max(NODE_HEIGHT + CANVAS_PADDING * 2, visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING - canvasOrigin.y);
+  const [origin, setOrigin] = useState({ scope: layoutScope, x: 0, y: 0 });
+  const activeDrag = dragNodeId ? dragRef.current : null;
+  const canvasOrigin = {
+    x: Math.min(origin.scope === layoutScope ? origin.x : 0, visibleGeometry.bounds.x - CANVAS_PADDING, activeDrag?.canvasLeft ?? Infinity),
+    y: Math.min(origin.scope === layoutScope ? origin.y : 0, visibleGeometry.bounds.y - CANVAS_PADDING, activeDrag?.canvasTop ?? Infinity),
+  };
+  const canvasWidth = Math.max(NODE_WIDTH + CANVAS_PADDING * 2, visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING - canvasOrigin.x, (activeDrag?.canvasRight ?? canvasOrigin.x) - canvasOrigin.x);
+  const canvasHeight = Math.max(NODE_HEIGHT + CANVAS_PADDING * 2, visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING - canvasOrigin.y, (activeDrag?.canvasBottom ?? canvasOrigin.y) - canvasOrigin.y);
   const fitScale = Math.min(1, viewportSize.width > 0 ? viewportSize.width / canvasWidth : 1, viewportSize.height > 0 ? viewportSize.height / canvasHeight : 1);
   const canvasScale = zoom ?? fitScale;
+  const canvasViewRef = useRef({ x: canvasOrigin.x, y: canvasOrigin.y, scale: canvasScale });
   const canvasReady = readyScope === layoutScope || effectiveGraph.nodes.length === 0;
   const webhookPublicUrl = buildWebhookPublicUrl(startWebhookPublicBaseUrl, startWebhookPath);
 
   useLayoutEffect(() => {
     const sameScope = origin.scope === layoutScope;
-    if (sameScope && origin.x === canvasOrigin.x && origin.y === canvasOrigin.y) return;
+    const drag = dragRef.current;
     const scroller = canvasScrollerRef.current;
+    canvasViewRef.current = { x: canvasOrigin.x, y: canvasOrigin.y, scale: canvasScale };
     if (sameScope && scroller && zoom !== null) {
-      scroller.scrollLeft += (origin.x - canvasOrigin.x) * canvasScale;
-      scroller.scrollTop += (origin.y - canvasOrigin.y) * canvasScale;
+      scroller.scrollLeft += (origin.x - canvasOrigin.x) * canvasScale + (drag?.panX ?? 0);
+      scroller.scrollTop += (origin.y - canvasOrigin.y) * canvasScale + (drag?.panY ?? 0);
     }
-    setOrigin({ scope: layoutScope, x: canvasOrigin.x, y: canvasOrigin.y });
-  }, [origin, layoutScope, canvasOrigin.x, canvasOrigin.y, canvasScale, zoom]);
+    if (drag) {
+      drag.panX = 0;
+      drag.panY = 0;
+    }
+    if (!sameScope || origin.x !== canvasOrigin.x || origin.y !== canvasOrigin.y) {
+      setOrigin({ scope: layoutScope, x: canvasOrigin.x, y: canvasOrigin.y });
+    }
+  }, [origin, layoutScope, canvasOrigin.x, canvasOrigin.y, canvasScale, zoom, draftPositions]);
 
   useEffect(() => {
     const element = canvasScrollerRef.current;
@@ -1045,10 +1085,48 @@ export function TeamRunGraphCanvas({
     setFormError(null);
   }, [selectedNode]);
 
-  useEffect(resetNodeDraft, [resetNodeDraft]);
+  const nodeEditorScope = configurationSheet?.kind === 'node' && selectedNode
+    ? JSON.stringify([layoutScope, selectedNode.nodeId, canEdit]) : null;
+  useLayoutEffect(() => {
+    // Snapshot refreshes replace node objects, not the user's open draft.
+    if (nodeDraftScopeRef.current !== nodeEditorScope) {
+      nodeDraftScopeRef.current = nodeEditorScope;
+      resetNodeDraft();
+      setBindingRequired(false);
+    } else if (canEdit && nodeEditorScope && !sessionRef && selectedSessionRef) {
+      setSessionRef(selectedSessionRef);
+    }
+  }, [nodeEditorScope, resetNodeDraft, canEdit, sessionRef, selectedSessionRef]);
+
+  const canCreateSession = canEdit && Boolean(onCreateSession);
+  useLayoutEffect(() => {
+    sessionRequestRef.current = nodeEditorScope ? { requestId: null, pending: false } : null;
+    setSessionCreation('idle');
+    return () => { sessionRequestRef.current = null; };
+  }, [nodeEditorScope, roleId]);
+
+  const handleCreateSession = async (): Promise<void> => {
+    const request = sessionRequestRef.current;
+    if (!request || request.pending || !canCreateSession || !onCreateSession || roleSessions.length === 0 || isSaving || mutationPending) return;
+    request.requestId ??= crypto.randomUUID();
+    request.pending = true;
+    setSessionCreation('pending');
+    try {
+      const binding = await onCreateSession(roleId, request.requestId);
+      if (sessionRequestRef.current !== request) return;
+      setSessionRef(binding.sessionRef!);
+      setBindingRequired(false);
+      request.requestId = null;
+      setSessionCreation('idle');
+    } catch {
+      if (sessionRequestRef.current === request) setSessionCreation('failed');
+    } finally {
+      request.pending = false;
+    }
+  };
 
   const closeNodeEditor = () => {
-    resetNodeDraft();
+    sessionRequestRef.current = null;
     setConfigurationSheet(null);
     setNewNode(null);
   };
@@ -1203,7 +1281,9 @@ export function TeamRunGraphCanvas({
   };
 
   const handleSaveNode = async (): Promise<void> => {
-    if (!selectedNode) return;
+    if (!selectedNode || sessionRequestRef.current?.pending) return;
+    setFormError(null);
+    setBindingRequired(true);
     const maxAttempts = readPositiveIntegerInRange(nodeMaxAttempts, 1, NODE_MAX_ATTEMPTS_LIMIT);
     if (maxAttempts === null) {
       setFormError(labels.nodeMaxAttemptsInvalid);
@@ -1223,11 +1303,8 @@ export function TeamRunGraphCanvas({
       config = { rule: scriptReviewRule };
     }
     if (selectedNode.kind === 'work' || selectedNode.kind === 'review') {
-      if (!roleBindingValid) {
-        setFormError(labels.roleBindingRequired);
-        return;
-      }
-      config = { prompt, sessionRef, ...(selectedNode.kind === 'work' && outputArtifactKind.trim() ? { outputArtifactKind: outputArtifactKind.trim() } : {}) };
+      if (!roleBindingValid) return;
+      config = { prompt, sessionRef: selectedSessionRef, ...(selectedNode.kind === 'work' && outputArtifactKind.trim() ? { outputArtifactKind: outputArtifactKind.trim() } : {}) };
     }
     const nextNode = graphPatchNode({
       ...selectedNode,
@@ -1341,46 +1418,97 @@ export function TeamRunGraphCanvas({
 
   const handleNodePointerDown = (event: PointerEvent<HTMLDivElement>, node: PositionedNode): void => {
     if (!canEdit || isSaving || mutationPending || dragRef.current || event.button !== 0) return;
+    const surface = canvasSurfaceRef.current;
+    if (!surface) return;
+    event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    const rect = surface.getBoundingClientRect();
     dragRef.current = {
       nodeId: node.nodeId,
       pointerId: event.pointerId,
       pointerStartX: event.clientX,
       pointerStartY: event.clientY,
-      nodeStartX: node.x,
-      nodeStartY: node.y,
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      offsetX: canvasOrigin.x + (event.clientX - rect.left) / canvasScale - node.x,
+      offsetY: canvasOrigin.y + (event.clientY - rect.top) / canvasScale - node.y,
+      canvasLeft: canvasOrigin.x,
+      canvasTop: canvasOrigin.y,
+      canvasRight: canvasOrigin.x + canvasWidth,
+      canvasBottom: canvasOrigin.y + canvasHeight,
       currentX: node.x,
       currentY: node.y,
+      panX: 0,
+      panY: 0,
+      frameTime: null,
       moved: false,
     };
     setDragNodeId(node.nodeId);
   };
 
-  const updateDragPosition = (event: PointerEvent<HTMLDivElement>): DragState | null => {
+  const updateDragPosition = (drag: DragState): void => {
+    const surface = canvasSurfaceRef.current;
+    if (!surface) return;
+    const rect = surface.getBoundingClientRect();
+    const view = canvasViewRef.current;
+    drag.currentX = view.x + (drag.pointerX - rect.left + drag.panX) / view.scale - drag.offsetX;
+    drag.currentY = view.y + (drag.pointerY - rect.top + drag.panY) / view.scale - drag.offsetY;
+  };
+
+  const updateDragPointer = (event: PointerEvent<HTMLDivElement>): DragState | null => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return null;
-    const dx = event.clientX - drag.pointerStartX;
-    const dy = event.clientY - drag.pointerStartY;
-    drag.currentX = Math.max(Math.min(CANVAS_PADDING / 2, drag.nodeStartX), drag.nodeStartX + dx / canvasScale);
-    drag.currentY = Math.max(Math.min(CANVAS_PADDING / 2, drag.nodeStartY), drag.nodeStartY + dy / canvasScale);
-    drag.moved ||= Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD;
+    drag.pointerX = event.clientX;
+    drag.pointerY = event.clientY;
+    drag.moved ||= Math.abs(event.clientX - drag.pointerStartX) > DRAG_THRESHOLD
+      || Math.abs(event.clientY - drag.pointerStartY) > DRAG_THRESHOLD;
     return drag;
   };
 
+  const requestDragFrame = (): void => {
+    if (dragRef.current?.moved && dragFrameRef.current === null) {
+      dragFrameRef.current = requestAnimationFrame(advanceDrag);
+    }
+  };
+
+  const advanceDrag = (time: number): void => {
+    dragFrameRef.current = null;
+    const drag = dragRef.current;
+    const scroller = canvasScrollerRef.current;
+    if (!drag?.moved || !scroller) return;
+    const rect = scroller.getBoundingClientRect();
+    const elapsed = Math.min(32, drag.frameTime === null ? 16 : time - drag.frameTime);
+    const edgeSpeed = (pointer: number, start: number, end: number) => {
+      const margin = 48;
+      return Math.max(-1, Math.min(0, (pointer - start - margin) / margin))
+        + Math.min(1, Math.max(0, (pointer - end + margin) / margin));
+    };
+    drag.panX = edgeSpeed(drag.pointerX, rect.left, rect.left + scroller.clientWidth) * elapsed * 0.6;
+    drag.panY = edgeSpeed(drag.pointerY, rect.top, rect.top + scroller.clientHeight) * elapsed * 0.6;
+    const view = canvasViewRef.current;
+    // Expand before scrolling; negative graph coordinates are valid, scroll offsets are not.
+    drag.canvasLeft = Math.min(drag.canvasLeft, view.x + Math.min(0, scroller.scrollLeft + drag.panX) / view.scale);
+    drag.canvasTop = Math.min(drag.canvasTop, view.y + Math.min(0, scroller.scrollTop + drag.panY) / view.scale);
+    drag.canvasRight = Math.max(drag.canvasRight, view.x + (scroller.scrollLeft + scroller.clientWidth + drag.panX) / view.scale);
+    drag.canvasBottom = Math.max(drag.canvasBottom, view.y + (scroller.scrollTop + scroller.clientHeight + drag.panY) / view.scale);
+    updateDragPosition(drag);
+    const position = { x: drag.currentX, y: drag.currentY };
+    setDraftPositions((current) => current[drag.nodeId]?.x === position.x && current[drag.nodeId]?.y === position.y
+      ? current : { ...current, [drag.nodeId]: position });
+    const panning = drag.panX !== 0 || drag.panY !== 0;
+    drag.frameTime = panning ? time : null;
+    if (panning) requestDragFrame();
+  };
+
   const handleNodePointerMove = (event: PointerEvent<HTMLDivElement>): void => {
-    const drag = updateDragPosition(event);
-    if (!drag?.moved || dragFrameRef.current !== null) return;
-    dragFrameRef.current = requestAnimationFrame(() => {
-      dragFrameRef.current = null;
-      const latest = dragRef.current!;
-      const position = { x: latest.currentX, y: latest.currentY };
-      setDraftPositions((current) => ({ ...current, [latest.nodeId]: position }));
-    });
+    updateDragPointer(event);
+    requestDragFrame();
   };
 
   const handleNodePointerUp = async (event: PointerEvent<HTMLDivElement>): Promise<void> => {
-    const finishedDrag = updateDragPosition(event);
+    const finishedDrag = updateDragPointer(event);
     if (!finishedDrag) return;
+    updateDragPosition(finishedDrag);
     cancelDragFrame();
     dragRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
@@ -1433,14 +1561,14 @@ export function TeamRunGraphCanvas({
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          {roles.length > 0 ? (
+          {members.length > 0 ? (
             <div className="flex -space-x-2" aria-label={labels.teamRoles}>
-              {roles.slice(0, 4).map((role) => (
-                <div key={`${role.roleId}:${role.sessionRef}`} title={`${role.roleId} · ${role.agentId}`} className="grid h-8 w-8 place-items-center rounded-full border-2 border-background bg-primary/15 text-[10px] font-semibold text-primary">
+              {members.slice(0, 4).map((role) => (
+                <div key={role.roleId} title={`${role.roleId} · ${role.agentId}`} className="grid h-8 w-8 place-items-center rounded-full border-2 border-background bg-primary/15 text-[10px] font-semibold text-primary">
                   {role.roleId.slice(0, 2).toUpperCase()}
                 </div>
               ))}
-              {roles.length > 4 ? <div className="grid h-8 min-w-8 place-items-center rounded-full border-2 border-background bg-muted px-2 text-[10px] font-semibold text-muted-foreground">+{roles.length - 4}</div> : null}
+              {members.length > 4 ? <div className="grid h-8 min-w-8 place-items-center rounded-full border-2 border-background bg-muted px-2 text-[10px] font-semibold text-muted-foreground">+{members.length - 4}</div> : null}
             </div>
           ) : null}
           {headerActions}
@@ -1509,9 +1637,10 @@ export function TeamRunGraphCanvas({
             </div>
           </div>
         <div className={compact ? 'relative flex min-h-0 flex-1 flex-col' : 'relative'}>
-        <StableScrollArea ref={canvasScrollerRef} data-team-graph-canvas="true" inert={!canvasReady} style={{ opacity: canvasReady ? 1 : 0 }} className={`relative overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner ${compact ? 'min-h-[240px] max-h-[60vh] flex-1' : 'h-[520px]'}`}>
+        <StableScrollArea ref={canvasScrollerRef} onScroll={requestDragFrame} data-team-graph-canvas="true" inert={!canvasReady} style={{ opacity: canvasReady ? 1 : 0 }} className={`relative overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner ${compact ? 'min-h-[240px] max-h-[60vh] flex-1' : 'h-[520px]'}`}>
           <div className="overflow-hidden" style={{ width: canvasWidth * canvasScale, height: canvasHeight * canvasScale }}>
           <div
+            ref={canvasSurfaceRef}
             aria-label={labels.workflowCanvas}
             className="relative rounded-xl"
             onClick={() => {
@@ -1648,7 +1777,8 @@ export function TeamRunGraphCanvas({
                   onPointerMove={handleNodePointerMove}
                   onPointerUp={(event) => { void handleNodePointerUp(event); }}
                   onPointerCancel={handleNodePointerCancel}
-                  className={`absolute ${canEdit ? 'cursor-grab active:cursor-grabbing touch-none' : 'cursor-pointer'} rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
+                  onLostPointerCapture={handleNodePointerCancel}
+                  className={`absolute select-none ${canEdit ? 'cursor-grab active:cursor-grabbing touch-none' : 'cursor-pointer'} rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
                   style={{ left: node.x - canvasOrigin.x, top: node.y - canvasOrigin.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT, visibility: positions[node.nodeId] && nodeSizes[node.nodeId] ? 'visible' : 'hidden' }}
                 >
                   <div className={`h-1 w-full rounded-t-[17px] ${visual.accentClassName}`} />
@@ -1717,7 +1847,7 @@ export function TeamRunGraphCanvas({
       </div>
 
       <Sheet open={configurationSheet !== null} onOpenChange={(open) => {
-        if (!open && !isSaving && !mutationPending) {
+        if (!open && !isSaving && !mutationPending && sessionCreation !== 'pending') {
           if (configurationSheet?.kind === 'node') closeNodeEditor();
           else closeEdgeEditor();
         }
@@ -1728,7 +1858,7 @@ export function TeamRunGraphCanvas({
             node={selectedNode}
             kind={selectedNodeKind}
             editable={canEdit}
-            pending={isSaving || mutationPending}
+            pending={isSaving || mutationPending || sessionCreation === 'pending'}
             isNew={Boolean(newNode)}
             title={nodeTitle}
             maxAttempts={nodeMaxAttempts}
@@ -1746,11 +1876,14 @@ export function TeamRunGraphCanvas({
             {selectedNodeKind === 'work' || selectedNodeKind === 'review' ? <TeamAssignmentEditor
               kind={selectedNodeKind}
               editable={canEdit}
-              disabled={isSaving || mutationPending}
+              disabled={isSaving || mutationPending || sessionCreation === 'pending'}
               labels={labels}
               roleId={canEdit ? roleId : selectedNode.roleId ?? ''}
-              sessionRef={canEdit ? sessionRef : selectedNode.config?.sessionRef ?? ''}
+              sessionRef={canEdit ? selectedSessionRef : selectedNode.config?.sessionRef ?? ''}
               roles={roleBindings}
+              bindingRequired={bindingRequired}
+              sessionCreation={sessionCreation}
+              onCreateSession={canCreateSession ? () => { void handleCreateSession(); } : undefined}
               prompt={canEdit ? prompt : readNodePrompt(selectedNode)}
               outputArtifactKind={canEdit ? outputArtifactKind : selectedNode.config?.outputArtifactKind ?? ''}
               onBindingChange={changeRoleBinding}

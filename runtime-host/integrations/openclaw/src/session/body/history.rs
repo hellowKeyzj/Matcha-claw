@@ -20,6 +20,46 @@ impl Body {
         self.history_ids.retain(|id| prefix.contains(id));
     }
 
+    pub(super) fn merge_history(&mut self, previous: &[SessionItem]) {
+        let native = self.persisted.iter().map(|row| row.id.as_str()).collect::<HashSet<_>>();
+        let previous_ids = previous.iter().map(SessionItem::item_id).collect::<HashSet<_>>();
+        let mut retained = HashMap::new();
+        let mut history = Vec::new();
+        for item in std::mem::take(&mut self.items) {
+            if previous_ids.contains(item.item_id()) && !native.contains(item.item_id()) {
+                retained.insert(item.item_id().to_owned(), item);
+            } else { history.push(item); }
+        }
+        let mut positions = history.iter().enumerate().map(|(index, item)|
+            (item.item_id().to_owned(), index + 1)).collect::<HashMap<_, _>>();
+        for (index, item) in history.iter().enumerate() {
+            if let SessionItem::AssistantTurn { message_id: Some(_), segments, .. } = item {
+                for segment in segments {
+                    if let SessionContent::ToolUse { tool_call_id, .. } = segment {
+                        // Durable tool rows also stand in for their retired live placeholders.
+                        positions.entry(format!("oc:tool:{tool_call_id}")).or_insert(index + 1);
+                    }
+                }
+            }
+        }
+        for thinking in self.streams.values().flat_map(|stream| &stream.thinking) {
+            if let Some(position) = thinking.replacement.as_ref().and_then(|id| positions.get(id)).copied() {
+                for id in &thinking.items { positions.entry(id.clone()).or_insert(position); }
+            }
+        }
+        let mut gaps = (0..=history.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+        let mut gap = 0;
+        for old in previous {
+            if let Some(item) = retained.remove(old.item_id()) { gaps[gap].push(item); }
+            else if let Some(position) = positions.get(old.item_id()) { gap = *position; }
+        }
+        // Preserve display neighbours before terminal adoption can split or replace them.
+        for (items, row) in gaps.into_iter().zip(history.into_iter().map(Some).chain([None])) {
+            self.items.extend(items);
+            self.items.extend(row);
+        }
+    }
+
     pub(in crate::session) fn apply_history(&mut self, previous: &[SessionItem]) -> Option<()> {
         self.history_rebuilding = false;
         self.reconcile_terminals()?;

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -11,9 +12,9 @@ use sessions_module::{
     command::{SessionEvent, SessionIngress, SessionIngressEvent, SessionObservationFailure},
     ports::{ItemsSyncMode, OwnedRuntimeFuture, SessionTerminalRun},
     state::{
-        ApprovalPhase, ApprovalView, ItemAnchor, ItemStatus, MissingFact, RecoveryReason,
-        RuntimeView, SessionApplyResult, SessionChange, SessionContent, SessionEventBinding,
-        SessionFact, SessionItem, SessionState, SessionView, ToolPhase,
+        ItemAnchor, ItemStatus, MissingFact, RecoveryReason, RuntimeView, SessionApplyResult,
+        SessionChange, SessionContent, SessionEventBinding, SessionFact, SessionItem, SessionState,
+        SessionView, ToolPhase,
     },
     timeline,
 };
@@ -242,6 +243,12 @@ impl From<RuntimeOperationFailure> for ObservationFailure {
 }
 const MAX_RUN_FACTS: usize = 1024;
 
+struct Restoration {
+    frontier: u64,
+    checkpoint_item_ids: HashSet<String>,
+    retired_item_ids: Vec<String>,
+}
+
 #[derive(Clone)]
 struct Projection {
     request: SessionObservationRequest,
@@ -305,8 +312,9 @@ impl Projection {
         event: Event,
         output: &mpsc::Sender<SessionIngressEvent>,
         cancel: &CancellationToken,
-        restoring: bool,
+        mut restoration: Option<&mut Restoration>,
     ) -> Result<Option<RunRecord>, ObservationFailure> {
+        let restoring = restoration.is_some();
         let boundary = match event.kind.as_str() {
             "native.message" => match event.payload["type"].as_str() {
                 Some("stream_event") => {
@@ -360,7 +368,7 @@ impl Projection {
         }
         let mut streaming = self.streaming.clone();
         let mut input = self.input.clone();
-        let projected = events::project(&mut streaming, &mut input, &event, &self.state)
+        let projected = match events::project(&mut streaming, &mut input, &event, &self.state)
             .inspect_err(|error| {
                 platform::trace::runtime_trace("matcha.session.observation.failed", || {
                     json!({
@@ -377,8 +385,18 @@ impl Projection {
                         "failure": error.trace_summary(),
                     })
                 });
-            })
-            .map_err(failure)?;
+            }) {
+            Ok(projected) => projected,
+            Err(Failure::InvalidReadback) if restoration.as_ref().is_some_and(|restore| event.seq <= restore.frontier) => {
+                streaming = self.streaming.clone();
+                input = self.input.clone();
+                if !streaming.rebuild_stopped_preview(&event) {
+                    return Err(failure(Failure::InvalidReadback));
+                }
+                events::Projected { changes: Vec::new(), history_refresh: false, run: None }
+            }
+            Err(error) => return Err(failure(error)),
+        };
         let binding = self.binding();
         let mut candidate = self.state.clone();
         candidate
@@ -409,6 +427,19 @@ impl Projection {
                     "terminal": projected.run.as_ref().is_some_and(|run| run.status.terminal()),
                 })
             });
+        }
+        if let Some(restoration) = restoration.as_mut() {
+            // Only checkpoint items may already exist in the Host. Replay-local previews
+            // are retired inside candidate state, never accumulated as external evidence.
+            for change in &projected.changes {
+                if let SessionChange::ItemsReplaced { old_item_ids, .. } = change {
+                    for id in old_item_ids {
+                        if restoration.checkpoint_item_ids.remove(id) {
+                            restoration.retired_item_ids.push(id.clone());
+                        }
+                    }
+                }
+            }
         }
         let ingress = if restoring {
             projected
@@ -519,14 +550,23 @@ impl Projection {
                 result = &mut frontier_read => break result
                     .inspect_err(|error| self.trace_failure("sync.initial_frontier", Some("events.replay"), Some(error)))
                     .map_err(failure)?,
-                event = subscription.recv() => {
-                    self.consume(event.map_err(|error| self.subscription_failure(error))?, output, cancel, restoring).await?;
+                // Recovery needs its fixed durable cut before consuming any preview.
+                event = subscription.recv(), if !restoring => {
+                    self.consume(event.map_err(|error| self.subscription_failure(error))?, output, cancel, None).await?;
                 },
             }
         };
+        let mut restoration = restoring.then(|| Restoration {
+            frontier: initial,
+            checkpoint_item_ids: values(self.state.items()).iter().map(|item| item.item_id().to_owned()).collect(),
+            retired_item_ids: Vec::new(),
+        });
         while self.cursor < initial {
             let event = tokio::select! { _ = cancel.cancelled() => return Err(RuntimeOperationFailure::Unavailable.into()), event = subscription.recv() => event.map_err(|error| self.subscription_failure(error))?, };
-            self.consume(event, output, cancel, restoring).await?;
+            self.consume(event, output, cancel, restoration.as_mut()).await?;
+        }
+        if self.streaming.rebuilding() {
+            return Err(failure(Failure::InvalidReadback));
         }
         let baseline = self.state.clone();
         let mut run_facts = Vec::new();
@@ -545,14 +585,9 @@ impl Projection {
                 if item.availability == sessions_module::question::QuestionAvailability::Pending
                     && item.delivery == sessions_module::question::QuestionDelivery::NotSent
                 {
-                    approval_views.push(ApprovalView {
-                        approval_id: item.approval_id().inspect_err(|error| {
-                            error.trace("sync.approval_projection", None, &native_id);
-                        })?,
-                        run_id: item.run_id.clone(),
-                        phase: ApprovalPhase::Requested,
-                        option_ids: vec!["allow".into(), "deny".into()],
-                    });
+                    approval_views.push(item.approval().inspect_err(|error| {
+                        error.trace("sync.approval_projection", None, &native_id);
+                    })?);
                 }
             }
             view.approvals = SessionFact::Complete(approval_views);
@@ -568,6 +603,7 @@ impl Projection {
             let mut terminal_runs = Vec::new();
             for run in runs.runs.iter().chain(runs.current_run.iter()) {
                 terminal_fact(&mut terminal_runs, run);
+                run.update_timing(&mut view.run_timings);
             }
             Ok::<_, Failure>((view, runs.latest_seq, terminal_runs))
         };
@@ -581,7 +617,7 @@ impl Projection {
                 event = subscription.recv(), if run_facts.len() < MAX_RUN_FACTS => {
                     let event = event.map_err(|error| self.subscription_failure(error))?;
                     let seq = event.seq;
-                    if let Some(run) = self.consume(event, output, cancel, restoring).await? {
+                    if let Some(run) = self.consume(event, output, cancel, restoration.as_mut()).await? {
                         run_facts.push((seq, run));
                     }
                 },
@@ -591,14 +627,16 @@ impl Projection {
             if seq > run_cut {
                 reconcile_run(&mut view.runtime, &run);
                 terminal_fact(&mut terminal_runs, &run);
+                run.update_timing(&mut view.run_timings);
             }
         }
         while self.cursor < run_cut {
             let event = tokio::select! { _ = cancel.cancelled() => return Err(RuntimeOperationFailure::Unavailable.into()), event = subscription.recv() => event.map_err(|error| self.subscription_failure(error))?, };
-            self.consume(event, output, cancel, restoring).await?;
+            self.consume(event, output, cancel, restoration.as_mut()).await?;
         }
         // Run control uses its DB snapshot cut; history remains independently read.
         let replay = self.state.view();
+        let retired_item_ids = restoration.map_or_else(Vec::new, |restore| restore.retired_item_ids);
         let mut sync = SessionSync {
             view,
             source_epoch: Some(self.source_epoch),
@@ -609,7 +647,7 @@ impl Projection {
             },
             replay_baseline: None,
             terminal_runs,
-            retired_item_ids: Vec::new(),
+            retired_item_ids,
             retired_tool_ids: Vec::new(),
             retired_approval_ids: Vec::new(),
         };
@@ -933,7 +971,7 @@ async fn run(
             _ = cancel.cancelled() => break,
             event = subscription.recv() => {
                 failed = match event {
-                    Ok(event) => projection.consume(event, &output, &cancel, false).await.err(),
+                    Ok(event) => projection.consume(event, &output, &cancel, None).await.err(),
                     Err(error) => Some(projection.subscription_failure(error)),
                 };
                 if failed.is_some_and(|error| error.invalid_readback) {

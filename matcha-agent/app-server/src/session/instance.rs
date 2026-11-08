@@ -11,6 +11,54 @@ use crate::{
 use super::{Execution, Session, Sessions, history, native, record};
 
 impl Sessions {
+    pub(crate) async fn stable_agent_instances(
+        &self,
+        agent_id: &str,
+    ) -> rpc::Result<(tokio::sync::OwnedMutexGuard<()>, Vec<(String, String)>)> {
+        'stable: loop {
+            let admission = self.agent_guard(agent_id).await;
+            self.accepting()?;
+            let sessions: Vec<_> = self.0.sessions.read().await.values().cloned().collect();
+            let mut instances = Vec::new();
+            for session in sessions {
+                let changed = session.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                let execution = session.data.lock().await;
+                if execution.record.agent_id != agent_id {
+                    continue;
+                }
+                if execution.launching {
+                    // Launch captures its spec under the Agent guard, then starts without it.
+                    drop(execution);
+                    drop(admission);
+                    changed.await;
+                    continue 'stable;
+                }
+                if let Some(cli) = &execution.cli {
+                    instances.push((
+                        execution.record.session_id.clone(),
+                        cli.instance_id().to_owned(),
+                    ));
+                }
+            }
+            return Ok((admission, instances));
+        }
+    }
+
+    pub(crate) async fn apply_instance_permissions(
+        &self,
+        session_id: &str,
+        instance_id: &str,
+        patch: &Value,
+        states: &std::collections::BTreeMap<String, bool>,
+    ) -> rpc::Result<Vec<String>> {
+        self.current_cli(session_id, Some(instance_id))
+            .await?
+            .apply_permissions(patch, states)
+            .await
+    }
+
     pub async fn ensure_native(&self, session_id: &str) -> rpc::Result<Value> {
         self.accepting()?;
         let session = self.session(session_id).await?;

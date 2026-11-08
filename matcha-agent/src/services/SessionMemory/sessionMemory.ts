@@ -223,6 +223,11 @@ async function setupSessionMemoryFile(
 
   const output = result.data as FileReadToolOutput
   if (output.type === 'text') {
+    if (output.file.truncatedByTokenCap) {
+      throw new Error(
+        'Cannot update session memory from a token-truncated read.',
+      )
+    }
     currentMemory = output.file.content
   }
 

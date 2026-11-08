@@ -32,6 +32,7 @@ import { rethrowInvestigationAdmission } from '../investigation.js'
 import { currentInvestigationScope } from '../../../world/investigation.js'
 import { getModelMaxOutputTokens } from '../../../utils/context.js'
 import { normalizeModelStringForAPI } from '../../../utils/model/configs.js'
+import { resolveAdapterEffort } from '../../../utils/effort.js'
 import {
   anthropicMessagesToGemini,
   adaptGeminiStreamToAnthropic,
@@ -84,6 +85,7 @@ export async function* queryModelGemini(
     const geminiTools = anthropicToolsToGemini(standardTools)
     const toolChoice = anthropicToolChoiceToGemini(options.toolChoice)
 
+    const effort = resolveAdapterEffort(options.model, options.effortValue)
     const stream = streamGeminiGenerateContent({
       model: geminiModel,
       signal,
@@ -106,12 +108,14 @@ export async function* queryModelGemini(
           ...(options.temperatureOverride !== undefined && {
             temperature: options.temperatureOverride,
           }),
-          ...(thinkingConfig.type !== 'disabled' && {
+          ...((effort !== undefined || thinkingConfig.type !== 'disabled') && {
             thinkingConfig: {
               includeThoughts: true,
-              ...(thinkingConfig.type === 'enabled' && {
-                thinkingBudget: thinkingConfig.budgetTokens,
-              }),
+              ...(typeof effort === 'string'
+                ? { thinkingLevel: effort }
+                : thinkingConfig.type === 'enabled' && {
+                    thinkingBudget: thinkingConfig.budgetTokens,
+                  }),
             },
           }),
         },

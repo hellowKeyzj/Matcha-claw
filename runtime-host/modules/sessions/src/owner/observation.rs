@@ -168,6 +168,12 @@ impl SessionShared {
             .is_some_and(|entry| entry.terminal_sync.load(Ordering::Acquire))
     }
 
+    pub(super) fn observation_failure(&self, identity: &SessionIdentity) -> Option<RuntimeOperationFailure> {
+        self.observations.lock().expect("session observation lock")
+            .get(&session_identity_lane_key(identity))
+            .and_then(|entry| entry.recovery.failure())
+    }
+
     pub(crate) fn observation_generation(&self, identity: &SessionIdentity) -> Option<u64> {
         self.observations
             .lock()
@@ -440,9 +446,12 @@ impl SessionLane {
             }
             if let Ok(sync) = &mut result && sync.view.identity == identity {
                 for terminals in sync.terminal_runs.chunks(crate::state::MAX_CHANGE_COUNT) {
-                    let terminals: Vec<_> = terminals.iter().map(|terminal|
-                        (terminal.clone(), sync.view.assistant_texts_for_run_id(&terminal.run_id))
-                    ).collect();
+                    let terminals: Vec<_> = terminals.iter().map(|terminal| {
+                        let bodies = crate::state::TerminalBodies::capture(
+                            &sync.view.items, sync.view.endpoint_session_id.as_deref(), &terminal.run_id,
+                        );
+                        (terminal.clone(), bodies)
+                    }).collect();
                     loop {
                         let epoch = producer.retry_epoch();
                         let permit = shared.terminal_permit().await;
@@ -945,6 +954,26 @@ impl SessionLane {
             if entry.close_after_sync.is_some() { entry.close_after_sync = Some(false); }
             entry.take_failed_waiters()
         };
+        if let Some(mut next) = self.state.clone()
+            && let Some(cursor) = next.cursor().checked_add(1)
+            && let Some(binding) = crate::state::SessionEventBinding::new(identity.clone(), None)
+        {
+            let mut changes = vec![SessionChange::RecoveryRequired { reason: crate::state::RecoveryReason::NativeUnknown }];
+            if let crate::state::SessionFact::Complete(runtime) | crate::state::SessionFact::Incomplete { facts: runtime, .. } = next.runtime()
+                && runtime.active_run_id.is_some() && !crate::state::terminal_run_phase(runtime.phase)
+            {
+                let mut runtime = runtime.clone();
+                runtime.issue = Some(crate::state::RuntimeIssue::Unknown);
+                runtime.run_progress = None;
+                runtime.runtime_activity = None;
+                changes.push(SessionChange::RuntimeChanged { runtime });
+            }
+            if let crate::state::SessionApplyResult::Applied(delta) = next.apply_bound(binding, None, cursor, changes) {
+                self.state = Some(next.clone());
+                shared.store_snapshot_state(next).await;
+                shared.emit_session_delta(&delta, Vec::new());
+            }
+        }
         self.close_observation(shared, identity, false);
         for waiter in waiters { finish_failed_waiter(waiter, RuntimeOperationFailure::Unknown).await; }
         true
@@ -1247,15 +1276,17 @@ impl SessionLane {
         shared: &SessionShared,
         identity: &SessionIdentity,
         generation: u64,
-        terminals: Vec<(crate::ports::SessionTerminalRun, Vec<String>)>,
+        terminals: Vec<(crate::ports::SessionTerminalRun, crate::state::TerminalBodies)>,
         publish: bool,
     ) -> Option<crate::state::SyncTerminalChanges> {
         if shared.observation_generation(identity) != Some(generation) { return None; }
         let before = self.state.as_ref()?;
         let mut next = before.clone();
         let mut committed = Vec::new();
-        for (terminal, assistant_texts) in terminals {
+        for (terminal, bodies) in terminals {
             if next.has_terminal_run(&terminal.run_id) { continue; }
+            let run_id = terminal.run_id.clone();
+            let assistant_texts = bodies.texts();
             let cursor = next.cursor().checked_add(1)?;
             let binding = crate::state::SessionEventBinding::new(identity.clone(), None)
                 .expect("validated sync identity");
@@ -1264,6 +1295,9 @@ impl SessionLane {
             ) else { return None; };
             let snapshots = SessionShared::terminal_snapshots(&delta, &next, |_| assistant_texts.clone());
             if !self.retain_terminals(shared, &mut next, &snapshots) { return None; }
+            if let Some(pending) = next.pending_terminals.iter_mut().find(|pending| pending.snapshot.native_run_id == run_id) {
+                pending.bodies = bodies;
+            }
             committed.push((delta, snapshots));
         }
         let changes = next.sync_terminal_changes(before);

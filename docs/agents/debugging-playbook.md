@@ -168,6 +168,7 @@ runtime integration、connector status、provider SDK、gateway RPC、MCP/stdin-
 
 ### Promoted case index
 
+- [MCP schema 超大整数上限触发模型 502](./debugging-case-archive.md#case-mcp-schema-超大整数上限触发模型-502) — 新增/修改工具数值 schema，或裸 API 成功而带工具请求失败时，先核已有数值精度签名；2026-11-03 首次、2026-11-07 maintenance 复发，不能据此泛化所有 502。
 - [OpenClaw MCP status timeout](./debugging-case-archive.md#case-openclaw-mcp-status-timeout) — DP-001 来源案例；关键教训是集成类状态失败先验证真实协议闭环，手写 probe 必须模拟真实调用方 SDK。
 - [Matcha-agent app-server completed but UI pending](./debugging-case-archive.md#case-matcha-agent-app-server-completed-but-ui-pending) — DP-001 补充案例；关键教训是 runtime 接入完成证据必须到 renderer terminal state，不能停在上游 `run.completed`。
 

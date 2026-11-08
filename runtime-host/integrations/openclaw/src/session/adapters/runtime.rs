@@ -819,6 +819,14 @@ fn valid_command_identity(identity: &sessions_module::state::SessionIdentity) ->
 }
 
 impl SessionOps for OpenClawDriver {
+    fn pending_approvals<'a>(&'a self, command: sessions_module::approval::PendingApprovalsCommand) -> sessions_module::SessionFuture<'a, sessions_module::approval::PendingApprovalsOutcome> {
+        Box::pin(self.session_gateway.pending_approvals(command))
+    }
+
+    fn respond_to_approval<'a>(&'a self, command: sessions_module::approval::SessionApprovalCommand) -> sessions_module::SessionFuture<'a, sessions_module::approval::SessionApprovalOutcome> {
+        Box::pin(self.session_gateway.respond_to_approval(command))
+    }
+
     fn supports_goal(&self) -> bool { self.session_gateway.supports_goal() }
 
     fn mutate_session_goal<'a>(&'a self, command: sessions_module::goal::SessionGoalCommand) -> sessions_module::SessionFuture<'a, sessions_module::goal::SessionGoalOutcome> {
@@ -1042,6 +1050,57 @@ impl SessionOps for OpenClawDriver {
                 Ok(outcome) => project_openclaw_delete(outcome),
                 Err(error) => project_openclaw_delete_error(error),
             }
+        })
+    }
+
+    fn read_execution_result<'a>(
+        &'a self,
+        command: sessions_module::execution::SessionRunReadCommand,
+    ) -> sessions_module::SessionFuture<'a, Option<sessions_module::execution::SessionExecutionResult>> {
+        Box::pin(async move {
+            use sessions_module::{
+                execution::{SessionExecutionMessage, SessionExecutionMessagesStatus, SessionExecutionResult, SessionExecutionRuntime, SessionRunSelector},
+                state::{MAX_ITEMS, MAX_TEXT_BYTES, SessionFact, SessionItem},
+            };
+
+            if !valid_command_identity(&command.identity) { return None; }
+            let SessionRunSelector::RunId(run_id) = command.selector else { return None; };
+            let timeline = timeline::Command::new(
+                timeline::Operation::Load, command.identity.clone(),
+                timeline::WindowRequest::new(timeline::Direction::Latest, MAX_ITEMS, None)?,
+                command.endpoint_session_id.clone(), false,
+            )?;
+            let view = match self.load_openclaw_session_timeline(timeline, 1).await {
+                timeline::Outcome::Complete(view) | timeline::Outcome::Incomplete(view) => view,
+                timeline::Outcome::Unavailable(_) => return None,
+            };
+            if view.identity != command.identity
+                || command.endpoint_session_id.as_ref().is_some_and(|id| view.endpoint_session_id.as_ref() != Some(id))
+            { return None; }
+            let items = match view.items {
+                SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. } => items,
+                SessionFact::Unavailable | SessionFact::Unknown => return None,
+            };
+            let messages: Vec<_> = items.into_iter().filter_map(|item| match item {
+                SessionItem::AssistantTurn { item_id, run_id: Some(owner), text, status, .. } if owner == run_id => {
+                    Some(SessionExecutionMessage { item_id: Some(item_id), text, status })
+                }
+                _ => None,
+            }).collect();
+            if messages.len() > MAX_ITEMS || messages.iter().any(|message| message.text.len() > MAX_TEXT_BYTES || message.text.contains('\0')) {
+                return None;
+            }
+            let runtime = match view.runtime {
+                SessionFact::Complete(runtime) => Some(SessionExecutionRuntime {
+                    phase: runtime.phase, active_run_id: runtime.active_run_id, issue: runtime.issue,
+                }),
+                SessionFact::Incomplete { .. } | SessionFact::Unavailable | SessionFact::Unknown => None,
+            };
+            // Native history candidates do not prove that this run's full response is present.
+            Some(SessionExecutionResult {
+                identity: command.identity, run_id, runtime, messages,
+                messages_status: SessionExecutionMessagesStatus::Incomplete, complete: false,
+            })
         })
     }
 

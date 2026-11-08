@@ -27,7 +27,7 @@ type TimelineRequest = Readonly<{
 export type SessionTimelineTransportResponse = Readonly<{ status: 200 | 503; body: unknown }>;
 
 export interface SessionTimelineTransport {
-  load(request: unknown, traceId?: string | null): Promise<SessionTimelineTransportResponse>;
+  load(request: unknown, traceId?: string | null, signal?: AbortSignal): Promise<SessionTimelineTransportResponse>;
   window(request: unknown, traceId?: string | null): Promise<SessionTimelineTransportResponse>;
 }
 
@@ -36,7 +36,7 @@ export function createSessionTimelineTransport(
   runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionTimelineTransport {
-  const execute = async (request: unknown, operation: TimelineRequest['operationId'], traceId?: string | null): Promise<SessionTimelineTransportResponse> => {
+  const execute = async (request: unknown, operation: TimelineRequest['operationId'], traceId?: string | null, signal?: AbortSignal): Promise<SessionTimelineTransportResponse> => {
     if (!isRequest(request, operation)) {
       logSessionTrace('electron.timeline.rejected', traceId, () => ({ operation }));
       return { status: 503, body: UNAVAILABLE };
@@ -65,6 +65,7 @@ export function createSessionTimelineTransport(
       fetcher,
       body: request,
       headers: traceHeader(traceId),
+      signal,
     });
     if (response === null) {
       logSessionTrace('electron.timeline.failure', traceId, () => ({
@@ -91,7 +92,7 @@ export function createSessionTimelineTransport(
     return { status: 503, body: UNAVAILABLE };
   };
   return {
-    load: async (request, traceId) => await execute(request, 'sessions.load', traceId),
+    load: async (request, traceId, signal) => await execute(request, 'sessions.load', traceId, signal),
     window: async (request, traceId) => await execute(request, 'sessions.window', traceId),
   };
 }

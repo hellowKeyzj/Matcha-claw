@@ -1,10 +1,12 @@
 pub mod command;
 pub(crate) mod effort;
 pub(crate) mod idle;
+pub(crate) mod permissions;
 pub mod process;
 pub mod projection;
 pub mod protocol;
 mod search;
+pub(crate) mod skills;
 
 use crate::{
     config::{AgentConfig, Config, Paths},
@@ -78,6 +80,7 @@ struct Instance {
     sealed: Option<crate::sealed::InstanceGuard>,
     iab: crate::session::iab::InstanceGuard,
     search: tokio::sync::Mutex<search::State>,
+    permissions: tokio::sync::Mutex<permissions::Permissions>,
     pending: Mutex<Pending>,
     incoming: Mutex<HashSet<String>>,
     admission: Arc<tokio::sync::RwLock<idle::Admission>>,
@@ -178,6 +181,14 @@ impl Cli {
             .as_object_mut()
             .ok_or_else(|| Error::invalid("enabledPlugins must be an object"))?
             .insert("weixin@builtin".into(), Value::Bool(has_channel_inputs));
+        let skill_permissions = permissions::project(
+            settings
+                .get("permissions")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            &spec.agent.skill_states,
+        )?;
+        let has_disabled_skills = spec.agent.skill_states.values().any(|enabled| !enabled);
         args.extend([
             "--settings".into(),
             serde_json::to_string(&settings)
@@ -234,6 +245,9 @@ impl Cli {
             sealed,
             iab,
             search: tokio::sync::Mutex::new(search::State::default()),
+            permissions: tokio::sync::Mutex::new(permissions::Permissions::new(
+                settings.get("permissions"),
+            )),
             pending: Mutex::new(Pending::default()),
             incoming: Mutex::new(HashSet::new()),
             admission: idle::admission(),
@@ -252,6 +266,10 @@ impl Cli {
             .initializer
             .lock()
             .expect("native initializer lock");
+        let append_system_prompt = crate::prompt::append_system_prompt(
+            &spec.agent_id,
+            spec.agent.append_system_prompt.as_deref(),
+        );
         let reader = tokio::spawn(read_output(
             instance.clone(),
             output,
@@ -264,13 +282,21 @@ impl Cli {
         if let Some(prompt) = spec.agent.system_prompt {
             initialize["systemPrompt"] = Value::String(prompt);
         }
-        if let Some(prompt) = spec.agent.append_system_prompt {
+        if let Some(prompt) = append_system_prompt {
             initialize["appendSystemPrompt"] = Value::String(prompt);
         }
         let initializing = instance.clone();
         let initializer = tokio::spawn(async move {
             let result = async {
                 let initialized = initializing.request(initialize).await?;
+                if has_disabled_skills {
+                    // --settings JSON becomes a native flag file; toggles must stay inline-only.
+                    tokio::time::timeout(effort::CONTROL_WINDOW, initializing.request(json!({
+                        "subtype": "apply_flag_settings", "settings": { "permissions": skill_permissions },
+                    }))).await.map_err(|_| Error::unavailable(
+                        "skill_launch_ack_unknown", "Native skill settings were not acknowledged during startup",
+                    ))??;
+                }
                 if let Some(projection) = &spec.config.search {
                     initializing.apply_search(Some(projection)).await?;
                 }

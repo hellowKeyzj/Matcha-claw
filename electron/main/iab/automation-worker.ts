@@ -49,13 +49,13 @@ const services: AutomationServices = {
     const events = new Set<(event: IabCdpEvent) => void>();
     listeners.set(descriptor.id, events);
     const executor: IabCdpExecutor = {
-      send: (method, params, options) => {
-        options?.assertCurrent?.();
+      send: async (method, params, options) => {
+        await options?.assertCurrent?.();
         if (options?.signal && teardownSignals.has(options.signal)) return teardown(descriptor.id, method, params);
         return effect(operationContext(options?.signal), { kind: 'command', leaseId: descriptor.id, method, params, sessionId: options?.sessionId, timeoutMs: options?.timeoutMs });
       },
-      setScreenshotViewport(options) {
-        options.assertCurrent?.();
+      async setScreenshotViewport(options) {
+        await options.assertCurrent?.();
         return effect(operationContext(options.signal), { kind: 'screenshot-viewport', leaseId: descriptor.id, timeoutMs: options.timeoutMs });
       },
       restoreScreenshotViewport(signal) {
@@ -64,12 +64,12 @@ const services: AutomationServices = {
         return effect(context, { kind: 'restore-screenshot-viewport', leaseId: descriptor.id });
       },
       onEvent(listener) { events.add(listener); return () => { events.delete(listener); }; },
-      setInterceptPolicy: (rules, options) => {
-        options.assertCurrent?.();
+      setInterceptPolicy: async (rules, options) => {
+        await options.assertCurrent?.();
         return effect(operationContext(options.signal), { kind: 'intercept', leaseId: descriptor.id, rules });
       },
-      listChildFrames: (options) => {
-        options?.assertCurrent?.();
+      listChildFrames: async (options) => {
+        await options?.assertCurrent?.();
         return effect(operationContext(options?.signal), { kind: 'frames', leaseId: descriptor.id, timeoutMs: options?.timeoutMs });
       },
     };

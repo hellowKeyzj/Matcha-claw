@@ -121,6 +121,10 @@ export function modelSupportsAdaptiveThinking(model: string): boolean {
   if (
     canonical.includes('opus-4-7') ||
     canonical.includes('opus-4-6') ||
+    canonical.includes('opus-4-8') ||
+    canonical.includes('opus-5') ||
+    canonical.includes('sonnet-5') ||
+    canonical.includes('fable-5') ||
     canonical.includes('sonnet-4-6')
   ) {
     return true

@@ -22,6 +22,12 @@ use crate::{
 
 #[path = "public_evidence_projection.rs"]
 mod public_evidence_projection;
+#[path = "public_message_projection.rs"]
+mod public_message_projection;
+
+pub use public_message_projection::{
+    TeamRunMessageCursor, TeamRunMessagePage, TeamRunMessagePageStatus, TeamRunPublicMessage,
+};
 
 pub use public_evidence_projection::{
     PublicEvidenceProjection, PublicEvidenceType, project_public_evidence,
@@ -347,9 +353,8 @@ pub enum TeamPublicQueryOutcome {
     Unavailable,
 }
 
-/// The complete Organization-owned TeamRun snapshot. It contains only durable facts that are
-/// safe to expose to a renderer; runtime bindings, prompts, receipts, paths, and idempotency
-/// material are intentionally not represented.
+/// Organization-owned TeamRun facts and bounded business-result message pages. Runtime
+/// bindings, prompts, transport receipts, and idempotency material remain private.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamRunPublicSnapshot {
@@ -361,6 +366,8 @@ pub struct TeamRunPublicSnapshot {
     decisions: Vec<TeamRunPublicDecision>,
     evidence: Vec<PublicEvidenceProjection>,
     artifacts: Vec<TeamRunPublicArtifact>,
+    messages: Vec<TeamRunPublicMessage>,
+    message_page: TeamRunMessagePage,
     events: Vec<TeamRunPublicEvent>,
     next_event_cursor: u64,
     unavailable_sections: Vec<TeamRunPublicUnavailableSection>,
@@ -398,6 +405,14 @@ impl TeamRunPublicSnapshot {
 
     pub fn artifacts(&self) -> &[TeamRunPublicArtifact] {
         &self.artifacts
+    }
+
+    pub fn messages(&self) -> &[TeamRunPublicMessage] {
+        &self.messages
+    }
+
+    pub fn message_page(&self) -> &TeamRunMessagePage {
+        &self.message_page
     }
 
     pub fn events(&self) -> &[TeamRunPublicEvent] {
@@ -490,6 +505,7 @@ pub struct TeamRunPublicAttempt {
     node_id: String,
     attempt_id: String,
     node_execution_id: String,
+    current_attempt: bool,
     number: u32,
     status: TeamPublicAttemptStatus,
     reason: TeamPublicAttemptReason,
@@ -499,6 +515,8 @@ pub struct TeamRunPublicAttempt {
 }
 
 impl TeamRunPublicAttempt {
+    pub const fn current_attempt(&self) -> bool { self.current_attempt }
+
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
@@ -805,13 +823,31 @@ pub struct TeamRunPublicArtifact {
     role_id: String,
     kind: String,
     title: String,
+    content_ref: String,
+    evidence_refs: Vec<TeamRunArtifactEvidenceRef>,
+    attempt_id: String,
+    current_attempt: bool,
     summary: Option<String>,
     evidence_count: usize,
     created_at: u64,
     updated_at: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum TeamRunArtifactEvidenceRef {
+    Artifact { #[serde(rename = "artifactId")] artifact_id: String },
+}
+
 impl TeamRunPublicArtifact {
+    pub fn content_ref(&self) -> &str { &self.content_ref }
+
+    pub fn evidence_refs(&self) -> &[TeamRunArtifactEvidenceRef] { &self.evidence_refs }
+
+    pub fn attempt_id(&self) -> &str { &self.attempt_id }
+
+    pub const fn current_attempt(&self) -> bool { self.current_attempt }
+
     pub fn artifact_id(&self) -> &str {
         &self.artifact_id
     }
@@ -1034,6 +1070,7 @@ pub struct TeamRunPublicSnapshotRequest {
     run_id: GraphRunId,
     event_cursor: u64,
     event_limit: Option<usize>,
+    message_cursor: Option<TeamRunMessageCursor>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1057,7 +1094,13 @@ impl TeamRunPublicSnapshotRequest {
             run_id,
             event_cursor,
             event_limit,
+            message_cursor: None,
         })
+    }
+
+    pub(crate) fn with_message_cursor(mut self, cursor: Option<TeamRunMessageCursor>) -> Self {
+        self.message_cursor = cursor;
+        self
     }
 
     fn unbounded(team_id: TeamId, run_id: GraphRunId) -> Self {
@@ -1066,6 +1109,7 @@ impl TeamRunPublicSnapshotRequest {
             run_id,
             event_cursor: 0,
             event_limit: None,
+            message_cursor: None,
         }
     }
 
@@ -1109,6 +1153,7 @@ pub(crate) fn produce_team_run_public_snapshot_for_run(
     run_id: &GraphRunId,
     event_cursor: u64,
     event_limit: Option<u64>,
+    message_cursor: Option<TeamRunMessageCursor>,
 ) -> Result<TeamRunPublicSnapshotQueryOutcome, TeamRunPublicSnapshotRequestError> {
     let Some(team_id) = facts.run(run_id).map(|run| run.team().clone()) else {
         return Ok(TeamRunPublicSnapshotQueryOutcome::Unavailable(
@@ -1116,7 +1161,8 @@ pub(crate) fn produce_team_run_public_snapshot_for_run(
         ));
     };
     let request =
-        TeamRunPublicSnapshotRequest::try_new(team_id, run_id.clone(), event_cursor, event_limit)?;
+        TeamRunPublicSnapshotRequest::try_new(team_id, run_id.clone(), event_cursor, event_limit)?
+            .with_message_cursor(message_cursor);
     Ok(produce_team_run_public_snapshot(facts, &request))
 }
 
@@ -1216,7 +1262,7 @@ fn build_public_snapshot(
         .graph()
         .executions()
         .values()
-        .flat_map(|history| history.attempts().iter().map(public_attempt))
+        .flat_map(|history| history.attempts().iter().map(|attempt| public_attempt(attempt, run)))
         .collect::<Vec<_>>();
     let deliveries = facts
         .deliveries()
@@ -1242,8 +1288,11 @@ fn build_public_snapshot(
     let artifacts = facts
         .artifacts()
         .filter(|record| record.run_id() == run_id.as_str())
-        .map(public_artifact)
+        .map(|record| public_artifact(record, run))
         .collect::<Vec<_>>();
+    let (messages, message_page, messages_missing) = public_message_projection::project_messages(
+        facts, run, &artifacts, request.message_cursor.as_ref(),
+    );
     let events = facts.events_for_run(run_id.as_str());
     let counts = TeamRunPublicCounts {
         attempts: attempts.len(),
@@ -1266,7 +1315,14 @@ fn build_public_snapshot(
         .into_iter()
         .map(project_team_run_public_event)
         .collect::<Vec<_>>();
-    let diagnostics = diagnostics_projection(run_id, runtime, counts);
+    let mut diagnostics = diagnostics_projection(run_id, runtime, counts);
+    if !messages_missing {
+        diagnostics.unavailable_sections.retain(|section| *section != TeamRunPublicUnavailableSection::Messages);
+    }
+    let mut unavailable_sections = unavailable_sections();
+    if !messages_missing {
+        unavailable_sections.retain(|section| *section != TeamRunPublicUnavailableSection::Messages);
+    }
     TeamRunPublicSnapshot {
         run: TeamRunPublicRun {
             team_id: team_id.as_str().to_owned(),
@@ -1295,9 +1351,11 @@ fn build_public_snapshot(
         decisions,
         evidence,
         artifacts,
+        messages,
+        message_page,
         next_event_cursor,
         events,
-        unavailable_sections: unavailable_sections(),
+        unavailable_sections,
         diagnostics,
     }
 }
@@ -1332,8 +1390,10 @@ fn unavailable_sections() -> Vec<TeamRunPublicUnavailableSection> {
     ]
 }
 
-fn public_attempt(attempt: &crate::run::graph::NodeAttempt) -> TeamRunPublicAttempt {
+fn public_attempt(attempt: &crate::run::graph::NodeAttempt, run: &crate::GraphRunFacts) -> TeamRunPublicAttempt {
     TeamRunPublicAttempt {
+        current_attempt: !run.execution_is_retired(attempt.node_id(), attempt.fence())
+            && run.graph().current_attempt(attempt.node_id()).is_some_and(|current| current.fence() == attempt.fence()),
         node_id: attempt.node_id().as_str().to_owned(),
         attempt_id: attempt.fence().attempt_id().as_str().to_owned(),
         node_execution_id: attempt.fence().node_execution_id().as_str().to_owned(),
@@ -1395,8 +1455,18 @@ fn public_decision(decision: &crate::TeamDecision) -> TeamRunPublicDecision {
     }
 }
 
-fn public_artifact(record: &crate::run::artifact::ArtifactRecord) -> TeamRunPublicArtifact {
+fn public_artifact(
+    record: &crate::run::artifact::ArtifactRecord,
+    run: &crate::GraphRunFacts,
+) -> TeamRunPublicArtifact {
     let public = crate::run::artifact::project_public_artifact(record);
+    let node = crate::NodeId::new(record.node_id());
+    // Completion stores the native artifact reference, not the EvidenceRecord identity.
+    let evidence_refs = record.evidence().iter().filter_map(|provenance| {
+        (provenance.reference_kind() == "artifact").then(|| TeamRunArtifactEvidenceRef::Artifact {
+            artifact_id: provenance.evidence_id().to_owned(),
+        })
+    }).collect();
     TeamRunPublicArtifact {
         artifact_id: public.artifact_id.as_str().to_owned(),
         run_id: public.run_id,
@@ -1405,6 +1475,11 @@ fn public_artifact(record: &crate::run::artifact::ArtifactRecord) -> TeamRunPubl
         role_id: public.role_id,
         kind: public.kind,
         title: public.title,
+        content_ref: record.content_ref().to_owned(),
+        evidence_refs,
+        attempt_id: record.fence().attempt_id().as_str().to_owned(),
+        current_attempt: !run.execution_is_retired(&node, record.fence())
+            && run.graph().current_attempt(&node).is_some_and(|attempt| attempt.fence() == record.fence()),
         summary: public.summary,
         evidence_count: public.evidence_count,
         created_at: record.created_at(),

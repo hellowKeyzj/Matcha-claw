@@ -387,6 +387,7 @@ const TEAM_MESSAGE_CLOSE: &str = "</team_message>";
 #[derive(Clone, Eq, PartialEq)]
 pub struct TeamNodeOutput {
     final_assistant_text: String,
+    business_messages: Vec<String>,
     summary: String,
     decision: String,
 }
@@ -424,8 +425,10 @@ impl TeamNodeOutput {
         }
         let summary = validate_summary(summary.into())?;
         let decision = validate_decision(decision.into())?;
+        let business_messages = Self::business_messages_from(std::slice::from_ref(&final_assistant_text));
         Ok(Self {
             final_assistant_text,
+            business_messages,
             summary,
             decision,
         })
@@ -454,6 +457,31 @@ impl TeamNodeOutput {
             .map_err(|_| TeamNodeOutputError::DecisionNotAllowed)
     }
 
+    pub(crate) fn business_messages_from(texts: &[String]) -> Vec<String> {
+        let mut messages = Vec::new();
+        for text in texts {
+            let body = if text.contains(TEAM_MESSAGE_OPEN) || text.contains(TEAM_MESSAGE_CLOSE) {
+                let Ok((body, _)) = split_team_message(text) else { return Vec::new() };
+                body
+            } else {
+                text.as_str()
+            };
+            if !body.trim().is_empty() {
+                messages.push(body.to_owned());
+            }
+        }
+        messages
+    }
+
+    pub(crate) fn with_business_messages(mut self, messages: Vec<String>) -> Self {
+        self.business_messages = messages;
+        self
+    }
+
+    pub(crate) fn business_messages(&self) -> &[String] {
+        &self.business_messages
+    }
+
     pub fn final_assistant_text(&self) -> &str {
         &self.final_assistant_text
     }
@@ -479,17 +507,36 @@ impl fmt::Debug for TeamNodeOutput {
 }
 
 fn extract_team_message(text: &str) -> Result<&str, TeamNodeOutputError> {
+    if !text.contains(TEAM_MESSAGE_CLOSE) {
+        return Err(TeamNodeOutputError::MissingEnvelope);
+    }
+    split_team_message(text).map(|(_, json)| json)
+}
+
+fn split_team_message(text: &str) -> Result<(&str, &str), TeamNodeOutputError> {
     let text = text.trim_end();
     let open = text.find(TEAM_MESSAGE_OPEN).ok_or(TeamNodeOutputError::MissingEnvelope)?;
-    let close = text.find(TEAM_MESSAGE_CLOSE).ok_or(TeamNodeOutputError::MissingEnvelope)?;
-    let start = open + TEAM_MESSAGE_OPEN.len();
-    if close < start
-        || close + TEAM_MESSAGE_CLOSE.len() != text.len()
-        || text[start..].contains(TEAM_MESSAGE_OPEN)
-    {
+    let body = &text[..open];
+    let suffix = &text[open + TEAM_MESSAGE_OPEN.len()..];
+    if body.contains(TEAM_MESSAGE_CLOSE) || suffix.contains(TEAM_MESSAGE_OPEN) {
         return Err(TeamNodeOutputError::InvalidEnvelope);
     }
-    Ok(&text[start..close])
+    let json = if let Some(close) = suffix.find(TEAM_MESSAGE_CLOSE) {
+        if close + TEAM_MESSAGE_CLOSE.len() != suffix.len() {
+            return Err(TeamNodeOutputError::InvalidEnvelope);
+        }
+        &suffix[..close]
+    } else {
+        // Without a closing tag, only an otherwise identifiable control object is a suffix.
+        let value = serde_json::from_str::<Value>(suffix.trim())
+            .map_err(|_| TeamNodeOutputError::InvalidEnvelope)?;
+        let object = value.as_object().ok_or(TeamNodeOutputError::InvalidEnvelope)?;
+        if object.is_empty() || object.keys().any(|key| !matches!(key.as_str(), "summary" | "decision")) {
+            return Err(TeamNodeOutputError::InvalidEnvelope);
+        }
+        suffix
+    };
+    Ok((body, json))
 }
 
 fn required_message_string(

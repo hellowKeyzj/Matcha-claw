@@ -44,6 +44,7 @@ const METHODS: &[&str] = &[
     "instructions.read",
     "instructions.write",
     "skills.list",
+    "skills.configure",
     "skills.get",
     "skills.install",
     "skills.remove",
@@ -207,7 +208,7 @@ pub(super) async fn dispatch(gateway: &Gateway, method: &str, params: Value) -> 
         Some("prompts" | "instructions") => {
             prompt::dispatch(method, params, config, sessions).await
         }
-        Some("skills") => skill::dispatch(method, params, config).await,
+        Some("skills") => skill::dispatch(method, params, config, sessions).await,
         Some("sealedSkills") => sealed::dispatch(config, method, params).await,
         Some("plugins") => plugin::dispatch(method, params, config, sessions).await,
         Some("mcp") => mcp::dispatch(method, params, config, sessions).await,

@@ -41,6 +41,7 @@ import { createSessionThinkingTransport } from '../runtime-host-delivery/transpo
 import { createSessionRenameTransport } from '../runtime-host-delivery/transport/sessions/rename';
 import { createSessionSendTransport } from '../runtime-host-delivery/transport/sessions/send';
 import { createSessionTimelineTransport } from '../runtime-host-delivery/transport/sessions/timeline';
+import { createSessionRunTransport } from '../runtime-host-delivery/transport/sessions/run';
 import { createSessionObservationTransport } from '../runtime-host-delivery/transport/sessions/observation';
 import { createClawHubSkillInstallTransport } from '../runtime-host-delivery/transport/skills/clawhub-install';
 import { createClawHubSkillSearchTransport } from '../runtime-host-delivery/transport/skills/clawhub-search';
@@ -118,6 +119,7 @@ export function createRuntimeHostTransportBundle(
     fleetCredentialsTransport: createFleetCredentialsTransport(issuer, runtimeHostTransportPort),
     sessionContentTransport: createSessionContentTransport(issuer, runtimeHostTransportPort),
     sessionTimelineTransport: createSessionTimelineTransport(issuer, runtimeHostTransportPort),
+    sessionRunTransport: createSessionRunTransport(issuer, runtimeHostTransportPort),
     sessionObservationTransport: createSessionObservationTransport(issuer, runtimeHostTransportPort),
     diagnosticsArchiveTransport: createDiagnosticsArchiveTransport(issuer, runtimeHostTransportPort),
     workspaceTextTransport: createWorkspaceTextTransport(issuer, runtimeHostTransportPort),

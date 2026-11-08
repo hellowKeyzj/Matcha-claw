@@ -5,7 +5,7 @@ import { subscribeBrowserRecovery, subscribeHostEvent } from '@/lib/host-events'
 import { isTeamGraphSourcePortActions, type TeamDesignRecord, type TeamDesignSnapshot, type TeamDesignTarget } from '@/types/team-design';
 import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier } from '@/lib/session-trace';
 import { matchesOrganizationIdentity, type TeamCreationFailure } from '@/types/call-log/organization';
-import type { CallRecord } from '@/types/call-log';
+import type { CallReceipt, CallRecord } from '@/types/call-log';
 import type { WaitForCallOptions } from '@/types/call-log/wait';
 import type { ManualTeamCreation, TeamCreationObserver } from '@/plugins/teams/types/team-creation';
 import { forgetOwnedSessions } from '@/plugins/chat/session-actions';
@@ -14,6 +14,7 @@ import {
   cancelTeamRun,
   classifyTeamCreationFailure,
   createTeamRun,
+  createTeamRoleSession,
   deleteTeamInstance,
   exportTeamRunGraphYaml,
   importTeamRunGraphYaml,
@@ -106,6 +107,7 @@ interface TeamsState {
   startRun: (target: TeamDesignTarget) => Promise<void>;
   exitDesign: (target: TeamDesignTarget) => Promise<void>;
   submitRunGraphPatch: (target: TeamDesignTarget, operations: TeamGraphPatchOperation[]) => Promise<void>;
+  createRoleSession: (target: TeamDesignTarget, roleId: string, requestId: string) => Promise<TeamRoleBindingRecord>;
   createManualTeamWithProgress: (input: ManualTeamCandidate) => Promise<string>;
   resetManualTeamCreation: () => void;
   replaceTeamSkillVersion: (input: { teamId: string; expectedCurrentVersion: string; candidate: TeamSkillCandidate }) => string;
@@ -137,6 +139,15 @@ interface TeamDesignRead {
   promise: Promise<void>;
 }
 
+interface RoleSessionCreation {
+  roleId: string;
+  removed: boolean;
+  receipt?: CallReceipt;
+  sessionRef?: string;
+  promise?: Promise<TeamRoleBindingRecord>;
+}
+
+const roleSessionCreations = new Map<string, RoleSessionCreation>();
 const designReads = new Map<string, TeamDesignRead>();
 const designObservers = new Map<string, { target: TeamDesignTarget; count: number }>();
 let disposeDesignEvents: (() => void) | null = null;
@@ -185,6 +196,13 @@ function refreshObservedDesigns(): void {
 }
 
 function removeDesignReads(teamId: string, runId?: string): void {
+  for (const [key, entry] of roleSessionCreations) {
+    const [entryTeamId, entryRunId] = JSON.parse(key) as [string, string, string];
+    if (entryTeamId === teamId && (runId === undefined || entryRunId === runId)) {
+      entry.removed = true;
+      roleSessionCreations.delete(key);
+    }
+  }
   for (const [key, entry] of actionInFlightByKey) {
     if (!key.startsWith('design:')) continue;
     const [entryTeamId, entryRunId] = JSON.parse(key.slice('design:'.length)) as [string, string];
@@ -489,7 +507,7 @@ function removeRunIdsFromRecord(runsById: Record<string, TeamRunRecord | undefin
 }
 
 function collectTeamRunRoleSessionBindings(
-  state: Pick<TeamsState, 'runListByTeamId' | 'rolesByTeamId'>,
+  state: Pick<TeamsState, 'runListByTeamId' | 'rolesByTeamId' | 'designByRunId'>,
   teamId: string,
   runIds: readonly string[],
 ): TeamRoleBindingRecord[] {
@@ -500,6 +518,10 @@ function collectTeamRunRoleSessionBindings(
       .flatMap((run) => run.sessions),
     ...(state.rolesByTeamId[teamId] ?? [])
       .filter((binding) => runIdSet.has(binding.runId)),
+    ...runIds.flatMap((runId) => {
+      const snapshot = state.designByRunId[runId]?.snapshot;
+      return snapshot?.teamId === teamId ? snapshot.roles : [];
+    }),
   ];
   const bindingsByIdentity = new Map<string, TeamRoleBindingRecord>();
   for (const binding of bindings) {
@@ -907,6 +929,96 @@ export const useTeamsStore = create<TeamsState>()(
             await get().refreshSnapshot(frozenTarget.teamId, { force: true });
           }
         });
+      },
+      createRoleSession: (requestedTarget, roleId, requestId) => {
+        const target = { ...requestedTarget, scope: resolveTeamRuntimeScope(requestedTarget.teamId, requestedTarget.runId) };
+        const snapshot = get().designByRunId[target.runId]?.snapshot;
+        if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId) {
+          return Promise.reject(new Error('Team run snapshot is required'));
+        }
+        const key = JSON.stringify([target.teamId, target.runId, requestId]);
+        const existing = roleSessionCreations.get(key);
+        if (existing && existing.roleId !== roleId) return Promise.reject(new Error('Team role session request conflicts with the original role'));
+        if (existing?.promise) return existing.promise;
+        const actionKey = `design:${designTargetKey(target)}`;
+        if (actionInFlightByKey.has(actionKey)) return Promise.reject(new Error('Team run mutation is already pending'));
+        const creation: RoleSessionCreation = existing ?? { roleId, removed: false };
+        const action = { requestId, operation: `role-session-create:${requestId}`, removed: false, promise: Promise.resolve() };
+        const requireCurrentRun = () => {
+          const current = get().designByRunId[target.runId]?.snapshot;
+          if (creation.removed || current?.teamId !== target.teamId || current.runId !== target.runId
+            || !get().teams.some((team) => team.id === target.teamId)) {
+            throw new Error('Team run is no longer available');
+          }
+        };
+        creation.promise = Promise.resolve().then(async () => {
+          try {
+            requireCurrentRun();
+            if (!creation.sessionRef) {
+              creation.receipt ??= await createTeamRoleSession({ ...target, roleId, idempotencyKey: requestId });
+              requireCurrentRun();
+              const call = await waitForCall(creation.receipt, 'organization', { timeoutMs: null });
+              requireCurrentRun();
+              if (call.command !== 'team.roleSessionCreate'
+                || !await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, target.teamId)
+                || !await matchesOrganizationIdentity(call.detail.runId, call.detail.runIdHash, target.runId)) {
+                throw new Error('Team role session result does not match the requested run');
+              }
+              if (call.status !== 'succeeded') {
+                creation.receipt = undefined;
+                throw new Error(call.status === 'unknown' ? 'Team role session creation outcome is unknown' : 'Team role session creation was not confirmed');
+              }
+              if (call.detail.outcome !== 'created' || call.detail.roleSession?.roleId !== roleId) {
+                throw new Error('Team role session creation was not confirmed');
+              }
+              creation.sessionRef = call.detail.roleSession.sessionRef;
+            }
+            requireCurrentRun();
+            const readback = await readTeamDesignSnapshot(target);
+            requireCurrentRun();
+            const binding = readback.roles.find((role) => role.roleId === roleId && role.sessionRef === creation.sessionRef);
+            if (!binding) throw new Error('Created Team role session is not available in the run snapshot');
+            const designRead = designReads.get(designTargetKey(target));
+            if (designRead) designRead.dirty = true;
+            const runRead = snapshotInFlightByTeamId.get(target.teamId);
+            if (runRead?.runId === target.runId) runRead.dirty = true;
+            set((state) => {
+              const current = state.designByRunId[target.runId]!;
+              const roles = [...new Map([...current.snapshot!.roles, ...readback.roles]
+                .map((role) => [JSON.stringify([role.roleId, role.sessionRef]), role])).values()];
+              return {
+                designByRunId: { ...state.designByRunId, [target.runId]: {
+                  ...current, snapshot: { ...current.snapshot!, roles },
+                } },
+                runListByTeamId: { ...state.runListByTeamId, [target.teamId]: (state.runListByTeamId[target.teamId] ?? [])
+                  .map((run) => run.runId === target.runId ? { ...run, sessions: roles } : run) },
+                ...(state.teams.find((team) => team.id === target.teamId)?.activeRunId === target.runId
+                  ? { rolesByTeamId: { ...state.rolesByTeamId, [target.teamId]: roles } } : {}),
+              };
+            });
+            roleSessionCreations.delete(key);
+            return binding;
+          } finally {
+            creation.promise = undefined;
+            if (!creation.receipt && !creation.sessionRef) roleSessionCreations.delete(key);
+            if (actionInFlightByKey.get(actionKey) === action) {
+              actionInFlightByKey.delete(actionKey);
+              if (!creation.removed) set((state) => {
+                const current = state.designByRunId[target.runId];
+                return current?.snapshot?.teamId === target.teamId ? { designByRunId: { ...state.designByRunId, [target.runId]: {
+                  ...current, mutationPending: false,
+                } } } : {};
+              });
+            }
+          }
+        });
+        action.promise = creation.promise.then(() => {}, () => {});
+        roleSessionCreations.set(key, creation);
+        actionInFlightByKey.set(actionKey, action);
+        set((state) => ({ designByRunId: { ...state.designByRunId, [target.runId]: {
+          ...state.designByRunId[target.runId]!, mutationPending: true,
+        } } }));
+        return creation.promise;
       },
       runIdsByTeamId: {},
       runListByTeamId: {},

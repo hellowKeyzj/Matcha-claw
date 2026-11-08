@@ -2,18 +2,25 @@ use std::{fmt, sync::Arc};
 
 use tokio::sync::Mutex;
 
+use crate::lifecycle::{
+    journal::LifecycleProcess,
+    logs::{LifecycleLogBuffer, LogStream},
+};
+
 use foundation::process::{
     ShutdownOutcome, TerminationOutcome,
     supervision::{
-        CommandReceipt, CompletionError, RestartOutcome, StartOutcome, Supervisor, SupervisorHandle,
-        SupervisorLease, SupervisorOutcome, SupervisorRejection, SupervisorSnapshot,
-        TerminationCompletion,
+        CommandReceipt, CompletionError, RestartOutcome, StartOutcome, Supervisor,
+        SupervisorHandle, SupervisorLease, SupervisorOutcome, SupervisorRejection,
+        SupervisorSnapshot, TerminationCompletion,
     },
 };
 
 pub struct SupervisorOwner {
     lifecycle: SupervisorLifecycleHandle,
     supervisor: Supervisor,
+    journal_observer: tokio::task::JoinHandle<()>,
+    journal_stop: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Clone)]
@@ -22,6 +29,7 @@ pub struct SupervisorLifecycleHandle {
     closed: Arc<Mutex<bool>>,
     shutdown: Arc<Mutex<ShutdownConfirmation>>,
     mcp_oauth: Arc<crate::surfaces::connectors::oauth::McpOAuth>,
+    logs: LifecycleLogBuffer,
 }
 
 #[derive(Default)]
@@ -34,15 +42,25 @@ impl SupervisorOwner {
     pub(crate) fn new(
         supervisor: Supervisor,
         mcp_oauth: Arc<crate::surfaces::connectors::oauth::McpOAuth>,
+        logs: LifecycleLogBuffer,
     ) -> Self {
+        let journal_stop = tokio_util::sync::CancellationToken::new();
+        let journal_observer = tokio::spawn(observe_lifecycle(
+            supervisor.handle().subscribe(),
+            logs.clone(),
+            journal_stop.clone(),
+        ));
         Self {
             lifecycle: SupervisorLifecycleHandle {
                 handle: supervisor.handle(),
                 closed: Arc::new(Mutex::new(false)),
                 shutdown: Arc::new(Mutex::new(ShutdownConfirmation::default())),
                 mcp_oauth,
+                logs,
             },
             supervisor,
+            journal_observer,
+            journal_stop,
         }
     }
 
@@ -53,10 +71,15 @@ impl SupervisorOwner {
     pub fn begin_join(self) -> PendingSupervisorJoin {
         let mut supervisor = self.supervisor;
         let mcp_oauth = self.lifecycle.mcp_oauth;
+        let journal_observer = self.journal_observer;
+        let journal_stop = self.journal_stop;
         PendingSupervisorJoin {
             task: tokio::spawn(async move {
                 let oauth_reaped = mcp_oauth.close_and_join().await;
-                supervisor.join().await.map_err(SupervisorJoinError::from)?;
+                let joined = supervisor.join().await.map_err(SupervisorJoinError::from);
+                journal_stop.cancel();
+                journal_observer.await.map_err(SupervisorJoinError::from)?;
+                joined?;
                 if oauth_reaped {
                     Ok(())
                 } else {
@@ -85,7 +108,12 @@ impl SupervisorLifecycleHandle {
         if *closed {
             return CommandReceipt::ShuttingDown;
         }
-        self.handle.start().await
+        self.logs
+            .append(LogStream::Stdout, b"[gateway] start requested");
+        let receipt = self.handle.start().await;
+        drop(closed);
+        self.logs.flush().await;
+        receipt
     }
 
     pub(crate) async fn enqueue_restart(&self) -> CommandReceipt<RestartOutcome> {
@@ -93,7 +121,12 @@ impl SupervisorLifecycleHandle {
         if *closed {
             return CommandReceipt::ShuttingDown;
         }
-        self.handle.restart().await
+        self.logs
+            .append(LogStream::Stdout, b"[gateway] restart requested");
+        let receipt = self.handle.restart().await;
+        drop(closed);
+        self.logs.flush().await;
+        receipt
     }
 
     pub(crate) async fn enqueue_stop(&self) -> CommandReceipt<TerminationCompletion> {
@@ -161,6 +194,11 @@ impl SupervisorLifecycleHandle {
                 "signal": exit.and_then(|exit| exit.signal()),
             })
         });
+        self.logs.append(
+            LogStream::Stdout,
+            format!("[gateway] shutdown result={result:?}").as_bytes(),
+        );
+        self.logs.flush().await;
         result
     }
 
@@ -270,6 +308,37 @@ impl SupervisorLifecycleHandle {
             _ => None,
         }
     }
+}
+
+async fn observe_lifecycle(
+    mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
+    logs: LifecycleLogBuffer,
+    cancellation: tokio_util::sync::CancellationToken,
+) {
+    let mut previous = None;
+    loop {
+        let snapshot = snapshots.borrow_and_update().clone();
+        if previous.as_ref() != Some(&snapshot) {
+            let logs = snapshot
+                .process()
+                .or_else(|| previous.as_ref().and_then(SupervisorSnapshot::process))
+                .map(|process| {
+                    logs.for_process(LifecycleProcess::Gateway(process.identity().pid()))
+                })
+                .unwrap_or_else(|| logs.clone());
+            logs.append(LogStream::Stdout, format!(
+                "[gateway] supervisor phase={:?} operation={:?} restart_failures={} failure={:?} outcome={:?}",
+                snapshot.phase(), snapshot.active_operation(), snapshot.restart_episode().settled_failures(), snapshot.failure(), snapshot.last_outcome(),
+            ).as_bytes());
+            logs.flush().await;
+            previous = Some(snapshot);
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => break,
+            changed = snapshots.changed() => if changed.is_err() { break },
+        }
+    }
+    logs.flush().await;
 }
 
 pub struct PendingSupervisorJoin {

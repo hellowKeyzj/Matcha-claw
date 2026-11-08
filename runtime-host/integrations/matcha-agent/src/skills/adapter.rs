@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use platform::endpoint::runtime_address::RuntimeScope;
 use skills_module::{SkillRuntimeOps, bundle, install, management, ports::SkillsFuture, status};
 use tokio_util::sync::CancellationToken;
@@ -48,12 +50,24 @@ impl SkillRuntimeOps for MatchaRuntimeDriver {
         Box::pin(async move {
             let Some(agent) = agent(scope) else {return status::Outcome::Unavailable;};
             let catalog = match self.native_skills().list(agent).await {Ok(catalog)=>catalog,Err(_)=>return status::Outcome::Unavailable};
-            status::Outcome::Available(status::Catalog {entries:catalog.skills.into_iter().map(|skill| status::Entry {
+            let mut entries = Vec::new();
+            let mut bundled_names = HashSet::new();
+            for skill in catalog.bundled_skills {
+                bundled_names.insert(skill.name.clone());
+                entries.push(status::Entry {
+                    key:skill.name.clone(),slug:None,name:skill.name,description:skill.description,
+                    // Application configuration, not a current-session loading ACK.
+                    enabled:skill.enabled,selectable:true,eligible:true,blocked_by_allowlist:false,bundled:Some(true),always:None,emoji:None,
+                    source:Some("bundled".into()),uninstallable:false,base_dir:None,file_path:None,missing_categories:Vec::new(),
+                });
+            }
+            entries.extend(catalog.skills.into_iter().filter(|skill| !bundled_names.contains(&skill.name)).map(|skill| status::Entry {
                 key:skill.name.clone(),slug:None,name:skill.name,description:String::new(),
                 // Native discovery candidates are not an enabled/eligible or current-session ACK.
                 enabled:false,selectable:false,eligible:false,blocked_by_allowlist:false,bundled:None,always:None,emoji:None,
                 source:Some("native-agent-candidate".into()),uninstallable:true,base_dir:None,file_path:None,missing_categories:Vec::new(),
-            }).collect()})
+            }));
+            status::Outcome::Available(status::Catalog {entries})
         })
     }
 

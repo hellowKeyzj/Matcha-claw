@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use foundation::{
     execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute},
@@ -13,41 +13,10 @@ use organization::{OrganizationHandle, TeamRunCoordinatorHandle};
 use provider_module::ProviderHandle;
 
 use super::{
-    AutostartOpenClawError, PeerCommand, PeerGlobalState, PeerKey, PeerLaneKey, PeerLaneState, PeerQuery,
-    RuntimeRestartCommandError, RuntimeStartCommandError, RuntimeStopCommandError,
-    command::RuntimeLifecycleCall,
+    AutostartOpenClawError, PeerCommand, PeerGlobalState, PeerKey, PeerLaneKey, PeerLaneState,
+    PeerQuery, PeerStartupState, RuntimeRestartCommandError, RuntimeStartCommandError,
+    RuntimeStopCommandError, command::RuntimeLifecycleCall,
 };
-
-#[derive(Clone)]
-pub(crate) struct PeerStartupState {
-    matcha_start: Arc<Mutex<Option<Result<StartOutcome, DriverStartFailure>>>>,
-    open_claw_start: Arc<Mutex<Option<Result<StartOutcome, DriverStartFailure>>>>,
-}
-
-impl PeerStartupState {
-    pub(crate) fn new() -> Self {
-        Self {
-            matcha_start: Arc::new(Mutex::new(None)),
-            open_claw_start: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    pub(crate) fn matcha_start_failure(&self) -> Option<crate::RuntimeStartFailure> {
-        self.matcha_start
-            .lock()
-            .expect("Matcha peer start result lock poisoned")
-            .as_ref()
-            .and_then(super::status::start_failure)
-    }
-
-    pub(crate) fn open_claw_start_failure(&self) -> Option<crate::RuntimeStartFailure> {
-        self.open_claw_start
-            .lock()
-            .expect("OpenClaw peer start result lock poisoned")
-            .as_ref()
-            .and_then(super::status::start_failure)
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct PeerShared {
@@ -64,9 +33,7 @@ pub(crate) struct PeerShared {
     team_run: TeamRunCoordinatorHandle,
     organization: OrganizationHandle,
     runtime_directory: Arc<RuntimeDriverDirectory>,
-    open_claw_runtime_events: Option<tokio::sync::mpsc::Sender<()>>,
-    matcha_start: Arc<Mutex<Option<Result<StartOutcome, DriverStartFailure>>>>,
-    open_claw_start: Arc<Mutex<Option<Result<StartOutcome, DriverStartFailure>>>>,
+    startup: PeerStartupState,
 }
 
 impl PeerShared {
@@ -124,44 +91,57 @@ impl PeerShared {
 
     fn runtime_state(&self, key: &PeerKey) -> crate::RuntimeState {
         if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::matcha_agent().endpoint() {
-            super::status::matcha_state(&self.runtime_directory, &self.matcha_startup_diagnostics)
+            super::status::matcha_state(
+                &self.runtime_directory,
+                &self.matcha_startup_diagnostics,
+                &self.admission,
+                &self.startup,
+            )
         } else if *key
             == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
         {
-            super::status::open_claw_state(&self.runtime_directory, &self.openclaw_startup_diagnostics)
+            super::status::open_claw_state(
+                &self.runtime_directory,
+                &self.openclaw_startup_diagnostics,
+                &self.admission,
+                &self.startup,
+            )
         } else {
             unreachable!("registered peer runtime must have a fixed status projection")
         }
     }
 
+    pub(super) fn startup(&self) -> &PeerStartupState {
+        &self.startup
+    }
+
     pub(super) fn open_claw_runtime_events(&self) -> Option<&tokio::sync::mpsc::Sender<()>> {
-        self.open_claw_runtime_events.as_ref()
+        self.startup.runtime_events()
     }
 
-    pub(super) fn record_matcha_start(&self, result: Result<StartOutcome, DriverStartFailure>) {
-        *self
-            .matcha_start
-            .lock()
-            .expect("Matcha peer start result lock poisoned") = Some(result);
-    }
-
-    pub(super) fn open_claw_start_result(
-        &self,
-    ) -> &Mutex<Option<Result<StartOutcome, DriverStartFailure>>> {
-        &self.open_claw_start
+    pub(super) async fn record_matcha_start(&self, result: Result<StartOutcome, DriverStartFailure>) {
+        let process = self.matcha_ready_projection.lock().await.process;
+        self.startup.record_matcha(result, process);
     }
 
     pub(super) fn record_open_claw_start(&self, result: Result<StartOutcome, DriverStartFailure>) {
-        *self
-            .open_claw_start
-            .lock()
-            .expect("OpenClaw peer start result lock poisoned") = Some(result);
+        self.startup.record_open_claw(
+            result,
+            self.runtime_directory
+                .lookup(
+                    &crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw()
+                        .endpoint(),
+                )
+                .and_then(|driver| {
+                    driver
+                        .host_lifecycle_ops()
+                        .and_then(|ops| ops.snapshot().process())
+                }),
+        );
     }
 
     pub(super) fn notify_open_claw_runtime(&self) {
-        if let Some(events) = self.open_claw_runtime_events() {
-            let _ = events.try_send(());
-        }
+        self.startup.notify();
     }
 }
 
@@ -183,7 +163,6 @@ impl PeerOwner {
         team_run: TeamRunCoordinatorHandle,
         organization: OrganizationHandle,
         runtime_directory: Arc<RuntimeDriverDirectory>,
-        open_claw_runtime_events: Option<tokio::sync::mpsc::Sender<()>>,
         startup: PeerStartupState,
     ) -> Self {
         Self {
@@ -203,9 +182,7 @@ impl PeerOwner {
                 team_run,
                 organization,
                 runtime_directory,
-                open_claw_runtime_events,
-                matcha_start: startup.matcha_start,
-                open_claw_start: startup.open_claw_start,
+                startup,
             },
         }
     }
@@ -288,8 +265,8 @@ impl OwnerSpec for PeerOwner {
 
 async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCommand) {
     let _reservation = match &mut command {
-        PeerCommand::AutostartOpenClaw { reservation, .. }
-        | PeerCommand::StartRuntime { reservation, .. }
+        PeerCommand::AutostartOpenClaw { .. } => None,
+        PeerCommand::StartRuntime { reservation, .. }
         | PeerCommand::StopRuntime { reservation, .. }
         | PeerCommand::RestartRuntime { reservation, .. }
         | PeerCommand::RepairRuntime { reservation, .. }
@@ -313,11 +290,20 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCom
             if snapshot.phase() == foundation::process::supervision::SupervisorPhase::Running
                 && snapshot.process() == Some(process)
             {
+                if shared.matcha_ready_projection().lock().await.process != Some(process) {
+                    shared.startup().begin_matcha();
+                }
                 let result = super::matcha::apply_ready_projections(shared, lifecycle).await;
-                shared.record_matcha_start(result.map(|()| StartOutcome::Started));
+                if result.is_ok() {
+                    shared.team_run().recover_materialization_receipts().await;
+                }
+                shared
+                    .record_matcha_start(result.map(|()| StartOutcome::Started))
+                    .await;
             }
         }
-        PeerCommand::AutostartOpenClaw { reply, .. } => {
+        PeerCommand::AutostartOpenClaw { reply, reservation } => {
+            let _reservation = reservation;
             let _ = reply.send(super::openclaw::autostart(shared).await);
         }
         PeerCommand::StartRuntime { call, .. } => {
@@ -489,6 +475,9 @@ async fn stop_runtime(
         return Err(RuntimeStopCommandError::AdmissionClosed);
     }
     let result = lifecycle.stop().await;
+    if result.is_ok() {
+        shared.startup().clear_matcha();
+    }
     super::status::runtime_stop_result(result)
         .map(|()| shared.runtime_state(key))
         .map_err(RuntimeStopCommandError::RuntimeStop)
@@ -502,17 +491,33 @@ async fn restart_runtime(
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
         return super::openclaw::restart_manual(shared).await;
     }
+    shared.startup().begin_matcha();
     let result = lifecycle.restart().await;
     let result = match result {
         Ok(outcome @ foundation::process::supervision::RestartOutcome::Restarted) => {
-            let projection = super::matcha::apply_ready_projections(shared, lifecycle).await;
-            shared.record_matcha_start(projection.clone().map(|()| StartOutcome::Started));
-            projection.map(|()| outcome).map_err(|_| {
-                crate::composition::runtime_ports::RuntimeLifecycleFailure::CompletionFailed
-            })
+            super::matcha::apply_ready_projections(shared, lifecycle)
+                .await
+                .map(|()| outcome)
+                .map_err(|_| {
+                    crate::composition::runtime_ports::RuntimeLifecycleFailure::CompletionFailed
+                })
         }
         other => other,
     };
+    shared.record_matcha_start(
+        result
+            .clone()
+            .map(|outcome| match outcome {
+                foundation::process::supervision::RestartOutcome::Restarted => {
+                    StartOutcome::Started
+                }
+                foundation::process::supervision::RestartOutcome::Cancelled { by, cleanup } => {
+                    StartOutcome::Cancelled { by, cleanup }
+                }
+            })
+            .map_err(super::status::lifecycle_start_failure),
+    )
+    .await;
     super::status::runtime_restart_result(result)
         .map(|()| shared.runtime_state(key))
         .map_err(RuntimeRestartCommandError::RuntimeRestart)
@@ -526,6 +531,7 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
                 shared.runtime_directory(),
                 shared.matcha_startup_diagnostics(),
                 shared.openclaw_startup_diagnostics(),
+                shared.startup(),
             ));
         }
         PeerQuery::OpenClawRepairStatus { reply } => {
@@ -535,6 +541,8 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             let _ = reply.send(super::status::open_claw_state(
                 shared.runtime_directory(),
                 shared.openclaw_startup_diagnostics(),
+                shared.admission(),
+                shared.startup(),
             ));
         }
         PeerQuery::OpenClawLogs { cursor, reply } => {
@@ -760,7 +768,7 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
 async fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
     match command {
         PeerCommand::AutostartMatcha | PeerCommand::MatchaReady { .. } => {
-            shared.record_matcha_start(Err(DriverStartFailure::Unsupported));
+            shared.record_matcha_start(Err(DriverStartFailure::Unsupported)).await;
         }
         PeerCommand::AutostartOpenClaw { reply, .. } => {
             shared.record_open_claw_start(Err(DriverStartFailure::Unsupported));

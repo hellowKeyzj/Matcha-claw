@@ -183,6 +183,15 @@ function writeLog(formatted: string): void {
 
 export type DebugMessage = string | (() => string | [string, ...unknown[]]);
 
+// High-frequency diagnostics stay off stdout/stderr: console writes can block the main thread.
+export function trace(level: LogLevel.DEBUG | LogLevel.INFO, message: DebugMessage, ...args: unknown[]): void {
+  if (currentLevel > level || process.env.MATCHACLAW_TRACE !== '1') return;
+  const resolved = typeof message === 'function' ? message() : message;
+  writeLog(typeof resolved === 'string'
+    ? formatMessage(LogLevel[level], resolved, ...args)
+    : formatMessage(LogLevel[level], ...resolved));
+}
+
 export function debug(message: DebugMessage, ...args: unknown[]): void {
   if (currentLevel > LogLevel.DEBUG || process.env.MATCHACLAW_TRACE !== '1') return;
   const resolved = typeof message === 'function' ? message() : message;
@@ -278,6 +287,7 @@ export async function listLogFiles(): Promise<Array<{ name: string; path: string
  * Logger namespace export
  */
 export const logger = {
+  trace,
   debug,
   info,
   warn,

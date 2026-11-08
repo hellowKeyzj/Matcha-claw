@@ -31,6 +31,43 @@ pub(crate) struct Message {
     pub item: SessionItem,
     pub tools: Vec<ToolView>,
 }
+impl Message {
+    pub(crate) fn retain_transcript_item(&mut self, row: &Value) -> bool {
+        let SessionItem::UserMessage {
+            item_id,
+            message_id,
+            status,
+            content,
+            ..
+        } = &mut self.item
+        else {
+            return true;
+        };
+        let pure_result = row
+            .pointer("/message/content")
+            .or_else(|| row.get("content"))
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                !blocks.is_empty() && blocks.iter().all(|block| block["type"] == "tool_result")
+            });
+        if !pure_result {
+            return true;
+        }
+        content.retain(|block| !matches!(block, SessionContent::ToolResult { .. }));
+        if content.is_empty() {
+            return false;
+        }
+        self.item = SessionItem::AssistantTurn {
+            item_id: std::mem::take(item_id),
+            run_id: None,
+            message_id: message_id.take(),
+            status: *status,
+            segments: std::mem::take(content),
+            text: String::new(),
+        };
+        true
+    }
+}
 fn id(value: &str) -> Result<&str, Failure> {
     if value.is_empty() || value.len() > MAX_ID_BYTES || value.chars().any(char::is_control) {
         Err(Failure::InvalidReadback)
@@ -169,8 +206,15 @@ fn project_message(
         .and_then(Value::as_str)
         .ok_or_else(|| rejected(row, "message.uuid_missing"))?)
     .map_err(|_| rejected(row, "message.uuid_invalid"))?;
-    let body = row
-        .pointer("/message/content")
+    let local_output = normalization::local_command_output(row).map(Value::String);
+    let kind = if local_output.is_some() {
+        "assistant"
+    } else {
+        kind
+    };
+    let body = local_output
+        .as_ref()
+        .or_else(|| row.pointer("/message/content"))
         .or_else(|| row.get("content"))
         .unwrap_or(&Value::Null);
     let blocks = match body {
@@ -330,6 +374,7 @@ fn project_message(
             item_id: uuid.to_owned(),
             message_id: Some(uuid.to_owned()),
             input_ids: Vec::new(),
+            notice: None,
             status,
             content,
             text,

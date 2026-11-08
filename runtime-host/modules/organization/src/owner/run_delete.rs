@@ -31,15 +31,44 @@ pub(super) async fn run_delete_and_purge(
         | Ok(BeginCancellationOutcome::Tombstoned) => (store.facts().run(&run_id).and_then(|run| run.runtime()).map(|runtime| runtime.bindings().to_vec()).unwrap_or_default(), false),
         Err(error) => return Err(error),
     };
-    let outcome = shared
-        .team_delete_role_sessions(run_id.clone(), bindings, abort_first, cancellation)
-        .await;
+    let outcome = delete_run_sessions(store, shared, run_id.clone(), bindings, abort_first, cancellation).await;
     complete_team_run_delete_native_evidence(store, team_run,
         run_id,
         &idempotency_key,
         outcome,
         observed_at,
     )
+}
+
+pub(super) fn delete_run_sessions(
+    store: &OrganizationStore,
+    shared: &OrganizationShared,
+    run_id: GraphRunId,
+    bindings: Vec<organization::RoleSessionReceipt>,
+    abort_first: bool,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> runtime_directory::OwnedRuntimeFuture<NativeDeletionEvidence> {
+    let cleanup_cancellation = cancellation.child_token();
+    let pending = store.facts().run(&run_id).map(|run| run.role_session_intents().values()
+        .filter(|intent| !run.session_installed(&intent.binding))
+        .map(|intent| shared.team_delete_role_sessions(
+            run_id.clone(), vec![intent.binding.clone()], false, cleanup_cancellation.clone(),
+        )).collect::<Vec<_>>()).unwrap_or_default();
+    let mut native = shared.team_delete_role_sessions(run_id, bindings, abort_first, cancellation);
+    Box::pin(async move {
+        let _cleanup_guard = cleanup_cancellation.drop_guard();
+        let cleanup = async move {
+            for pending in pending {
+                let _ = pending.await;
+            }
+        };
+        // Unconfirmed additions get only the time spent deleting confirmed sessions.
+        tokio::select! {
+            biased;
+            outcome = &mut native => outcome,
+            _ = cleanup => native.await,
+        }
+    })
 }
 
 pub(super) fn complete_team_run_delete_native_evidence(

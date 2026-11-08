@@ -236,7 +236,7 @@ export function projectMessages(
   // Admission owns this wait until native output or an associated terminal takes over.
   const yielded = incoming?.runPhase === 'idle' && incoming.activeRunId !== null
     && incoming.activeRunId === current.activeRunId;
-  const preservePending = incoming !== null && !yielded && !isRunActive(incoming) && isRunActive(current)
+  const preservePending = incoming !== null && !incoming.lastIssue && !yielded && !isRunActive(incoming) && isRunActive(current)
     && current.pendingTurnKey !== null && !pendingTurnTerminated(current, projection.terminalRunIds);
   let runtime = incoming === null ? current : preservePending ? {
     ...current,
@@ -244,7 +244,7 @@ export function projectMessages(
     imageGeneration: incoming.imageGeneration,
   } : reconcileRuntimeProjection(current, incoming);
   if (record.abort?.phase === 'stopping' && record.abort.imageTaskIds?.length
-    && current.runPhase === 'stopping' && incoming !== null
+    && current.runPhase === 'stopping' && incoming !== null && !incoming.lastIssue
     && (incoming.activeRunId === current.activeRunId || incoming.activeRunId === null)
     && !pendingTurnTerminated(current, projection.terminalRunIds)
     && !imageTaskCancellationSettled(record.abort, items)) {
@@ -273,6 +273,8 @@ export function projectMessages(
     items: nextItems,
     runtime,
     abort: runtime.runPhase === 'stopping' || runtime.lastIssue?.code?.startsWith('chat.abort.') === true
+      || runtime.runPhase === 'error' && runtime.activeRunId !== null
+        && (runtime.lastIssue?.code === 'session.runtime.unknown' || runtime.lastIssue?.code === 'session.runtime.unavailable')
       ? record.abort ?? null : null,
   };
 }
@@ -311,6 +313,10 @@ export function terminalRunIds(
   observedRunIds: readonly string[],
 ): readonly string[] {
   return observedRunIds.length ? [...exactRunIds, ...observedRunIds] : exactRunIds;
+}
+
+export function settleReceipts(record: ChatSessionRecord): ChatSessionRecord {
+  return record;
 }
 
 export function resolveAbortRunId(record: ChatSessionRecord): string | undefined {

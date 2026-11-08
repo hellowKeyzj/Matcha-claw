@@ -24,7 +24,7 @@ export function FailureScreen({ message }: { message: string | null }) {
         <AlertCircle className="h-[18px] w-[18px]" />
       </div>
       <h2 className="max-w-2xl text-[1.9rem] font-semibold tracking-[-0.045em] text-foreground md:text-[2.05rem]">
-        {t('status.error')}
+        {t('common:status.error')}
       </h2>
       <p className="mt-2 max-w-2xl text-[14px] leading-6 text-muted-foreground md:text-[15px] md:leading-7">
         {message || t('common:status.error')}

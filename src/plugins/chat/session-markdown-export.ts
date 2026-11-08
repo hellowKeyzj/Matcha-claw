@@ -1,3 +1,4 @@
+import i18next from 'i18next';
 import type { ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
 import type { MessageContextTag } from '@/plugins/message-rendering/extensions';
 import { readTaggedMessage } from '@/plugins/message-rendering/tagged-context';
@@ -257,7 +258,8 @@ function renderAssistantItemMarkdown(item: Extract<ChatRenderItem, { kind: 'assi
 
 function renderSystemItemMarkdown(item: Extract<ChatRenderItem, { kind: 'system' }>): string[] {
   const contentLines: string[] = [];
-  appendText(contentLines, item.text);
+  appendText(contentLines, item.notice === 'restart-recovery'
+    ? i18next.t('systemNotice.restartRecovery', { ns: 'chat' }) : item.text);
   return [
     `## System · ${item.level}`,
     '',

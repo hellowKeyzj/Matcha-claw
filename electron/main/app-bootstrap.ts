@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { ApplicationPluginOwner } from './app-plugins/owner';
 import { AppPluginPackageWorker } from './app-plugins/package-client';
 import { AppPluginHost, type AppPluginHostOptions } from './app-plugins/host';
+import { createAppPluginExecution } from './app-plugins/execution';
+import { createAppPluginServices } from './app-plugins/services';
+import { registerAppPluginExecutionTargets } from '../api/ipc/app-plugin-execution-targets';
 import { collectPluginVideo, generatePluginAudio, generatePluginMedia, generatePluginText, listPluginMediaModels, queryPluginVideo, submitPluginVideo } from './app-plugins/media';
 import { startAppPluginAgentGateway } from './app-plugins/agent-gateway';
 import type { RuntimeHostApiDependencies } from '../api/context';
@@ -56,6 +59,16 @@ import { createWorldPrivateOperations } from './world/private-operations';
 import { createChannelAuthorization } from './channels/authorization';
 import { composeLicenseService } from './license/composition';
 import { createIab } from './iab/composition';
+import { createAccess } from './access';
+import { getRuntimeHostStateDir } from '../utils/paths';
+import { createNetworkAccess } from './network-access';
+import { createInterconnect } from './interconnect';
+import { createSharedCapabilities } from './interconnect/capabilities';
+import { createRuntimeCapabilityProvider } from './interconnect/capability-runtime';
+import { createWikiCapabilityProvider } from './interconnect/capability-wiki';
+import { createPluginCapabilityProvider } from './app-plugins/remote-capabilities';
+import { createAgentCapabilityProvider } from './interconnect/capability-agent';
+import { createSharedFolders } from './interconnect/capability-folder';
 import { registerIabHandlers } from '../api/ipc/iab-ipc';
 import { registerAppPluginConfirmationHandlers } from '../api/ipc/app-plugin-confirmation';
 
@@ -242,8 +255,19 @@ export function bootstrapMainApplication(deps: {
     if (!delivery) throw new Error('Model delivery is unavailable.');
     return generatePluginText(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
   };
+  const appPluginExecutionTargets = registerAppPluginExecutionTargets(mainWindow);
+  const appPluginExecution = createAppPluginExecution({
+    getTransports: async () => { await apiRuntime; return transportBundle!; },
+    listTeams: async () => ({ teams: appPluginExecutionTargets.listTeams() }),
+  });
+  const appPluginServices = createAppPluginServices({
+    rootDir: appPluginRoot,
+    getTransports: async () => { await apiRuntime; return transportBundle!.hostApiTransports; },
+  });
   const appPluginHost = new AppPluginHost({
     rootDir: appPluginRoot, owner: appPlugins, packageWorker: appPluginPackages,
+    execute: appPluginExecution.execute,
+    service: appPluginServices.service,
     publish: (event) => deps.hostEventBus.emit('app-plugins:runtime', event),
     publishConfirmation: (event) => deps.hostEventBus.emit('app-plugins:confirmation', event),
     list: async (request, signal) => {
@@ -305,12 +329,47 @@ export function bootstrapMainApplication(deps: {
     owner: appPlugins, host: appPluginHost,
     onPreview: (developmentId) => deps.hostEventBus.emit('app-plugins:preview', { developmentId }),
     root: join(app.getPath('userData'), 'app-plugin-agent'),
-    sdkArchive: app.isPackaged ? join(process.resourcesPath, 'app-plugins', 'sdk.tgz') : join(app.getAppPath(), 'sdk', 'app-plugins', 'matcha-app-plugins-sdk-1.0.0.tgz'),
+    sdkArchive: app.isPackaged ? join(process.resourcesPath, 'app-plugins', 'sdk.tgz') : join(app.getAppPath(), 'sdk', 'app-plugins', 'matcha-app-plugins-sdk-1.2.0.tgz'),
   }));
   const appPluginGatewaySettled = appPluginAgentGateway.then(() => undefined, () => {
     logger.warn('[AppPlugins] Agent SDK gateway unavailable; existing runtimes will start without plugin development tools');
   });
   const shutdown = new AbortController();
+  const access = createAccess({ root: join(getRuntimeHostStateDir(), 'access') });
+  const networkAccess = createNetworkAccess({
+    root: join(app.getPath('userData'), 'network-access'),
+    getHostName: async () => {
+      const response = await access.read(shutdown.signal);
+      if (response.status !== 200) throw new Error(response.body.error);
+      return response.body.host.name;
+    },
+    receive: async (request, signal) => {
+      if (signal.aborted || shutdown.signal.aborted) return { status: 503, body: { success: false, error: 'unavailable' } };
+      if ('kind' in request && request.kind === 'interconnect') {
+        const response = await (await interconnect).receive(request as import('../../src/types/desktop/interconnect').InterconnectEnvelope);
+        return 'kind' in response ? response : { status: 503, body: { success: false, error: 'unavailable' } };
+      }
+      return { status: 400, body: { success: false, error: 'invalid-request' } };
+    },
+  });
+  void networkAccess.catch(() => undefined);
+  const sharedFolders = createSharedFolders();
+  const interconnect = createInterconnect({
+    root: join(app.getPath('userData'), 'interconnect'), network: networkAccess, signal: shutdown.signal,
+    access, folders: sharedFolders,
+    capabilities: createSharedCapabilities([
+      createRuntimeCapabilityProvider(async () => { await apiRuntime; return transportBundle!.hostApiTransports; }),
+      createWikiCapabilityProvider(async () => { await apiRuntime; return transportBundle!.hostApiTransports; }),
+      createPluginCapabilityProvider(appPlugins, appPluginHost),
+      createAgentCapabilityProvider(async () => { await apiRuntime; return transportBundle!; }),
+      { id: 'folders', async list() {
+        const response = await access.folders(shutdown.signal);
+        if (response.status !== 200) throw new Error('Shared folders are unavailable.');
+        return response.body.map(sharedFolders.folderCapability);
+      } },
+    ]),
+  });
+  void interconnect.catch(() => undefined);
   const iab = createIab({
     window: deps.getMainWindow,
     emit: (event) => deps.hostEventBus.emit('iab:event', event),
@@ -453,12 +512,19 @@ export function bootstrapMainApplication(deps: {
   const cloudAccountService = createCloudAccountService(cloudAccountClient, accountRuntime);
   const apiRuntime = runtimeSetup.then(({ api }) => api);
   void apiRuntime.catch(() => undefined);
+  void apiRuntime.then(async () => {
+    shutdown.signal.throwIfAborted();
+    await appPluginHost.start(await appPlugins.list());
+  }).catch(() => logger.warn('[AppPlugins] Background application activation did not complete'));
   const apiContext = {
     licenseService,
     cloudAccountService,
     appPlugins,
     appPluginHost,
     appPluginAgentGateway,
+    access,
+    networkAccess,
+    interconnect,
     eventBus: deps.hostEventBus,
     sessionObservers,
     runtime: apiRuntime,
@@ -470,6 +536,7 @@ export function bootstrapMainApplication(deps: {
   void providerAuthRuntime.catch(() => undefined);
   const providerAuth = createProviderPrivateAuth(deps.getMainWindow, providerAuthRuntime, shutdown.signal);
   registerProviderPrivateAuthHandlers(providerAuth);
+  void networkAccess.then((network) => network.startConfigured()).catch(() => logger.warn('[Access] Network component could not start'));
   const worldPrivate = createWorldPrivateOperations(
     runtimeSetup.then(({ api }) => api.runtimeHostTransports.worldTransport), shutdown.signal,
     apiRuntime.then(({ runtimeHost }) => runtimeHost),
@@ -517,11 +584,14 @@ export function bootstrapMainApplication(deps: {
         hostApiServer.closeAllConnections();
       });
       void serverClosed?.catch(() => undefined);
+      const interconnectClosed = interconnect.then((owner) => owner.close(), () => undefined).finally(() => sharedFolders.close());
+      void interconnectClosed.catch(() => undefined);
       const appPluginsClosed = appPluginAgentGateway.then((gateway) => gateway.close(), () => undefined)
         .finally(() => appPluginHost.close()).finally(() => appPlugins.close()).finally(() => appPluginPackages.close());
       void appPluginsClosed.catch(() => undefined);
       stopIabIpc();
       stopAppPluginConfirmation();
+      appPluginExecutionTargets.close();
       const iabClosed = iab.close();
       void iabClosed.catch(() => undefined);
       shutdownStage = 'startup';
@@ -550,9 +620,18 @@ export function bootstrapMainApplication(deps: {
             shutdownStage = 'iab';
             await iabClosed;
           } finally {
-            shutdownStage = 'runtime-host';
-            const runtimeHost = directRuntimeHost ?? startedRuntimeHost;
-            if (runtimeHost) await runtimeHost.stop();
+            try {
+              shutdownStage = 'network-access';
+              try { await interconnectClosed; }
+              finally {
+                try { await networkAccess.then((network) => network.close()); }
+                finally { await access.close(); }
+              }
+            } finally {
+              shutdownStage = 'runtime-host';
+              const runtimeHost = directRuntimeHost ?? startedRuntimeHost;
+              if (runtimeHost) await runtimeHost.stop();
+            }
           }
         } finally {
           shutdownStage = 'delivery';
@@ -573,7 +652,7 @@ export function bootstrapMainApplication(deps: {
   const forceClose = (): Promise<void> => {
     shutdown.abort();
     forceCloseTask ??= (async () => {
-      const results = await Promise.allSettled([iab.close(), appPluginAgentGateway.then((gateway) => gateway.forceClose(), () => undefined), appPluginHost.forceClose(), appPlugins.close(), appPluginPackages.forceClose(), ...[...heldRuntimeHosts].map((host) => host.forceKill())]);
+      const results = await Promise.allSettled([interconnect.then((owner) => owner.close(), () => undefined).finally(() => sharedFolders.close()), networkAccess.then((network) => network.close()), access.close(), iab.close(), appPluginAgentGateway.then((gateway) => gateway.forceClose(), () => undefined), appPluginHost.forceClose(), appPlugins.close(), appPluginPackages.forceClose(), ...[...heldRuntimeHosts].map((host) => host.forceKill())]);
       const failures = results.filter((result) => result.status === 'rejected');
       if (failures.length > 0) {
         throw new AggregateError(failures.map((result) => result.reason), 'Runtime-host force confirmation failed');

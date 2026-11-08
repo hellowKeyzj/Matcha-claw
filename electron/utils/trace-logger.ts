@@ -1,4 +1,4 @@
-import { logger, type DebugMessage } from './logger';
+import { logger, LogLevel, type DebugMessage } from './logger';
 
 export function isTraceEnabled(): boolean {
   return process.env.MATCHACLAW_TRACE === '1';
@@ -6,7 +6,7 @@ export function isTraceEnabled(): boolean {
 
 export function traceDebug(message: DebugMessage, ...args: unknown[]): void {
   if (!isTraceEnabled()) return;
-  logger.debug(message, ...args);
+  logger.trace(LogLevel.DEBUG, message, ...args);
 }
 
 export function startupTrace(source: string, phase: string, detail?: () => Record<string, unknown>): void {

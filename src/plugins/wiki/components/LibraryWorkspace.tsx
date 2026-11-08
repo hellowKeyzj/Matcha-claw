@@ -26,6 +26,8 @@ export type LibraryWorkspaceProps = Readonly<{
   activeTab: WikiWorkspaceTab;
   sourceView: WikiSourceView;
   busy: string | null;
+  writeBusy: string | null;
+  refreshing: boolean;
   panels: WikiWorkspacePanels;
   retainedTabIds: readonly string[];
   activity: ReactNode;
@@ -58,6 +60,8 @@ export function LibraryWorkspace({
   activeTab,
   sourceView,
   busy,
+  writeBusy,
+  refreshing,
   panels,
   retainedTabIds,
   activity,
@@ -93,12 +97,7 @@ export function LibraryWorkspace({
       className="flex h-full min-h-[620px] flex-col overflow-hidden"
     >
       <div ref={layoutRef} className="flex min-h-0 flex-1">
-        {sidebarCollapsed ? (
-          <div className="flex w-9 shrink-0 flex-col items-center gap-1 border-r bg-[hsl(var(--shell-surface-muted))] pt-2 [border-color:hsl(var(--shell-border))]">
-            <Button type="button" size="icon" variant="ghost" onClick={toggleSidebar} className="h-7 w-7" title={t('sidebar.expand')} aria-label={t('sidebar.expand')}><PanelLeftOpen className="h-4 w-4" /></Button>
-            <Button type="button" size="icon" variant="ghost" onClick={onBackHome} disabled={busy !== null} className="h-7 w-7" title={t('workspace.library')} aria-label={t('workspace.library')}><Home className="h-4 w-4" /></Button>
-          </div>
-        ) : (
+        {!sidebarCollapsed ? (
           <>
             <aside style={{ width: sidebarWidth }} className="flex min-w-0 shrink-0 flex-col overflow-hidden border-r bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
               <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border/70 px-4">
@@ -113,7 +112,7 @@ export function LibraryWorkspace({
               </div>
               <div className="min-h-0 flex-1 overflow-auto p-2">
                 {sidebarMode === 'knowledge' ? (
-                  <KnowledgeTreePanel pages={pages} sourceFiles={sourceFiles} selectedPath={selectedPath} busy={busy} loading={navigationLoading} error={navigationError} onSelectFile={onSelectFile} onDeletePage={onDeletePage} onRetry={onRetryNavigation} />
+                  <KnowledgeTreePanel pages={pages} sourceFiles={sourceFiles} selectedPath={selectedPath} busy={busy} writeBusy={writeBusy} loading={navigationLoading} error={navigationError} onSelectFile={onSelectFile} onDeletePage={onDeletePage} onRetry={onRetryNavigation} />
                 ) : (
                   <WikiTreePanel files={files} expandedDirectories={expandedDirectories} loadedDirectories={loadedDirectories} loadingDirectories={loadingDirectories} directoryErrors={directoryErrors} selectedPath={selectedPath} busy={busy} onSelectFile={onSelectFile} onToggleDirectory={onToggleDirectory} onRetryDirectory={onRetryDirectory} />
                 )}
@@ -135,11 +134,17 @@ export function LibraryWorkspace({
               onKeyDown={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setSidebarWidth((width) => Math.max(150, Math.min(400, width + (event.key === 'ArrowRight' ? 10 : -10)))); } }}
             />
           </>
-        )}
+        ) : null}
 
         <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[hsl(var(--shell-surface))]">
           <div className="flex h-12 shrink-0 items-center gap-3 border-b px-5 [border-color:hsl(var(--shell-border))]">
-            <TabsList className="h-12 min-h-0 flex-1 gap-1 overflow-x-auto rounded-none border-0 bg-transparent p-0 shadow-none">
+            {sidebarCollapsed ? (
+              <div className="flex shrink-0 items-center gap-1 border-r pr-3 [border-color:hsl(var(--shell-border))]">
+                <Button type="button" size="icon" variant="ghost" onClick={toggleSidebar} className="h-8 w-8 rounded-full" title={t('sidebar.expand')} aria-label={t('sidebar.expand')}><PanelLeftOpen className="h-4 w-4" /></Button>
+                <Button type="button" size="icon" variant="ghost" onClick={onBackHome} disabled={busy !== null} className="h-8 w-8 rounded-full" title={t('workspace.library')} aria-label={t('workspace.library')}><Home className="h-4 w-4" /></Button>
+              </div>
+            ) : null}
+            <TabsList className="h-12 min-h-0 min-w-0 flex-1 gap-1 overflow-x-auto rounded-none border-0 bg-transparent p-0 shadow-none">
               {tabs.map((tab) => {
                 const Icon = tab.icon;
                 return (
@@ -170,7 +175,7 @@ export function LibraryWorkspace({
               >
                 <Settings2 className="h-4 w-4" />
               </Button>
-              <Button type="button" size="icon" variant="ghost" onClick={onRefresh} disabled={busy !== null} className="h-8 w-8 rounded-full" title={t('common.refresh')}>
+              <Button type="button" size="icon" variant="ghost" onClick={onRefresh} disabled={busy !== null || refreshing} className="h-8 w-8 rounded-full" title={t('common.refresh')}>
                 <RefreshCw className="h-4 w-4" />
               </Button>
             </div>

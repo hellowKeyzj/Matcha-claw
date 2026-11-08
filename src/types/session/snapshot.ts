@@ -73,6 +73,58 @@ export interface SessionCatalogItem {
 
 export type SessionApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 
+export type SessionApprovalText = { text: string; totalBytes: number };
+export type SessionApprovalTarget = SessionApprovalText & { name: 'command' | 'file_path' | 'path' | 'url' };
+export type SessionApprovalInput =
+  | { kind: 'complete'; value: Record<string, unknown> }
+  | { kind: 'omitted'; reason: 'size_limit'; totalBytes: number; targets: SessionApprovalTarget[] };
+export type SessionApprovalScope =
+  | { kind: 'message-send'; target: SessionApprovalText; recipientCount: number; recipients?: SessionApprovalText[]; audience?: 'internal' | 'external' }
+  | { kind: 'payment'; amount: SessionApprovalText; currency: SessionApprovalText; target: SessionApprovalText }
+  | { kind: 'external-post'; target: SessionApprovalText; visibility: 'public' | 'restricted' }
+  | { kind: 'standing-grant'; automation: SessionApprovalText; command: SessionApprovalText; expiresInDays?: number };
+export type SessionApprovalDetails =
+  | {
+    kind: 'tool';
+    toolCallId: string;
+    toolName: string;
+    input: SessionApprovalInput;
+    decisionReason: SessionApprovalText | null;
+    blockedPath: SessionApprovalText | null;
+  }
+  | {
+    kind: 'exec';
+    commandText: SessionApprovalText;
+    commandPreview?: SessionApprovalText | null;
+    warningText?: SessionApprovalText | null;
+    host?: SessionApprovalText | null;
+    nodeId?: SessionApprovalText | null;
+    agentId?: SessionApprovalText | null;
+    scope?: SessionApprovalScope;
+    allowedDecisions: SessionApprovalDecision[];
+  }
+  | {
+    kind: 'plugin';
+    title: SessionApprovalText;
+    description: SessionApprovalText;
+    detail?: SessionApprovalText;
+    severity: 'info' | 'warning' | 'critical';
+    pluginId?: SessionApprovalText | null;
+    toolName?: SessionApprovalText | null;
+    agentId?: SessionApprovalText | null;
+    scope?: SessionApprovalScope;
+    allowedDecisions: SessionApprovalDecision[];
+    externalResolution?: { label: SessionApprovalText; decisions: ('allow-once' | 'allow-always')[] };
+  }
+  | {
+    kind: 'system-agent';
+    title: SessionApprovalText;
+    description: SessionApprovalText;
+    proposalHash: string;
+    agentId?: SessionApprovalText | null;
+    allowedDecisions: ['allow-once', 'deny'];
+  };
+
 export interface SessionApprovalRequestItem {
   id: string;
   sessionKey: string;
@@ -82,6 +134,7 @@ export interface SessionApprovalRequestItem {
   command?: string;
   allowedDecisions: ReadonlyArray<SessionApprovalDecision>;
   request?: Record<string, unknown>;
+  details?: SessionApprovalDetails;
   createdAtMs: number;
   expiresAtMs?: number;
 }
@@ -169,6 +222,7 @@ export type SessionWireItem =
     itemId: string;
     messageId: string | null;
     inputIds?: string[];
+    notice?: 'restart-recovery';
     text: string;
     content: SessionWireContent[];
     status: SessionWireItemStatus;
@@ -215,6 +269,7 @@ export type SessionWireApproval = {
   runId: string | null;
   phase: 'requested' | 'resolved';
   optionIds: string[];
+  details: SessionApprovalDetails | null;
 };
 
 export type SessionWireRuntimeActivity = 'compacting';
@@ -282,6 +337,13 @@ export type SessionWireWindow = {
   isAtLatest: boolean;
 };
 
+export type SessionRunTiming = {
+  runId: string;
+  startedAtMs: number;
+  endedAtMs: number | null;
+  inputMessageId: string | null;
+};
+
 export type SessionInputReceipt =
   | { state: 'pending'; inputId: string; queued?: true; cancelled?: true }
   | { state: 'consumed'; inputId: string; messageId: string };
@@ -291,6 +353,7 @@ export type SessionView = {
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
   inputReceipts?: SessionInputReceipt[];
+  runTimings: SessionRunTiming[];
   goal: SessionGoalView;
   ownership: SessionOwnership | null;
   identity: SessionWireIdentity;
@@ -319,6 +382,7 @@ export type SessionRecoveryReason =
 
 export type SessionChange =
   | { kind: 'runPhaseChanged'; runId: string; phase: SessionWireRuntime['phase'] }
+  | { kind: 'runTimingUpdated'; timing: SessionRunTiming }
   | { kind: 'messageDelta'; itemId: string; runId: string | null; messageId: string | null; text: string; replace: boolean; status: SessionWireItemStatus }
   | { kind: 'messageUpdated'; item: SessionWireItem }
   | { kind: 'messageReplaced'; item: SessionWireItem }
@@ -345,6 +409,7 @@ export type SessionProjectionSnapshot = {
   sessionKey: string;
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
+  runTimings: SessionRunTiming[];
   goal: SessionGoalView;
   ownership: SessionOwnership | null;
   identity: SessionWireIdentity;
@@ -429,7 +494,7 @@ function isPayloadValue(value: unknown): boolean {
   return text !== undefined
     && utf8ByteLength(text) <= MAX_TEXT_BYTES
     && !payloadValueContainsNul(value)
-    && (value === null || typeof value !== 'object' || value.constructor === Object || Array.isArray(value));
+    && (value === null || typeof value !== 'object' || Object.getPrototypeOf(value) === Object.prototype || Array.isArray(value));
 }
 
 function payloadValueContainsNul(value: unknown): boolean {
@@ -661,9 +726,24 @@ function decodeInputReceipts(value: unknown): SessionInputReceipt[] | null {
   return receipts as SessionInputReceipt[];
 }
 
+export function isSessionRunTiming(value: unknown): value is SessionRunTiming {
+  return isRecord(value)
+    && hasExactKeys(value, ['runId', 'startedAtMs', 'endedAtMs', 'inputMessageId'])
+    && isNonEmptyIdentifier(value.runId) && !value.runId.includes('\u007f')
+    && isSafeInteger(value.startedAtMs) && value.startedAtMs >= 0
+    && (value.endedAtMs === null || isSafeInteger(value.endedAtMs) && value.endedAtMs >= value.startedAtMs)
+    && (value.inputMessageId === null || isNonEmptyIdentifier(value.inputMessageId) && !value.inputMessageId.includes('\u007f'));
+}
+
+export function isSessionRunTimings(value: unknown): value is SessionRunTiming[] {
+  return Array.isArray(value) && value.length <= MAX_ITEMS && value.every(isSessionRunTiming)
+    && new Set(value.map((timing) => timing.runId)).size === value.length;
+}
+
 function decodeItem(value: unknown): SessionWireItem | null {
   if (!isRecord(value) || typeof value.kind !== 'string') return null;
-  if (value.kind === 'userMessage' && hasAllowedKeys(value, ['kind', 'itemId', 'messageId', 'text', 'content', 'status'], ['inputIds'])
+  if (value.kind === 'userMessage' && hasAllowedKeys(value, ['kind', 'itemId', 'messageId', 'text', 'content', 'status'], ['inputIds', 'notice'])
+    && (!Object.hasOwn(value, 'notice') || value.notice === 'restart-recovery')
     && isNonEmptyIdentifier(value.itemId)
     && (value.messageId === null || isNonEmptyIdentifier(value.messageId))
     && (!Object.hasOwn(value, 'inputIds') || isInputIds(value.inputIds)
@@ -673,7 +753,7 @@ function decodeItem(value: unknown): SessionWireItem | null {
     && value.content.length <= MAX_SEGMENTS
     && value.content.every((item) => decodeContent(item) !== null)
     && isItemStatus(value.status)) {
-    return { kind: 'userMessage', itemId: value.itemId, messageId: value.messageId, ...(value.inputIds === undefined ? {} : { inputIds: [...value.inputIds as string[]] }), text: value.text, content: value.content.map((item) => decodeContent(item)!), status: value.status };
+    return { kind: 'userMessage', itemId: value.itemId, messageId: value.messageId, ...(value.inputIds === undefined ? {} : { inputIds: [...value.inputIds as string[]] }), ...(value.notice === 'restart-recovery' ? { notice: value.notice } : {}), text: value.text, content: value.content.map((item) => decodeContent(item)!), status: value.status };
   }
   if (value.kind === 'assistantTurn' && hasExactKeys(value, ['kind', 'itemId', 'runId', 'messageId', 'status', 'segments', 'text'])
     && isNonEmptyIdentifier(value.itemId)
@@ -726,16 +806,126 @@ function decodeTool(value: unknown): SessionWireTool | null {
     : null;
 }
 
+export const MAX_APPROVAL_TEXT_BYTES = MAX_TEXT_BYTES;
+export const MAX_APPROVAL_TARGET_BYTES = 4096;
+
+function isApprovalPreview(text: unknown, totalBytes: unknown, limit: number): boolean {
+  if (typeof text !== 'string' || text.includes('\0') || !isSafeInteger(totalBytes) || totalBytes < 0) return false;
+  const bytes = utf8ByteLength(text);
+  return bytes <= limit && totalBytes >= bytes;
+}
+
+function isApprovalText(value: unknown, nonempty = false): value is SessionApprovalText {
+  return isRecord(value) && hasExactKeys(value, ['text', 'totalBytes'])
+    && isApprovalPreview(value.text, value.totalBytes, MAX_APPROVAL_TEXT_BYTES)
+    && (!nonempty || (value.totalBytes as number) > 0);
+}
+
+function isApprovalInput(value: unknown): value is SessionApprovalInput {
+  if (!isRecord(value)) return false;
+  if (value.kind === 'complete') return hasExactKeys(value, ['kind', 'value'])
+    && isRecord(value.value) && isPayloadValue(value.value);
+  if (value.kind !== 'omitted' || !hasExactKeys(value, ['kind', 'reason', 'totalBytes', 'targets'])
+    || value.reason !== 'size_limit' || !isSafeInteger(value.totalBytes) || value.totalBytes <= MAX_TEXT_BYTES
+    || !Array.isArray(value.targets) || value.targets.length > 4) return false;
+  const names = new Set<string>();
+  return value.targets.every((target) => {
+    if (!isRecord(target) || !hasExactKeys(target, ['name', 'text', 'totalBytes'])
+      || typeof target.name !== 'string' || !['command', 'file_path', 'path', 'url'].includes(target.name)
+      || names.has(target.name) || !isApprovalPreview(target.text, target.totalBytes, MAX_APPROVAL_TARGET_BYTES)
+      || (target.totalBytes as number) > (value.totalBytes as number)) return false;
+    names.add(target.name);
+    return true;
+  });
+}
+
+function isApprovalScope(value: unknown): value is SessionApprovalScope {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case 'message-send':
+      return hasAllowedKeys(value, ['kind', 'target', 'recipientCount'], ['recipients', 'audience'])
+        && isApprovalText(value.target, true) && isSafeInteger(value.recipientCount)
+        && value.recipientCount >= 1 && value.recipientCount <= 1_000_000
+        && (!Object.hasOwn(value, 'recipients') || Array.isArray(value.recipients) && value.recipients.length <= 5
+          && value.recipients.every((recipient) => isApprovalText(recipient, true)))
+        && (!Object.hasOwn(value, 'audience') || value.audience === 'internal' || value.audience === 'external');
+    case 'payment':
+      return hasExactKeys(value, ['kind', 'amount', 'currency', 'target']) && isApprovalText(value.amount, true)
+        && isApprovalText(value.currency, true) && isApprovalText(value.target, true);
+    case 'external-post':
+      return hasExactKeys(value, ['kind', 'target', 'visibility']) && isApprovalText(value.target, true)
+        && (value.visibility === 'public' || value.visibility === 'restricted');
+    case 'standing-grant':
+      return hasAllowedKeys(value, ['kind', 'automation', 'command'], ['expiresInDays'])
+        && isApprovalText(value.automation, true) && isApprovalText(value.command, true)
+        && (!Object.hasOwn(value, 'expiresInDays') || isSafeInteger(value.expiresInDays)
+          && value.expiresInDays >= 1 && value.expiresInDays <= 3650);
+    default:
+      return false;
+  }
+}
+
+function isApprovalDecisions(value: unknown): value is SessionApprovalDecision[] {
+  return Array.isArray(value) && value.length >= 1 && value.length <= 3 && value.includes('deny')
+    && value.every((decision) => decision === 'allow-once' || decision === 'allow-always' || decision === 'deny')
+    && new Set(value).size === value.length;
+}
+
+function isOptionalApprovalText(value: Record<string, unknown>, key: string, nonempty = false): boolean {
+  return !Object.hasOwn(value, key) || value[key] === null || isApprovalText(value[key], nonempty);
+}
+
+export function isSessionApprovalDetails(value: unknown): value is SessionApprovalDetails {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case 'tool':
+      return hasExactKeys(value, ['kind', 'toolCallId', 'toolName', 'input', 'decisionReason', 'blockedPath'])
+        && isNonEmptyIdentifier(value.toolCallId) && isNonEmptyIdentifier(value.toolName) && isApprovalInput(value.input)
+        && (value.decisionReason === null || isApprovalText(value.decisionReason))
+        && (value.blockedPath === null || isApprovalText(value.blockedPath));
+    case 'exec':
+      return hasAllowedKeys(value, ['kind', 'commandText', 'allowedDecisions'], ['commandPreview', 'warningText', 'host', 'nodeId', 'agentId', 'scope'])
+        && isApprovalText(value.commandText, true)
+        && ['commandPreview', 'warningText', 'host'].every((key) => isOptionalApprovalText(value, key))
+        && ['nodeId', 'agentId'].every((key) => isOptionalApprovalText(value, key, true))
+        && (!Object.hasOwn(value, 'scope') || isApprovalScope(value.scope)) && isApprovalDecisions(value.allowedDecisions);
+    case 'plugin': {
+      if (!hasAllowedKeys(value, ['kind', 'title', 'description', 'severity', 'allowedDecisions'], ['detail', 'pluginId', 'toolName', 'agentId', 'scope', 'externalResolution'])
+        || !isApprovalText(value.title, true) || !isApprovalText(value.description, true)
+        || Object.hasOwn(value, 'detail') && !isApprovalText(value.detail, true)
+        || !['info', 'warning', 'critical'].includes(value.severity as string)
+        || !['pluginId', 'toolName', 'agentId'].every((key) => isOptionalApprovalText(value, key, true))
+        || Object.hasOwn(value, 'scope') && !isApprovalScope(value.scope)
+        || !isApprovalDecisions(value.allowedDecisions)) return false;
+      const external = value.externalResolution;
+      return !Object.hasOwn(value, 'externalResolution') || isRecord(external)
+        && hasExactKeys(external, ['label', 'decisions']) && isApprovalText(external.label, true)
+        && Array.isArray(external.decisions) && external.decisions.length >= 1 && external.decisions.length <= 2
+        && external.decisions.every((decision) => decision === 'allow-once' || decision === 'allow-always')
+        && new Set(external.decisions).size === external.decisions.length;
+    }
+    case 'system-agent':
+      return hasAllowedKeys(value, ['kind', 'title', 'description', 'proposalHash', 'allowedDecisions'], ['agentId'])
+        && isApprovalText(value.title, true) && isApprovalText(value.description, true)
+        && typeof value.proposalHash === 'string' && /^[a-f0-9]{64}$/u.test(value.proposalHash)
+        && isOptionalApprovalText(value, 'agentId', true) && Array.isArray(value.allowedDecisions)
+        && value.allowedDecisions.length === 2 && value.allowedDecisions[0] === 'allow-once' && value.allowedDecisions[1] === 'deny';
+    default:
+      return false;
+  }
+}
+
 function decodeApproval(value: unknown): SessionWireApproval | null {
   return isRecord(value)
-    && hasExactKeys(value, ['approvalId', 'runId', 'phase', 'optionIds'])
+    && hasExactKeys(value, ['approvalId', 'runId', 'phase', 'optionIds', 'details'])
     && isNonEmptyIdentifier(value.approvalId)
     && (value.runId === null || isNonEmptyIdentifier(value.runId))
     && (value.phase === 'requested' || value.phase === 'resolved')
     && Array.isArray(value.optionIds)
     && value.optionIds.length <= MAX_APPROVALS
     && value.optionIds.every((item) => isNonEmptyIdentifier(item))
-    ? { approvalId: value.approvalId, runId: value.runId, phase: value.phase, optionIds: [...value.optionIds] }
+    && (value.details === null || isSessionApprovalDetails(value.details))
+    ? { approvalId: value.approvalId, runId: value.runId, phase: value.phase, optionIds: [...value.optionIds], details: value.details }
     : null;
 }
 
@@ -876,6 +1066,9 @@ function decodeChange(value: unknown): SessionChange | null {
       return hasExactKeys(value, ['kind', 'runId', 'phase']) && isNonEmptyIdentifier(value.runId) && isRuntimePhase(value.phase)
         ? { kind: 'runPhaseChanged', runId: value.runId, phase: value.phase }
         : null;
+    case 'runTimingUpdated':
+      return hasExactKeys(value, ['kind', 'timing']) && isSessionRunTiming(value.timing)
+        ? { kind: 'runTimingUpdated', timing: { ...value.timing } } : null;
     case 'messageDelta':
       return hasExactKeys(value, ['kind', 'itemId', 'runId', 'messageId', 'text', 'replace', 'status'])
         && isNonEmptyIdentifier(value.itemId)
@@ -932,7 +1125,7 @@ function isRecoveryReason(value: unknown): value is SessionRecoveryReason {
 }
 
 function decodeView(value: unknown): SessionView | null {
-  if (!isRecord(value) || !hasAllowedKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'goal', 'ownership', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'], ['inputReceipts'])) return null;
+  if (!isRecord(value) || !hasAllowedKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'goal', 'ownership', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'], ['inputReceipts', 'runTimings'])) return null;
   const identity = decodeIdentity(value.identity);
   const modelState = value.modelState === null ? null : decodeModelState(value.modelState);
   const inputReceipts = Object.hasOwn(value, 'inputReceipts') ? decodeInputReceipts(value.inputReceipts) : undefined;
@@ -947,13 +1140,14 @@ function decodeView(value: unknown): SessionView | null {
     || (value.endpointSessionId !== null && !isNonEmptyIdentifier(value.endpointSessionId, MAX_SESSION_KEY_BYTES))
     || (value.modelState !== null && !modelState)
     || inputReceipts === null
+    || Object.hasOwn(value, 'runTimings') && !isSessionRunTimings(value.runTimings)
     || (value.ownership !== null && !isSessionOwnership(value.ownership))
     || identity.sessionKey !== value.sessionKey
     || !isSafeInteger(value.epoch) || value.epoch < 1 || value.epoch > MAX_SAFE_INTEGER
     || !isSafeInteger(value.seq) || value.seq < 0 || value.seq > MAX_SAFE_INTEGER
     || !isSafeInteger(value.cursor) || value.cursor < 0 || value.cursor > MAX_SAFE_INTEGER
     || !goal || !items || !tools || !approvals || !runtime || !window || !completeness) return null;
-  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, modelState, ...(inputReceipts === undefined ? {} : { inputReceipts }), goal, ownership: value.ownership, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
+  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, modelState, ...(inputReceipts === undefined ? {} : { inputReceipts }), runTimings: ((value.runTimings as SessionRunTiming[] | undefined) ?? []).map((timing) => ({ ...timing })), goal, ownership: value.ownership, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
 }
 
 function decodeDelta(value: unknown): SessionDelta | null {
@@ -971,7 +1165,8 @@ function decodeDelta(value: unknown): SessionDelta | null {
     || !isSafeInteger(value.cursor) || value.cursor < 1 || value.cursor > MAX_SAFE_INTEGER
     || !Array.isArray(value.changes) || value.changes.length === 0 || value.changes.length > MAX_CHANGE_COUNT) return null;
   const changes = value.changes.map(decodeChange);
-  if (changes.some((change) => change === null)) return null;
+  if (changes.some((change) => change === null
+    || change.kind === 'runTimingUpdated' && value.runId !== undefined && value.runId !== change.timing.runId)) return null;
   return {
     sessionKey: value.sessionKey,
     identity,

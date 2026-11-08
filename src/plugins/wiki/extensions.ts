@@ -35,7 +35,6 @@ export type WikiWorkspaceTabContribution = Readonly<{
 
 export type WikiSourceMutationOptions = Readonly<{
   label: string;
-  projectBound?: boolean;
   observeTasks?: boolean;
   success?: string;
 }>;

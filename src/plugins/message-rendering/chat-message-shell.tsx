@@ -39,13 +39,13 @@ export function MessageShell({
     >
       <div
         className={cn(
-          MESSAGE_LAYOUT_TOKENS.messageAvatar,
+          !isUser && assistantAvatarSlot === 'placeholder'
+            ? MESSAGE_LAYOUT_TOKENS.messageAvatarPlaceholder
+            : isUser ? MESSAGE_LAYOUT_TOKENS.messageAvatar : MESSAGE_LAYOUT_TOKENS.messageAvatarAssistantRail,
           isUser
             ? MESSAGE_LAYOUT_TOKENS.messageAvatarUserOrder
             : MESSAGE_LAYOUT_TOKENS.messageAvatarAssistantOrder,
-          !isUser && assistantAvatarSlot === 'placeholder'
-            ? 'pointer-events-none opacity-0'
-            : 'border border-border/60 bg-card text-foreground shadow-sm',
+          isUser && 'border border-border/60 bg-card text-foreground shadow-sm',
         )}
         aria-hidden={!isUser && assistantAvatarSlot === 'placeholder' ? 'true' : undefined}
       >
@@ -65,7 +65,7 @@ export function MessageShell({
             agentName={assistantAgentName}
             avatarSeed={assistantAvatarSeed}
             avatarStyle={assistantAvatarStyle}
-            className="h-full w-full"
+            className={cn(MESSAGE_LAYOUT_TOKENS.messageAvatar, 'absolute left-0 -top-[7px] border border-border/60 bg-card shadow-sm')}
             dataTestId="assistant-message-avatar"
           />
         )}

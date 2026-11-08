@@ -5226,6 +5226,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
 
 [[package]]
+name = "maintenance"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "serde_json",
+]
+
+[[package]]
 name = "markup5ever"
 version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5257,6 +5265,7 @@ dependencies = [
  "plugins",
  "provider",
  "qrcode",
+ "regex",
  "reqwest",
  "runtime-directory",
  "security",
@@ -7317,6 +7326,7 @@ dependencies = [
  "foundation",
  "futures-util",
  "getrandom 0.3.4",
+ "maintenance",
  "matcha-agent",
  "openclaw",
  "organization",

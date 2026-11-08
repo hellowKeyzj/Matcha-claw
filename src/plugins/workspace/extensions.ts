@@ -1,4 +1,4 @@
-import type { ComponentType, ReactNode } from 'react';
+import type { ComponentType, CSSProperties, ReactNode } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { defineExtensionPoint } from '@/plugin-host/core';
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
@@ -40,10 +40,13 @@ export interface WorkspacePage {
   readonly mount?: 'active';
   readonly lifetime?: 'workspace';
   readonly promoteWithDraft?: boolean;
+  readonly retainOnSessionChange?: (sessionIdentity: SessionIdentity | null) => boolean;
   readonly workspaceDraftId?: string;
   readonly onSelect?: () => void | Promise<void>;
   readonly onClose?: () => void | Promise<void>;
 }
+
+export type WorkspacePane = 'main' | 'side';
 
 export interface WorkspaceController {
   readonly scopeKey: string;
@@ -51,11 +54,15 @@ export interface WorkspaceController {
   readonly sessionIdentity: SessionIdentity | null;
   readonly pages: readonly WorkspacePage[];
   readonly activePageId: string | null;
+  readonly activePageIds: Readonly<Record<WorkspacePane, string | null>>;
+  readonly pagePlacements: Readonly<Record<string, WorkspacePane>>;
   readonly open: boolean;
   readonly layout: WorkspaceLayout;
   openPage(page: WorkspacePage, options?: { activate?: boolean }): void;
   syncPages(providerId: string, pages: readonly WorkspacePage[]): void;
   activatePage(id: string, options?: { reveal?: boolean }): void;
+  movePage(id: string, pane: WorkspacePane): void;
+  showChat(): void;
   removePage(id: string): void;
   closePage(id: string): Promise<void>;
   show(): void;
@@ -79,9 +86,20 @@ export interface WorkspaceLauncher {
   readonly execute: (context: WorkspaceLauncherContext) => void | Promise<void>;
 }
 
+export interface WorkspacePaneStyle {
+  readonly header: CSSProperties;
+  readonly body: CSSProperties;
+  readonly dropTarget: CSSProperties;
+}
+
 export interface WorkspacePanelProps {
   readonly visible: boolean;
   readonly width: number;
+  readonly mainVisible: boolean;
+  readonly mainWidth: number;
+  readonly mainActions?: ReactNode;
+  readonly mainStyle: WorkspacePaneStyle;
+  readonly sideStyle: WorkspacePaneStyle;
   readonly mode: 'docked' | 'overlay';
   readonly onHide: () => void;
   readonly onSendMessage?: (text: string) => void | Promise<void>;

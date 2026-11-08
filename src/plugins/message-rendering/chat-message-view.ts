@@ -40,6 +40,11 @@ function normalizeToolUses(toolUses: ReadonlyArray<{ id: string; name: string; i
   }));
 }
 
+export function hasVisibleUserOutput(item: SessionRenderUserMessageItem): boolean {
+  return !!item.largeText || !!item.text.trim() || item.images.length > 0
+    || item.attachedFiles.length > 0 || !!item.contentNotices?.length;
+}
+
 export function getAssistantTurnPlainText(item: SessionAssistantTurnItem): string {
   return item.text.trim();
 }

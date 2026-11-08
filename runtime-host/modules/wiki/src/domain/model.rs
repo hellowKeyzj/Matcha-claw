@@ -1224,6 +1224,10 @@ impl WikiSourceTask {
         &self.status
     }
 
+    pub(crate) fn stage(&self) -> Option<&str> {
+        self.stage.as_deref()
+    }
+
     pub fn is_paused(&self) -> bool {
         self.stage.as_deref() == Some("paused")
     }
@@ -1288,7 +1292,10 @@ impl WikiSourceTask {
 
     pub fn mark_cancelled(&mut self) {
         self.status = WikiSourceTaskStatus::Cancelled;
-        self.stage = Some("cancelled".to_owned());
+        // Retain processing progress, but a cancelled pause must no longer be resumable.
+        if self.is_paused() {
+            self.stage = Some("cancelled".to_owned());
+        }
         self.progress = None;
         self.completed = None;
         self.total = None;

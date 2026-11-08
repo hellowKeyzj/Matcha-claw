@@ -104,17 +104,20 @@ export function useChatThinking({
   const pendingIntent = pendingSelection?.runtime === runtime ? pendingSelection : undefined;
   const intended = draft || !switching && !writeResult ? pendingIntent : undefined;
   const loading = ready && (!isCurrentRequest || !result);
-  const options = useMemo(() => (snapshot?.options ?? []).map((level) => ({
-    id: JSON.stringify(level), label: level, level,
-  })), [snapshot?.options]);
+  const options = useMemo(() => [
+    ...(runtime === 'matcha-agent' ? [{ id: JSON.stringify(null), label: t('input.thinkingReset'), level: null }] : []),
+    ...(snapshot?.options ?? []).map((level) => ({ id: JSON.stringify(level), label: level, level })),
+  ], [runtime, snapshot?.options, t]);
   const requestedLevel = intended ? intended.level : snapshot?.level;
   const incompatible = isCurrentRequest && requestedLevel != null && (snapshot ? !snapshot.options.includes(requestedLevel) : result?.outcome === 'unsupported');
-  const level = intended
-    ? intended.level ?? (snapshot?.level === null ? snapshot.effectiveLevel : undefined)
-    : snapshot?.effectiveLevel ?? snapshot?.level;
+  const level = runtime === 'matcha-agent'
+    ? requestedLevel
+    : intended
+      ? intended.level ?? (snapshot?.level === null ? snapshot.effectiveLevel : undefined)
+      : snapshot?.effectiveLevel ?? snapshot?.level;
   const currentOption = incompatible ? undefined : options.find((option) => option.level === level);
   const canReset = Boolean(pendingIntent) || snapshot?.level != null || !draft && modelHint !== undefined;
-  const disabled = !ready || initializationBusy && !switching || options.length === 0 && !canReset;
+  const disabled = !ready || initializationBusy && !switching || !snapshot?.options.length && !canReset;
 
   useEffect(() => {
     logSessionTrace('thinking.picker.state', createSessionTraceId('thinking-intent'), () => ({
@@ -164,7 +167,7 @@ export function useChatThinking({
 
   if (!runtime || !snapshot && !pendingIntent && (!isCurrentRequest || !result)) return null;
   if (isCurrentRequest && !pendingIntent && !canReset && (result?.outcome === 'unsupported' || writeResult?.outcome === 'unsupported'
-    || snapshot && options.length === 0)) return null;
+    || snapshot && snapshot.options.length === 0)) return null;
   return {
     currentId: currentOption?.id ?? null,
     label: incompatible ? t('input.thinkingReselect')

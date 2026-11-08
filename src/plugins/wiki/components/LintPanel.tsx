@@ -22,6 +22,7 @@ import { fetchSelectableProviderModels } from '@/plugins/providers/services/prov
 import type { ModelCatalogEntry } from '@/types/subagent';
 import type { WikiLintConfig, WikiLintFinding, WikiLintFixReceipt, WikiLintState } from '@/types/wiki-capabilities';
 import { WikiEmpty, WikiIconButton, WikiPanel, WikiPanelHeader, WikiSurface } from '@/plugins/wiki/components/WikiChrome';
+import { classifyWikiObservationFailure } from '@/plugins/wiki/observation-error';
 
 export type LintPanelProps = Readonly<{
   projectId: string;
@@ -58,7 +59,7 @@ function LintBody({ projectId, busy, initialModelRef, onOpenFile, onFilesChanged
   const [deleteItem, setDeleteItem] = useState<WikiLintFinding | null>(null);
   const [fixReceipt, setFixReceipt] = useState<WikiLintFixReceipt | null>(null);
   const [error, setError] = useState('');
-  const [pollPaused, setPollPaused] = useState(false);
+  const [pollError, setPollError] = useState('');
   const [pollVersion, setPollVersion] = useState(0);
   const observing = useRef<AbortController | null>(null);
   const locked = useRef(false);
@@ -106,25 +107,21 @@ function LintBody({ projectId, busy, initialModelRef, onOpenFile, onFilesChanged
   useEffect(() => {
     if (!running || !state?.taskId) return;
     let cancelled = false;
-    let failures = 0;
-    let attempts = 0;
     let timer: ReturnType<typeof setTimeout>;
     const signal = observing.current!.signal;
     const poll = async () => {
       try {
         const next = await hostWikiLintState({ projectId });
         if (cancelled || signal.aborted) return;
-        if (next.projectId !== projectId) throw unconfirmed();
+        if (next.projectId !== projectId || next.taskId !== state.taskId) throw unconfirmed();
         setState(next);
-        failures = 0;
+        setPollError('');
         if (!isRunning(next)) return;
-      } catch {
+      } catch (cause) {
         if (cancelled || signal.aborted) return;
-        failures++;
-      }
-      if (++attempts >= 600 || failures >= 3) {
-        setPollPaused(true);
-        return;
+        const failure = classifyWikiObservationFailure(cause, unconfirmed().message);
+        setPollError(failure.message);
+        if (failure.reason === 'stopped') return;
       }
       timer = setTimeout(() => { void poll(); }, 1000);
     };
@@ -174,7 +171,7 @@ function LintBody({ projectId, busy, initialModelRef, onOpenFile, onFilesChanged
         }
       }
       if (!signal.aborted) {
-        setPollPaused(false);
+        setPollError('');
         setPollVersion((version) => version + 1);
       }
     });
@@ -188,7 +185,7 @@ function LintBody({ projectId, busy, initialModelRef, onOpenFile, onFilesChanged
       setSubmittedModel(semantic ? { taskId: receipt.callId, modelRef } : null);
       setFixReceipt(null);
       setSelectedIds(new Set());
-      setPollPaused(false);
+      setPollError('');
       const next = await readState(signal);
       if (!next || signal.aborted) return;
       if (next.taskId !== receipt.callId) throw unconfirmed();
@@ -316,7 +313,7 @@ function LintBody({ projectId, busy, initialModelRef, onOpenFile, onFilesChanged
               {submittedModel?.taskId === state.taskId ? <span className="break-all">{t('lint.submittedModel', { defaultValue: '本次提交模型：{{modelRef}}', modelRef: submittedModel.modelRef })}</span> : null}
             </div>
           ) : null}
-          {pollPaused ? <div className="flex flex-wrap items-center gap-2 text-xs text-destructive">{text('progressPaused', '自动进度刷新已暂停，后台任务不受影响。')}<Button type="button" size="sm" variant="outline" onClick={() => { setPollPaused(false); setPollVersion((version) => version + 1); }}>{text('resumeProgress', '继续查看进度')}</Button></div> : null}
+          {pollError ? <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">{pollError}<Button type="button" size="sm" variant="outline" onClick={() => { setPollError(''); setPollVersion((version) => version + 1); }}>{text('resumeProgress', '继续查看进度')}</Button></div> : null}
         </WikiSurface>
 
         {showRules && config ? (

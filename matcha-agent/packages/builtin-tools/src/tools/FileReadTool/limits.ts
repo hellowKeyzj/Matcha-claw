@@ -4,7 +4,10 @@
  *   | limit         | default | checks                    | cost          | on overflow     |
  *   |---------------|---------|---------------------------|---------------|-----------------|
  *   | maxSizeBytes  | 256 KB  | TOTAL FILE SIZE (not out) | 1 stat        | throws pre-read |
- *   | maxTokens     | 25000   | actual output tokens      | API roundtrip | throws post-read|
+ *   | maxTokens     | 25000   | actual output tokens      | API roundtrip | prefix or throw |
+ *
+ * Whole-file text requests return a budgeted prefix on token overflow;
+ * explicit ranges and other file types still throw after reading.
  *
  * Known mismatch: maxSizeBytes gates on total file size, not the slice.
  * Tested truncating instead of throwing for explicit-limit reads that

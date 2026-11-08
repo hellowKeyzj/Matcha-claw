@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     bundle::Bundle,
-    management::{ConfigOutcome, UploadReceipt},
+    management::{ConfigApplication, ConfigOutcome, UploadReceipt},
 };
 
 const MAX_RESULTS: usize = 16;
@@ -33,6 +33,8 @@ pub(crate) enum SkillResult {
         skill_key: String,
         #[serde(rename = "invalidKeys")]
         invalid_keys: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        application: Option<ConfigApplication>,
     },
     BatchState {
         success: bool,
@@ -285,21 +287,23 @@ pub(crate) async fn configure(
         crate::management::Command::Config { skill_key, .. } => skill_key.clone(),
         _ => unreachable!(),
     };
-    let (outcome, invalid_keys) = match handle.manage_skills(command).await {
+    let (outcome, invalid_keys, application) = match handle.manage_skills(command).await {
         Ok(crate::management::Outcome::Config {
             outcome,
             invalid_keys,
-        }) => (outcome, invalid_keys),
+            application,
+        }) => (outcome, invalid_keys, application),
         Ok(
             crate::management::Outcome::Mutation(crate::management::MutationOutcome::Rejected)
             | crate::management::Outcome::Rejected,
-        ) => (ConfigOutcome::Rejected, Vec::new()),
-        _ => (ConfigOutcome::Unknown, Vec::new()),
+        ) => (ConfigOutcome::Rejected, Vec::new(), None),
+        _ => (ConfigOutcome::Unknown, Vec::new(), None),
     };
     SkillResult::Config {
         outcome,
         skill_key,
         invalid_keys,
+        application,
     }
 }
 
@@ -366,7 +370,7 @@ pub(crate) async fn batch_state(
             }
         }
     }
-    let success = failed.is_empty() && invalid_keys.is_empty();
+    let success = !stopped && failed.is_empty() && invalid_keys.is_empty();
     let outcome = if success {
         ConfigOutcome::Accepted
     } else if uncertain {

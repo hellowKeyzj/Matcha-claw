@@ -231,6 +231,9 @@
     "actionFailed": "Team action did not complete: {{error}}"
   },
   "chat": {
+    "leader": "Leader",
+    "memberSessions": "Team conversations",
+    "moreMembers": "More members",
     "teamNotFound": "Team not found",
     "backToList": "Back to Teams",
     "runStatus": "Run status",
@@ -379,6 +382,13 @@
       "sessionRef": "Member session",
       "selectRole": "Select a member",
       "selectSession": "Select a session",
+      "defaultSession": "Default session",
+      "numberedSession": "Session {{number}}",
+      "sessionUnavailable": "This session is no longer available",
+      "createSession": "New session",
+      "creatingSession": "Creating session",
+      "retryCreateSession": "Retry creation",
+      "createSessionFailed": "Session creation could not be confirmed. Retry; your node draft is kept.",
       "noRoleBindings": "No members available",
       "invalidBinding": "Unavailable: {{value}}",
       "roleBindingRequired": "Select an available member and their session.",

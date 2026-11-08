@@ -61,7 +61,7 @@ pub(crate) enum PeerCommand {
         process: foundation::process::ProcessObservation,
     },
     AutostartOpenClaw {
-        reservation: Option<OwnedMutexGuard<()>>,
+        reservation: Arc<OwnedMutexGuard<()>>,
         reply: oneshot::Sender<Result<RuntimeState, AutostartOpenClawError>>,
     },
     StartRuntime {
@@ -96,18 +96,20 @@ impl PeerCommand {
         if !matches!(self.route_command(), CommandRoute::Keyed(PeerLaneKey::Lifecycle(key)) if key == RuntimeDriverIdentity::open_claw().endpoint()) {
             return true;
         }
+        if matches!(self, Self::AutostartOpenClaw { .. }) {
+            return true;
+        }
         let Some(permit) = driver.try_reserve_lifecycle() else {
             return false;
         };
         let reservation = match self {
-            Self::AutostartOpenClaw { reservation, .. }
-            | Self::StartRuntime { reservation, .. }
+            Self::StartRuntime { reservation, .. }
             | Self::StopRuntime { reservation, .. }
             | Self::RestartRuntime { reservation, .. }
             | Self::RepairRuntime { reservation, .. }
             | Self::RestartOpenClawAfterPluginChange { reservation, .. } => reservation,
-            Self::AutostartMatcha | Self::MatchaReady { .. } => {
-                unreachable!("Matcha has no OpenClaw reservation")
+            Self::AutostartOpenClaw { .. } | Self::AutostartMatcha | Self::MatchaReady { .. } => {
+                unreachable!("command has no unreserved OpenClaw lifecycle")
             }
         };
         *reservation = Some(permit);

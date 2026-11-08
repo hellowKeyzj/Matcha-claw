@@ -3,9 +3,12 @@ use crate::client::Client;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sessions_module::question::{
-    NativeApplication, QuestionAnswer, QuestionAvailability, QuestionDelivery, QuestionFailure,
-    QuestionReceipt, QuestionRequest, QuestionTarget, QuestionView,
+use sessions_module::{
+    question::{
+        NativeApplication, QuestionAnswer, QuestionAvailability, QuestionDelivery, QuestionFailure,
+        QuestionReceipt, QuestionRequest, QuestionTarget, QuestionView,
+    },
+    state::{ApprovalDetails, ApprovalInput, ApprovalPhase, ApprovalText, ApprovalView},
 };
 
 #[derive(Deserialize)]
@@ -93,6 +96,35 @@ impl Pending {
         view.validate().map_err(|_| Failure::InvalidReadback)?;
         Ok(view)
     }
+    pub fn approval(&self) -> Result<ApprovalView, Failure> {
+        let approval_id = self.approval_id()?;
+        let details = ApprovalDetails::Tool {
+            tool_call_id: field(&self.request, "tool_use_id")?,
+            tool_name: field(&self.request, "tool_name")?,
+            input: ApprovalInput::try_from_value(self.request["input"].clone())
+                .map_err(|_| Failure::InvalidReadback)?,
+            decision_reason: approval_text(&self.request, "decision_reason")?,
+            blocked_path: approval_text(&self.request, "blocked_path")?,
+        };
+        details.validate().map_err(|_| Failure::InvalidReadback)?;
+        let requested = self.availability == QuestionAvailability::Pending
+            && self.delivery == QuestionDelivery::NotSent;
+        Ok(ApprovalView {
+            approval_id,
+            run_id: self.run_id.clone(),
+            phase: if requested {
+                ApprovalPhase::Requested
+            } else {
+                ApprovalPhase::Resolved
+            },
+            option_ids: if requested {
+                vec!["allow".into(), "deny".into()]
+            } else {
+                Vec::new()
+            },
+            details: Some(details),
+        })
+    }
     pub fn approval_id(&self) -> Result<String, Failure> {
         if self.category != "permission"
             || self.request["subtype"] != "can_use_tool"
@@ -113,6 +145,15 @@ pub(crate) fn approval_id(target: &QuestionTarget) -> Result<String, Failure> {
         return Err(Failure::InvalidReadback);
     }
     Ok(id)
+}
+fn approval_text(value: &Value, key: &str) -> Result<Option<ApprovalText>, Failure> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => ApprovalText::try_from_text(text)
+            .map(Some)
+            .map_err(|_| Failure::InvalidReadback),
+        _ => Err(Failure::InvalidReadback),
+    }
 }
 fn field(value: &Value, key: &str) -> Result<String, Failure> {
     value

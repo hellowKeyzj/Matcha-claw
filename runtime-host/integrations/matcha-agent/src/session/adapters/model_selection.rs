@@ -7,7 +7,7 @@ use crate::{
         rpc::{self, Failure, FailureKind},
     },
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sessions_module::{
     model_selection::{
         MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
@@ -53,13 +53,37 @@ pub(super) async fn restore(
         Some(serde_json::Value::Null) => {}
         _ => return Err(SessionSendOutcome::Unknown),
     }
-    if record.model_selection_id.is_none()
+    let model = if record.model_selection_id.is_none()
         && record.provider_fingerprint.is_none()
         && record.provider_id.is_none()
     {
-        return Ok(None);
-    }
-    let model = record.model.ok_or(SessionSendOutcome::Rejected)?;
+        if record.model.is_some() {
+            return Ok(None);
+        }
+        let agent = rpc::call_cancellable(
+            client,
+            "agents.get",
+            json!({"agentId":record.agent_id.as_str()}),
+            cancel,
+        )
+        .await
+        .map_err(super::model::send_failure)?;
+        if agent.get("agentId").and_then(Value::as_str) != Some(record.agent_id.as_str()) {
+            return Err(SessionSendOutcome::Unknown);
+        }
+        match (
+            agent.pointer("/definition/model"),
+            agent.pointer("/definition/provider"),
+        ) {
+            (Some(Value::Null), Some(Value::Null)) => None,
+            (Some(Value::Null | Value::String(_)), Some(Value::Null | Value::String(_))) => {
+                return Ok(None);
+            }
+            _ => return Err(SessionSendOutcome::Unknown),
+        }
+    } else {
+        Some(record.model.ok_or(SessionSendOutcome::Rejected)?)
+    };
     let command = MatchaSessionModelRuntimeCommand::try_new(
         identity.session_key.clone(),
         Some(record.session_id.as_str().to_owned()),

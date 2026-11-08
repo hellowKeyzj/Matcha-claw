@@ -86,28 +86,30 @@ export function SessionStatusPanel({
           onCloseAutoFocus={(event) => { event.preventDefault(); returnFocusRef.current?.focus(); }}
           className="fixed left-1/2 top-1/2 z-[120] flex max-h-[calc(100dvh-24px)] w-[360px] max-w-[calc(100vw-24px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-elevated outline-none"
         >
-          <header className="flex items-start justify-between gap-3 border-b border-border/45 px-3.5 py-3">
-            <div className="min-w-0">
+          <header className="flex items-start gap-3 border-b border-border/45 px-3.5 py-3">
+            <div className="min-w-0 flex-1">
               <Dialog.Title className="text-sm font-semibold">{t("input.sessionConnectors")}</Dialog.Title>
               <div className="mt-0.5 truncate text-xs text-muted-foreground">{summary.label}</div>
             </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 rounded-full"
-              aria-label={t("input.refreshConnectors")}
-              title={t("input.refreshConnectors")}
-              onClick={refresh}
-              disabled={loading}
-            >
-              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            </Button>
-            <Dialog.Close asChild>
-              <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0" aria-label={t("input.closePanel")}>
-                <X aria-hidden="true" className="h-4 w-4" />
+            <div className="flex shrink-0 items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0"
+                aria-label={t("input.refreshConnectors")}
+                title={t("input.refreshConnectors")}
+                onClick={refresh}
+                disabled={loading}
+              >
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <RefreshCw className="h-3.5 w-3.5" />}
               </Button>
-            </Dialog.Close>
+              <Dialog.Close asChild>
+                <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0" aria-label={t("input.closePanel")}>
+                  <X aria-hidden="true" className="h-4 w-4" />
+                </Button>
+              </Dialog.Close>
+            </div>
           </header>
 
           <div className="min-h-0 overflow-y-auto overscroll-contain p-2">

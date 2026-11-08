@@ -8,6 +8,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    journal::LifecycleProcess,
     logs::{LifecycleDiagnostic, LifecycleLogBuffer, LifecycleLogClassifier, LogStream},
     stop::OpenClawGracefulStop,
 };
@@ -53,9 +54,15 @@ impl StdioActivation for OpenClawStdioActivation {
         cancellation: CancellationToken,
     ) -> PolicyFuture<StdioActivationResult> {
         let report_diagnostic = Arc::clone(&self.report_diagnostic);
-        let log_buffer = self.log_buffer.clone();
+        let log_buffer = self
+            .log_buffer
+            .for_process(LifecycleProcess::Gateway(process.identity().pid()));
         let graceful_stop = self.graceful_stop.clone();
         Box::pin(async move {
+            log_buffer.append(
+                LogStream::Stdout,
+                b"[gateway] process observed; activating stdio",
+            );
             if cancellation.is_cancelled() {
                 return StdioActivationResult::Cancelled;
             }
@@ -103,22 +110,34 @@ async fn drain_output(
     report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
     log_buffer: LifecycleLogBuffer,
 ) -> std::io::Result<()> {
-    let mut classifier = LifecycleLogClassifier::with_buffer(stream, log_buffer);
+    let mut classifier = LifecycleLogClassifier::with_buffer(stream, log_buffer.clone());
     let mut chunk = [0; READ_CHUNK_BYTES];
 
     loop {
-        let read = output.read(&mut chunk).await?;
+        let read = match output.read(&mut chunk).await {
+            Ok(read) => read,
+            Err(error) => {
+                log_buffer.append(
+                    LogStream::Stderr,
+                    format!("[gateway] stdio read failed error_kind={:?}", error.kind()).as_bytes(),
+                );
+                log_buffer.flush().await;
+                return Err(error);
+            }
+        };
         if read == 0 {
             for diagnostic in classifier.finish() {
                 LifecycleDiagnostic::state().record(diagnostic);
                 report_diagnostic(diagnostic);
             }
+            log_buffer.flush().await;
             return Ok(());
         }
         for diagnostic in classifier.push(&chunk[..read]) {
             LifecycleDiagnostic::state().record(diagnostic);
             report_diagnostic(diagnostic);
         }
+        log_buffer.flush().await;
     }
 }
 

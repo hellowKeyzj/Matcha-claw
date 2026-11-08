@@ -2,7 +2,7 @@ use organization::ports::native_effects::RoleSessionRetirementOutcome;
 use organization::{
     GraphRunId, NativeDeletionEvidence, NativeDeletionProof, RoleAbortOutcome,
     RoleSessionDeleteReceipt, RoleSessionDeletionConfirmation, RoleSessionReceipt,
-    RunRuntimeReceipt, RuntimeReceiptOutcome, TeamCreationFailure,
+    RoleSessionSubmission, RunRuntimeReceipt, RuntimeReceiptOutcome, TeamCreationFailure,
     TeamCreationFailureReason as Reason, TeamCreationStage,
 };
 use serde_json::{Value, json};
@@ -20,6 +20,7 @@ pub(super) async fn confirm(
     client: Client,
     receipt: RunRuntimeReceipt,
     cancellation: CancellationToken,
+    submission: &mut RoleSessionSubmission,
 ) -> (RuntimeReceiptOutcome, Option<TeamCreationFailure>) {
     let failure = |reason, native_started| {
         (
@@ -54,7 +55,12 @@ pub(super) async fn confirm(
                     "agentId": binding.agent().as_str(), "sessionId": binding.endpoint_session_id().as_str(),
                 }), &cancellation).await {
                     Ok(_) => {}
-                    Err(error) => return failure(reason(&error), native_started),
+                    Err(error) => {
+                        if error.delivery() == crate::client::Delivery::Unknown {
+                            *submission = RoleSessionSubmission::Unknown;
+                        }
+                        return failure(reason(&error), native_started);
+                    }
                 }
                 match client
                     .call_cancellable("sessions.get", params.clone(), &cancellation)
@@ -104,6 +110,32 @@ pub(super) async fn confirm(
         }
     }
     (RuntimeReceiptOutcome::Installed, None)
+}
+
+pub(super) async fn readback(
+    client: Client,
+    binding: RoleSessionReceipt,
+    cancellation: CancellationToken,
+) -> (RuntimeReceiptOutcome, Option<TeamCreationFailure>) {
+    let (outcome, reason) = match client
+        .call_cancellable(
+            "sessions.get",
+            json!({"sessionId": binding.endpoint_session_id().as_str()}),
+            &cancellation,
+        )
+        .await
+    {
+        Ok(session)
+            if matches_session(&session, &binding)
+                && session.get("status").and_then(Value::as_str) == Some("open") =>
+        {
+            return (RuntimeReceiptOutcome::Installed, None);
+        }
+        Ok(_) => (RuntimeReceiptOutcome::OutcomeUnknown, Reason::NativeReadbackMismatch),
+        Err(error) if absent(&error) => (RuntimeReceiptOutcome::Unavailable, Reason::NativeReadbackMismatch),
+        Err(error) => (RuntimeReceiptOutcome::Unavailable, reason(&error)),
+    };
+    (outcome, Some(TeamCreationFailure::new(TeamCreationStage::InitializingSessions, reason)))
 }
 
 async fn runs(
@@ -309,14 +341,15 @@ pub(super) async fn delete(
         let mut delete_params = params.clone();
         delete_params["expectedAgentId"] = json!(binding.agent().as_str());
         match client
-            .call_cancellable("sessions.delete", delete_params, &cancellation)
+            .call_cancellable("sessions.retire", delete_params, &cancellation)
             .await
         {
             Ok(deleted)
                 if deleted["sessionId"] == binding.endpoint_session_id().as_str()
-                    && deleted["deleted"] == true
+                    && deleted["retired"] == true
                     && deleted["cleanupComplete"] == true
-                    && deleted["scope"] == "session" => {}
+                    && deleted["scope"] == "session"
+                    && matches!(deleted["state"].as_str(), Some("absent" | "deleted")) => {}
             _ => return NativeDeletionEvidence::OutcomeUnknown,
         }
         match client

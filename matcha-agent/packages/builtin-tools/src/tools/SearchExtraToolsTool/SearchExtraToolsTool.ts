@@ -25,7 +25,10 @@ import {
   getToolIndex,
   searchTools,
 } from 'src/services/searchExtraTools/toolIndex.js'
-import type { SearchExtraToolsResult } from 'src/services/searchExtraTools/toolIndex.js'
+import {
+  getToolInputSchema,
+  renderToolInputSchema,
+} from 'src/services/searchExtraTools/toolSchema.js'
 
 const KEYWORD_WEIGHT = Number(
   process.env.SEARCH_EXTRA_TOOLS_WEIGHT_KEYWORD ?? '0.4',
@@ -53,6 +56,15 @@ type InputSchema = ReturnType<typeof inputSchema>
 export const outputSchema = lazySchema(() =>
   z.object({
     matches: z.array(z.string()),
+    tool_details: z
+      .array(
+        z.object({
+          name: z.string(),
+          description: z.string(),
+          input_schema: z.unknown().optional(),
+        }),
+      )
+      .optional(),
     query: z.string(),
     total_deferred_tools: z.number(),
     pending_mcp_servers: z.array(z.string()).optional(),
@@ -125,16 +137,38 @@ export function clearSearchExtraToolsDescriptionCache(): void {
 /**
  * Build the search result output structure.
  */
-function buildSearchResult(
+async function buildSearchResult(
   matches: string[],
   query: string,
   totalDeferredTools: number,
+  tools: Tools,
   pendingMcpServers?: string[],
   alreadyLoaded?: string[],
-): { data: Output } {
+): Promise<{ data: Output }> {
+  const matchedTools = matches.flatMap(name => {
+    if (alreadyLoaded?.includes(name)) return []
+    const tool = findToolByName(tools, name)
+    return tool ? [tool] : []
+  })
+  const toolDetails = await Promise.all(
+    matchedTools.map(async tool => {
+      let description = ''
+      try {
+        description = await getToolDescriptionMemoized(tool.name, tools)
+      } catch {
+        // A failed description must not hide the tool's parameter schema.
+      }
+      return {
+        name: tool.name,
+        description,
+        input_schema: getToolInputSchema(tool),
+      }
+    }),
+  )
   return {
     data: {
       matches,
+      ...(toolDetails.length > 0 ? { tool_details: toolDetails } : {}),
       query,
       total_deferred_tools: totalDeferredTools,
       ...(pendingMcpServers && pendingMcpServers.length > 0
@@ -417,6 +451,7 @@ export const SearchExtraToolsTool = buildTool({
           [],
           query,
           deferredTools.length,
+          tools,
           pendingServers,
         )
       }
@@ -433,6 +468,7 @@ export const SearchExtraToolsTool = buildTool({
         found,
         query,
         deferredTools.length,
+        tools,
         undefined,
         alreadyLoaded.length > 0 ? alreadyLoaded : undefined,
       )
@@ -446,17 +482,6 @@ export const SearchExtraToolsTool = buildTool({
       const discoverQuery = discoverMatch[1]!.trim()
       const index = await getToolIndex(deferredTools)
       const tfIdfResults = searchTools(discoverQuery, index, max_results)
-      const textResults = tfIdfResults.map(r => {
-        let line = `**${r.name}** (score: ${r.score.toFixed(2)})\n${r.description}`
-        if (r.inputSchema) {
-          line += `\nSchema: ${JSON.stringify(r.inputSchema)}`
-        }
-        return line
-      })
-      const text =
-        textResults.length > 0
-          ? `Found ${textResults.length} tools:\n${textResults.join('\n\n')}`
-          : 'No matching deferred tools found'
       logSearchOutcome(
         tfIdfResults.map(r => r.name),
         'keyword',
@@ -465,6 +490,7 @@ export const SearchExtraToolsTool = buildTool({
         tfIdfResults.map(r => r.name),
         query,
         deferredTools.length,
+        tools,
       )
     }
 
@@ -516,6 +542,7 @@ export const SearchExtraToolsTool = buildTool({
         matches,
         query,
         deferredTools.length,
+        tools,
         pendingServers,
       )
     }
@@ -524,6 +551,7 @@ export const SearchExtraToolsTool = buildTool({
       matches,
       query,
       deferredTools.length,
+      tools,
       undefined,
       alreadyLoaded.length > 0 ? alreadyLoaded : undefined,
     )
@@ -589,6 +617,12 @@ export const SearchExtraToolsTool = buildTool({
         `Found ${deferredNames.length} deferred tool(s): ${deferredNames.join(', ')}.` +
           `\nUse ExecuteExtraTool with {"tool_name": "<name>", "params": {...}} to invoke any of these deferred tools.`,
       )
+      for (const detail of content.tool_details ?? []) {
+        if (!deferredNames.includes(detail.name)) continue
+        parts.push(
+          `### ${detail.name}\n${detail.description}\n${renderToolInputSchema(detail.input_schema)}`,
+        )
+      }
     }
 
     const text = parts.join('\n')

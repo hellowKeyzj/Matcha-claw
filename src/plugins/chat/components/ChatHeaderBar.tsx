@@ -47,6 +47,7 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
                 HEADER_BUTTON_CLASSNAME,
                 showThinking && 'bg-secondary text-foreground',
               )}
+              aria-label={showThinking ? t('toolbar.hideThinking') : t('toolbar.showThinking')}
               onClick={onToggleThinking}
             >
               <Brain className="h-4 w-4" />

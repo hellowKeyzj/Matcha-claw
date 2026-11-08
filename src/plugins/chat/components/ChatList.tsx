@@ -1,6 +1,7 @@
 import { MESSAGE_LAYOUT_TOKENS } from '@/plugins/message-rendering/message-layout-tokens';
 import { isTraceEnabled } from '@/lib/trace-logger';
 import {
+  Component,
   forwardRef,
   memo,
   useCallback,
@@ -12,6 +13,7 @@ import {
   useState,
   useSyncExternalStore,
   type MouseEventHandler,
+  type ReactNode,
   type RefObject,
   type TouchEventHandler,
   type WheelEventHandler,
@@ -21,11 +23,13 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { getSessionTextModel, type SessionTextModel } from '@/plugins/chat/store/session-presentation';
+import { buildThreadPresentation, type ThreadItemPresentation } from '@/plugins/chat/thread-presentation';
+import { buildThreadWorkPlan, type ThreadWorkPresentation } from '@/plugins/chat/thread-work';
+import { isRunActive } from '@/plugins/chat/store/types';
 import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
 import { createChatScrollChromeStore, type ChatScrollChromeStore } from '@/plugins/chat/chat-scroll-chrome-store';
 import type {
   ChatAssistantPresentation,
-  ChatAssistantTurnItem,
   ChatExecutionGraphItem,
   ChatRenderItem,
   ChatUserMessageItem,
@@ -33,7 +37,8 @@ import type {
 import { ChatMessage } from '@/plugins/message-rendering/ChatMessage';
 import { ChatAssistantTurn } from '@/plugins/chat/components/ChatAssistantTurn';
 import { useToolActivityDisclosure } from '@/plugins/message-rendering/useToolActivityDisclosure';
-import { buildToolGroupPlan, isCoveredToolOnlyItem, selectLatestBrowserTools } from '@/plugins/chat/tool-group-plan';
+import { useTranslation } from 'react-i18next';
+import { buildToolGroupPlan, selectLatestBrowserTools } from '@/plugins/chat/tool-group-plan';
 import type { ToolGroupPlan, ToolSlot } from '@/plugins/message-rendering/tool-groups';
 import type { SessionRenderToolCard } from '@/types/session/tool-card';
 import type { ToolActivityDisclosure } from '@/plugins/message-rendering/tool-renderers/types';
@@ -45,6 +50,7 @@ import type { UseChatViewResult } from '@/plugins/chat/useChatView';
 import { FailureScreen } from '@/plugins/chat/components/ChatStates';
 import { AssistantPendingIndicator } from '@/plugins/chat/components/AssistantPendingIndicator';
 import type { ChatSessionPending } from '@/plugins/chat/store/types';
+import type { SessionRunTiming } from '@/types/session/snapshot';
 import type { ChatArtifactGroup } from '@/plugins/chat/artifacts';
 import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import type { ChatSessionRuntimeState, ChatSessionViewportState } from '@/plugins/chat/store';
@@ -56,6 +62,7 @@ import type { WorkspaceFileContext } from '@/lib/host-api';
 import type { GeneratedFile } from '@/plugins/files/generated-files';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeRenderItems, summarizeSessionIdentity } from '@/lib/session-trace';
 
+const EMPTY_ARTIFACT_FILES: GeneratedFile[] = [];
 const STARTUP_TRACE_PREFIX = '[startup-trace]';
 const tracedFirstPaintSessionKeys = new Set<string>();
 
@@ -69,10 +76,11 @@ export interface ChatListProps {
   isActive: boolean;
   currentSessionKey: string;
   scrollScopeKey?: string;
-  submissionPending?: { itemKey: string; label: string };
   runtime: ChatSessionRuntimeState;
   viewport: ChatSessionViewportState;
   items: ChatRenderItem[];
+  runTimings?: readonly SessionRunTiming[];
+  activeRunId?: string | null;
   activity?: Extract<ChatSessionPending, { kind: 'activity' }>['mode'] | null;
   assistantPresentation?: ChatAssistantPresentation;
   liveView: UseChatViewResult;
@@ -107,9 +115,14 @@ interface ChatListSurfaceProps {
   onWheel: WheelEventHandler<HTMLDivElement>;
   onViewportClickCapture: MouseEventHandler<HTMLDivElement>;
   items: ChatRenderItem[];
-  submissionPending?: ChatListProps['submissionPending'];
+  runtime: ChatSessionRuntimeState;
+  isAtLatest: boolean;
+  runTimings?: readonly SessionRunTiming[];
+  activeRunId?: string | null;
   activity?: Extract<ChatSessionPending, { kind: 'activity' }>['mode'] | null;
   assistantPresentation?: ChatAssistantPresentation;
+  onBeforeWorkChange?: () => void;
+  onAfterWorkChange?: () => void;
   showLoadOlder: boolean;
   isLoadingOlder: boolean;
   onLoadOlder: () => void;
@@ -134,6 +147,27 @@ type ChatListContentProps = Omit<
   'messagesViewportRef' | 'messageContentRef' | 'onPointerDown' | 'onScroll' | 'onTouchMove' | 'onWheel' | 'onViewportClickCapture' | 'scrollChromeStore'
 >;
 
+// React's before-mutation lifecycle samples geometry before any child is hidden.
+class WorkGeometrySnapshot extends Component<{
+  scope: string | null;
+  signal: string;
+  onBefore?: () => void;
+  onAfter?: () => void;
+  children: ReactNode;
+}> {
+  getSnapshotBeforeUpdate(previous: Readonly<WorkGeometrySnapshot['props']>) {
+    const changed = previous.scope === this.props.scope && previous.signal !== this.props.signal;
+    if (changed) this.props.onBefore?.();
+    return changed;
+  }
+
+  componentDidUpdate(_previous: Readonly<WorkGeometrySnapshot['props']>, _state: unknown, changed: boolean) {
+    if (changed) this.props.onAfter?.();
+  }
+
+  render() { return this.props.children; }
+}
+
 function getMessageDataAttributes(item: ChatRenderItem) {
   return {
     'data-chat-item-key': item.key,
@@ -145,87 +179,9 @@ function getMessageDataAttributes(item: ChatRenderItem) {
   };
 }
 
-function replyTimerKey(runId?: string, laneKey?: string): string | null {
-  if (!runId) {
-    return null;
-  }
-  return `${runId}::${laneKey || 'main'}`;
-}
-
-function hasVisibleUserOutput(item: ChatUserMessageItem): boolean {
-  return !!item.largeText
-    || item.text.trim().length > 0
-    || item.images.length > 0
-    || item.attachedFiles.length > 0
-    || !!item.contentNotices?.length;
-}
-
-function hasVisibleAssistantOutput(
-  item: ChatAssistantTurnItem,
-  showThinking: boolean,
-  textModel: SessionTextModel,
-  toolSlots?: ReadonlyMap<string, ToolSlot>,
-): boolean {
-  return item.segments.some((segment) => {
-    if (segment.kind === 'message') {
-      return !!segment.largeText || textModel.assistant(segment.text).trim().length > 0;
-    }
-    if (segment.kind === 'thinking') {
-      return showThinking && segment.text.trim().length > 0;
-    }
-    if (segment.kind === 'tool') {
-      return toolSlots?.get(segment.key)?.kind !== 'covered';
-    }
-    if (segment.kind === 'media') {
-      return segment.images.length > 0 || segment.attachedFiles.length > 0 || !!segment.contentNotices?.length;
-    }
-    return false;
-  })
-    || item.images.length > 0
-    || item.attachedFiles.length > 0
-    || item.status === 'streaming'
-    || item.status === 'waiting_tool';
-}
-
-function buildItemPresentation(
-  items: ReadonlyArray<ChatRenderItem>,
-  showThinking: boolean,
-  textModel: SessionTextModel,
-  toolPlan: ToolGroupPlan,
-) {
-  const startedAtByTimerKey = new Map<string, number>();
-  let latestUserMessageCreatedAt: number | undefined;
-  let inAssistantVisualGroup = false;
-
-  return items.map((item) => {
-    const toolSlots = toolPlan.get(item.key);
-    let coveredOnly = false;
-    let assistantAvatarSlot: MessageAvatarSlot | undefined;
-    let replyStartedAt: number | undefined;
-    if (item.kind === 'assistant-turn') {
-      coveredOnly = isCoveredToolOnlyItem(item, toolSlots);
-      if (!coveredOnly && hasVisibleAssistantOutput(item, showThinking, textModel, toolSlots)) {
-        assistantAvatarSlot = inAssistantVisualGroup ? 'placeholder' : 'visible';
-        inAssistantVisualGroup = true;
-      }
-      const timerKey = replyTimerKey(item.runId, item.laneKey);
-      replyStartedAt = (timerKey ? startedAtByTimerKey.get(timerKey) : undefined) ?? latestUserMessageCreatedAt;
-    } else if (item.kind === 'user-message') {
-      if (hasVisibleUserOutput(item)) inAssistantVisualGroup = false;
-      if (typeof item.createdAt === 'number') {
-        latestUserMessageCreatedAt = item.createdAt;
-        const timerKey = replyTimerKey(item.runId, item.laneKey);
-        if (timerKey) startedAtByTimerKey.set(timerKey, item.createdAt);
-      }
-    } else if (item.kind === 'system' && item.text.trim()) {
-      inAssistantVisualGroup = false;
-    }
-    return { item, toolSlots, coveredOnly, assistantAvatarSlot, replyStartedAt };
-  });
-}
-
 function SystemInfoRow({ item }: { item: ChatRenderItem }) {
-  const text = item.text.trim();
+  const { t } = useTranslation('chat');
+  const text = item.kind === 'system' && item.notice === 'restart-recovery' ? t('systemNotice.restartRecovery') : item.text.trim();
   if (!text) {
     return null;
   }
@@ -238,35 +194,46 @@ function SystemInfoRow({ item }: { item: ChatRenderItem }) {
   );
 }
 
-function renderChatItem(input: {
+const ChatItem = memo(function ChatItem(input: {
   item: ChatRenderItem;
+  index: number;
+  spacing: ThreadItemPresentation['spacing'];
   toolSlots?: ReadonlyMap<string, ToolSlot>;
   latestBrowserTools: ReadonlySet<SessionRenderToolCard>;
   disclosure: ToolActivityDisclosure;
+  workDisclosure: ToolActivityDisclosure;
+  work?: ThreadWorkPresentation;
   assistantAvatarSlot?: MessageAvatarSlot;
-  replyStartedAt?: number;
+  timing: ThreadItemPresentation['timing'];
+  footer: ThreadItemPresentation['footer'];
+  view: ThreadItemPresentation['view'];
   showThinking: boolean;
   userAvatarImageUrl: string | null;
   sessionIdentity?: SessionIdentity;
   endpointSessionId?: string | null;
   workspaceContext?: WorkspaceFileContext;
   onJumpToItemKey: (itemKey?: string) => void;
-  artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
-  onOpenArtifactFile: (file: GeneratedFile) => void;
+  artifactFiles: GeneratedFile[];
+  onOpenArtifactFile?: (file: GeneratedFile) => void;
   onOpenAttachedArtifact: (file: AttachedFileMeta) => boolean | void;
   onReuseMessage?: (text: string) => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
+  let content: ReactNode;
   if (input.item.kind === 'assistant-turn') {
-    return (
+    content = (
       <ChatAssistantTurn
         item={input.item}
         toolSlots={input.toolSlots}
         latestBrowserTools={input.latestBrowserTools}
         disclosure={input.disclosure}
+        work={input.work}
+        workDisclosure={input.workDisclosure}
         showThinking={input.showThinking}
-        replyStartedAt={input.replyStartedAt}
+        timing={input.timing}
+        footer={input.footer}
+        view={input.view ?? undefined}
         assistantAvatarSlot={input.assistantAvatarSlot}
         userAvatarImageUrl={input.userAvatarImageUrl}
         sessionIdentity={input.sessionIdentity}
@@ -277,10 +244,9 @@ function renderChatItem(input: {
         onRuntimeOpenLink={input.onRuntimeOpenLink}
       />
     );
-  }
-  if (input.item.kind === 'execution-graph') {
+  } else if (input.item.kind === 'execution-graph') {
     const item = input.item as ChatExecutionGraphItem;
-    return (
+    content = (
       <div
         data-testid="chat-execution-graph-rail"
         className={cn(
@@ -310,27 +276,38 @@ function renderChatItem(input: {
             triggerItemKey={item.triggerItemKey}
             replyItemKey={item.replyItemKey}
             onJumpToItemKey={input.onJumpToItemKey}
-            artifactFiles={input.artifactFilesByGraphKey.get(item.key) ?? []}
+            artifactFiles={input.artifactFiles}
             onOpenArtifactFile={input.onOpenArtifactFile}
           />
         </div>
       </div>
     );
+  } else if (input.item.kind === 'system') {
+    content = <SystemInfoRow item={input.item} />;
+  } else {
+    content = (
+      <ChatMessage
+        item={input.item as ChatUserMessageItem}
+        onReuseMessage={input.onReuseMessage}
+        onOpenFile={input.onOpenAttachedArtifact}
+        userAvatarImageUrl={input.userAvatarImageUrl}
+        sessionIdentity={input.sessionIdentity}
+        endpointSessionId={input.endpointSessionId}
+      />
+    );
   }
-  if (input.item.kind === 'system') {
-    return <SystemInfoRow item={input.item} />;
-  }
+  const hiddenWorkRow = input.work && !input.work.headSegmentKey && !input.workDisclosure.expandedKeys.has(input.work.key)
+    && input.footer === null && !!input.view?.segments.length && input.view.segments.every((segment) => input.work!.segmentKeys.has(segment.key));
   return (
-    <ChatMessage
-      item={input.item as ChatUserMessageItem}
-      onReuseMessage={input.onReuseMessage}
-      onOpenFile={input.onOpenAttachedArtifact}
-      userAvatarImageUrl={input.userAvatarImageUrl}
-      sessionIdentity={input.sessionIdentity}
-      endpointSessionId={input.endpointSessionId}
-    />
+    <div hidden={hiddenWorkRow || undefined}>
+      <div data-index={input.index} className={input.spacing}>
+        <div {...getMessageDataAttributes(input.item)} className="w-full">
+          {content}
+        </div>
+      </div>
+    </div>
   );
-}
+});
 
 const ChatListContent = memo(function ChatListContent({
   isEmptyState,
@@ -338,7 +315,12 @@ const ChatListContent = memo(function ChatListContent({
   showBlockingError,
   errorMessage,
   items,
-  submissionPending,
+  runtime,
+  isAtLatest,
+  runTimings,
+  onBeforeWorkChange,
+  onAfterWorkChange,
+  activeRunId,
   activity,
   assistantPresentation,
   showLoadOlder,
@@ -363,14 +345,19 @@ const ChatListContent = memo(function ChatListContent({
   const metadataStartedAt = tracing ? performance.now() : 0;
   const textModel = getSessionTextModel(sessionIdentity);
   const disclosure = useToolActivityDisclosure(sessionIdentity);
+  const workDisclosure = useToolActivityDisclosure(sessionIdentity);
   const identityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
-  const committedTools = useRef<{
+  const committedPresentation = useRef<{
     identityKey: string | null;
     plan: ToolGroupPlan;
     latestBrowserTools: ReadonlySet<SessionRenderToolCard>;
+    rows: ThreadItemPresentation[];
+    workPlan: ReadonlyMap<string, ThreadWorkPresentation>;
+    showThinking: boolean;
+    textModel: SessionTextModel;
   } | null>(null);
   const { toolPlan, latestBrowserTools } = useMemo(() => {
-    const previous = committedTools.current?.identityKey === identityKey ? committedTools.current : null;
+    const previous = committedPresentation.current?.identityKey === identityKey ? committedPresentation.current : null;
     const toolPlan = buildToolGroupPlan(items, previous?.plan);
     const selected = selectLatestBrowserTools(items, sessionIdentity);
     const previousLatest = previous?.latestBrowserTools;
@@ -385,10 +372,29 @@ const ChatListContent = memo(function ChatListContent({
     }
     return { toolPlan, latestBrowserTools };
   }, [identityKey, items, sessionIdentity]);
+  const itemPresentation = useMemo(() => buildThreadPresentation(items, showThinking, textModel, toolPlan,
+    committedPresentation.current?.identityKey === identityKey ? committedPresentation.current : undefined, runTimings, activeRunId),
+  [identityKey, items, showThinking, textModel, toolPlan, runTimings, activeRunId]);
+  const runWorking = isAtLatest && (isRunActive(runtime) || !!activity || !!runtime.imageGeneration?.active);
+  const workPlan = useMemo(() => buildThreadWorkPlan(itemPresentation, runWorking,
+    committedPresentation.current?.identityKey === identityKey ? committedPresentation.current.workPlan : undefined),
+  [identityKey, itemPresentation, runWorking]);
+  const workTimingFooters = useMemo(() => {
+    const footers = new Set<string>();
+    const timings = new Set<string>();
+    for (const row of itemPresentation) {
+      const workTiming = workPlan.get(row.item.key)?.timing;
+      if (workTiming?.kind === 'finished') timings.add(JSON.stringify([workTiming.startedAtMs, workTiming.endedAtMs]));
+      if (row.footer === null) continue;
+      if (row.timing?.kind === 'finished' && timings.has(JSON.stringify([row.timing.startedAtMs, row.timing.endedAtMs]))) footers.add(row.item.key);
+      timings.clear();
+    }
+    return footers;
+  }, [itemPresentation, workPlan]);
+  const workSignal = useMemo(() => [...workPlan].map(([itemKey, work]) => JSON.stringify([itemKey, [...work.segmentKeys], workDisclosure.expandedKeys.has(work.key)])).join('|'), [workPlan, workDisclosure.expandedKeys]);
   useLayoutEffect(() => {
-    committedTools.current = { identityKey, plan: toolPlan, latestBrowserTools };
-  }, [identityKey, latestBrowserTools, toolPlan]);
-  const itemPresentation = useMemo(() => buildItemPresentation(items, showThinking, textModel, toolPlan), [items, showThinking, textModel, toolPlan]);
+    committedPresentation.current = { identityKey, plan: toolPlan, latestBrowserTools, rows: itemPresentation, workPlan, showThinking, textModel };
+  }, [identityKey, latestBrowserTools, toolPlan, itemPresentation, workPlan, showThinking, textModel]);
   const metadataBuildElapsedMs = tracing ? performance.now() - metadataStartedAt : null;
   let contentElementsBuildElapsedMs: number | null = null;
   useEffect(() => {
@@ -417,6 +423,8 @@ const ChatListContent = memo(function ChatListContent({
   }
 
   const contentElementsStartedAt = tracing ? performance.now() : 0;
+  const activityTiming = activity && activeRunId
+    ? runTimings?.find((timing) => timing.runId === activeRunId) : undefined;
   const content = (
     <>
       {showLoadOlderButton && !isEmptyState ? (
@@ -440,44 +448,35 @@ const ChatListContent = memo(function ChatListContent({
 
       {!isEmptyState ? (
         <>
-          {itemPresentation.map(({ item, toolSlots, coveredOnly, assistantAvatarSlot, replyStartedAt }, index) => {
-            return (
-              <div key={item.key}>
-                <div data-index={index} className={coveredOnly ? 'w-full' : CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}>
-                  <div {...getMessageDataAttributes(item)} className="w-full">
-                    {renderChatItem({
-                      item,
-                      toolSlots,
-                      latestBrowserTools,
-                      disclosure,
-                      assistantAvatarSlot,
-                      replyStartedAt,
-                      showThinking,
-                      userAvatarImageUrl,
-                      sessionIdentity,
-                      endpointSessionId,
-                      workspaceContext,
-                      onJumpToItemKey,
-                      artifactFilesByGraphKey,
-                      onOpenArtifactFile,
-                      onOpenAttachedArtifact,
-                      onReuseMessage,
-                      onRuntimeSendMessage,
-                      onRuntimeOpenLink,
-                    })}
-                    {submissionPending?.itemKey === item.key ? (
-                      <div className={cn(MESSAGE_LAYOUT_TOKENS.messageShell, MESSAGE_LAYOUT_TOKENS.messageShellUserColumns)}>
-                        <div className={cn(MESSAGE_LAYOUT_TOKENS.messageContentColumn, MESSAGE_LAYOUT_TOKENS.messageContentUserOrder)}>
-                          <span role="status" aria-live="polite" className="text-xs text-muted-foreground">{submissionPending.label}</span>
-                        </div>
-                        <div aria-hidden="true" className={cn(MESSAGE_LAYOUT_TOKENS.messageAvatar, MESSAGE_LAYOUT_TOKENS.messageAvatarUserOrder, 'invisible')} />
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+          {itemPresentation.map(({ item, toolSlots, spacing, assistantAvatarSlot, timing, footer, view }, index) => (
+            <ChatItem
+              key={item.key}
+              item={item}
+              index={index}
+              spacing={spacing}
+              toolSlots={toolSlots}
+              latestBrowserTools={latestBrowserTools}
+              disclosure={disclosure}
+              assistantAvatarSlot={assistantAvatarSlot}
+              work={workPlan.get(item.key)}
+              workDisclosure={workDisclosure}
+              timing={workTimingFooters.has(item.key) ? undefined : timing}
+              footer={footer}
+              view={view}
+              showThinking={showThinking}
+              userAvatarImageUrl={userAvatarImageUrl}
+              sessionIdentity={sessionIdentity}
+              endpointSessionId={endpointSessionId}
+              workspaceContext={workspaceContext}
+              onJumpToItemKey={onJumpToItemKey}
+              artifactFiles={item.kind === 'execution-graph' ? artifactFilesByGraphKey.get(item.key) ?? EMPTY_ARTIFACT_FILES : EMPTY_ARTIFACT_FILES}
+              onOpenArtifactFile={item.kind === 'execution-graph' ? onOpenArtifactFile : undefined}
+              onOpenAttachedArtifact={onOpenAttachedArtifact}
+              onReuseMessage={onReuseMessage}
+              onRuntimeSendMessage={onRuntimeSendMessage}
+              onRuntimeOpenLink={onRuntimeOpenLink}
+            />
+          ))}
         </>
       ) : null}
       {activity ? (
@@ -489,14 +488,14 @@ const ChatListContent = memo(function ChatListContent({
             assistantAvatarSeed={assistantPresentation?.avatarSeed}
             assistantAvatarStyle={assistantPresentation?.avatarStyle}
           >
-            <AssistantPendingIndicator mode={activity} />
+            <AssistantPendingIndicator mode={activity} timing={activityTiming ? { kind: 'running', startedAtMs: activityTiming.startedAtMs } : undefined} />
           </MessageShell>
         </div>
       ) : null}
     </>
   );
   contentElementsBuildElapsedMs = tracing ? performance.now() - contentElementsStartedAt : null;
-  return content;
+  return <WorkGeometrySnapshot scope={identityKey} signal={workSignal} onBefore={onBeforeWorkChange} onAfter={onAfterWorkChange}>{content}</WorkGeometrySnapshot>;
 });
 
 const ChatScrollChrome = memo(function ChatScrollChrome({
@@ -555,7 +554,12 @@ export const ChatListSurface = memo(function ChatListSurface({
   onWheel,
   onViewportClickCapture,
   items,
-  submissionPending,
+  runtime,
+  isAtLatest,
+  runTimings,
+  onBeforeWorkChange,
+  onAfterWorkChange,
+  activeRunId,
   activity,
   assistantPresentation,
   showLoadOlder,
@@ -603,7 +607,7 @@ export const ChatListSurface = memo(function ChatListSurface({
             data-testid="chat-message-stack"
             className={cn(
               'w-full',
-              !showBlockingLoading && !isEmptyState && CHAT_LAYOUT_TOKENS.threadMessageStackPaddingTop,
+              !showBlockingLoading && !isEmptyState && `${CHAT_LAYOUT_TOKENS.threadMessageStackPaddingTop} pb-6`,
             )}
             style={{ overflowAnchor: 'none' }}
           >
@@ -613,7 +617,12 @@ export const ChatListSurface = memo(function ChatListSurface({
               showBlockingError={showBlockingError}
               errorMessage={errorMessage}
               items={items}
-              submissionPending={submissionPending}
+              runtime={runtime}
+              isAtLatest={isAtLatest}
+              onBeforeWorkChange={onBeforeWorkChange}
+              onAfterWorkChange={onAfterWorkChange}
+              runTimings={runTimings}
+              activeRunId={activeRunId}
               activity={activity}
               assistantPresentation={assistantPresentation}
               showLoadOlder={showLoadOlder}
@@ -651,7 +660,9 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     scrollScopeKey = currentSessionKey,
     viewport,
     items,
-    submissionPending,
+    runtime,
+    runTimings,
+    activeRunId,
     activity,
     assistantPresentation,
     liveView,
@@ -765,6 +776,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     handleViewportScroll,
     notifyViewportGeometryChanged,
     handleViewportClickCapture,
+    prepareContentAnchorRestore,
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
     scrollViewportByWheelDelta,
@@ -822,7 +834,17 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     if (!target) {
       return;
     }
-    target.scrollIntoView({ block: 'start', behavior: 'auto' });
+    const summaries = new Set<HTMLButtonElement>();
+    for (const hidden of target.querySelectorAll<HTMLElement>('[data-chat-work-key][hidden]')) {
+      const key = hidden.dataset.chatWorkKey;
+      const summary = viewportNode.querySelector<HTMLButtonElement>(`[data-chat-work-summary="true"][data-chat-work-key="${CSS.escape(key ?? '')}"]`);
+      if (summary) summaries.add(summary);
+    }
+    for (const summary of summaries) summary.click();
+    // Disclosure commits before the next paint; locate the original item after expansion.
+    window.requestAnimationFrame(() => {
+      if (target.isConnected && viewportNode.contains(target)) target.scrollIntoView({ block: 'start', behavior: 'auto' });
+    });
   }, []);
 
   const handleJumpToLatestBottom = useCallback(() => {
@@ -892,7 +914,12 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       onWheel={handleViewportWheel}
       onViewportClickCapture={handleViewportClickCapture}
       items={items}
-      submissionPending={submissionPending}
+      runtime={runtime}
+      isAtLatest={viewport.isAtLatest}
+      onBeforeWorkChange={prepareContentAnchorRestore}
+      onAfterWorkChange={notifyViewportGeometryChanged}
+      runTimings={runTimings}
+      activeRunId={activeRunId}
       activity={activity}
       assistantPresentation={assistantPresentation}
       showLoadOlder={viewport.hasMore || viewport.isLoadingMore}

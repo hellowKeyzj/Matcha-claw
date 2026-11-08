@@ -2,6 +2,7 @@ import { readdir, readFile, writeFile, cp } from 'fs/promises'
 import { join } from 'path'
 import { getMacroDefines } from './scripts/defines.ts'
 import { DEFAULT_BUILD_FEATURES } from './scripts/defines.ts'
+import { skillsCatalog } from './src/skills/bundled/appCatalogSkills.ts'
 
 const outdir = 'dist'
 
@@ -39,6 +40,11 @@ if (!result.success) {
   }
   process.exit(1)
 }
+
+await writeFile(
+  join(outdir, 'skills-catalog.json'),
+  `${JSON.stringify(skillsCatalog)}\n`,
+)
 
 // Step 3: Post-process — replace Bun-only `import.meta.require` with Node.js compatible version
 const files = await readdir(outdir)

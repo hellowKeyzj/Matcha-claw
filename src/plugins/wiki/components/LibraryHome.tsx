@@ -1,11 +1,11 @@
 import { useMemo, useState, type JSX } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BookOpen, FolderOpen, FolderPlus, Loader2, Plus, RefreshCw, Search, X } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import { FolderOpen, FolderPlus, Loader2, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { formatDateTime, type WikiProject, type WikiProjectTemplate, type WikiStatus } from '@/plugins/wiki/wiki-model';
+import './LibraryHome.css';
 
 export type LibraryHomeProps = Readonly<{
   status: WikiStatus;
@@ -146,100 +146,73 @@ export function LibraryHome(props: LibraryHomeProps): JSX.Element {
     const keyword = query.trim().toLowerCase();
     return [...projects]
       .sort((left, right) => right.openedAtMs - left.openedAtMs)
-      .filter((project) => !keyword || project.title.toLowerCase().includes(keyword) || project.rootPath.toLowerCase().includes(keyword))
-      .slice(0, 10);
+      .filter((project) => !keyword || project.title.toLowerCase().includes(keyword) || project.rootPath.toLowerCase().includes(keyword));
   }, [projects, query]);
 
   return (
     <>
-      <div className="grid h-full min-h-0 grid-cols-[300px_minmax(0,1fr)] overflow-hidden">
-        <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
-          <div className="px-5 py-5">
-            <div className="flex items-center justify-between gap-2">
-              <h1 className="text-2xl font-semibold tracking-tight">{t('home.title')}</h1>
-              <Button variant="ghost" size="icon" onClick={onRefresh} disabled={isBusy} className="h-8 w-8 rounded-full">
-                {busy === 'load' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              </Button>
-            </div>
+      <main className="library-home">
+        <header className="library-home-header">
+          <h1>{t('home.title')}</h1>
+          <div className="library-home-actions">
+            <Button type="button" variant="ghost" size="icon" onClick={onRefresh} disabled={isBusy} aria-label={t('common.refresh')}>
+              {busy === 'load' ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <RefreshCw aria-hidden="true" className="h-4 w-4" />}
+            </Button>
+            <Button type="button" size="sm" onClick={() => setCreateDialogOpen(true)} disabled={isBusy} className="library-home-create">
+              <Plus aria-hidden="true" className="h-4 w-4" />
+              {t('home.newLibrary')}
+            </Button>
+          </div>
+        </header>
 
-            <div className="mt-5 flex h-10 items-center gap-2 rounded-2xl bg-background px-3 ring-1 ring-border/70">
-              <Search className="h-4 w-4 text-muted-foreground" />
+        <div className="library-home-body" aria-busy={isBusy}>
+          <div className="library-home-toolbar">
+            <label className="library-home-search">
+              <Search aria-hidden="true" />
               <input
+                type="search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={t('home.search')}
-                className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                aria-label={t('home.search')}
               />
-            </div>
+            </label>
           </div>
-
-          <div className="mt-1 min-h-0 flex-1 overflow-auto px-5">
-            <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t('home.myLibraries')}</span>
-              <span>{visibleProjects.length}</span>
-            </div>
-
-            <div className="space-y-1.5">
-              {visibleProjects.map((project) => (
-                <button
-                  key={project.projectId}
-                  type="button"
-                  onClick={() => onSelectProject(project)}
-                  className={cn(
-                    'flex w-full min-w-0 items-center gap-2 rounded-xl px-2 py-2 text-left text-sm hover:bg-background/70',
-                    project.projectId === currentProject?.projectId && 'bg-background shadow-sm',
-                  )}
-                >
-                  <BookOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate">{project.title}</span>
-                  {project.projectId === currentProject?.projectId ? <Badge variant="secondary">{t('common.current')}</Badge> : null}
-                </button>
-              ))}
-              {visibleProjects.length === 0 ? <div className="rounded-xl border border-dashed border-border/80 py-8 text-center text-sm text-muted-foreground">{t('common.empty')}</div> : null}
-            </div>
+          <div className="library-home-table-scroll">
+            <table className="library-home-table" aria-label={t('home.title')}>
+              <thead>
+                <tr>
+                  <th scope="col">{t('home.table.name')}</th>
+                  <th scope="col">{t('home.table.location')}</th>
+                  <th scope="col">{t('home.table.lastOpened')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleProjects.map((project) => (
+                  <tr key={project.projectId} aria-disabled={isBusy} onClick={() => { if (!isBusy) onSelectProject(project); }}>
+                    <td>
+                      <button
+                        type="button"
+                        className="library-home-project"
+                        title={project.title}
+                        disabled={isBusy}
+                        onClick={(event) => { event.stopPropagation(); onSelectProject(project); }}
+                      >
+                        <span className="library-home-icon"><FolderOpen aria-hidden="true" /></span>
+                        <strong>{project.title}</strong>
+                        {project.projectId === currentProject?.projectId ? <span className="library-home-current">{t('common.current')}</span> : null}
+                      </button>
+                    </td>
+                    <td><span className="library-home-path" title={project.rootPath}>{project.rootPath}</span></td>
+                    <td>{formatDateTime(project.openedAtMs, t('time.unrecorded'))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {visibleProjects.length === 0 ? <div className="library-home-empty" role="status">{t(projects.length > 0 && query.trim() ? 'home.noResults' : 'common.empty')}</div> : null}
           </div>
-        </aside>
-
-        <main className="min-h-0 min-w-0 overflow-y-auto px-12 py-10">
-          <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-2xl font-semibold tracking-tight">{t('home.recent')}</h2>
-              <Button type="button" onClick={() => setCreateDialogOpen(true)} disabled={isBusy} className="h-9 rounded-full bg-foreground px-4 text-background hover:bg-foreground/90">
-                <Plus className="h-4 w-4" />
-                {t('home.newLibrary')}
-              </Button>
-            </div>
-
-            <div className="mt-6 overflow-hidden">
-              <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_160px] border-b border-border/70 px-4 py-2 text-xs text-muted-foreground">
-                <span>{t('home.table.name')}</span>
-                <span>{t('home.table.location')}</span>
-                <span>{t('home.table.lastOpened')}</span>
-              </div>
-              <div className="max-h-[420px] overflow-y-auto">
-                {visibleProjects.length > 0 ? visibleProjects.map((project) => (
-                  <button
-                    key={project.projectId}
-                    type="button"
-                    onClick={() => onSelectProject(project)}
-                    className="grid w-full grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_160px] items-center border-b border-border/60 px-4 py-3 text-left text-sm last:border-b-0 hover:bg-secondary/35"
-                  >
-                    <span className="flex min-w-0 items-center gap-2">
-                      <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
-                      <span className="truncate font-medium">{project.title}</span>
-                      {project.projectId === currentProject?.projectId ? <Badge variant="secondary">{t('common.current')}</Badge> : null}
-                    </span>
-                    <span className="truncate text-muted-foreground">{project.rootPath}</span>
-                    <span className="text-xs text-muted-foreground">{formatDateTime(project.openedAtMs, t('time.unrecorded'))}</span>
-                  </button>
-                )) : (
-                  <div className="py-16 text-center text-sm text-muted-foreground">{t('common.empty')}</div>
-                )}
-              </div>
-            </div>
-          </div>
-        </main>
-      </div>
+        </div>
+      </main>
 
       <LibraryDialog
         open={createDialogOpen}

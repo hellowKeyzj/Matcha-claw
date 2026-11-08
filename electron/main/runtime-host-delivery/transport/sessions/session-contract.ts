@@ -1,6 +1,6 @@
 import { isSessionOwnership, type SessionOwnership } from '../../../../../src/types/desktop/session-ownership';
 import type { SessionGoalView } from '../../../../../src/types/session-goal';
-import { tryDecodeSessionGoalView, type SessionInputReceipt } from '../../../../../src/types/session/snapshot';
+import { isSessionApprovalDetails, isSessionRunTiming, isSessionRunTimings, tryDecodeSessionGoalView, type SessionApprovalDetails, type SessionInputReceipt, type SessionRunTiming } from '../../../../../src/types/session/snapshot';
 
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_ID_BYTES = 256;
@@ -44,6 +44,7 @@ export type SessionView = Readonly<{
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
   inputReceipts?: SessionInputReceipt[];
+  runTimings: SessionRunTiming[];
   goal: SessionGoalView;
   identity: SessionIdentity;
   epoch: number;
@@ -61,6 +62,7 @@ export type SessionItem = Readonly<{
   readonly kind: 'userMessage' | 'assistantTurn' | 'system';
   readonly itemId: string;
   readonly runId?: string | null;
+  readonly notice?: 'restart-recovery';
 }>;
 export type ToolView = Readonly<{
   toolCallId: string;
@@ -74,7 +76,13 @@ export type ToolView = Readonly<{
   details: unknown | null;
   isError: boolean | null;
 }>;
-export type ApprovalView = Readonly<{ approvalId: string; runId?: string | null; phase: string }>;
+export type ApprovalDetails = SessionApprovalDetails;
+export type ApprovalView = Readonly<{
+  approvalId: string;
+  runId?: string | null;
+  phase: string;
+  details: ApprovalDetails | null;
+}>;
 export type RuntimeActivity = 'compacting';
 export type RuntimeStartupPhase =
   | 'waiting_for_state'
@@ -133,6 +141,7 @@ export type SessionContentLoadResponse = Readonly<{
 
 export type SessionChange =
   | Readonly<{ kind: 'runPhaseChanged'; runId: string; phase: SessionRunPhase }>
+  | Readonly<{ kind: 'runTimingUpdated'; timing: SessionRunTiming }>
   | Readonly<{ kind: 'messageDelta'; itemId: string; runId: string | null; messageId: string | null; text: string; replace: boolean; status: SessionItemStatus }>
   | Readonly<{ kind: 'messageUpdated'; item: SessionItem }>
   | Readonly<{ kind: 'messageReplaced'; item: SessionItem }>
@@ -205,13 +214,14 @@ export function decodeSessionView(value: unknown): SessionView | null {
     || !hasAllowedKeys(value, [
       'sessionKey', 'ownership', 'endpointSessionId', 'modelState', 'goal', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
       'runtime', 'window', 'completeness',
-    ], ['inputReceipts'])
+    ], ['inputReceipts', 'runTimings'])
     || typeof value.sessionKey !== 'string'
     || !isSessionKey(value.sessionKey)
     || (value.ownership !== null && !isSessionOwnership(value.ownership))
     || !isNullableSessionKey(value.endpointSessionId)
     || !isNullableSessionModelState(value.modelState)
     || (Object.hasOwn(value, 'inputReceipts') && !isInputReceipts(value.inputReceipts))
+    || (Object.hasOwn(value, 'runTimings') && !isSessionRunTimings(value.runTimings))
     || !tryDecodeSessionGoalView(value.goal)
     || !isSessionIdentity(value.identity)
     || value.identity.sessionKey !== value.sessionKey
@@ -226,7 +236,7 @@ export function decodeSessionView(value: unknown): SessionView | null {
     || !isCompleteness(value.completeness)) {
     return null;
   }
-  return value as SessionView;
+  return { ...value, runTimings: value.runTimings ?? [] } as SessionView;
 }
 
 export function isSessionDelta(value: unknown): value is SessionDelta {
@@ -270,6 +280,10 @@ function isChange(value: unknown, outerRunId: string | undefined): boolean {
     case 'runPhaseChanged':
       if (!hasExactKeys(value, ['kind', 'runId', 'phase']) || !isId(value.runId) || !isRunPhase(value.phase)) return false;
       changeRunId = value.runId;
+      break;
+    case 'runTimingUpdated':
+      if (!hasExactKeys(value, ['kind', 'timing']) || !isSessionRunTiming(value.timing)) return false;
+      changeRunId = value.timing.runId;
       break;
     case 'messageDelta':
       if (!hasExactKeys(value, ['kind', 'itemId', 'runId', 'messageId', 'text', 'replace', 'status'])
@@ -376,7 +390,8 @@ function isApprovals(value: unknown): boolean {
 function isItem(value: unknown): boolean {
   if (!isRecord(value) || typeof value.kind !== 'string') return false;
   if (value.kind === 'userMessage') {
-    return hasAllowedKeys(value, ['kind', 'itemId', 'messageId', 'text', 'content', 'status'], ['inputIds'])
+    return hasAllowedKeys(value, ['kind', 'itemId', 'messageId', 'text', 'content', 'status'], ['inputIds', 'notice'])
+      && (!Object.hasOwn(value, 'notice') || value.notice === 'restart-recovery')
       && isId(value.itemId)
       && isNullableId(value.messageId)
       && (!Object.hasOwn(value, 'inputIds') || isSessionInputIds(value.inputIds)
@@ -466,14 +481,17 @@ function isTool(value: unknown): value is ToolView {
 
 function isApproval(value: unknown): value is ApprovalView {
   return isRecord(value)
-    && hasExactKeys(value, ['approvalId', 'runId', 'phase', 'optionIds'])
+    && hasExactKeys(value, ['approvalId', 'runId', 'phase', 'optionIds', 'details'])
     && isId(value.approvalId)
     && isNullableId(value.runId)
     && isApprovalPhase(value.phase)
     && Array.isArray(value.optionIds)
     && value.optionIds.length <= MAX_APPROVALS
-    && value.optionIds.every(isId);
+    && value.optionIds.every(isId)
+    && (value.details === null || isApprovalDetails(value.details));
 }
+
+export const isApprovalDetails: (value: unknown) => value is ApprovalDetails = isSessionApprovalDetails;
 
 function isRuntimeNotice(value: unknown): value is RuntimeNotice {
   return isRecord(value)
@@ -687,7 +705,7 @@ function isPayloadValue(value: unknown): boolean {
   return text !== undefined
     && Buffer.byteLength(text, 'utf8') <= MAX_TEXT_BYTES
     && !payloadValueContainsNul(value)
-    && (value === null || typeof value !== 'object' || value.constructor === Object || Array.isArray(value));
+    && (value === null || typeof value !== 'object' || Object.getPrototypeOf(value) === Object.prototype || Array.isArray(value));
 }
 
 function payloadValueContainsNul(value: unknown): boolean {

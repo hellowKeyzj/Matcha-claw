@@ -27,6 +27,7 @@ import { securityPlugin } from '@/plugins/security/plugin';
 import { dashboardPlugin } from '@/plugins/dashboard/plugin';
 import { callsPlugin } from '@/plugins/calls/plugin';
 import { searchPlugin } from '@/plugins/search/plugin';
+import { accessPlugin } from '@/plugins/access/plugin';
 
 export const applicationPluginsHost = createPluginHost([
   applicationShellPlugin,
@@ -56,6 +57,7 @@ export const applicationPluginsHost = createPluginHost([
   dashboardPlugin,
   callsPlugin,
   searchPlugin,
+  accessPlugin,
 ]);
 
 export function observeApplicationPluginPackages(): () => void {

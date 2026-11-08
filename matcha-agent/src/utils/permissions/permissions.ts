@@ -1466,7 +1466,7 @@ export function syncPermissionRulesFromDisk(
     }
   }
 
-  // Clear all disk-based source:behavior combos before applying new rules.
+  // Clear all reloadable settings source:behavior combos before applying new rules.
   // Without this, removing a rule from settings (e.g. deleting a deny entry)
   // would leave the old rule in the context because convertRulesToUpdates
   // only generates replaceRules for source:behavior pairs that have rules —
@@ -1475,6 +1475,7 @@ export function syncPermissionRulesFromDisk(
     'userSettings',
     'projectSettings',
     'localSettings',
+    'flagSettings' as PermissionUpdateDestination,
   ]
   for (const diskSource of diskSources) {
     for (const behavior of ['allow', 'deny', 'ask'] as PermissionBehavior[]) {

@@ -1,5 +1,5 @@
-import { useCallback, useEffectEvent, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject, type WheelEvent } from 'react';
-import type { WorkspaceLayout } from '@/plugins/workspace/extensions';
+import { useCallback, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject, type WheelEvent } from 'react';
+import type { WorkspaceLayout, WorkspacePanelProps, WorkspacePaneStyle } from '@/plugins/workspace/extensions';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
 import { CHAT_WORKSPACE_LAYOUT } from '@/app/layout/workspace';
@@ -11,7 +11,6 @@ const CHAT_THREAD_TOP_GAP_PX = 8;
 const CHAT_STAGE_CSS_VARS = {
   '--chat-composer-safe-offset': '0px',
   '--chat-thread-bottom-padding': `${CHAT_THREAD_BOTTOM_GAP_PX}px`,
-  '--chat-header-safe-offset': '0px',
   '--chat-thread-top-padding': `${CHAT_THREAD_TOP_GAP_PX}px`,
 } as CSSProperties;
 
@@ -23,6 +22,8 @@ interface ChatShellProps {
   sidePanelMainWidth?: number | null;
   sidePanelVisible?: boolean;
   panelLayout: WorkspaceLayout;
+  containerWidth: number;
+  mainPageActive: boolean;
   onSidePanelResize?: (nextWidth: number) => void;
   onSidePanelResizeCommit?: (nextWidth: number) => void;
   onComposerWheel?: (deltaY: number) => void;
@@ -30,8 +31,9 @@ interface ChatShellProps {
   isEmptyState?: boolean;
   emptyState?: ReactNode;
   offline?: ReactNode;
-  sidePanel: ReactNode;
+  renderWorkspace: (metrics: Pick<WorkspacePanelProps, 'visible' | 'width' | 'mainVisible' | 'mainWidth' | 'mainActions' | 'mainStyle' | 'sideStyle'>) => ReactNode;
   header: ReactNode;
+  threadHeader?: ReactNode;
   viewportPane: ReactNode;
   input: ReactNode;
 }
@@ -44,6 +46,8 @@ export function ChatShell({
   sidePanelMainWidth = null,
   sidePanelVisible,
   panelLayout,
+  containerWidth,
+  mainPageActive,
   onSidePanelResize,
   onSidePanelResizeCommit,
   onComposerWheel,
@@ -51,15 +55,14 @@ export function ChatShell({
   isEmptyState = false,
   emptyState = null,
   offline = null,
-  sidePanel,
+  renderWorkspace,
   header,
+  threadHeader,
   viewportPane,
   input,
 }: ChatShellProps) {
-  const isMac = window.electron?.platform === 'darwin';
   const isOffline = Boolean(offline);
   const stageRef = useRef<HTMLDivElement>(null);
-  const headerOverlayRef = useRef<HTMLDivElement>(null);
   const composerOverlayRef = useRef<HTMLDivElement>(null);
   const resizeGestureRef = useRef<{
     pointerId: number; element: HTMLDivElement; cursor: string; userSelect: string;
@@ -74,6 +77,7 @@ export function ChatShell({
   const composerCentered = isEmptyState && !panelOnly;
   const panelTop = panelLayoutActive && !panelOnly && panelLayout.position === 'top';
   const panelBeforeChat = panelLayoutActive && !panelOnly && panelLayout.position === 'left';
+  const stageHidden = panelOnly ? !panelComposerDocked : mainPageActive;
 
   const shouldLetNestedScrollableConsumeWheel = (event: WheelEvent<HTMLElement>): boolean => {
     const target = event.target;
@@ -113,38 +117,24 @@ export function ChatShell({
     }
 
     const resetOverlayOffsets = () => {
-      stageNode.style.setProperty('--chat-header-safe-offset', '0px');
-      stageNode.style.setProperty('--chat-thread-top-padding', `${CHAT_THREAD_TOP_GAP_PX}px`);
       stageNode.style.setProperty('--chat-composer-safe-offset', '0px');
       stageNode.style.setProperty('--chat-thread-bottom-padding', `${CHAT_THREAD_BOTTOM_GAP_PX}px`);
     };
 
-    const headerNode = headerOverlayRef.current;
     const composerNode = composerOverlayRef.current;
-    if (!headerNode || !composerNode || isEmptyState || panelOnly || isOffline) {
+    if (!composerNode || isEmptyState || panelOnly || isOffline) {
       resetOverlayOffsets();
       return;
     }
 
     // 只记录本次 effect 已提交的 CSS 高度，每次同步仍读取真实布局。
-    let appliedHeaderHeight: number | undefined;
     let appliedComposerHeight: number | undefined;
     const syncOverlayOffsets = () => {
-      const headerHeight = Math.ceil(headerNode.getBoundingClientRect().height);
       const composerHeight = Math.ceil(composerNode.getBoundingClientRect().height);
-      if (headerHeight === appliedHeaderHeight && composerHeight === appliedComposerHeight) {
-        return;
-      }
-      if (headerHeight !== appliedHeaderHeight) {
-        stageNode.style.setProperty('--chat-header-safe-offset', `${headerHeight}px`);
-        stageNode.style.setProperty('--chat-thread-top-padding', `${headerHeight + CHAT_THREAD_TOP_GAP_PX}px`);
-        appliedHeaderHeight = headerHeight;
-      }
-      if (composerHeight !== appliedComposerHeight) {
-        stageNode.style.setProperty('--chat-composer-safe-offset', `${composerHeight}px`);
-        stageNode.style.setProperty('--chat-thread-bottom-padding', `${composerHeight + CHAT_THREAD_BOTTOM_GAP_PX}px`);
-        appliedComposerHeight = composerHeight;
-      }
+      if (composerHeight === appliedComposerHeight) return;
+      stageNode.style.setProperty('--chat-composer-safe-offset', `${composerHeight}px`);
+      stageNode.style.setProperty('--chat-thread-bottom-padding', `${composerHeight + CHAT_THREAD_BOTTOM_GAP_PX}px`);
+      appliedComposerHeight = composerHeight;
       onComposerGeometryChange?.();
     };
 
@@ -157,7 +147,6 @@ export function ChatShell({
     const observer = new ResizeObserver(() => {
       syncOverlayOffsets();
     });
-    observer.observe(headerNode);
     observer.observe(composerNode);
 
     return () => {
@@ -235,7 +224,10 @@ export function ChatShell({
         const layoutNode = chatLayoutRef.current;
         if (!layoutNode) return;
         const rect = layoutNode.getBoundingClientRect();
-        setPanelHeightPercent(Math.max(25, Math.min(75, (clientY - rect.top) / Math.max(1, rect.height) * 100)));
+        const [sideHeaderHeight, , resizerHeight, mainHeaderHeight] = getComputedStyle(layoutNode).gridTemplateRows.split(/\s+/).map(Number.parseFloat);
+        const targetHeight = Math.max(rect.height * 0.25, Math.min(rect.height * 0.75, clientY - rect.top));
+        const bodyHeight = Math.max(1, rect.height - sideHeaderHeight - mainHeaderHeight - resizerHeight);
+        setPanelHeightPercent(Math.max(0, Math.min(100, (targetHeight - sideHeaderHeight) / bodyHeight * 100)));
         return;
       }
       const delta = clientX - gesture.startX;
@@ -258,16 +250,53 @@ export function ChatShell({
     && (sidePanelPhase === 'opening' || sidePanelPhase === 'open' || sidePanelPhase === 'closing');
   const overlaySidePanelMounted = sidePanelMode === 'overlay'
     && sidePanelPhase === 'open';
-  const [sidePanelContentMounted, setSidePanelContentMounted] = useState(false);
-  // Hide the workspace without unmounting its open pages.
-  if (resolvedSidePanelVisible && !sidePanelContentMounted) setSidePanelContentMounted(true);
+  const splitColumns = dockedSidePanelMounted && !panelOnly && !panelTop;
   const mainTrack = sidePanelMainWidth != null ? `${sidePanelMainWidth}px` : 'minmax(0, 1fr)';
   const panelTrack = sidePanelMainWidth != null ? 'minmax(0, 1fr)' : 'var(--chat-side-panel-width)';
-  const gridTemplateColumns = dockedSidePanelMounted && !panelOnly && !panelTop
+  const gridTemplateColumns = splitColumns
     ? panelBeforeChat
       ? `${panelTrack} var(--chat-side-panel-resizer-width) ${mainTrack}`
       : `${mainTrack} var(--chat-side-panel-resizer-width) ${panelTrack}`
     : 'minmax(0, 1fr)';
+  const mainColumn = panelBeforeChat ? 3 : 1;
+  const mainHeaderRow = panelTop ? 4 : 1;
+  const mainVisible = !panelOnly;
+  const mainWidth = splitColumns
+    ? sidePanelMainWidth ?? Math.max(1, containerWidth - sidePanelWidth - CHAT_WORKSPACE_LAYOUT.paneResizerWidth)
+    : containerWidth;
+  const mainStyle = useMemo<WorkspacePaneStyle>(() => ({
+    header: { gridColumn: mainColumn, gridRow: mainHeaderRow, display: mainVisible ? undefined : 'none' },
+    body: { gridColumn: mainColumn, gridRow: mainHeaderRow + 1, display: mainVisible ? undefined : 'none' },
+    dropTarget: {
+      gridColumn: mainColumn,
+      gridRow: panelOnly ? 2 : `${mainHeaderRow} / ${mainHeaderRow + 2}`,
+      ...(panelOnly ? { width: '50%', justifySelf: 'start' } : {}),
+      zIndex: 30,
+    },
+  }), [mainColumn, mainHeaderRow, mainVisible, panelOnly]);
+  const sideStyle = useMemo<WorkspacePaneStyle>(() => {
+    const sidePlacement: CSSProperties = {
+      gridColumn: splitColumns && !panelBeforeChat ? 3 : 1,
+      display: dockedSidePanelMounted || overlaySidePanelMounted ? undefined : 'none',
+      visibility: resolvedSidePanelVisible ? undefined : 'hidden',
+      pointerEvents: resolvedSidePanelVisible ? undefined : 'none',
+      ...(overlaySidePanelMounted ? { justifySelf: 'end', width: sidePanelWidth, maxWidth: 'calc(100% - 1.5rem)', marginRight: 12, zIndex: 20 } : {}),
+    };
+    return {
+      header: { ...sidePlacement, gridRow: 1, ...(overlaySidePanelMounted ? { marginTop: 12 } : {}) },
+      body: { ...sidePlacement, gridRow: 2, ...(overlaySidePanelMounted ? { marginBottom: 12, height: 'auto' } : {}) },
+      dropTarget: { ...sidePlacement, gridRow: '1 / 3', ...(overlaySidePanelMounted ? { marginTop: 12, marginBottom: 12 } : {}), zIndex: 30 },
+    };
+  }, [dockedSidePanelMounted, overlaySidePanelMounted, panelBeforeChat, resolvedSidePanelVisible, sidePanelWidth, splitColumns]);
+  const workspace = useMemo(() => renderWorkspace({
+    visible: resolvedSidePanelVisible,
+    width: splitColumns || overlaySidePanelMounted ? sidePanelWidth : containerWidth,
+    mainVisible,
+    mainWidth,
+    mainActions: header,
+    mainStyle,
+    sideStyle,
+  }), [containerWidth, header, mainStyle, mainVisible, mainWidth, overlaySidePanelMounted, renderWorkspace, resolvedSidePanelVisible, sidePanelWidth, sideStyle, splitColumns]);
 
   return (
     <div
@@ -277,49 +306,32 @@ export function ChatShell({
       data-panel-fullscreen={panelLayoutActive ? panelLayout.fullscreen : undefined}
       style={{
         gridTemplateColumns,
-        gridTemplateRows: panelTop ? `minmax(0, ${panelHeightPercent}fr) var(--chat-side-panel-resizer-width) minmax(0, ${100 - panelHeightPercent}fr)` : undefined,
+        gridTemplateRows: panelTop
+          ? `auto minmax(0, ${panelHeightPercent}fr) var(--chat-side-panel-resizer-width) auto minmax(0, ${100 - panelHeightPercent}fr)`
+          : 'auto minmax(0, 1fr)',
         ['--chat-side-panel-width' as string]: `${sidePanelWidth}px`,
         ['--chat-side-panel-resizer-width' as string]: `${CHAT_WORKSPACE_LAYOUT.paneResizerWidth}px`,
       }}
     >
       <div
         ref={stageRef}
+        inert={stageHidden}
+        aria-hidden={stageHidden}
         className={cn(CHAT_LAYOUT_TOKENS.stageSurface, 'chat-scroll-sync', panelComposerDocked && 'pointer-events-none z-10 bg-transparent')}
         style={{ ...CHAT_STAGE_CSS_VARS,
-          display: panelOnly && !panelComposerDocked ? 'none' : undefined,
-          gridColumn: panelTop ? 1 : panelBeforeChat ? 3 : 1,
-          gridRow: panelTop ? 3 : 1,
+          visibility: stageHidden ? 'hidden' : undefined,
+          gridColumn: mainColumn,
+          gridRow: panelOnly ? '1 / 3' : mainHeaderRow + 1,
         }}
       >
-          {isMac && !panelOnly ? (
-            <div
-              data-testid="mac-chat-drag-region"
-              aria-hidden="true"
-              className="drag-region pointer-events-auto absolute inset-x-0 top-0 z-[15] h-7"
-            />
-          ) : null}
-
           <div
             data-testid="chat-stage-backdrop"
             hidden={panelOnly}
             className={CHAT_LAYOUT_TOKENS.stageBackdrop}
           />
 
-          <div
-            data-testid="chat-stage-header-overlay"
-            ref={headerOverlayRef}
-            hidden={panelOnly}
-            inert={panelOnly}
-            className={CHAT_LAYOUT_TOKENS.stageHeaderOverlay}
-          >
-            <div className={CHAT_LAYOUT_TOKENS.stageHeaderRail}>
-              <div className="pointer-events-auto min-w-0 w-full">
-                {header}
-              </div>
-            </div>
-          </div>
-
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            {!panelOnly && !isOffline ? threadHeader : null}
             {offline && !panelOnly ? <div className="min-h-0 flex-1 overflow-auto">{offline}</div> : null}
             <div className={panelOnly || isOffline ? 'hidden' : 'contents'} inert={panelOnly || isOffline}>
               {!isEmptyState ? viewportPane : null}
@@ -355,7 +367,7 @@ export function ChatShell({
       {dockedSidePanelMounted && !panelOnly ? <div
         role="separator"
         aria-orientation={panelTop ? 'horizontal' : 'vertical'}
-        style={panelLayoutActive ? { gridColumn: panelTop ? 1 : 2, gridRow: panelTop ? 2 : 1 } : undefined}
+        style={{ gridColumn: panelTop ? 1 : 2, gridRow: panelTop ? 3 : '1 / 3' }}
         data-testid="chat-side-panel-resizer"
         className={cn(
           'group relative z-10 touch-none bg-transparent',
@@ -374,26 +386,9 @@ export function ChatShell({
         />
       </div> : null}
 
-      {sidePanelContentMounted ? (
-        <div
-          data-testid={overlaySidePanelMounted ? 'chat-side-panel-overlay' : undefined}
-          inert={!resolvedSidePanelVisible}
-          className={cn(
-            'min-h-0 min-w-0 overflow-hidden bg-card',
-            overlaySidePanelMounted && 'absolute inset-y-3 right-3 z-20 max-w-[calc(100%-1.5rem)]',
-            !resolvedSidePanelVisible && 'invisible pointer-events-none',
-          )}
-          style={overlaySidePanelMounted
-            ? { width: `${sidePanelWidth}px` }
-            : {
-              display: dockedSidePanelMounted ? undefined : 'none',
-              gridColumn: panelOnly || panelTop || panelBeforeChat ? 1 : 3,
-              gridRow: 1,
-            }}
-        >
-          {sidePanel}
-        </div>
-      ) : null}
+      <div className="contents" data-testid={overlaySidePanelMounted ? 'chat-side-panel-overlay' : undefined}>
+        {workspace}
+      </div>
     </div>
   );
 }

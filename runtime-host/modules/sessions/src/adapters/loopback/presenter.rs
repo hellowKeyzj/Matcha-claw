@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use crate::state::{
     ApprovalPhase, ApprovalView, ItemStatus, MissingFact, OmissionReason, RunPhase, RunProgress,
-    RunStartupPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeErrorKind, RuntimeIssue,
+    RunStartupPhase, RunTiming, RuntimeActivity, RuntimeErrorDetail, RuntimeErrorKind, RuntimeIssue,
     RuntimeView, SessionCompleteness, SessionContent, SessionFact, SessionItem, SessionProvider,
     SessionView, SessionWindow, ToolPhase, ToolView, public_media_reference,
 };
@@ -31,7 +31,19 @@ pub(crate) fn session_view(view: &SessionView) -> Value {
     if let Some(receipts) = &view.input_receipts {
         value["inputReceipts"] = json!(receipts);
     }
+    if !view.run_timings.is_empty() {
+        value["runTimings"] = Value::Array(view.run_timings.iter().map(run_timing_value).collect());
+    }
     value
+}
+
+fn run_timing_value(timing: &RunTiming) -> Value {
+    json!({
+        "runId": &timing.run_id,
+        "startedAtMs": timing.started_at_ms,
+        "endedAtMs": timing.ended_at_ms,
+        "inputMessageId": &timing.input_message_id,
+    })
 }
 
 fn fact_value<T>(fact: &SessionFact<T>, map: impl Fn(&T) -> Value) -> Value {
@@ -55,6 +67,7 @@ fn item_value(item: &SessionItem) -> Value {
             item_id,
             message_id,
             input_ids,
+            notice,
             text,
             content,
             status,
@@ -69,6 +82,9 @@ fn item_value(item: &SessionItem) -> Value {
             });
             if !input_ids.is_empty() {
                 value["inputIds"] = json!(input_ids);
+            }
+            if let Some(notice) = notice {
+                value["notice"] = json!(notice);
             }
             value
         },
@@ -187,6 +203,7 @@ fn approval_value(approval: &ApprovalView) -> Value {
         "runId": &approval.run_id,
         "phase": approval_phase(approval.phase),
         "optionIds": &approval.option_ids,
+        "details": &approval.details,
     })
 }
 
@@ -382,6 +399,7 @@ mod tests {
             endpoint_session_id: Some("session-1".to_owned()),
             ownership: None,
             model_state: None,
+            input_receipts: None,
             goal: crate::goal::SessionGoalView::Unknown,
             identity: SessionIdentity::new(
                 "agent:main:demo",
@@ -392,10 +410,12 @@ mod tests {
             epoch: 1,
             seq: 1,
             cursor: 1,
+            run_timings: Vec::new(),
             items: SessionFact::Complete(vec![SessionItem::UserMessage {
                 item_id: "item-1".to_owned(),
                 message_id: Some("message-1".to_owned()),
                 input_ids: Vec::new(),
+                notice: None,
                 text: String::new(),
                 content: vec![
                     SessionContent::Media {

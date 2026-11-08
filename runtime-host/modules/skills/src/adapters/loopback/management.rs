@@ -585,6 +585,7 @@ pub(super) fn response(outcome: Outcome) -> (u16, Value) {
         Outcome::Config {
             outcome,
             invalid_keys,
+            ..
         } => {
             let status = match outcome {
                 crate::management::ConfigOutcome::Rejected => 400,

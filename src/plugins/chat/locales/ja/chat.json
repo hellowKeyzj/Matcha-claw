@@ -16,6 +16,14 @@
         "updateSuccess": "Agent ワークスペースを更新し、新しいセッションを開始しました。",
         "updateFailed": "ワークスペースの更新に失敗しました: {{error}}"
     },
+    "systemNotice": {
+        "restartRecovery": "ゲートウェイの再起動で前の処理が中断され、Agent に応答の再開と完了が依頼されました"
+    },
+    "work": {
+        "duration": "所要時間 {{duration}}",
+        "process": "実行過程",
+        "tools_count": "ツール呼び出し {{count}} 回"
+    },
     "toolActivity": {
         "input": "入力",
         "output": "出力",
@@ -323,10 +331,7 @@
         "teamDesignExit": "実行グラフを保持して設計を終了",
         "teamDesignExiting": "戻っています…",
         "teamDesignExitWaiting": "現在の応答を停止してから設計を終了してください",
-        "gatewayDisconnectedPlaceholder": "ゲートウェイ未接続...",
-        "gatewayRecoveringNotice": "ランタイムを準備中…",
         "messagePlaceholder": "メッセージ、/ でスキル、Enter 送信、Shift+Enter 改行",
-        "approvalWaitingPlaceholder": "承認待ちです...",
         "pickModel": "モデルを選択",
         "pickWiki": "ナレッジベースを選択",
         "wikiPickerLabel": "ナレッジベース：{{name}}",
@@ -349,8 +354,7 @@
         "attachmentReady": "添付 {{count}} 件を追加済み",
         "attachmentsReady": "添付 {{count}} 件を追加済み",
         "contextUsageLabel": "コンテキスト使用 {{pct}}%",
-        "contextUsageTitle": "コンテキスト使用 {{pct}}%（{{detail}}）",
-        "imageGenerationActive": "画像を生成中"
+        "contextUsageTitle": "コンテキスト使用 {{pct}}%（{{detail}}）"
     },
     "goal": {
         "title": "セッションの目標", "set": "目標を設定", "edit": "目標を編集", "cancel": "目標モードを解除", "placeholder": "目標を入力、Enter で送信、Shift+Enter で改行", "pause": "一時停止", "resume": "再開", "complete": "完了にする", "block": "中断状態にする", "clear": "目標を削除", "more": "その他の目標操作", "refresh": "最新状態を確認", "unknown": "目標の状態は未確認", "note": "説明", "tokens": "{{count}} tokens 使用済み", "budget": "上限 {{count}} tokens", "inlineOnly": "目標モードには直接送信できるファイルのみ添付できます。フォルダ、パスのみの添付、現在のランタイムの上限を超えるファイルを削除してください。", "noAttachmentsOnEdit": "編集は目標のみ変更します。添付を削除してください。",
@@ -391,23 +395,20 @@
         "refreshing": "更新中...",
         "mutating": "変更を反映中..."
     },
+    "replyTiming": {
+        "seconds": "{{count}}秒",
+        "minutesSeconds": "{{minutes}}分{{seconds}}秒",
+        "running": "応答中… {{duration}}",
+        "completed": "完了、所要時間 {{duration}}",
+        "stopped": "停止、所要時間 {{duration}}",
+        "failed": "失敗、所要時間 {{duration}}",
+        "copy": "返信をコピー",
+        "copied": "返信をコピーしました"
+    },
     "pending": {
-        "creatingSession": "セッションを作成中",
-        "configuringSession": "セッションを設定中",
         "typing": "思考中",
         "activity": "ツールを実行中",
         "compacting": "コンテキストを圧縮中です。完了後に返信を続けます",
-        "startup": {
-            "waiting_for_state": "セッション状態の準備を待機中",
-            "preparing_workspace": "ワークスペースを準備中",
-            "naming_worktree": "ワークスペースに名前を付けています",
-            "creating_worktree": "ワークスペースを作成中",
-            "running_setup": "初期化を実行中",
-            "provisioning_environment": "実行環境を準備中",
-            "preparing_context": "コンテキストを準備中",
-            "memory_flushing": "メモリを保存中",
-            "starting_model": "モデルを起動中"
-        },
         "retrying": "モデルがレート制限中です。再試行しています {{attempt}}/{{maxAttempts}}"
     },
     "runtimeStatus": {
@@ -426,6 +427,8 @@
         "previewUnavailable": "画像プレビューは一時的に利用できません"
     },
     "errors": {
+        "historyUnavailable": "会話履歴を読み込めません。ランタイムの状態を確認してから、会話を開き直してください",
+        "runOutcomeUnknown": "前回の実行結果を確認できません。重複実行を避けるため、再送信前に実行済みの操作を確認してください",
         "activeRunDisconnected": "この実行は終了イベントを受け取る前に切断されました。",
         "abortStoppingTimeout": "停止要求後も実行の終了イベントが届いていません。もう一度停止を押してください。",
         "abortUnknown": "停止要求の結果を確認できませんでした。応答はまだ実行中の可能性があります。もう一度停止を押してください。",
@@ -488,7 +491,18 @@
     "skillConfigDialog": {
         "titleWithAgent": "スキル設定 · {{agent}}",
         "loading": "スキルを読み込み中...",
-        "empty": "利用可能なスキルがありません。"
+        "loadFailed": "スキルを読み込めません。閉じてから再度開いてください",
+        "empty": "利用可能なスキルがありません。",
+        "toggleSkill": "スキルの有効・無効を切り替え：{{name}}",
+        "saveFailed": "スキル設定の保存を確認できません。閉じてから再度開いてください",
+        "savedNextStart": "保存済み、次回起動時に反映されます",
+        "savedPartial": "保存済み、一部のセッションでは反映を確認できません",
+        "savedAcknowledged": "保存済み、ネイティブインスタンスが反映を確認しました",
+        "applicationCounts": "確認済み {{acknowledged}}、未確認 {{unconfirmed}}",
+        "acknowledged": "確認済み",
+        "unconfirmed": "未確認",
+        "sessionStatus": "セッション {{sessionId}} · インスタンス {{instanceId}}：{{status}}",
+        "policyLimits": "スキルの使用はユーザーやプロジェクトのポリシーで制限される場合があります"
     },
     "skillPreviewTooltip": "SKILL.md をプレビュー",
     "skillPreviewTitle": "SKILL.md プレビュー",
@@ -550,6 +564,45 @@
     "approval": {
         "panelTitle": "承認待ち",
         "waitingLabel": "承認待ちです...",
+        "requestLabel": "ツールの実行に承認が必要です",
+        "parameters": "パラメーターを表示",
+        "parametersOmitted": "パラメーターが表示上限を超えているため、全体を表示できません（合計 {{totalBytes}} バイト）",
+        "textIncomplete": "全文ではありません。先頭 {{shownBytes}} / {{totalBytes}} バイトを表示しています",
+        "commandRequest": "コマンドの実行に承認が必要です",
+        "commandPreview": "コマンドの概要",
+        "description": "承認の説明",
+        "detail": "詳細",
+        "warning": "警告",
+        "severityLabel": "重大度",
+        "severities": { "info": "情報", "warning": "警告", "critical": "重大" },
+        "scopeLabel": "操作の範囲",
+        "scopeKind": "操作の種類",
+        "scopeKinds": { "message-send": "メッセージ送信", "payment": "支払い", "external-post": "外部への投稿", "standing-grant": "継続的な許可" },
+        "target": "対象",
+        "automation": "自動化タスク",
+        "expiresInDays": "有効日数",
+        "recipientCount": "宛先数",
+        "recipientPreview": "宛先のプレビュー",
+        "audienceLabel": "宛先の区分",
+        "audiences": { "internal": "内部", "external": "外部" },
+        "amount": "金額",
+        "currency": "通貨",
+        "visibilityLabel": "公開範囲",
+        "visibility": { "public": "公開", "restricted": "制限付き" },
+        "host": "ホスト",
+        "nodeId": "ノード ID",
+        "agentId": "エージェント ID",
+        "pluginId": "プラグイン ID",
+        "toolName": "ツール",
+        "externalResolution": "外部承認",
+        "externalDecisions": "外部承認の選択肢",
+        "proposalHash": "提案のハッシュ",
+        "command": "コマンド",
+        "file_path": "ファイルパス",
+        "path": "パス",
+        "url": "URL",
+        "decisionReason": "承認が必要な理由",
+        "blockedPath": "制限されたパス",
         "pendingRequest": "{{title}}",
         "allowOnce": "今回のみ許可",
         "allowAlways": "常に許可",

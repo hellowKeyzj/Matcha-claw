@@ -323,6 +323,7 @@ fn optional_limit(
 fn map_wiki_error(error: WikiFailure) -> ToolCallError {
     match error {
         WikiFailure::CurrentProjectUnset
+        | WikiFailure::RequestKeyConflict
         | WikiFailure::ProjectNotFound { .. }
         | WikiFailure::InvalidInput { .. }
         | WikiFailure::InvalidPath { .. }

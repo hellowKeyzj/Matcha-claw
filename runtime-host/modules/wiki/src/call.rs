@@ -33,6 +33,8 @@ impl WikiCallDetail {
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum WikiCallOperation {
+    #[serde(rename = "artifacts.archive")]
+    ArchiveArtifact,
     ImportSource,
     ImportFolder,
     RefreshSources,
@@ -87,6 +89,7 @@ pub(crate) enum WikiCallOperation {
 impl WikiCallOperation {
     pub(crate) const fn command(self) -> &'static str {
         match self {
+            Self::ArchiveArtifact => "artifacts.archive",
             Self::ImportSource => "import-source",
             Self::ImportFolder => "import-folder",
             Self::RefreshSources => "refresh-sources",

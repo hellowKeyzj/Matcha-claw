@@ -46,7 +46,7 @@ function requestContext(context: BrowserActionContext): BrowserActionContext {
 
 export class IabBrowserClient {
   private readonly stopped = new AbortController()
-  private readonly runs = new Map<string, { groupId: string; discovery: Promise<Discovery> }>()
+  private readonly runs = new Map<string, { groupId: string; context: BrowserActionContext; discovery: Promise<Discovery> }>()
 
   constructor(private readonly stateDir: string) {}
 
@@ -82,23 +82,17 @@ export class IabBrowserClient {
     ])
     try {
       signal.throwIfAborted()
-      let discovery: Promise<Discovery>
-      if (context.runId) {
-        const key = runKey(context)
-        let run = this.runs.get(key)
-        if (!run) {
-          // Pin discovery independently of a tool cancellation; cleanup must reach the original Main.
-          run = { groupId: context.sessionGroupId!, discovery: readDiscovery(this.stateDir, this.stopped.signal) }
-          this.runs.set(key, run)
-        }
-        discovery = run.discovery
-      } else {
-        discovery = readDiscovery(this.stateDir, signal)
+      const key = context.runId ? runKey(context) : undefined
+      let run = key ? this.runs.get(key) : undefined
+      if (key && !run) {
+        // Pin discovery independently of a tool cancellation; cleanup must reach the original Main.
+        run = { groupId: context.sessionGroupId!, context: { ...context }, discovery: readDiscovery(this.stateDir, this.stopped.signal) }
+        this.runs.set(key, run)
       }
       let target: Discovery
-      try { target = await discovery }
+      try { target = await (run?.discovery ?? readDiscovery(this.stateDir, signal)) }
       catch (error) {
-        if (context.runId) this.runs.delete(runKey(context))
+        if (key && this.runs.get(key) === run) this.runs.delete(key)
         throw error
       }
       signal.throwIfAborted()
@@ -110,16 +104,27 @@ export class IabBrowserClient {
   }
 
   async cleanupSession(request: BrowserSessionCleanup): Promise<void> {
-    const run = this.runs.get(runKey(request.context))
-    if (!run) return
+    const key = runKey(request.context)
+    const run = this.runs.get(key)
+    const runs = request.scope === 'group'
+      ? [...this.runs].filter(([, candidate]) => candidate.groupId === request.context.sessionGroupId)
+      : run ? [[key, run] as const] : []
+    if (!runs.length) return
     const signal = AbortSignal.any([this.stopped.signal, AbortSignal.timeout(30_000)])
-    const result = await this.post(await run.discovery, '/browser/session-end', {
-      context: requestContext(request.context), scope: request.scope,
-    }, signal)
-    if (result.released !== true) throw new Error('In-app browser session cleanup could not be confirmed.')
+    const outcomes = await Promise.allSettled(runs.map(async ([, candidate]) => {
+      let target: Discovery
+      try { target = await candidate.discovery }
+      catch { return } // Discovery failed before this pin could post a browser request.
+      const result = await this.post(target, '/browser/session-end', {
+        context: requestContext(candidate.context), scope: request.scope,
+      }, signal)
+      if (result.released !== true) throw new Error('In-app browser session cleanup could not be confirmed.')
+    }))
+    const failures = outcomes.flatMap((outcome) => outcome.status === 'rejected' ? [outcome.reason] : [])
+    if (failures.length) throw new AggregateError(failures, 'In-app browser session cleanup could not be confirmed.')
     if (request.scope === 'group') {
-      for (const [key, candidate] of this.runs) {
-        if (candidate.groupId === run.groupId) this.runs.delete(key)
+      for (const [key, candidate] of runs) {
+        if (this.runs.get(key) === candidate) this.runs.delete(key)
       }
     }
   }

@@ -173,7 +173,7 @@ async function setupTarget(id, { reuseFunctionalLocalCache = false } = {}) {
   }
 }
 
-if (process.argv.includes(scriptPath)) {
+if (process.argv.slice(1).some(arg => path.resolve(arg) === scriptPath)) {
   const downloadAll = argv.all;
   const platform = argv.platform;
   const target = argv.target;

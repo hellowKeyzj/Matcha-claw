@@ -165,6 +165,10 @@ impl DiagnosticsArchiveReceipt {
         Self::terminated("unavailable".to_owned(), DiagnosticsArchiveTerminal::Failed)
     }
 
+    pub(crate) fn cancelled() -> Result<Self, DiagnosticsArchiveError> {
+        archive_id().map(cancelled)
+    }
+
     pub fn archive_id(&self) -> &str {
         &self.archive_id
     }
@@ -212,6 +216,7 @@ enum ArchiveRoot {
 pub struct DiagnosticsArchiveAdmission {
     producer: DiagnosticsArchiveProducer,
     state: HostState,
+    runtime_logs: Option<String>,
 }
 
 impl DiagnosticsArchiveProducer {
@@ -269,6 +274,7 @@ impl DiagnosticsArchiveProducer {
         DiagnosticsArchiveAdmission {
             producer: self.clone(),
             state,
+            runtime_logs: None,
         }
     }
 
@@ -282,6 +288,7 @@ impl DiagnosticsArchiveProducer {
     fn produce(
         &self,
         state: &HostState,
+        runtime_logs: Option<&str>,
         cancellation: &crate::DiagnosticsArchiveCancellation,
     ) -> Result<DiagnosticsArchiveReceipt, DiagnosticsArchiveError> {
         let archive_id = archive_id()?;
@@ -292,7 +299,7 @@ impl DiagnosticsArchiveProducer {
         if !root.is_available() {
             return Err(DiagnosticsArchiveError::OutputUnavailable);
         }
-        let Ok((entries, image)) = self.encode(&root, state) else {
+        let Ok((entries, image)) = self.encode(&root, state, runtime_logs) else {
             return Ok(failed(archive_id));
         };
         if cancellation.is_cancelled() {
@@ -319,6 +326,7 @@ impl DiagnosticsArchiveProducer {
         &self,
         root: &DiagnosticsArchiveRoot,
         state: &HostState,
+        runtime_logs: Option<&str>,
     ) -> Result<(usize, Vec<u8>), DiagnosticsArchiveError> {
         let host_state = serde_json::to_vec_pretty(&ArchiveHostState::new(
             state,
@@ -326,7 +334,12 @@ impl DiagnosticsArchiveProducer {
         ))
         .map_err(|_| DiagnosticsArchiveError::OutputUnavailable)?;
         let app_log_root = root.app_log_root();
-        let entries = bundle::collect(root.state_root(), app_log_root.as_deref(), host_state);
+        let entries = bundle::collect_with_runtime_logs(
+            root.state_root(),
+            app_log_root.as_deref(),
+            host_state,
+            runtime_logs,
+        );
         let image = zip::encode(&entries)?;
         (image.len() as u64 <= ARCHIVE_BYTE_LIMIT)
             .then_some((entries.len(), image))
@@ -335,6 +348,15 @@ impl DiagnosticsArchiveProducer {
 }
 
 impl DiagnosticsArchiveAdmission {
+    pub(crate) fn with_runtime_logs(
+        mut self,
+        snapshot: Result<Option<String>, DiagnosticsArchiveError>,
+    ) -> Self {
+        self.runtime_logs =
+            snapshot.unwrap_or_else(|_| Some("source=openclaw\ncoverage=unavailable\n".to_owned()));
+        self
+    }
+
     pub fn download(self, archive_id: &str) -> Result<Vec<u8>, DiagnosticsArchiveError> {
         self.producer.download(archive_id)
     }
@@ -344,7 +366,7 @@ impl DiagnosticsArchiveAdmission {
         cancellation: &crate::DiagnosticsArchiveCancellation,
     ) -> DiagnosticsArchiveReceipt {
         self.producer
-            .produce(&self.state, cancellation)
+            .produce(&self.state, self.runtime_logs.as_deref(), cancellation)
             .unwrap_or_else(|_| DiagnosticsArchiveReceipt::failed())
     }
 }

@@ -72,22 +72,60 @@ function createBackgroundContext() {
     return relay.transportOpen && relay.handshakeReady
   })
   const handleCdp = createDispatcher(mgr, scheduler)
-  const tabsReady = (async () => {
-    await selection.ready
-    if (!(await mgr.loadTabs())) throw new Error('Failed to restore tab registry')
-    if (!(await mgr.reconcileTabs())) throw new Error('Failed to reconcile tab registry')
-  })()
   // Native listeners must be installed synchronously on every MV3 worker wake-up.
   const { resyncDownloads, clearDownloadWatches } = initDownloadTracker(sendToRelay)
   const ctx = {
-    mgr, selection, handleCdp, tabsReady,
-    tabsReadyBarrier: { current: tabsReady, state: 'restoring', error: null },
+    mgr, selection, handleCdp, tabsReady: null, tabsLoaded: false,
+    tabRegistryWait: null,
+    tabsReadyBarrier: { current: null, state: 'restoring', error: null },
     resyncGeneration: null,
     currentTargetSync: null,
     resyncDownloads, clearDownloadWatches,
   }
-  setTabsReadiness(ctx, tabsReady, 'restoring')
+  const epoch = mgr.beginTabsResync()
+  setTabsReadiness(ctx, restoreTabs(ctx, () => mgr.isTabsResyncCurrent(epoch)), 'restoring')
   return ctx
+}
+
+function restoreTabs(ctx, isCurrent) {
+  const previous = ctx.tabsReady
+  const restore = async () => {
+    if (!isCurrent()) throw new Error('Relay connection changed before tab restoration')
+    await (previous ? ctx.selection.retryReady() : ctx.selection.ready)
+    if (!isCurrent()) throw new Error('Relay connection changed during tab restoration')
+    // Loading replaces the registry; a failed reconciliation must not reload live entries.
+    if (!ctx.tabsLoaded) {
+      if (!(await ctx.mgr.loadTabs())) throw new Error('Failed to restore tab registry')
+      ctx.tabsLoaded = true
+    }
+    if (!isCurrent()) throw new Error('Relay connection changed during tab restoration')
+    if (!(await ctx.mgr.reconcileTabs({ isCurrent }))) throw new Error('Failed to reconcile tab registry')
+  }
+  const readiness = previous ? previous.catch(restore) : restore()
+  ctx.tabsReady = readiness
+  return readiness
+}
+
+function awaitTabRegistry(ctx) {
+  // Share the wait so a new recovery cannot let later native events overtake earlier ones.
+  if (ctx.tabRegistryWait) return ctx.tabRegistryWait
+  const pending = (async () => {
+    for (;;) {
+      const readiness = ctx.tabsReady
+      try {
+        await readiness
+      } catch (error) {
+        if (readiness === ctx.tabsReady) throw error
+      }
+      if (readiness === ctx.tabsReady) return
+    }
+  })()
+  ctx.tabRegistryWait = pending
+  const clear = () => {
+    if (ctx.tabRegistryWait === pending) ctx.tabRegistryWait = null
+  }
+  void pending.then(clear, clear)
+  return pending
 }
 
 function setTabsReadiness({ tabsReadyBarrier }, readiness, state) {
@@ -152,7 +190,7 @@ function scheduleCurrentTargetSync(ctx) {
 }
 
 function initializeRelay(ctx) {
-  const { mgr, selection, handleCdp, tabsReady, resyncDownloads, clearDownloadWatches } = ctx
+  const { mgr, selection, handleCdp, resyncDownloads, clearDownloadWatches } = ctx
   initRelay({
     async onMessage(msg, commandContext) {
       await awaitTabsReadiness(ctx, commandContext)
@@ -175,6 +213,8 @@ function initializeRelay(ctx) {
         mgr.stopSessionIndicators()
         return
       }
+      // A pending load replaces registry entries; let it settle before clearing them.
+      await Promise.allSettled([ctx.tabsReady])
       const dissolveGroup = await getSetting(SETTINGS_KEYS.CLOSE_GROUP_ON_DISABLE)
       const cleanup = await Promise.allSettled([
         clearDownloadWatches(),
@@ -188,6 +228,7 @@ function initializeRelay(ctx) {
       const generation = getRelayConnectionSnapshot().transportGeneration
       ctx.resyncGeneration = generation
       const isCurrent = () => isCurrentTransport(generation) && mgr.isTabsResyncCurrent(epoch)
+      const tabsReady = restoreTabs(ctx, isCurrent)
       const resync = (async () => {
         await tabsReady
         if (!isCurrent()) throw new Error('Relay connection changed before tab resync')
@@ -209,13 +250,14 @@ function initializeRelay(ctx) {
   })
 }
 
-function registerDebuggerListeners({ mgr, tabsReady, selection }) {
+function registerDebuggerListeners(ctx) {
+  const { mgr, selection } = ctx
   chrome.debugger.onEvent.addListener((source, method, params) => {
-    void tabsReady.then(() => mgr.onDebuggerEvent(source, method, params))
+    void awaitTabRegistry(ctx).then(() => mgr.onDebuggerEvent(source, method, params))
       .catch((error) => log.warn('debugger event handling failed:', method, error))
   })
   chrome.debugger.onDetach.addListener((source, reason) => {
-    void tabsReady.then(async () => {
+    void awaitTabRegistry(ctx).then(async () => {
       const entry = mgr.get(source.tabId)
       const windowId = entry?.windowId
       const detached = await mgr.onDebuggerDetach(source, reason, { recover: isRelayConnected })
@@ -227,9 +269,9 @@ function registerDebuggerListeners({ mgr, tabsReady, selection }) {
 }
 
 function registerTabLifecycleListeners(ctx) {
-  const { mgr, selection, tabsReady } = ctx
+  const { mgr, selection } = ctx
   const schedule = (task) => {
-    void tabsReady.then(task).catch((error) => log.warn('tab lifecycle handling failed:', error))
+    void awaitTabRegistry(ctx).then(task).catch((error) => log.warn('tab lifecycle handling failed:', error))
   }
   chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
     if (!isRelayConnected() && !isReconnecting()) {
@@ -304,14 +346,15 @@ function registerTabLifecycleListeners(ctx) {
   })
 }
 
-function registerAlarmListeners({ mgr, tabsReady }) {
+function registerAlarmListeners(ctx) {
+  const { mgr } = ctx
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (handleConnectionAlarm(alarm.name)) return
     if (mgr.handleIndicatorAlarm(alarm.name)) return
     if (alarm.name !== 'relayKeepAlive') return
     if (isRelayConnected()) {
       trySendToRelay({ method: 'ping' })
-      void tabsReady.then(() => mgr.performHealthCheck())
+      void awaitTabRegistry(ctx).then(() => mgr.performHealthCheck())
         .catch((error) => log.warn('tab health check failed:', error))
       return
     }

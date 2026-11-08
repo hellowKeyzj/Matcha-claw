@@ -12,6 +12,7 @@ import { FILE_EDIT_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/FileE
 import type { Input as FileReadInput } from '@claude-code-best/builtin-tools/tools/FileReadTool/FileReadTool.js'
 import {
   FILE_READ_TOOL_NAME,
+  FILE_READ_TOKEN_CAP_PREFIX,
   FILE_UNCHANGED_STUB,
 } from '@claude-code-best/builtin-tools/tools/FileReadTool/prompt.js'
 import { FILE_WRITE_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/FileWriteTool/prompt.js'
@@ -34,6 +35,7 @@ import type {
 } from './permissions/PermissionPromptToolResultSchema.js'
 import type { ProcessUserInputContext } from './processUserInput/processUserInput.js'
 import { recordTranscript } from './sessionStorage.js'
+import { PERSISTED_OUTPUT_TAG } from './toolResultStorage.js'
 
 export type PermissionPromptTool = Tool<
   ReturnType<typeof permissionToolInputSchema>,
@@ -470,6 +472,17 @@ export function extractReadFilesFromMessages(
         if (content.type === 'tool_result' && content.tool_use_id) {
           // Handle Read tool results
           const readFilePath = fileReadToolUseIds.get(content.tool_use_id)
+          if (
+            readFilePath &&
+            typeof content.content === 'string' &&
+            (content.content.startsWith(
+              `<system-reminder>${FILE_READ_TOKEN_CAP_PREFIX}`,
+            ) ||
+              content.content.startsWith(PERSISTED_OUTPUT_TAG))
+          ) {
+            cache.delete(readFilePath)
+            continue
+          }
           if (
             readFilePath &&
             typeof content.content === 'string' &&
