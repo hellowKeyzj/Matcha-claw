@@ -1,0 +1,13 @@
+--- a/genoffice/apps/html/src/renderer/preview/inspector-protocol.ts
++++ b/genoffice/apps/html/src/renderer/preview/inspector-protocol.ts
+@@ -101,6 +101,10 @@
+   | {
+       type: 'gx:keyCommand'
+       command:
++        | 'save'
++        | 'saveAs'
++        | 'find'
++        | 'replace'
+         | 'delete'
+         | 'parent'
+         | 'next'

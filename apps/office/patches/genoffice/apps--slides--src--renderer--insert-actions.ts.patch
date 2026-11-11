@@ -1,0 +1,63 @@
+--- a/genoffice/apps/slides/src/renderer/insert-actions.ts
++++ b/genoffice/apps/slides/src/renderer/insert-actions.ts
+@@ -4,6 +4,7 @@
+  * header/footer, equations, media, 3D models, and screen recording.
+  * Functions take the ActionCtx built fresh per call.
+  */
++import { videoPosterBase64 } from '../../../../../src/slides/video-poster'
+ import type { InsertKind, LinkTargetOp } from '../shared/ipc'
+ import type { ActionCtx } from './action-context'
+ import { applySelectionLink, saveEditSelection, selectionLink } from './TextEditOverlay'
+@@ -408,8 +409,8 @@
+ 
+ /**
+  * A video/audio file dropped on the canvas, embedded like the Insert dialog does but
+- * centered on the drop point. Electron hands us the file's path, which lets main
+- * build the poster frame from the system thumbnail; a path-less File falls back to bytes.
++ * centered on the drop point. A renderer-held video supplies its captured poster;
++ * native file paths, when available, let main use the system thumbnail.
+  */
+ export async function insertDroppedMedia(
+   ctx: ActionCtx,
+@@ -420,6 +421,8 @@
+   if (!ctx.slide) return
+   const slideIndex = ctx.current
+   const path = window.desktop.getPathForFile(file)
++  const ext = fileExt(file.name)
++  const posterBase64 = kind === 'video' && !path ? await videoPosterBase64(file, ext) : undefined
+   const source = path
+     ? { path }
+     : { base64: bytesToBase64(new Uint8Array(await file.arrayBuffer())) }
+@@ -427,6 +430,7 @@
+     slideIndex,
+     kind,
+-    ext: fileExt(file.name),
++    ext,
++    ...(posterBase64 ? { posterBase64 } : {}),
+     fitWidthPx: FIT_WIDTH,
+     name: file.name,
+     centerPx: atPx,
+@@ -457,7 +461,9 @@
+   }
+   if (!ctx.slide) return
+   try {
+-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
++    const api = window.matchaApp
++    if (!api) throw new Error('Screen capture is unavailable.')
++    const stream = await api.getScreenStream()
+     const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+       ? 'video/webm;codecs=vp9'
+       : 'video/webm'
+@@ -477,10 +483,12 @@
+         ctx.setStatus(t('appStatusRecordingEmpty'))
+         return
+       }
++      const posterBase64 = await videoPosterBase64(blob, 'webm')
+       const r = await window.slidesApi.addMediaBytes({
+         slideIndex,
+         kind: 'video',
+         base64: bytesToBase64(new Uint8Array(await blob.arrayBuffer())),
++        ...(posterBase64 ? { posterBase64 } : {}),
+         ext: 'webm',
+         fitWidthPx: FIT_WIDTH,
+         name: `Screen recording ${new Date().toLocaleTimeString()}`,

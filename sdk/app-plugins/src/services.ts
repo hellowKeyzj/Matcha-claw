@@ -1,8 +1,9 @@
 import { validateRuntimeEndpointRef } from './identity.js';
+import { isAppRenderPdfRequest, isAppRenderDocumentRequest, type AppRenderPdfRequest, type AppRenderPdfResult, type AppRenderDocumentRequest, type AppRenderDocumentResult, type AppRenderDocumentRead } from './api.js';
 import type { AppAgentTarget } from './execution.js';
 
 export const APP_SERVICE_MAX_BYTES = 8 * 1024 * 1024;
-export const APP_SERVICE_VERSION = '1.3.0';
+export const APP_SERVICE_VERSION = '1.6.0';
 export const APP_SERVICE_ERROR_CODES = ['invalid-request', 'unavailable', 'outcome-unknown', 'cancelled', 'response-too-large', 'not-found', 'conflict', 'permission-denied', 'storage-unavailable'] as const;
 export type AppServiceErrorCode = typeof APP_SERVICE_ERROR_CODES[number];
 export class AppServiceError extends Error {
@@ -121,19 +122,47 @@ export interface AppCapabilitiesResults {
 }
 export type AppCapabilitiesApi = Api<AppCapabilitiesInputs, AppCapabilitiesResults>;
 
+export interface AppRenderingInputs { renderPdf: AppRenderPdfRequest; renderDocument: AppRenderDocumentRequest }
+export interface AppRenderingResults { renderPdf: AppRenderPdfResult; renderDocument: AppRenderDocumentResult }
+export interface AppRenderingApi {
+  renderPdf(input: AppRenderPdfRequest, signal?: AbortSignal): Promise<AppRenderPdfResult>;
+  renderDocument(input: AppRenderDocumentRequest, signal?: AbortSignal, read?: AppRenderDocumentRead): Promise<AppRenderDocumentResult>;
+}
+
+export interface AppDesktopInputs {
+  systemLocale: Record<string, never>;
+  openExternal: { readonly url: string };
+  revealFile: { readonly path: string };
+  pickFile: { readonly extensions: readonly string[] };
+}
+export interface AppDesktopResults {
+  systemLocale: { readonly locale: string };
+  openExternal: { readonly opened: true };
+  revealFile: { readonly revealed: true };
+  pickFile: { readonly path: string | null };
+}
+/** Trusted background only; local paths must not be forwarded to opaque UI or model output. */
+export type AppDesktopApi = Api<AppDesktopInputs, AppDesktopResults>;
+
 export interface AppServiceInputs {
+  desktop: AppDesktopInputs;
+  rendering: AppRenderingInputs;
   workspace: AppWorkspaceInputs;
   knowledge: AppKnowledgeInputs;
   credentials: AppCredentialsInputs;
   capabilities: AppCapabilitiesInputs;
 }
 export interface AppServiceResults {
+  desktop: AppDesktopResults;
+  rendering: AppRenderingResults;
   workspace: AppWorkspaceResults;
   knowledge: AppKnowledgeResults;
   credentials: AppCredentialsResults;
   capabilities: AppCapabilitiesResults;
 }
 export const APP_SERVICE_OPERATIONS = {
+  desktop: ['openExternal', 'revealFile', 'pickFile', 'systemLocale'],
+  rendering: ['renderPdf', 'renderDocument'],
   workspace: ['readText', 'readBinary', 'stat', 'listDir', 'writeText', 'writeBinary'],
   knowledge: ['list', 'listDir', 'read', 'search', 'retrieveContext', 'archive', 'archiveStatus'],
   credentials: ['availability', 'get', 'set', 'delete'],
@@ -173,6 +202,23 @@ export function isAppServiceRequest(value: unknown): value is AppServiceRequest 
   const input = value.input;
   const operation = value.operation;
   switch (value.service) {
+    case 'desktop':
+      if (operation === 'systemLocale') return fields(input, []);
+      if (operation === 'openExternal') {
+        if (!fields(input, ['url']) || !text(input.url) || /[\\\s\u0000-\u001f\u007f]|%(?:0[0-9a-f]|1[0-9a-f]|7f)/i.test(input.url)) return false;
+        try {
+          const url = new URL(input.url);
+          return !url.username && !url.password && (url.protocol === 'mailto:' ? !!url.pathname && !url.host
+            : (url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname);
+        } catch { return false; }
+      }
+      if (operation === 'revealFile') return fields(input, ['path']) && text(input.path)
+        && !/[\u0000-\u001f\u007f]/.test(input.path)
+        && (/^\/(?![\\/])/.test(input.path) || /^[A-Za-z]:[\\/][^:]*$/.test(input.path));
+      return operation === 'pickFile' && fields(input, ['extensions']) && Array.isArray(input.extensions)
+        && input.extensions.length > 0 && input.extensions.length <= 64
+        && input.extensions.every(extension => typeof extension === 'string' && /^[A-Za-z0-9]{1,32}$/.test(extension));
+    case 'rendering': return operation === 'renderPdf' ? isAppRenderPdfRequest(input) : operation === 'renderDocument' && isAppRenderDocumentRequest(input);
     case 'workspace': {
       const extra = operation === 'writeText' ? ['content'] : operation === 'writeBinary' ? ['data'] : [];
       const optional = operation === 'readText' || operation === 'readBinary' ? ['maxBytes'] : operation === 'listDir' ? ['includeHidden'] : [];

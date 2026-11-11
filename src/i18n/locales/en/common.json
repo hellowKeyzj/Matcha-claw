@@ -1,5 +1,6 @@
 {
     "appFrame": {
+        "chooseScreen": "Choose a screen or window",
         "sessionChanged": "The conversation has changed. Reopen the plugin and try again.",
         "mediaChanged": "Conversation media has changed. Reload it and try again.",
         "mediaReadFailed": "Could not read the conversation media. Try again.",

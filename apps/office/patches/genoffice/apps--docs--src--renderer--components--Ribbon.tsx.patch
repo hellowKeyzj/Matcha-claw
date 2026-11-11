@@ -1,0 +1,94 @@
+--- a/genoffice/apps/docs/src/renderer/components/Ribbon.tsx
++++ b/genoffice/apps/docs/src/renderer/components/Ribbon.tsx
+@@ -64,7 +64,7 @@
+ import { selectedBoxIndex } from '../editor/selected-box'
+ import { setInactiveSelectionShown } from '../editor/inactive-selection'
+ import { stepParagraphIndent } from '../editor/indent'
+-import { pasteFromClipboard } from '../editor/paste-actions'
++import { pasteFromClipboard, readClipboardPayload, type ClipboardPayload } from '../editor/paste-actions'
+ import type { PasteMode } from '../editor/paste-options'
+ import { formatNumber } from '../editor/numbering'
+ import { getActiveSubEditor } from '../editor/active-editor'
+@@ -2225,7 +2225,7 @@
+     setDropdown(null)
+   }
+ 
+-  const [pasteSpecial, setPasteSpecial] = useState(false)
++  const [pasteSpecial, setPasteSpecial] = useState<Promise<ClipboardPayload> | null>(null)
+   const pasteAs = (mode?: PasteMode) => {
+     setDropdown(null)
+     if (canEdit) void pasteFromClipboard(ed, mode)
+@@ -2312,7 +2312,7 @@
+         className={`ribbon-tabs ${IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
+         onDoubleClick={collapse.onTabsDoubleClick}
+       >
+-        {!IS_MAC && (
++        {
+           <div className="file-tab-wrap">
+             <button
+               className={`ribbon-tab ribbon-tab-file ${dropdown === 'file' ? 'open' : ''}`}
+@@ -2328,7 +2328,7 @@
+                     onOpen()
+                   }}
+                 >
+-                  {t('ribbonOpen')} <span className="file-menu-key">Ctrl+O</span>
++                  {t('ribbonOpen')} <span className="file-menu-key">{IS_MAC ? '⌘O' : 'Ctrl+O'}</span>
+                 </button>
+                 <button
+                   disabled={!hasDoc}
+@@ -2337,7 +2337,7 @@
+                     onSave()
+                   }}
+                 >
+-                  {t('ribbonSave')} <span className="file-menu-key">Ctrl+S</span>
++                  {t('ribbonSave')} <span className="file-menu-key">{IS_MAC ? '⌘S' : 'Ctrl+S'}</span>
+                 </button>
+                 <button
+                   disabled={!hasDoc}
+@@ -2346,24 +2346,14 @@
+                     onSaveAs()
+                   }}
+                 >
+-                  {t('ribbonSaveAs')} <span className="file-menu-key">Ctrl+Shift+S</span>
+-                </button>
+-                <button
+-                  className="qa-name-with-ai"
+-                  disabled={!hasDoc}
+-                  onClick={() => {
+-                    setDropdown(null)
+-                    onNameWithAi()
+-                  }}
+-                >
+-                  {t('ribbonNameWithAi')}
++                  {t('ribbonSaveAs')} <span className="file-menu-key">{IS_MAC ? '⇧⌘S' : 'Ctrl+Shift+S'}</span>
+                 </button>
+                 <div className="file-menu-sep" />
+                 {convertItems}
+               </div>
+             )}
+           </div>
+-        )}
++        }
+         {quickActions}
+         {TABS.filter((tabName) => tabName !== 'file').map((tabName) => (
+           <button
+@@ -3654,7 +3644,9 @@
+                         role="menuitem"
+                         onClick={() => {
+                           setDropdown(null)
+-                          setPasteSpecial(true)
++                          const payload = readClipboardPayload()
++                          void payload.catch(() => {})
++                          setPasteSpecial(payload)
+                         }}
+                       >
+                         {t('ribbonPasteSpecial')}
+@@ -3674,7 +3666,7 @@
+                   )}
+                   {pasteSpecial &&
+                     createPortal(
+-                      <PasteSpecialDialog editor={ed} onClose={() => setPasteSpecial(false)} />,
++                      <PasteSpecialDialog editor={ed} read={pasteSpecial} onClose={() => setPasteSpecial(null)} />,
+                       document.body,
+                     )}
+                 </div>

@@ -1,0 +1,7 @@
+.matcha-markdown-page { display: flex; flex-direction: column; height: 100vh; min-height: 0; }
+.matcha-markdown-page > .app { flex: 1; min-height: 0; height: auto; }
+.matcha-markdown-toolbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg); }
+.matcha-markdown-toolbar button { color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 5px 10px; cursor: pointer; }
+.matcha-markdown-toolbar button:hover { background: var(--hover); }
+.matcha-markdown-toolbar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.matcha-markdown-error { padding: 8px 12px; color: var(--text); border-bottom: 1px solid var(--border); }

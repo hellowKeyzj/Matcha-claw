@@ -125,6 +125,8 @@ MatchaClaw 直接基于官方 **OpenClaw** 核心构建。无需单独安装，�
 通过预构建的技能扩展 AI 智能体的能力。在集成的技能面板中浏览、安装、上传本地技能文件夹/ZIP/Markdown 文件，并管理技能——无需包管理器。
 MatchaClaw 还会内置预装完整的文档处理技能（`pdf`、`xlsx`、`docx`、`pptx`），在启动时自动部署到 `~/.openclaw/skills`，并在首次安装时默认启用。额外预装技能（`find-skills`、`tavily-search`、`multi-search-engine`、`web-extract`、`daily-news-briefing`）也会默认启用；若缺少必需的 API Key，OpenClaw 会在运行时给出配置错误提示。
 
+内置应用插件 **Matcha Office** 基于 GenOffice 源码快照适配，提供 Docs、Sheets、Slides 三个 `.docx`/`.xlsx`/`.pptx` 编辑页，并把创建、读取、编辑、检查以及 `.pdf`/`.md`/`.html` 导入导出映射为插件 tools，供 MatchaClaw 自己的 agent 调用。文件保存在插件本地库。GenOffice 桌面壳、内置 agent/AI 面板、AI provider 账号体系以及 CLI/MCP server 不会启动。
+
 重点搜索技能所需环境变量：
 - `TAVILY_API_KEY`：用于 `tavily-search`（上游运行时也可能支持 OAuth）
 

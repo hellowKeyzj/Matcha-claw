@@ -1,13 +1,17 @@
 import { join } from 'node:path';
+import type { BrowserWindow } from 'electron';
+import { createAppPluginDesktop } from './desktop';
 import {
   APP_EXECUTION_OPERATIONS, APP_SERVICE_MAX_BYTES, APP_SERVICE_OPERATIONS, APP_SERVICE_VERSION,
   AppServiceError, isAppServiceRequest,
-  type AppCapabilitiesInputs, type AppCapabilitiesResults, type AppServiceRequest, type AppServiceResult,
+  type AppCapabilitiesInputs, type AppCapabilitiesResults, type AppServiceRequest, type AppServiceResult, type AppRenderDocumentRead,
 } from '../../../sdk/app-plugins/src/api';
 import type { RuntimeHostTransports } from '../runtime-host-delivery/transport/host-api-transports';
 import { createAppPluginCredentials, AppPluginCredentialError } from './credentials';
 import { createAppPluginKnowledge } from './knowledge';
 import { createAppPluginWorkspace } from './workspace';
+import { AppRenderPdfError, renderAppPdf } from './render-pdf';
+import { AppDocumentLayoutError, renderAppDocument } from './document-layout';
 
 type CapabilityOperation = AppCapabilitiesResults['describe']['operations'][number];
 const WORKSPACE_OPERATIONS = {
@@ -19,7 +23,8 @@ const KNOWLEDGE_OPERATIONS = {
   archive: 'wiki.artifacts.archive', archiveStatus: 'wiki.artifacts.status',
 } as const;
 
-export function createAppPluginServices(options: { rootDir: string; getTransports(): Promise<RuntimeHostTransports> }) {
+export function createAppPluginServices(options: { rootDir: string; getMainWindow(): BrowserWindow | null; getTransports(): Promise<RuntimeHostTransports>; readAsset(pluginId: string, digest: string, path: string): Promise<Uint8Array> }) {
+  const desktop = createAppPluginDesktop(options.getMainWindow);
   const credentials = createAppPluginCredentials(join(options.rootDir, 'credentials'));
   const workspace = createAppPluginWorkspace(options.getTransports);
   async function describe(input: AppCapabilitiesInputs['describe'], signal: AbortSignal): Promise<AppCapabilitiesResults['describe']> {
@@ -63,17 +68,42 @@ export function createAppPluginServices(options: { rootDir: string; getTransport
     for (const operation of ['list', 'generate', 'generateText', 'generateSpeech', 'transcribe', 'generateMusic', 'submitVideo', 'queryVideo', 'collectVideo']) operations.push({
       id: `models.${operation}`, status: 'request-dependent', reason: 'model-selection-and-provider-dependent', limits: {},
     });
+    for (const operation of APP_SERVICE_OPERATIONS.desktop) operations.push({ id: `desktop.${operation}`, status: operation === 'pickFile' ? 'request-dependent' : 'available',
+      ...(operation === 'pickFile' ? { reason: 'main-window-and-user-selection-dependent' } : {}), limits });
+    for (const operation of APP_SERVICE_OPERATIONS.rendering) operations.push({ id: `rendering.${operation}`, status: 'available', limits });
     operations.push({ id: 'capabilities.describe', status: 'available', limits });
     return { sdkVersion: APP_SERVICE_VERSION, operations };
   }
   return {
-    async service(pluginId: string, request: AppServiceRequest, signal: AbortSignal): Promise<AppServiceResult> {
+    async service(pluginId: string, request: AppServiceRequest, signal: AbortSignal, read?: AppRenderDocumentRead, identity?: { digest: string }): Promise<AppServiceResult> {
       if (!isAppServiceRequest(request) || Buffer.byteLength(JSON.stringify(request)) > APP_SERVICE_MAX_BYTES) {
         throw new AppServiceError('invalid-request', 'Invalid app plugin service request.');
       }
       signal.throwIfAborted();
       let result: AppServiceResult;
       switch (request.service) {
+        case 'desktop':
+          switch (request.operation) {
+            case 'systemLocale': result = await desktop.systemLocale(request.input, signal); break;
+            case 'openExternal': result = await desktop.openExternal(request.input, signal); break;
+            case 'revealFile': result = await desktop.revealFile(request.input, signal); break;
+            case 'pickFile': result = await desktop.pickFile(request.input, signal); break;
+          }
+          break;
+        case 'rendering':
+          try {
+            if (request.operation === 'renderPdf') result = await renderAppPdf(request.input, signal);
+            else {
+              if (!identity) throw new AppServiceError('unavailable', 'Document rendering requires the active plugin package identity.');
+              result = await renderAppDocument(request.input, signal, { readAsset: path => options.readAsset(pluginId, identity.digest, path), read });
+            }
+          }
+          catch (error) {
+            if (error instanceof AppRenderPdfError || error instanceof AppDocumentLayoutError) throw new AppServiceError(error.code === 'too-large' ? 'response-too-large'
+              : error.code === 'cancelled' ? 'cancelled' : error.code === 'invalid-request' ? 'invalid-request' : 'unavailable', error.message);
+            throw error;
+          }
+          break;
         case 'workspace':
           switch (request.operation) {
             case 'readText': result = await workspace.readText(request.input, signal); break;

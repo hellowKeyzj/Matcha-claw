@@ -1,0 +1,17 @@
+--- a/genoffice/apps/docs/src/renderer/parse-worker.ts
++++ b/genoffice/apps/docs/src/renderer/parse-worker.ts
+@@ -1,3 +1,4 @@
++import { setLazyMediaBaseUrl } from '@genoffice/docx-engine/lazy-media'
+ import { parseDocx } from '@genoffice/docx-engine'
+ import type { ParseWorkerRequest, ParseWorkerResponse } from './parse-off-thread'
+ 
+@@ -7,7 +8,8 @@
+   (self as unknown as Worker).postMessage(msg, transfer)
+ 
+ self.onmessage = async (e: MessageEvent<ParseWorkerRequest>) => {
+-  const { id, bytes } = e.data
++  const { id, bytes, mediaBaseUrl } = e.data
++  setLazyMediaBaseUrl(mediaBaseUrl)
+   try {
+     const parsed = await parseDocx(new Uint8Array(bytes))
+     // HTML altChunks convert through the host's hidden window, reachable only

@@ -17,6 +17,7 @@ export type HostRequest =
   | { type: 'cancel'; requestId: string }
   | { type: 'execution-result'; requestId: string; pluginId: string; digest: string; result?: AppExecutionResult; error?: string; errorCode?: 'unavailable' | 'cancelled' | 'approval_unavailable' }
   | { type: 'service-result'; requestId: string; pluginId: string; digest: string; result?: AppServiceResult; error?: string; errorCode?: AppServiceErrorCode }
+  | { type: 'service-read'; parentRequestId: string; pluginId: string; digest: string; readId: string; input: AppJson }
   | { type: 'confirmation-result'; requestId: string; result?: boolean; error?: string; errorCode?: 'approval_unavailable' }
   | { type: 'model-result'; requestId: string; result?: AppModelResult; error?: string; errorCode?: string }
   | { type: 'text-model-result'; requestId: string; result?: AppTextModelResult; error?: string; errorCode?: string }
@@ -30,7 +31,8 @@ export type WorkerMessage =
     | { request: Extract<AppExecutionRequest, { operation: 'resolveTeamApproval' }>; callId: string }
     | { request: Exclude<AppExecutionRequest, { operation: 'resolveTeamApproval' }>; callId?: never }))
   | { type: 'execution-cancel'; requestId: string; pluginId: string; digest: string }
-  | { type: 'service-request'; requestId: string; pluginId: string; digest: string; request: AppServiceRequest }
+  | { type: 'service-request'; requestId: string; pluginId: string; digest: string; request: AppServiceRequest; hasRead?: true }
+  | { type: 'service-read-result'; parentRequestId: string; pluginId: string; digest: string; readId: string; result?: AppJson; error?: string; errorCode?: AppServiceErrorCode }
   | { type: 'service-cancel'; requestId: string; pluginId: string; digest: string }
   | { type: 'model'; requestId: string; pluginId: string; digest: string; request: AppModelRequest }
   | { type: 'text-model'; requestId: string; pluginId: string; digest: string; request: AppTextModelRequest }
@@ -105,12 +107,35 @@ export function isServiceEnvelope(value: unknown): boolean {
     || typeof value.pluginId !== 'string' || !value.pluginId.length || value.pluginId.length > 256
     || typeof value.digest !== 'string' || !value.digest.length || value.digest.length > 128) return false;
   const keys = ['type', 'requestId', 'pluginId', 'digest'];
-  if (value.type === 'service-request' && Object.hasOwn(value, 'request')) keys.push('request');
+  if (value.type === 'service-request' && Object.hasOwn(value, 'request')) {
+    keys.push('request');
+    if (Object.hasOwn(value, 'hasRead')) {
+      if (value.hasRead !== true || !value.request || typeof value.request !== 'object' || Array.isArray(value.request)
+        || value.request.service !== 'rendering' || value.request.operation !== 'renderDocument') return false;
+      keys.push('hasRead');
+    }
+  }
   else if (value.type === 'service-result') {
     if (typeof value.error === 'string' && value.error.length <= 2000 && isServiceErrorCode(value.errorCode)) keys.push('error', 'errorCode');
     else if (Object.hasOwn(value, 'result')) keys.push('result');
     else return false;
   } else if (value.type !== 'service-cancel') return false;
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+export function isServiceReadEnvelope(value: unknown): boolean {
+  if (!isServicePayload(value) || !(typeof value.parentRequestId === 'string' && value.parentRequestId.length > 0 && value.parentRequestId.length <= 128
+    || typeof value.parentRequestId === 'number' && Number.isSafeInteger(value.parentRequestId))
+    || typeof value.readId !== 'string' || !value.readId.length || value.readId.length > 128
+    || typeof value.pluginId !== 'string' || !value.pluginId.length || value.pluginId.length > 256
+    || typeof value.digest !== 'string' || !value.digest.length || value.digest.length > 128) return false;
+  const keys = ['type', 'parentRequestId', 'pluginId', 'digest', 'readId'];
+  if (value.type === 'service-read' && Object.hasOwn(value, 'input')) keys.push('input');
+  else if (value.type === 'service-read-result') {
+    if (typeof value.error === 'string' && value.error.length <= 2000 && isServiceErrorCode(value.errorCode)) keys.push('error', 'errorCode');
+    else if (Object.hasOwn(value, 'result')) keys.push('result');
+    else return false;
+  } else return false;
   return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 

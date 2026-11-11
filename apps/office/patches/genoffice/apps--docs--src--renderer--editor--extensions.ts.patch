@@ -1,0 +1,54 @@
+--- a/genoffice/apps/docs/src/renderer/editor/extensions.ts
++++ b/genoffice/apps/docs/src/renderer/editor/extensions.ts
+@@ -1,3 +1,4 @@
++import { reportDocsClipboardError } from '../../../../../../src/docs/clipboard'
+ import { ScriptFonts } from './script-fonts'
+ import {
+   asciiFamilyResolver,
+@@ -3699,30 +3700,23 @@
+       let dataUrl = node.attrs.imageDataUrl
+       if (typeof dataUrl !== 'string') return false
+       if (!dataUrl.startsWith('data:image/') && !isLazyImage(dataUrl)) return false
+-      const lazyPart = parseLazyMediaUrl(dataUrl)?.partPath
+-      const directlyCopyable = lazyPart
+-        ? /\.(?:png|jpe?g|gif)$/i.test(lazyPart)
+-        : PERSISTABLE_IMAGE_URL.test(dataUrl)
+-      // the save pipeline persists only png/jpeg/gif; display-only formats
+-      // (bmp/webp/svg/tiff...) are transcoded to PNG from the already-decoded
+-      // DOM img so the copy stays saveable — undecodable ones keep the
+-      // default HTML copy (a lazy picture is read from the file by the main process)
+-      if (!directlyCopyable) {
+-        const dom = view.nodeDOM(sel.from) as HTMLElement | null
+-        const img = dom?.querySelector?.('img.doc-protected-img') as HTMLImageElement | null
+-        if (!img || !img.naturalWidth || !img.naturalHeight) return false
+-        const canvas = document.createElement('canvas')
+-        canvas.width = img.naturalWidth
+-        canvas.height = img.naturalHeight
+-        const ctx = canvas.getContext('2d')
+-        if (!ctx) return false
++      // Encode the already-decoded selection before entering the gesture-gated SDK.
++      const dom = view.nodeDOM(sel.from) as HTMLElement | null
++      const img = dom?.querySelector?.('img.doc-protected-img') as HTMLImageElement | null
++      if (!img || !img.naturalWidth || !img.naturalHeight) {
++        event.preventDefault()
++        reportDocsClipboardError(new Error('The selected image has not decoded.'))
++        return true
++      }
++      const canvas = document.createElement('canvas')
++      canvas.width = img.naturalWidth
++      canvas.height = img.naturalHeight
++      const ctx = canvas.getContext('2d')
++      try {
++        if (!ctx) throw new Error('Image copying requires a canvas context.')
+         ctx.drawImage(img, 0, 0)
+-        try {
+-          dataUrl = canvas.toDataURL('image/png')
+-        } catch {
+-          return false
+-        }
+-      }
++        dataUrl = canvas.toDataURL('image/png')
++      } catch (error) { event.preventDefault(); reportDocsClipboardError(error); return true }
+       const write = window.desktop?.copyImageToClipboard?.(dataUrl, imageMetaJson(node.attrs))
+       // no bridge: keep the default HTML-only copy instead of an empty clipboard
+       if (!write) return false

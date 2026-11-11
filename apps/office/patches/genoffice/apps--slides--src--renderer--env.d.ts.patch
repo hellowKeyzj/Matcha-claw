@@ -1,0 +1,15 @@
+--- a/genoffice/apps/slides/src/renderer/env.d.ts
++++ b/genoffice/apps/slides/src/renderer/env.d.ts
+@@ -1,10 +1,11 @@
+ /// <reference types="vite/client" />
+-import type { SlidesApi } from '../shared/ipc'
++import type { DesktopFilesApi, SlidesApi } from '../shared/ipc'
+ import type { ProjectApi } from '@genoffice/project-store'
+ 
+ declare global {
+   interface Window {
+     slidesApi: SlidesApi
++    desktop: DesktopFilesApi
+     projectApi: ProjectApi
+   }
+ }

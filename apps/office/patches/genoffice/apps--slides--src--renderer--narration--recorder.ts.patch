@@ -1,0 +1,14 @@
+--- a/genoffice/apps/slides/src/renderer/narration/recorder.ts
++++ b/genoffice/apps/slides/src/renderer/narration/recorder.ts
+@@ -13,10 +13,7 @@
+     }
+   }
+ 
+-  static async start(): Promise<NarrationRecorder> {
+-    const stream = await navigator.mediaDevices.getUserMedia({
+-      audio: { echoCancellation: true, noiseSuppression: true },
+-    })
++  static async start(stream: MediaStream): Promise<NarrationRecorder> {
+     const recording = new NarrationRecorder(stream, new MediaRecorder(stream))
+     // A timeslice keeps what was said if the show ends abruptly
+     recording.recorder.start(1000)

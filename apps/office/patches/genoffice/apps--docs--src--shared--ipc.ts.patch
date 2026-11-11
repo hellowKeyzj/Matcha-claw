@@ -1,0 +1,10 @@
+--- a/genoffice/apps/docs/src/shared/ipc.ts
++++ b/genoffice/apps/docs/src/shared/ipc.ts
+@@ -482,6 +482,7 @@
+     auto?: boolean,
+   ): Promise<{
+     ok: boolean
++    path?: string
+     error?: string
+     reason?: 'external-modified'
+     /** a newer password choice arrived after this save's snapshot */

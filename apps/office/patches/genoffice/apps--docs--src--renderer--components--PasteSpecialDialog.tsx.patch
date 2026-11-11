@@ -1,0 +1,38 @@
+--- a/genoffice/apps/docs/src/renderer/components/PasteSpecialDialog.tsx
++++ b/genoffice/apps/docs/src/renderer/components/PasteSpecialDialog.tsx
+@@ -3,7 +3,6 @@
+ import type { Editor } from '@tiptap/core'
+ import {
+   pastePayload,
+-  readClipboardPayload,
+   type ClipboardPayload,
+   type PasteChoice,
+ } from '../editor/paste-actions'
+@@ -28,7 +27,7 @@
+   return flavors
+ }
+ 
+-export function PasteSpecialDialog({ editor, onClose }: { editor: Editor; onClose: () => void }) {
++export function PasteSpecialDialog({ editor, read, onClose }: { editor: Editor; read: Promise<ClipboardPayload>; onClose: () => void }) {
+   const { t } = useI18n()
+   const keys = useModalKeys(onClose)
+   const [payload, setPayload] = useState<ClipboardPayload | null>(null)
+@@ -36,15 +35,15 @@
+ 
+   useEffect(() => {
+     let alive = true
+-    void readClipboardPayload().then((read) => {
++    void read.then((read) => {
+       if (!alive) return
+       setPayload(read)
+       setFlavor(availableFlavors(read)[0] ?? null)
+-    })
++    }).catch(() => { if (alive) onClose() })
+     return () => {
+       alive = false
+     }
+-  }, [])
++  }, [read])
+ 
+   const flavors = payload ? availableFlavors(payload) : []
+   const ok = () => {

@@ -32,6 +32,8 @@ export class ApplicationPluginOwner {
   private tail: Promise<void> = Promise.resolve();
   private pending = 0;
   private closed = false;
+  // One verified package (at most the validator's 128 MiB limit), shared by all its pages.
+  private assetFiles?: { id: string; digest: string; state: 'loading' | 'ready'; files: Promise<ReadonlyMap<string, Uint8Array>> };
 
   constructor(private readonly options: ApplicationPluginOwnerOptions) {
     this.storage = new AppPluginStorage(options.rootDir, options.packageWorker);
@@ -111,18 +113,52 @@ export class ApplicationPluginOwner {
     });
   }
 
-  bundle(id: string, digest: string, entry: string): Promise<{ html: string }> {
-    return this.enqueue(async () => {
-      const installed = this.requireCurrent(await this.load(), id, digest);
-      if (!installed.enabled) throw new AppPluginError('conflict', 'This app plugin is disabled.');
-      const isReader = installed.manifest.contributes.readers?.some((reader) => reader.entry === entry);
-      const isApplication = installed.manifest.contributes.applications?.some((application) => application.entry === entry);
-      if (typeof entry !== 'string' || (!isReader && !isApplication)) {
-        throw new AppPluginError('invalid_package', 'The requested HTML entry is not declared by this plugin.');
+  async bundle(id: string, digest: string, entry: string): Promise<{ html: string }> {
+    if (this.closed) throw new AppPluginError('closed', 'App plugin owner is closing.');
+    const installed = this.requireCurrent(this.catalog ?? await this.list(), id, digest);
+    if (!installed.enabled) throw new AppPluginError('conflict', 'This app plugin is disabled.');
+    const isReader = installed.manifest.contributes.readers?.some((reader) => reader.entry === entry);
+    const isApplication = installed.manifest.contributes.applications?.some((application) => application.entry === entry);
+    if (typeof entry !== 'string' || (!isReader && !isApplication)) {
+      throw new AppPluginError('invalid_package', 'The requested HTML entry is not declared by this plugin.');
+    }
+    const bytes = await this.readAsset(id, digest, entry);
+    return { html: Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8') };
+  }
+
+  async readAsset(id: string, digest: string, path: string): Promise<Uint8Array> {
+    if (this.closed) throw new AppPluginError('closed', 'App plugin owner is closing.');
+    const installed = this.requireCurrent(this.catalog ?? await this.list(), id, digest);
+    if (!installed.enabled) throw new AppPluginError('conflict', 'This app plugin is disabled.');
+    // Warm reads do not compete with installation's bounded command lane.
+    const files = await this.readAssetFiles(installed);
+    const current = this.requireCurrent(this.catalog ?? await this.load(), id, digest);
+    if (this.closed || !current.enabled) throw new AppPluginError('conflict', 'This app plugin is unavailable.');
+    const bytes = files.get(path);
+    if (!bytes) throw new AppPluginError('not_found', 'The app plugin asset is unavailable.');
+    return bytes;
+  }
+
+  private readAssetFiles(installed: InstalledAppPlugin): Promise<ReadonlyMap<string, Uint8Array>> {
+    if (this.closed) return Promise.reject(new AppPluginError('closed', 'App plugin owner is closing.'));
+    const id = installed.manifest.id;
+    const digest = installed.digest;
+    if (this.assetFiles?.id === id && this.assetFiles.digest === digest) return this.assetFiles.files;
+    if (this.assetFiles?.state === 'loading') return this.assetFiles.files.then(() => this.readAssetFiles(installed));
+    this.assetFiles = undefined;
+    const files = this.storage.readPackage(id, digest, { operation: 'files' }).then((contents) => {
+      if (JSON.stringify(contents.manifest) !== JSON.stringify(installed.manifest)) {
+        throw new Error('Installed app plugin manifest does not match its package.');
       }
-      const contents = await this.storage.readPackage(id, digest, { operation: 'html', entry, expectedManifest: installed.manifest });
-      return { html: contents.html };
+      const current = this.requireCurrent(this.catalog!, id, digest);
+      if (this.closed || !current.enabled) throw new AppPluginError('conflict', 'This app plugin is unavailable.');
+      cached.state = 'ready';
+      return contents.files;
     });
+    const cached: NonNullable<ApplicationPluginOwner['assetFiles']> = { id, digest, state: 'loading', files };
+    this.assetFiles = cached;
+    void files.catch(() => { if (this.assetFiles === cached) this.assetFiles = undefined; });
+    return files;
   }
 
   setEnabled(input: { id: string; digest: string; enabled: boolean }): Promise<InstalledAppPlugin> {
@@ -167,7 +203,7 @@ export class ApplicationPluginOwner {
 
   close(): Promise<void> {
     this.closed = true;
-    return this.tail;
+    return Promise.all([this.tail, this.assetFiles?.files.catch(() => undefined)]).then(() => { this.assetFiles = undefined; });
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -254,6 +290,10 @@ export class ApplicationPluginOwner {
     const catalog = { revision, plugins, bundled: bundled ?? current.bundled };
     await this.storage.publish(catalog);
     this.catalog = catalog;
+    const cached = this.assetFiles;
+    if (cached?.state === 'ready' && !plugins.some((plugin) => plugin.enabled && plugin.manifest.id === cached.id && plugin.digest === cached.digest)) {
+      this.assetFiles = undefined;
+    }
     try {
       await this.options.onChanged({ revision }, structuredClone({ revision, plugins }));
     } catch (cause) {

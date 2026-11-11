@@ -1,0 +1,35 @@
+--- a/genoffice/apps/sheets/src/preload/index.ts
++++ b/genoffice/apps/sheets/src/preload/index.ts
+@@ -1030,6 +1030,7 @@
+     csvPath,
+     emptyCsv,
+     restoredFromRecovery,
++    backingIsRecovery,
+   } = input
+   if (
+     !isUuid(sessionId) ||
+@@ -1048,7 +1049,8 @@
+     (needsSaveAs !== undefined && typeof needsSaveAs !== 'boolean') ||
+     (csvPath !== undefined && (typeof csvPath !== 'string' || csvPath.length === 0)) ||
+     (emptyCsv !== undefined && typeof emptyCsv !== 'boolean') ||
+-    (restoredFromRecovery !== undefined && typeof restoredFromRecovery !== 'boolean')
++    (restoredFromRecovery !== undefined && typeof restoredFromRecovery !== 'boolean') ||
++    (backingIsRecovery !== undefined && typeof backingIsRecovery !== 'boolean')
+   ) {
+     throw new Error('Invalid workbook response.')
+   }
+@@ -1351,10 +1353,14 @@
+     visuals: visuals.map(parseVisualObject),
+     definedNames: parsedDefinedNames,
+     readOnly,
++    ...(input.passwordProtected === true ? { passwordProtected: true } : {}),
++    ...(input.automaticRecoveryDisabled === true ? { automaticRecoveryDisabled: true } : {}),
++    ...(input.unsavedNew === true ? { unsavedNew: true } : {}),
+     ...(needsSaveAs === undefined ? {} : { needsSaveAs }),
+     ...(csvPath === undefined ? {} : { csvPath }),
+     ...(emptyCsv === undefined ? {} : { emptyCsv }),
+     ...(restoredFromRecovery === undefined ? {} : { restoredFromRecovery }),
++    ...(backingIsRecovery === undefined ? {} : { backingIsRecovery }),
+     ...(themeColors === undefined ? {} : { themeColors: themeColors as string[] }),
+     ...(parsedThemeFonts === undefined ? {} : { themeFonts: parsedThemeFonts }),
+     ...(typeof input.normalFontName === 'string' && input.normalFontName !== ''

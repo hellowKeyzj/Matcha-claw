@@ -1,6 +1,6 @@
 import { HOST_API_STARTUP_PATHS, HOST_API_STARTUP_TRACE_HEADER, type HostApiProxyFailureCode } from '../../../src/lib/host-api-transport-contract';
 import { isTraceEnabled, startupTrace, traceDebug } from '../../utils/trace-logger';
-import { ipcMain } from 'electron';
+import { ipcMain, type WebContents } from 'electron';
 import { getHostApiRequestDependency } from '../route-boundary';
 import { toUSVString } from 'node:util';
 import { getHostApiBaseUrl } from '../server';
@@ -41,6 +41,7 @@ const ASYNC_ADMISSION_PATHS = new Set([
 type InflightHostApiRequest = {
   controller: AbortController;
   failureCode: HostApiProxyFailureCode;
+  sender?: WebContents;
 };
 
 type E2EProcess = typeof process & {
@@ -130,8 +131,12 @@ export function registerHostApiProxyHandlers(
   void runtimeReady.catch(() => undefined);
   // requestId → caller observation; accepted owner operations retain their own lifetime.
   const inflightRequests = new Map<string | symbol, InflightHostApiRequest>();
+  const senderListeners = new Map<WebContents, { destroyed: () => void; pending: number }>();
   shutdownSignal.addEventListener('abort', () => {
+    for (const [sender, listener] of senderListeners) sender.removeListener('destroyed', listener.destroyed);
+    senderListeners.clear();
     for (const request of inflightRequests.values()) request.controller.abort();
+    inflightRequests.clear();
   }, { once: true });
 
   ipcMain.handle('hostapi:abort', (_, request: HostApiAbortRequest) => {
@@ -212,7 +217,8 @@ export function registerHostApiProxyHandlers(
         || (method === 'POST' && (routeUrl.pathname === '/api/search/prepare' || routeUrl.pathname === '/api/search/restart'));
 
       const controller = new AbortController();
-      const pendingRequest: InflightHostApiRequest = { controller, failureCode: 'UNAVAILABLE' };
+      const sender = unboundedWait || slowSearch ? event.sender : undefined;
+      const pendingRequest: InflightHostApiRequest = { controller, failureCode: 'UNAVAILABLE', sender };
       inflightRequest = pendingRequest;
       const inflightKey = requestId || Symbol();
       inflightRequests.set(inflightKey, inflightRequest);
@@ -225,13 +231,26 @@ export function registerHostApiProxyHandlers(
         controller.abort();
       };
       let timer = setTimeout(expire, timeoutMs);
-      const senderClosed = () => {
-        pendingRequest.failureCode = 'ABORTED';
-        controller.abort();
-      };
-      if (unboundedWait || slowSearch) event.sender.once('destroyed', senderClosed);
       try {
-        if ((unboundedWait || slowSearch) && event.sender.isDestroyed()) senderClosed();
+        if (sender && !shutdownSignal.aborted) {
+          let listener = senderListeners.get(sender);
+          if (!listener) {
+            listener = {
+              pending: 0,
+              destroyed: () => {
+                for (const pending of inflightRequests.values()) {
+                  if (pending.sender !== sender) continue;
+                  pending.failureCode = 'ABORTED';
+                  pending.controller.abort();
+                }
+              },
+            };
+            senderListeners.set(sender, listener);
+            sender.once('destroyed', listener.destroyed);
+          }
+          listener.pending += 1;
+          if (sender.isDestroyed()) listener.destroyed();
+        }
         trace('ready.start');
         startupStage = 'ready';
         traceStartup('ready.start');
@@ -371,8 +390,12 @@ export function registerHostApiProxyHandlers(
         };
       } finally {
         clearTimeout(timer);
-        if (unboundedWait || slowSearch) event.sender.removeListener('destroyed', senderClosed);
         inflightRequests.delete(inflightKey);
+        const listener = sender && senderListeners.get(sender);
+        if (sender && listener && --listener.pending === 0) {
+          sender.removeListener('destroyed', listener.destroyed);
+          senderListeners.delete(sender);
+        }
       }
     } catch {
       trace('failure', () => ({ outcome: inflightRequest?.failureCode ?? 'UNAVAILABLE' }));

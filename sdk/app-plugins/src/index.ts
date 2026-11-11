@@ -1,5 +1,7 @@
 export * from './manifest.js';
+export * from './limits.js';
 export * from './api.js';
+export * from './document-resources.js';
 export * from './execution.js';
 export * from './services.js';
 export * from './identity.js';

@@ -1,0 +1,17 @@
+--- a/genoffice/apps/html/src/renderer/preview/inspector.js
++++ b/genoffice/apps/html/src/renderer/preview/inspector.js
+@@ -985,6 +985,14 @@
+   document.addEventListener(
+     'keydown',
+     (e) => {
++      const shortcutMod = (e.metaKey || e.ctrlKey) && !e.altKey
++      const shortcut = shortcutMod && (e.key.toLowerCase() === 's' ? (e.shiftKey ? 'saveAs' : 'save') : !e.shiftKey && ({ f: 'find', h: 'replace' }[e.key.toLowerCase()]))
++      if (shortcut) {
++        e.preventDefault()
++        if (editing) finishEdit(true)
++        post({ type: 'gx:keyCommand', command: shortcut })
++        return
++      }
+       if (editing) {
+         const mod = (e.metaKey || e.ctrlKey) && !e.altKey
+         if (e.key === 'Escape') {

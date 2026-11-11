@@ -1,0 +1,37 @@
+/* MatchaClaw owns AI; remove GenOffice's entries and the entire dock slot. */
+.ribbon-group:has(.ai-entry),
+.qa-name-with-ai,
+.copilot,
+.ai-ask-trigger,
+.ai-ask-pop {
+  display: none !important;
+}
+
+.app-shell .sheet-body {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.matcha-sheets-page {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100vh;
+}
+
+.matcha-sheets-page > .app-shell {
+  height: 100%;
+  min-height: 0;
+}
+
+.matcha-sheets-toolbar {
+  padding: 4px 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.matcha-sheets-toolbar button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+}

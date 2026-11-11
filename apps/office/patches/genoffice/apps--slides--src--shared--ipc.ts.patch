@@ -1,0 +1,117 @@
+--- a/genoffice/apps/slides/src/shared/ipc.ts
++++ b/genoffice/apps/slides/src/shared/ipc.ts
+@@ -1,3 +1,4 @@
++import type { Lang } from '@genoffice/i18n'
+ import type { AiPanelPrefs } from '@genoffice/ui'
+ /**
+  * slides main-process <-> renderer IPC contract (Phase 3: open/save/edit, AI not included yet).
+@@ -94,7 +95,9 @@
+ }
+ 
+ export interface OpenResult {
++  /** Stable library identity; display name is independent. */
+   path: string
++  name: string
+   slides: RenderSlide[]
+   /** Slide page size in EMU */
+   size: { cx: number; cy: number }
+@@ -1105,8 +1108,8 @@
+ 
+ /**
+  * Insert media the renderer holds (screen-recording webm) or a media file it was
+- * handed a path for (drop). A path lets main derive the video poster from the
+- * system thumbnail; bytes get a solid placeholder.
++ * handed a path for (drop). Renderer-held bytes can include a captured PNG poster;
++ * a path lets main derive the poster from the system thumbnail.
+  */
+ export type AddMediaBytesOp = {
+   slideIndex: number
+@@ -1114,6 +1117,8 @@
+   ext: string
+   fitWidthPx: number
+   name?: string
++  /** Captured video frame, PNG base64 without the data: prefix. */
++  posterBase64?: string
+   /** Frame size when the producer knows it (screen-recording track settings) */
+   natural?: { width: number; height: number }
+   /** Drop point to center on (fitWidthPx-scaled slide px); defaults to the slide center */
+@@ -1350,13 +1355,11 @@
+ 
+ export interface SlidesApi {
+   /** current UI language (persisted by the shell in app-settings.json) */
+-  getLanguage: () => Promise<
+-    'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar'
+-  >
++  getLanguage: () => Promise<Lang>
+   /** language switched from the shell home page */
+   onLanguageChanged: (
+     handler: (
+-      lang: 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar',
++      lang: Lang,
+     ) => void,
+   ) => () => void
+   /** current UI theme preference (persisted by the shell in app-settings.json) */
+@@ -1376,6 +1379,7 @@
+   /** snap the host window in/out of instant fullscreen for the slideshow
+    *  (macOS simpleFullScreen — skips the animated Space transition) */
+   setShowFullScreen: (on: boolean) => Promise<void>
++  openExternal: (url: string) => Promise<void>
+   openPptx: (fitWidthPx: number) => Promise<OpenResult | null>
+   openPptxPath: (path: string, fitWidthPx: number) => Promise<OpenResult | null>
+   /** Office-private faces referenced by layouts so far; the renderer registers them as FontFaces
+@@ -1433,7 +1437,7 @@
+   /** Single-page generation: a JSON slide spec (LLM output) built directly into a one-slide pptx; the marker goes into a landGeneratedPages pageMarkers slot */
+   localGeneratePage: (op: {
+     specJson: string
+-  }) => Promise<{ ok: boolean; marker?: string; error?: string; imageFailures?: string[] }>
++  }) => Promise<{ ok: boolean; marker?: string; error?: string; imageFailures?: string[]; imageWarnings?: string[] }>
+   editText: (op: EditTextOp) => Promise<RenderSlide | null>
+   /** Change font/size on selected elements wholesale (elements without text ignored; returns null if all ignored) */
+   setElementFont: (op: SetElementFontOp) => Promise<RenderSlide | null>
+@@ -1534,8 +1538,8 @@
+   repasteSlide: (op: RepasteSlideOp) => Promise<PasteSlideResult | null>
+   /** Is there a slide on the clipboard? (drives the Paste Slide menu item) */
+   hasSlideClipboard: () => Promise<boolean>
+-  /** Is there anything a paste would act on (internal elements/slide, or external image/text)? Drives the Paste menu item */
+-  clipboardProbe: () => Promise<boolean>
++  /** Whether paste can act on clipboard content; null means unavailable without a user gesture. */
++  clipboardProbe: () => Promise<boolean | null>
+   /** Delete a slide (refused when only one page remains); returns a partial update */
+   deleteSlide: (slideIndex: number) => Promise<SlideUpdate | null>
+   /** Delete a thumbnail selection in one undo step; returns a partial update */
+@@ -1751,10 +1755,10 @@
+   listPrinters: () => Promise<PrinterInfo[]>
+   /** the driver option groups a queue advertises (quality, color, media type); empty when none */
+   printerOptions: (queue: string) => Promise<PrinterOption[]>
+-  save: () => Promise<{ ok: boolean; path?: string; error?: string; slides?: RenderSlide[] }>
++  save: () => Promise<{ ok: boolean; path?: string; name?: string; error?: string; slides?: RenderSlide[] }>
+   saveAs: (
+     defaultName: string,
+-  ) => Promise<{ ok: boolean; path?: string; error?: string; slides?: RenderSlide[] }>
++  ) => Promise<{ ok: boolean; path?: string; name?: string; error?: string; slides?: RenderSlide[] }>
+   /** The close guard chose "Save": the main process asks the renderer to run the full save flow */
+   onCloseSaveRequest: (handler: () => void) => () => void
+   /** Undo/redo stack occupancy pushed by the main process (drives the QAT button gray states) */
+@@ -1769,7 +1773,7 @@
+   onMenuCommand: (handler: (command: MenuCommand) => void) => () => void
+   onOpened: (handler: (result: OpenResult) => void) => () => void
+   /** The file was renamed externally (shell Home list rename) — pushes the new path, the renderer updates the title bar */
+-  onRenamed: (handler: (newPath: string) => void) => () => void
++  onRenamed: (handler: (document: { path: string; name: string }) => void) => () => void
+   getAiSettings: () => Promise<AiSettings>
+   setAiSettings: (settings: AiSettings) => Promise<void>
+   /** ai-settings.json was rewritten by any renderer; re-read it */
+@@ -1927,13 +1931,6 @@
+   onAudienceNav: (handler: (action: AudienceNavAction) => void) => () => void
+ }
+ 
+-declare global {
+-  interface Window {
+-    slidesApi: SlidesApi
+-    desktop: DesktopFilesApi
+-  }
+-}
+-
+ export interface UserSkillEntry {
+   name: string
+   description: string

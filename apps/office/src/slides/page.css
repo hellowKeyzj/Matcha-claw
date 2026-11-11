@@ -1,0 +1,12 @@
+/* GenOffice AI is not part of the Matcha Office plugin; MatchaClaw's own agent
+   owns that surface. Keep the editor, hide the duplicated AI entry points. */
+.ribbon-group:has(.ai-entry),
+/* Snapshot file-menu order: Open, Save, Save As, Name with AI. */
+.file-menu > button:nth-of-type(4),
+.stage-ai-bar,
+.ai-dock,
+.ai-rail,
+.ai-ask-trigger,
+.ai-ask-pop {
+  display: none !important;
+}

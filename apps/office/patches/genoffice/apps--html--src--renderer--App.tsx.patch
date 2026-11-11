@@ -1,0 +1,654 @@
+--- a/genoffice/apps/html/src/renderer/App.tsx
++++ b/genoffice/apps/html/src/renderer/App.tsx
+@@ -3,18 +3,11 @@
+   Dropdown,
+   FindPanel,
+   type FindFocusRequest,
+-  type AiScopeQuoteData,
+   useAutoSavePref,
+   type FindPanelStrings,
+   type FindTarget,
+-  aiPanelInitiallyOpen,
+-  rememberAiPanelOpen,
+-  useAiSidebarEnabled,
+ } from '@genoffice/ui'
+-import {
+-  pollUntilReady,
+-  runHeadlessRendererExport,
+-} from '@genoffice/electron-utils/headless-export'
++import { createHtmlActions } from '../../../../../src/html/actions'
+ import { useI18n } from './i18n/locale'
+ import { parseDocText, serializeDocText, type Envelope } from './document/envelope'
+ import {
+@@ -27,15 +20,6 @@
+ import { instrumentForPreview } from './preview/instrument'
+ import type { ComputedSnapshot, ElementRect, FromInspector } from './preview/inspector-protocol'
+ import inspectorSource from './preview/inspector.js?raw'
+-import { AiPanel, GensparkMark, type AiPreset, type HtmlAiDeps } from './ai/AiPanel'
+-import { AiAskPopover, type AnchorRect, type AskMode } from './components/AiAskPopover'
+-import {
+-  EDIT_QUEUE_MAX,
+-  buildSelectionInstruction,
+-  resolveQueueItem,
+-  type EditQueueItem,
+-} from './ai/edit-queue'
+-import { buildProjection } from './ai/redact'
+ import { Breadcrumb, type NodeState } from './components/Breadcrumb'
+ import {
+   Ribbon,
+@@ -68,12 +52,9 @@
+   type ParseMap,
+ } from './document/parse-map'
+ import { compileOps, type HtmlOp, type OpError } from './document/ops'
+-import { injectBrief, parseBrief, type Brief } from './document/brief'
+ import { applyPatches } from './document/patch'
+ import { adoptImageRewrites } from './document/image-rewrites'
+-import { deriveAutoFileName, deriveNameFromPrompt } from './document/auto-name'
+-import { localFileName, modelSaveAsName } from './file-naming'
+-import { runGuardedPrint } from './print-guard'
++import { deriveAutoFileName, derivePageTitleName } from './document/auto-name'
+ import type { ExportFormat, SaveMode } from '../shared/ipc'
+
+ type LoadStatus = 'loading' | 'ready' | 'error'
+@@ -101,7 +82,6 @@
+ const DEVICES: Device[] = ['desktop', 'tablet', 'mobile']
+ /** document scaffolding: selectable in the source, never a target for element ops */
+ const STRUCTURAL = new Set(['html', 'head', 'body'])
+-const IS_MAC = /Mac/i.test(navigator.platform)
+
+ function readViewMode(): ViewMode {
+   const stored = localStorage.getItem('htmlapp.viewMode')
+@@ -117,17 +97,18 @@
+
+ /** picture bytes as a data URL: inline data, a remote URL through the main-process fetcher, or a file next to the document */
+ async function loadImageDataUrl(src: string): Promise<string | null> {
+-  if (/^data:image\//i.test(src)) return src
+   if (/^https?:/i.test(src)) {
+     const r = await window.htmlApi.fetchImage(src)
+     return r ? `data:${r.mime};base64,${r.base64}` : null
+   }
+-  if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return null
++  if (/^[a-z][a-z0-9+.-]*:/i.test(src) && !/^data:image\//i.test(src)) return null
+   const r = await window.htmlApi.readImage(src)
+   return r ? `data:${r.mime};base64,${r.base64}` : null
+ }
+-
+-export default function App() {
++export default function App({
++  onOpenExternal = async (url) => { window.open(url) },
++  onDocumentAction,
++}: { onOpenExternal?: (url: string) => Promise<void>; onDocumentAction?: (handler: (action: string, input: Record<string, unknown>) => Promise<unknown>) => () => void } = {}) {
+   const { lang, t } = useI18n()
+   const [status, setStatus] = useState<LoadStatus>('loading')
+   const [path, setPath] = useState<string | null>(null)
+@@ -145,14 +126,7 @@
+   const [cursor, setCursor] = useState<CursorInfo>({ line: 1, col: 1, pos: 0 })
+   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+   const [previewNonce, setPreviewNonce] = useState(0)
+-  const [draftHtml, setDraftHtml] = useState<string | null>(null)
+   const [historyState, setHistoryState] = useState({ undo: false, redo: false })
+-  const [aiOpen, setAiOpen] = useState(() => aiPanelInitiallyOpen('htmlapp.showAi'))
+-  // the sidebar switch is a soft hide; it closes the panel when it turns off
+-  const aiSidebarEnabled = useAiSidebarEnabled(setAiOpen)
+-  const [aiPreset, setAiPreset] = useState<AiPreset | null>(null)
+-  const [editQueue, setEditQueue] = useState<EditQueueItem[]>([])
+-  const [askMode, setAskMode] = useState<AskMode | null>(null)
+   const [selectedSid, setSelectedSid] = useState<number | null>(null)
+   const [selectedState, setSelectedState] = useState<NodeState>('static')
+   const [textSel, setTextSel] = useState<TextSel | null>(null)
+@@ -207,9 +181,8 @@
+     src: string
+     image: string
+   } | null>(null)
+-  /** the range awaiting a label, with the selection text it was opened on */
++
+   const [redactDialog, setRedactDialog] = useState<(SourceRange & { seed: string }) | null>(null)
+-
+   const editorRef = useRef<SourceEditorHandle>(null)
+   const previewRef = useRef<PreviewFrameHandle>(null)
+   const envelopeRef = useRef<Envelope>(DEFAULT_ENVELOPE)
+@@ -242,11 +215,7 @@
+   const mapSourceRef = useRef('')
+   const pathRef = useRef<string | null>(null)
+   const selectedSidRef = useRef<number | null>(null)
+-  const editQueueRef = useRef<EditQueueItem[]>([])
+   const canvasModeRef = useRef<CanvasMode>('edit')
+-  const queueSeqRef = useRef(0)
+-  /** brief confirmed on the AI card; pinned into the head of the next generated document */
+-  const briefRef = useRef<Brief | null>(null)
+   /** name taken from the first AI request of an untitled document: tab title now, file name at the first save */
+   const provisionalNameRef = useRef<string | null>(null)
+   const pendingStylesRef = useRef<Record<string, string | null>>({})
+@@ -256,7 +225,6 @@
+   const barRef = useRef<HTMLDivElement>(null)
+   pathRef.current = path
+   textRef.current = text
+-  editQueueRef.current = editQueue
+   canvasModeRef.current = canvasMode
+   savedTextRef.current = savedText
+   statusRef.current = status
+@@ -369,9 +337,6 @@
+     previewRef.current?.post({ type: 'gx:setMode', mode: frameMode(canvasMode) })
+   }, [canvasMode])
+
+-  useEffect(() => {
+-    rememberAiPanelOpen('htmlapp.showAi', aiOpen)
+-  }, [aiOpen])
+
+   useEffect(() => {
+     localStorage.setItem('htmlapp.device', device)
+@@ -470,10 +435,7 @@
+     (html: string, highlight: boolean) => {
+       flushPending()
+       // a generated document carries the confirmed brief so later turns (and re-opens) stay anchored to it
+-      const pinned =
+-        highlight && briefRef.current && !parseBrief(html)
+-          ? injectBrief(html, briefRef.current)
+-          : html
++      const pinned = html
+       editorRef.current?.replaceDoc(pinned, highlight)
+       // a new page, not an edit of the one on screen: it opens at the top
+       frameScrollRef.current = null
+@@ -548,6 +510,7 @@
+     [applyOps, getMap, flushPending, pushPreview],
+   )
+
++
+   /**
+    * Land a redaction plan. The marks the op vocabulary can express go through
+    * `runManual`, so they are validated, journaled and undoable like any toolbar
+@@ -647,23 +610,6 @@
+   )
+   selectSidRef.current = selectSid
+
+-  /** numbered pins for queued edits; stale items (element gone) get no pin */
+-  const postMarks = useCallback(() => {
+-    const items = canvasModeRef.current === 'present' ? [] : editQueueRef.current
+-    // no getMap() before the document is loaded: it would cache an empty map under version 0
+-    const map = items.length ? getMap() : null
+-    const src = textRef.current
+-    // one pin per element; several queued edits on the same element share it and list their ordinals
+-    const bySid = new Map<number, string[]>()
+-    const proj = map && buildProjection(src, map)
+-    items.forEach((item, i) => {
+-      const target = proj && resolveQueueItem(proj, map, item).target
+-      if (target) bySid.set(target.sid, [...(bySid.get(target.sid) ?? []), String(i + 1)])
+-    })
+-    const marks = [...bySid].map(([sid, ordinals]) => ({ sid, label: ordinals.join('·') }))
+-    previewRef.current?.post({ type: 'gx:mark', marks })
+-  }, [getMap])
+-  useEffect(postMarks, [editQueue, canvasMode, postMarks])
+
+   const onInspectorMessage = useCallback(
+     (msg: FromInspector) => {
+@@ -681,19 +627,6 @@
+           if (editAfterLoadRef.current !== null && editAfterLoadRef.current === sid)
+             previewRef.current?.post({ type: 'gx:beginTextEdit', sid })
+           editAfterLoadRef.current = null
+-          postMarks()
+-          return
+-        }
+-        case 'gx:markClick': {
+-          const map = getMap()
+-          const proj = buildProjection(textRef.current, map)
+-          // a shared pin opens the most recent edit on that element; the others stay reachable from the queue card
+-          const item = editQueueRef.current
+-            .filter((q) => resolveQueueItem(proj, map, q).target?.sid === msg.sid)
+-            .at(-1)
+-          if (!item) return
+-          selectSid(item.sid, { reveal: true })
+-          setAskMode({ kind: 'edit', qid: item.qid })
+           return
+         }
+         case 'gx:select': {
+@@ -774,6 +707,12 @@
+           if (canvasModeRef.current !== 'present') setZoom((z) => clampZoom(z - msg.delta * 0.6))
+           return
+         case 'gx:keyCommand': {
++          const shortcuts: Partial<Record<string, [string, boolean]>> = { save: ['s', false], saveAs: ['s', true], find: ['f', false], replace: ['h', false] }
++          const shortcut = shortcuts[msg.command]
++          if (shortcut) {
++            window.dispatchEvent(new KeyboardEvent('keydown', { key: shortcut[0], ctrlKey: true, shiftKey: shortcut[1] }))
++            return
++          }
+           if (canvasModeRef.current === 'present') {
+             if (msg.command === 'escape') setCanvasModeState('edit')
+             return
+@@ -800,7 +739,6 @@
+             moveSelectedRef.current(msg.command === 'moveUp' ? -1 : 1)
+           else if (msg.command === 'delete') runManual([{ op: 'remove', sid }], 'clear')
+           else if (msg.command === 'escape') selectSid(null)
+-          else if (msg.command === 'askAi') setAskMode({ kind: 'new' })
+           else if (msg.command === 'bold') wrapSelectionRef.current('strong')
+           else if (msg.command === 'italic') wrapSelectionRef.current('em')
+           else if (msg.command === 'parent' && e.parentSid !== null) {
+@@ -819,7 +757,7 @@
+           return
+         }
+         case 'gx:navigateBlocked':
+-          window.open(msg.href)
++          void onOpenExternal(msg.href).catch((error) => setNotice(String(error)))
+           setNotice(t('openExternal'))
+           return
+         case 'gx:resize':
+@@ -836,7 +774,7 @@
+           return
+       }
+     },
+-    [getMap, postMarks, runManual, selectSid, t, flushPending],
++    [getMap, runManual, selectSid, t, flushPending, onOpenExternal],
+   )
+
+   // the source cursor picks the covering element (no reveal: the user is already there)
+@@ -870,9 +808,6 @@
+       setTextSel(null)
+   }
+   wrapSelectionRef.current = wrapSelection
+-  const askAi = () => {
+-    if (selectedEntry) setAskMode({ kind: 'new' })
+-  }
+   const setAttr = (name: string, value: string | null) => {
+     // may run from the panel's unmount after the element was deleted
+     if (selectedEntry && getMap().bySid.has(selectedEntry.sid))
+@@ -998,73 +933,6 @@
+     cropHint: t('imageCropHint'),
+   }
+
+-  // ── element-scoped AI edits: queue them on the selected element or run one right away ──
+-  const askTarget = useMemo(() => {
+-    if (!selectedEntry || STRUCTURAL.has(selectedEntry.tag)) return null
+-    return {
+-      sid: selectedEntry.sid,
+-      tag: selectedEntry.tag,
+-      // user-facing popover: the raw source text, unlike the queue's model-facing excerpt
+-      excerpt: sourceText(text, selectedEntry).trim() || `<${selectedEntry.tag}>`,
+-      start: selectedEntry.range[0],
+-    }
+-  }, [selectedEntry, text])
+-  const queueAdd = (instruction: string) => {
+-    setAskMode(null)
+-    if (!askTarget || editQueue.length >= EDIT_QUEUE_MAX) return
+-    const qid = `q${++queueSeqRef.current}`
+-    setEditQueue((prev) => [
+-      ...prev,
+-      { qid, sid: askTarget.sid, tag: askTarget.tag, capturedText: askTarget.excerpt, instruction },
+-    ])
+-    setAiOpen(true)
+-  }
+-  const queueUpdate = (qid: string, instruction: string) => {
+-    setAskMode(null)
+-    setEditQueue((prev) => prev.map((q) => (q.qid === qid ? { ...q, instruction } : q)))
+-  }
+-  const queueRemove = (qid: string) => {
+-    setAskMode(null)
+-    setEditQueue((prev) => prev.filter((q) => q.qid !== qid))
+-  }
+-  const queueConsume = (qids: string[]) =>
+-    setEditQueue((prev) => prev.filter((q) => !qids.includes(q.qid)))
+-  const queueFocus = (qid: string) => {
+-    const item = editQueue.find((q) => q.qid === qid)
+-    const target = item && resolveQueueItem(buildProjection(text, getMap()), getMap(), item).target
+-    if (target) selectSid(target.sid, { reveal: true })
+-  }
+-  const askSendNow = (instruction: string) => {
+-    setAskMode(null)
+-    if (!askTarget) return
+-    flushPending()
+-    setAiOpen(true)
+-    const scope: AiScopeQuoteData = {
+-      label: t('aiScopeElement', { tag: askTarget.tag }),
+-      ...(askTarget.excerpt.trim() ? { text: askTarget.excerpt.trim() } : {}),
+-    }
+-    setAiPreset({
+-      text: buildSelectionInstruction(askTarget, instruction),
+-      displayText: instruction,
+-      nonce: Date.now(),
+-      scope,
+-    })
+-  }
+-  /** viewport rect of the selected element, clipped to the stage; identity changes whenever the geometry does */
+-  const getAskAnchorRect = useCallback((): AnchorRect | null => {
+-    // stageTick: the stage moved or resized (AI dock, split view, device recentre) without the frame-local rect changing
+-    void stageTick
+-    const stage = stageRef.current?.getBoundingClientRect()
+-    const host = stageRef.current?.querySelector('.preview-host')?.getBoundingClientRect()
+-    if (!selRect || !stage || !host) return null
+-    const z = zoom / 100
+-    const left = Math.max(stage.left, host.left + selRect.x * z)
+-    const top = Math.max(stage.top, host.top + selRect.y * z)
+-    const right = Math.min(stage.right, host.left + (selRect.x + selRect.width) * z)
+-    const bottom = Math.min(stage.bottom, host.top + (selRect.y + selRect.height) * z)
+-    if (right <= left || bottom <= top) return null
+-    return { left, top, right, bottom, viewTop: stage.top, viewBottom: stage.bottom }
+-  }, [selRect, zoom, stageTick])
+
+   // ── live style editing: poke the preview DOM now, write one set_style op to the source shortly after ──
+   const flushStyles = useCallback(() => {
+@@ -1114,7 +982,6 @@
+         return mode
+       })
+       flushPending()
+-      setAskMode(null)
+     },
+     [flushPending, selectSid],
+   )
+@@ -1133,14 +1000,11 @@
+         // the new tab reads html-preview:// as it stands: land pending pokes and the debounced push first
+         flushPending()
+         pushPreview(textRef.current)
+-        void window.htmlApi.presentInNewTab(path?.split(/[\\/]/).pop() ?? '')
++        void window.htmlApi.presentInNewTab(path?.split(/[\\/]/).pop() ?? '').catch((error) => setNotice(String(error)))
+         return
+       }
+       setPresentFull(kind === 'fullscreen')
+       setCanvasMode('present')
+-      // HTML fullscreen needs the click's user activation; macOS snaps via simpleFullScreen instead
+-      if (kind === 'fullscreen' && !IS_MAC)
+-        void document.documentElement.requestFullscreen?.().catch(() => {})
+     },
+     [path, setCanvasMode, flushPending, pushPreview],
+   )
+@@ -1161,7 +1025,7 @@
+     if (canvasMode !== 'present' || !presentFull) return
+     let entered = !!document.fullscreenElement
+     let exitTimer = 0
+-    void window.htmlApi.setPresentFullScreen(true).catch(() => {})
++    void window.htmlApi.setPresentFullScreen(true).catch((error) => setNotice(String(error)))
+     const onFsChange = () => {
+       if (document.fullscreenElement) {
+         entered = true
+@@ -1218,7 +1082,7 @@
+         const defaultName = proposedName
+           ? proposedName
+           : untitled
+-            ? localFileName(textAtSave, provisionalNameRef.current)
++            ? derivePageTitleName(textAtSave) || deriveAutoFileName(textAtSave)
+             : undefined
+         const result = await window.htmlApi.save({
+           text: serialized,
+@@ -1304,22 +1168,6 @@
+     void doSave('save')
+   }, [doSave])
+
+-  /**
+-   * Ask the model to name this page, on request, then open Save As with its
+-   * answer prefilled.
+-   *
+-   * The stem goes into the dialog rather than renaming the file on disk: a file
+-   * that may be open elsewhere, referenced from a note, or synced is not
+-   * something to move behind the reader's back. A declined or empty answer
+-   * leaves the dialog on the page's current name, so this is a no-op rather
+-   * than a failure.
+-   */
+-  const nameWithAi = useCallback(async () => {
+-    if (statusRef.current !== 'ready') return
+-    const stem = await modelSaveAsName(textRef.current, getMap())
+-    if (!stem) return
+-    await doSave('saveAs', undefined, stem)
+-  }, [doSave, getMap])
+
+   const zoomIn = useCallback(() => setZoom((z) => clampZoom(Math.round(z) + ZOOM_STEP)), [])
+   const zoomOut = useCallback(() => setZoom((z) => clampZoom(Math.round(z) - ZOOM_STEP)), [])
+@@ -1378,48 +1226,6 @@
+     // eslint-disable-next-line react-hooks/exhaustive-deps -- t is not referentially stable
+   }, [])
+
+-  const printingRef = useRef(false)
+-  const runPrint = useCallback(async () => {
+-    if (statusRef.current !== 'ready') return false
+-    return runGuardedPrint(
+-      printingRef,
+-      async () => {
+-        // serialize inside the gate so a throw still releases the flag
+-        flushPending()
+-        return window.htmlApi.printHtml({
+-          html: serializeDocText({ text: textRef.current, envelope: envelopeRef.current }),
+-        })
+-      },
+-      (error) => {
+-        console.error('[html] print failed:', error)
+-        setNotice(t('printFailed', { error }))
+-      },
+-    )
+-    // eslint-disable-next-line react-hooks/exhaustive-deps -- t is not referentially stable
+-  }, [])
+-
+-  // Headless export mode (--headless-export): this renderer lives in a hidden
+-  // window whose only job is to run the File menu's PDF or Word export against
+-  // a path the CLI chose, then report back so the main process can quit.
+-  const headlessExportStartedRef = useRef(false)
+-  useEffect(() => {
+-    if (headlessExportStartedRef.current) return
+-    headlessExportStartedRef.current = true
+-    void (async () => {
+-      const target = await window.htmlApi.consumeHeadlessExport()
+-      if (!target) return
+-      const report = await runHeadlessRendererExport(
+-        target.outPath,
+-        () =>
+-          pollUntilReady(() => {
+-            if (statusRef.current === 'error') throw new Error('the input document did not open')
+-            return statusRef.current === 'ready'
+-          }, 'no document opened'),
+-        (outPath) => runExport(target.format === 'docx' ? 'docx' : 'pdf', outPath),
+-      )
+-      window.htmlApi.headlessExportDone(report)
+-    })()
+-  }, [runExport])
+
+   useEffect(() => {
+     const offSave = window.htmlApi.onSaveRequest((mode) => {
+@@ -1456,7 +1262,9 @@
+           window.htmlApi.sendCloseSaveResult(true)
+           return
+         }
+-        window.htmlApi.sendCloseSaveResult(await doSave('save'))
++        const saved = await doSave('save')
++        flushPending()
++        window.htmlApi.sendCloseSaveResult(saved && textRef.current === savedTextRef.current)
+       })()
+     })
+     const offRenamed = window.htmlApi.onFileRenamed((next) => setPath(next))
+@@ -1489,9 +1295,6 @@
+       })()
+     })
+     const offExport = window.htmlApi.onExportRequest((format) => void runExport(format))
+-    // Shell menu Print / ⌘P. The menu owns the accelerator, so this subscription
+-    // is the only route the keystroke takes; without it ⌘P did nothing at all.
+-    const offPrint = window.htmlApi.onPrintRequest(() => void runPrint())
+     const offTheme = window.htmlApi.onThemeChanged(() => {
+       // let main.tsx flip data-theme first
+       window.setTimeout(
+@@ -1545,14 +1348,12 @@
+       offRenamed()
+       offDisk()
+       offExport()
+-      offPrint()
+       offTheme()
+       window.removeEventListener('keydown', onKeyDown, true)
+     }
+   }, [
+     doSave,
+     runExport,
+-    runPrint,
+     cycleView,
+     zoomIn,
+     zoomOut,
+@@ -1593,48 +1394,23 @@
+     }
+   }, [autoSave, path, doSave, flushPending])
+
+-  const aiDeps: HtmlAiDeps = {
+-    access: {
+-      getText: () => textRef.current,
+-      getVersion: () => versionRef.current,
+-      getMap,
+-      getLastManualVersion: () => lastManualVersionRef.current,
+-      getFilePath: () => pathRef.current,
+-      getSelectedSid: () => selectedSidRef.current,
+-      applyOps: (ops) => {
+-        flushPending()
+-        return applyOps(ops, false)
+-      },
+-      replaceAll: (html) => replaceAll(html, true),
+-    },
+-    getSnapshot: () => ({ text: textRef.current }),
+-    restoreSnapshot: (snapshot) => replaceAll(snapshot.text, false),
+-    onPrompt: (text) => {
+-      if (pathRef.current || provisionalNameRef.current) return
+-      const name = deriveNameFromPrompt(text)
+-      if (!name) return
+-      provisionalNameRef.current = name
+-      window.htmlApi.setProvisionalTitle(name)
+-    },
+-    onRunDone: (mutated) => {
+-      // AI wrote into a never-saved document: save it silently under the page's own title,
+-      // falling back to the name of the request that started it
+-      if (!mutated || pathRef.current) return
+-      const text = textRef.current
+-      const name = localFileName(text, provisionalNameRef.current)
+-      if (name) void doSave('save', name)
+-    },
+-    clearHighlights: () => editorRef.current?.clearHighlights(),
+-    onBriefConfirmed: (brief) => {
+-      briefRef.current = brief
+-    },
+-    previewDraft: setDraftHtml,
+-    navigateTo: (sid) => {
+-      const e = getMap().bySid.get(sid)
+-      if (!e) return
+-      selectSid(sid, { reveal: true })
+-    },
+-  }
++
++  const documentActionsRef = useRef<ReturnType<typeof createHtmlActions> | null>(null)
++  if (!documentActionsRef.current) documentActionsRef.current = createHtmlActions({
++    getText: () => textRef.current,
++    getVersion: () => versionRef.current,
++    getMap,
++    getLastManualVersion: () => lastManualVersionRef.current,
++    getFilePath: () => pathRef.current,
++    getSelectedSid: () => selectedSidRef.current,
++    applyOps: (ops) => { flushPending(); return applyOps(ops, false) },
++    replaceAll: (html) => replaceAll(html, true),
++  })
++  useEffect(() => onDocumentAction?.(async (action, input) => {
++    if (statusRef.current !== 'ready') throw new Error('The HTML editor is not ready.')
++    flushPending()
++    return documentActionsRef.current!(action, input)
++  }), [onDocumentAction, flushPending])
+
+   const statusText = useMemo(() => {
+     if (saveState === 'saving') return t('saving')
+@@ -1688,7 +1464,6 @@
+         dirty={dirty}
+         onSave={() => void doSave('save')}
+         onSaveAs={() => void doSave('saveAs')}
+-        onNameWithAi={() => void nameWithAi()}
+         onFind={() => openFind(false)}
+         canUndo={historyState.undo}
+         canRedo={historyState.redo}
+@@ -1704,51 +1479,15 @@
+         onToggleAutoSave={setAutoSave}
+         view={view}
+         onView={setView}
+-        aiOpen={aiOpen}
+-        onToggleAi={() => setAiOpen((v) => !v)}
+         canInsert={canvasMode === 'edit'}
+         onInsert={(kind, opts) => void insertElement(kind, opts)}
+         onInsertSkeleton={insertSkeleton}
+         canInsertSkeleton={canvasMode === 'edit' && isDocEmpty(textRef.current)}
+-        onAiPreset={(text) => {
+-          flushPending()
+-          setAiOpen(true)
+-          setAiPreset({ text, nonce: Date.now() })
+-        }}
+         canvasMode={canvasMode}
+         onPresent={startPresent}
+       />
+
+       <div className="app-main">
+-        <div
+-          className={`ai-dock${aiOpen ? '' : ' collapsed'}${
+-            !aiSidebarEnabled && !aiOpen ? ' ai-dock-off' : ''
+-          }`}
+-        >
+-          {!aiOpen && aiSidebarEnabled && (
+-            <button
+-              className="ai-rail"
+-              data-tip={t('aiOpenAssistant')}
+-              aria-label={t('aiOpenAssistant')}
+-              onClick={() => setAiOpen(true)}
+-            >
+-              <GensparkMark size={18} />
+-            </button>
+-          )}
+-          {/* stays mounted while collapsed: an in-flight run, its snapshots and the loop context survive */}
+-          <AiPanel
+-            deps={aiDeps}
+-            filePath={path}
+-            preset={aiPreset}
+-            editQueue={editQueue}
+-            onQueueEditInstruction={queueUpdate}
+-            onQueueRemove={queueRemove}
+-            onQueueClear={() => setEditQueue([])}
+-            onQueueFocus={queueFocus}
+-            onQueueConsume={queueConsume}
+-            onCollapse={() => setAiOpen(false)}
+-          />
+-        </div>
+         <div className="app-content">
+           {diskNotice && (
+             <div className="disk-notice" role="status">
+@@ -1795,7 +1534,6 @@
+                   zoom={zoom}
+                   onMessage={onInspectorMessage}
+                   onLoad={onPreviewLoad}
+-                  draft={draftHtml}
+                 />
+                 {canvasMode === 'present' && (
+                   <button
+@@ -1828,8 +1566,6 @@
+                       onReplaceImage={replaceImage}
+                       onCropImage={() => void openPictureDialog('crop')}
+                       onCutoutImage={() => void openPictureDialog('cutout')}
+-                      canAskAi={askTarget !== null}
+-                      onAskAi={askAi}
+                       tag={selectedEntry.tag}
+                       onMove={moveSelected}
+                       onDuplicate={duplicateSelected}
+@@ -1948,33 +1684,7 @@
+           </footer>
+         </div>
+       </div>
+-      {askTarget && askMode && canvasMode !== 'present' && (
+-        <AiAskPopover
+-          key={askMode.kind === 'edit' ? askMode.qid : 'new'}
+-          target={askTarget}
+-          mode={askMode}
+-          initialText={
+-            askMode.kind === 'edit'
+-              ? editQueue.find((q) => q.qid === askMode.qid)?.instruction
+-              : undefined
+-          }
+-          getAnchorRect={getAskAnchorRect}
+-          onSubmit={(instruction) =>
+-            askMode.kind === 'edit' ? queueUpdate(askMode.qid, instruction) : queueAdd(instruction)
+-          }
+-          onCancel={() => setAskMode(null)}
+-          onSendNow={askSendNow}
+-          onRemove={() => askMode.kind === 'edit' && queueRemove(askMode.qid)}
+-          queueFull={editQueue.length >= EDIT_QUEUE_MAX}
+-        />
+-      )}
+-      {redactDialog && (
+-        <RedactDialog
+-          seed={redactDialog.seed}
+-          onSubmit={confirmRedaction}
+-          onCancel={cancelRedaction}
+-        />
+-      )}
++      {redactDialog && <RedactDialog seed={redactDialog.seed} onSubmit={confirmRedaction} onCancel={cancelRedaction} />}
+       {pictureDialog?.kind === 'cutout' && (
+         <CutoutDialog
+           labels={imageDialogLabels}

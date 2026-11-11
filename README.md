@@ -124,6 +124,8 @@ WeChat (`openclaw-weixin`) cron proactive delivery is supported with constraints
 Extend your AI agents with pre-built skills. Browse, install, upload local skill folders/ZIPs/Markdown files, and manage skills through the integrated skill panel—no package managers required.
 MatchaClaw also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `tavily-search`, `multi-search-engine`, `web-extract`, `daily-news-briefing`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
 
+Matcha Office is a bundled application plugin adapted from a GenOffice source snapshot. It provides Docs, Sheets and Slides editing pages for `.docx`, `.xlsx` and `.pptx`, plus plugin tools that let the MatchaClaw agent create, read, edit and check those files and import or export `.pdf`, `.md` and `.html`. Files stay in the plugin's local library. The GenOffice desktop shell, built-in agent/AI panel, provider accounts and CLI/MCP server are not started; AI actions go through MatchaClaw's own agent and tools.
+
 Environment variables for bundled search skills:
 - `TAVILY_API_KEY` for `tavily-search` (OAuth may also be supported by upstream skill runtime)
 - `find-skills` does not require API keys

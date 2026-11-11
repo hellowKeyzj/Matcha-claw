@@ -1,0 +1,22 @@
+--- a/genoffice/apps/pdf/src/shared/ipc.ts
++++ b/genoffice/apps/pdf/src/shared/ipc.ts
+@@ -1041,8 +1041,10 @@
+ export interface PdfApi {
+   /** Take the pdf path pending for this view (queued at tab creation); null if none */
+   consumePending(): Promise<string | null>
++  getDocument(path: string): Promise<{ id: string; name: string }>
+   /** open any shell-routed document path (an AI answer's filenav citation) */
+   openSourcePath(path: string): Promise<void>
++  openExternal(url: string): Promise<void>
+   /** Read pdf bytes. Only paths granted to this view are allowed */
+   readFile(path: string): Promise<ArrayBuffer>
+   /** one slice of a granted file, with the file's size so the reader loop
+@@ -1166,7 +1168,7 @@
+   restoreFile(request: RestoreFileRequest): Promise<RestoreFileResult>
+   exportImages(request: ExportImagesRequest): Promise<ExportImagesResult>
+   /** Convert the current PDF to Word / Excel / PowerPoint via the shell's local conversion flows */
+-  convertOffice(format: PdfConvertFormat): Promise<void>
++  convertOffice(format: PdfConvertFormat, password?: string): Promise<void>
+   /** AI create_document: build a new standalone file in the default folder and open it in a new tab */
+   createDocument(request: CreateDocumentRequest): Promise<CreateDocumentResult>
+   /** Web image search for AI tools (app-wide ai:image-search handler) */

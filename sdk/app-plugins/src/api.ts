@@ -1,7 +1,8 @@
 import type { AppPluginManifest } from './manifest.js';
 import type { SessionIdentity } from './identity.js';
 import type { AppExecutionApi } from './execution.js';
-import type { AppCapabilitiesApi, AppCredentialsApi, AppKnowledgeApi, AppWorkspaceApi } from './services.js';
+import { isAppDocumentResourcesRequest, type AppDocumentResourcesApi, type AppDocumentResourcesRequest } from './document-resources.js';
+import type { AppCapabilitiesApi, AppCredentialsApi, AppDesktopApi, AppKnowledgeApi, AppRenderingApi, AppWorkspaceApi } from './services.js';
 export * from './execution.js';
 export * from './services.js';
 
@@ -182,6 +183,8 @@ export interface AppPluginContext {
   requestConfirmation(request: AppConfirmationRequest, signal?: AbortSignal): Promise<boolean>;
   publish(topic: string, data: AppJson): void;
   readonly execution: AppExecutionApi;
+  readonly desktop: AppDesktopApi;
+  readonly rendering: AppRenderingApi;
   readonly workspace: AppWorkspaceApi;
   readonly knowledge: AppKnowledgeApi;
   readonly credentials: AppCredentialsApi;
@@ -227,6 +230,8 @@ export interface AppWebviewContext {
   readonly workspaceDraftId?: string;
   readonly language?: string;
   readonly theme?: 'light' | 'dark';
+  readonly presentation?: { readonly id: string; readonly data?: AppJson };
+  readonly data?: AppJson;
 }
 
 export interface AppComposeSource {
@@ -348,15 +353,221 @@ export interface AppSessionMediaData {
   readonly name: string;
 }
 
+export type AppRenderDocumentRead = (input: AppJson, signal?: AbortSignal) => Promise<AppJson>;
+export interface AppRenderDocumentRequest {
+  readonly entry: string;
+  readonly html?: string;
+  readonly document?: AppDocumentResourcesRequest;
+  readonly payload?: AppJson;
+}
+export interface AppRenderDocumentResult { readonly data: string; readonly mimeType: string }
+export function isAppRenderDocumentRequest(value: unknown): value is AppRenderDocumentRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some(key => !['entry', 'html', 'document', 'payload'].includes(key)) || input.html !== undefined && typeof input.html !== 'string'
+    || input.document !== undefined && (input.html !== undefined || !isAppDocumentResourcesRequest(input.document))
+    || typeof input.entry !== 'string' || input.entry.length > 1024 || !/\.(?:m?js)$/.test(input.entry)
+    || /[\\:%?#\0]/.test(input.entry) || input.entry.split('/').some(part => !part || part === '.' || part === '..')) return false;
+  const json = (item: unknown): boolean => item === null || typeof item === 'string' || typeof item === 'boolean'
+    || typeof item === 'number' && Number.isFinite(item) || Array.isArray(item) && item.every(json)
+    || !!item && typeof item === 'object' && Object.values(item).every(json);
+  return input.payload === undefined || json(input.payload);
+}
+
+export interface AppScreenSourcesResult {
+  readonly status: 'ok' | 'denied';
+  readonly sources: readonly { readonly id: string; readonly name: string; readonly kind: 'screen' | 'window'; readonly thumbnail: string }[];
+}
+export interface AppScreenCaptureRequest { readonly id: string }
+export interface AppScreenCaptureResult { readonly mediaType: 'image/png'; readonly base64: string; readonly width: number; readonly height: number }
+
+export interface AppClipboardContent {
+  readonly text?: string;
+  readonly html?: string;
+  readonly image?: { readonly data: string; readonly mimeType: 'image/png' };
+  readonly metadata?: Readonly<Partial<Record<'io.genoffice.slides.slide' | 'io.genoffice.slides.elements', string>>>;
+}
+export interface AppClipboardWriteRequest extends AppClipboardContent {
+  readonly expected?: { readonly format: 'io.genoffice.slides.elements'; readonly value: string };
+}
+/** Shape and byte limits; the native owner additionally validates PNG chunks and pixels. */
+export function isAppClipboardWriteRequest(value: unknown): value is AppClipboardWriteRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  const record = (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item);
+  const bytes = (item: string) => new TextEncoder().encode(item).byteLength;
+  if (Object.keys(input).some(key => !['text', 'html', 'image', 'metadata', 'expected'].includes(key))
+    || !['text', 'html', 'image', 'metadata'].some(key => input[key] !== undefined)
+    || input.text !== undefined && (typeof input.text !== 'string' || bytes(input.text) > 2 * 1024 * 1024)
+    || input.html !== undefined && (typeof input.html !== 'string' || bytes(input.html) > 32 * 1024 * 1024)) return false;
+  if (input.image !== undefined) {
+    const image = input.image;
+    if (!record(image) || Object.keys(image).some(key => key !== 'data' && key !== 'mimeType') || image.mimeType !== 'image/png'
+      || typeof image.data !== 'string' || !image.data.length || image.data.length > 4 * Math.ceil(20 * 1024 * 1024 / 3)
+      || image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) return false;
+    const padding = image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0;
+    if (image.data.length / 4 * 3 - padding > 20 * 1024 * 1024) return false;
+  }
+  if (input.metadata !== undefined && (!record(input.metadata) || !Object.keys(input.metadata).length
+    || Object.keys(input.metadata).some(key => !['io.genoffice.slides.slide', 'io.genoffice.slides.elements'].includes(key))
+    || input.metadata['io.genoffice.slides.slide'] !== undefined && (typeof input.metadata['io.genoffice.slides.slide'] !== 'string'
+      || !input.metadata['io.genoffice.slides.slide'].length || bytes(input.metadata['io.genoffice.slides.slide']) > 256)
+    || input.metadata['io.genoffice.slides.elements'] !== undefined && (typeof input.metadata['io.genoffice.slides.elements'] !== 'string'
+      || !input.metadata['io.genoffice.slides.elements'].length || bytes(input.metadata['io.genoffice.slides.elements']) > 256))) return false;
+  if (input.expected !== undefined && (!record(input.expected) || Object.keys(input.expected).some(key => key !== 'format' && key !== 'value')
+    || input.expected.format !== 'io.genoffice.slides.elements' || typeof input.expected.value !== 'string' || !input.expected.value.length || bytes(input.expected.value) > 256)) return false;
+  return true;
+}
+
+export interface AppSpellcheckContextMenu { readonly seq: number; readonly misspelledWord: string; readonly suggestions: string[] }
+export interface AppSpellcheckLanguages { readonly active: string[]; readonly available: string[] }
+export interface AppSpellcheckWord { readonly misspelled: boolean; readonly suggestions: string[] }
+export type AppSpellcheckRequest =
+  | { readonly operation: 'armContextMenu' | 'languages' | 'respellKick' }
+  | { readonly operation: 'claimContextMenu'; readonly seq: number }
+  | { readonly operation: 'addWord' | 'ignoreWord' | 'replace' | 'checkWord'; readonly word: string }
+  | { readonly operation: 'setLanguages'; readonly languages: string[] };
+export function isAppSpellcheckRequest(value: unknown): value is AppSpellcheckRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  const keys = Object.keys(input);
+  if (['armContextMenu', 'languages', 'respellKick'].includes(String(input.operation))) return keys.length === 1;
+  if (input.operation === 'claimContextMenu') return keys.length === 2 && keys.every(key => key === 'operation' || key === 'seq') && Number.isSafeInteger(input.seq) && Number(input.seq) > 0;
+  if (['addWord', 'ignoreWord', 'replace', 'checkWord'].includes(String(input.operation))) return keys.length === 2 && keys.every(key => key === 'operation' || key === 'word') && typeof input.word === 'string' && input.word.length > 0 && input.word.length <= 256 && !input.word.includes('\0');
+  return input.operation === 'setLanguages' && keys.length === 2 && keys.every(key => key === 'operation' || key === 'languages') && Array.isArray(input.languages) && input.languages.length <= 128
+    && input.languages.every(language => typeof language === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(language));
+}
+export interface AppSpellcheckApi {
+  armContextMenu(): Promise<void>;
+  claimContextMenu(seq: number): Promise<void>;
+  onContextMenuRequest(listener: (request: AppSpellcheckContextMenu) => void): () => void;
+  addWord(word: string): Promise<boolean>;
+  ignoreWord(word: string): Promise<boolean>;
+  replace(word: string): Promise<void>;
+  languages(): Promise<AppSpellcheckLanguages>;
+  setLanguages(languages: string[]): Promise<AppSpellcheckLanguages>;
+  respellKick(): Promise<void>;
+  checkWord(word: string): Promise<AppSpellcheckWord>;
+}
+
+export interface AppPresentationDisplay {
+  readonly id: number;
+  readonly label: string;
+  readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly workArea: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly scaleFactor: number;
+  readonly primary: boolean;
+  readonly current: boolean;
+}
+export interface AppPresentationOpenRequest {
+  readonly content: { readonly kind: 'application'; readonly applicationId: string } | { readonly kind: 'html'; readonly html: string } | { readonly kind: 'document'; readonly documentResourcesId: string };
+  readonly displayId?: number;
+  readonly fullscreen?: boolean;
+  readonly data?: AppJson;
+}
+export type AppPresentationEvent = { readonly type: 'message'; readonly topic: string; readonly data: AppJson } | { readonly type: 'closed' };
+export interface AppPresentationBootstrap {
+  readonly presentationId: string;
+  readonly pluginId: string;
+  readonly digest: string;
+  readonly applicationId: string;
+  readonly entry: string;
+  readonly title: string;
+  readonly manifest: AppPluginManifest;
+  readonly context: AppWebviewContext;
+  readonly content: { readonly kind: 'application' | 'html'; readonly html: string } | { readonly kind: 'document'; readonly url: string };
+}
+export interface AppPresentationApi {
+  displays(): Promise<readonly AppPresentationDisplay[]>;
+  open(request: AppPresentationOpenRequest): Promise<{ readonly presentationId: string; readonly displayId: number }>;
+  send(request: { readonly topic: string; readonly data: AppJson }): Promise<void>;
+  swap(): Promise<boolean>;
+  setFullscreen(fullscreen: boolean): Promise<void>;
+  close(): Promise<void>;
+  subscribe(listener: (event: AppPresentationEvent) => void): () => void;
+}
+
+export const APP_RENDER_PDF_MAX_BYTES = 8 * 1024 * 1024;
+
+export interface AppRenderPdfRequest {
+  readonly html: string;
+  readonly options?: {
+    /** Custom dimensions and margins are in inches. */
+    readonly pageSize?: 'A0' | 'A1' | 'A2' | 'A3' | 'A4' | 'A5' | 'A6' | 'Legal' | 'Letter' | 'Tabloid' | 'Ledger' | { readonly width: number; readonly height: number };
+    readonly landscape?: boolean;
+    readonly pageRanges?: string;
+    readonly margins?: { readonly top?: number; readonly bottom?: number; readonly left?: number; readonly right?: number };
+    readonly scale?: number;
+    readonly headerTemplate?: string;
+    readonly footerTemplate?: string;
+    readonly displayHeaderFooter?: boolean;
+    readonly preferCSSPageSize?: boolean;
+    readonly printBackground?: boolean;
+  };
+}
+
+export interface AppRenderPdfResult {
+  readonly data: string;
+  readonly mimeType: 'application/pdf';
+}
+
+export type AppRenderPdfErrorCode = 'invalid-request' | 'too-large' | 'busy' | 'unavailable' | 'cancelled' | 'deadline' | 'render-failed';
+
+/** Closed, self-contained input only; serialized into the opaque application's bootstrap. */
+export function isAppRenderPdfRequest(value: unknown): value is AppRenderPdfRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some((key) => key !== 'html' && key !== 'options') || typeof input.html !== 'string' || !input.html.trim()) return false;
+  if (input.options === undefined) return true;
+  if (!input.options || typeof input.options !== 'object' || Array.isArray(input.options)) return false;
+  const options = input.options as Record<string, unknown>;
+  if (Object.keys(options).some((key) => !['pageSize', 'landscape', 'pageRanges', 'margins', 'scale', 'headerTemplate', 'footerTemplate', 'displayHeaderFooter', 'preferCSSPageSize', 'printBackground'].includes(key))) return false;
+  for (const key of ['landscape', 'displayHeaderFooter', 'preferCSSPageSize', 'printBackground']) {
+    if (options[key] !== undefined && typeof options[key] !== 'boolean') return false;
+  }
+  for (const key of ['headerTemplate', 'footerTemplate', 'pageRanges']) {
+    if (options[key] !== undefined && typeof options[key] !== 'string') return false;
+  }
+  if (options.scale !== undefined && (typeof options.scale !== 'number' || !Number.isFinite(options.scale) || options.scale < 0.1 || options.scale > 2)) return false;
+  if (options.pageSize !== undefined) {
+    if (typeof options.pageSize === 'string') {
+      if (!['A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'Legal', 'Letter', 'Tabloid', 'Ledger'].includes(options.pageSize)) return false;
+    } else {
+      const size = options.pageSize as Record<string, unknown> | null;
+      if (!size || typeof size !== 'object' || Array.isArray(size) || Object.keys(size).some((key) => key !== 'width' && key !== 'height')
+        || ['width', 'height'].some((key) => typeof size[key] !== 'number' || !Number.isFinite(size[key]) || Number(size[key]) <= 0)) return false;
+    }
+  }
+  if (options.margins !== undefined) {
+    const margins = options.margins as Record<string, unknown> | null;
+    if (!margins || typeof margins !== 'object' || Array.isArray(margins)
+      || Object.entries(margins).some(([key, margin]) => !['top', 'bottom', 'left', 'right'].includes(key) || typeof margin !== 'number' || !Number.isFinite(margin) || margin < 0)) return false;
+  }
+  return true;
+}
+
 export interface AppWebviewApi {
   readonly pluginId: string;
   readonly context: AppWebviewContext;
+  readonly documentResources: AppDocumentResourcesApi;
   call(name: string, arguments_?: Readonly<Record<string, unknown>>): Promise<AppToolResult>;
   compose(request: AppComposeRequest): Promise<void>;
+  openApplication(request: { readonly applicationId: string; readonly data?: AppJson }): Promise<void>;
   /** Loaded workspace media plus paginated native historical images; coverage is explicit. No drafts. */
   listSessionMedia(request?: AppSessionMediaListRequest): Promise<AppSessionMediaList>;
   readSessionMedia(request: { readonly id: string }): Promise<AppSessionMediaData>;
   writeClipboardImage(request: { readonly data: string; readonly mimeType: 'image/png' }): Promise<void>;
+  writeClipboard(request: AppClipboardWriteRequest): Promise<void>;
+  readClipboard(): Promise<AppClipboardContent>;
+  readonly spellcheck: AppSpellcheckApi;
+  readonly presentation: AppPresentationApi;
+  captureScreenSources(): Promise<AppScreenSourcesResult>;
+  captureScreenSource(request: AppScreenCaptureRequest): Promise<AppScreenCaptureResult | null>;
+  requestMicrophoneAccess(): Promise<boolean>;
+  getMicrophoneStream(): Promise<MediaStream>;
+  getScreenStream(): Promise<MediaStream>;
+  /** Self-contained HTML to PDF bytes; no scripts, network, local paths or printing. */
+  renderPdf(request: AppRenderPdfRequest): Promise<AppRenderPdfResult>;
   /** Native Agent workspace only; requires a foreground user gesture. */
   saveWorkspaceFile?(request: { readonly relativePath: string; readonly data: string }): Promise<{ readonly name: string; readonly size: number }>;
   /** One UI owner; true only after preparing to close. Aborting the request does not cancel backend work. */

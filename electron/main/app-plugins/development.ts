@@ -207,6 +207,17 @@ export class AppPluginDevelopmentOwner {
     return { html: Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8') };
   }
 
+  readAsset(input: { developmentId: string; revision: number; pluginId: string; digest: string; path: string }): Uint8Array {
+    const instance = this.requireActive(input.developmentId);
+    const run = this.requireRun(instance, input.revision, true);
+    if (run.manifest.id !== input.pluginId || run.digest !== input.digest) {
+      throw new AppPluginError('conflict', 'The development asset source has changed.');
+    }
+    const bytes = run.files?.get(input.path);
+    if (!bytes) throw new AppPluginError('not_found', 'The development asset is unavailable.');
+    return bytes;
+  }
+
   call(input: { developmentId: string; revision?: number; name: string; arguments: Record<string, unknown> }, signal: AbortSignal): Promise<AppToolResult> {
     const value = requireObject(input, ['developmentId', 'revision', 'name', 'arguments']);
     return this.withInstance(value.developmentId as string, async (instance) => {

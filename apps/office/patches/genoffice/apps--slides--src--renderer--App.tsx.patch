@@ -1,0 +1,195 @@
+--- a/genoffice/apps/slides/src/renderer/App.tsx
++++ b/genoffice/apps/slides/src/renderer/App.tsx
+@@ -32,7 +32,7 @@
+   SlideComment,
+   TransitionKind,
+ } from '../shared/ipc'
+-import { baseName } from '../shared/base-name'
++import { createSlidesSkill } from './ai/slides-skill'
+ import { mergeBroadcastUpdate, mergeSlideUpdate, setDeckRefresh } from '../shared/slide-update'
+ import { SlideCanvas, selectionChromeColor, type SlideCanvasHandle } from './SlideCanvas'
+ import { tableCellOverlayBox } from './table-hit'
+@@ -359,7 +359,7 @@
+   return { width, height: (slide.heightPx * width) / slide.widthPx }
+ }
+ 
+-export function App() {
++export function App({ trailingActions }: { trailingActions?: React.ReactNode } = {}) {
+   const { lang } = useI18n()
+   const [slides, setSlides] = useState<RenderSlide[]>([])
+   // Layouts may reference Office-private fonts (resolved in main); register them as FontFaces
+@@ -367,6 +367,7 @@
+     if (slides.length) void syncPrivateFonts()
+   }, [slides])
+   const [path, setPath] = useState<string | null>(null)
++  const [name, setName] = useState<string | null>(null)
+   // Deck references catalog fonts that are missing locally → one-click download banner
+   const [missingFonts, setMissingFonts] = useState<string[]>([])
+   const [fontBannerBusy, setFontBannerBusy] = useState(false)
+@@ -508,7 +509,7 @@
+   const bootHandledRef = useRef(false)
+   const [images, setImages] = useState<Map<string, HTMLImageElement>>(new Map())
+   const imageLoaderRef = useRef<ReturnType<typeof createImageLoader> | null>(null)
+-  const [hasClipboard, setHasClipboard] = useState(false)
++  const [hasClipboard, setHasClipboard] = useState<boolean | null>(null)
+   // The clipboard is app-wide (copies land from other windows) and external content counts too
+   useEffect(() => {
+     const probe = () => void window.slidesApi.clipboardProbe().then(setHasClipboard)
+@@ -689,9 +690,9 @@
+   const flushNotes = useCallback(async () => {
+     const pending = notesDraftRef.current
+     if (!pending) return
+-    notesDraftRef.current = null
+     const ok = await window.slidesApi.setNotes({ slideIndex: pending.index, text: pending.text })
+-    if (!ok) return
++    if (!ok) throw new Error(t('appStatusSaveFailed', { error: t('appUnknownError') }))
++    if (notesDraftRef.current === pending) notesDraftRef.current = null
+     setDirty(true)
+     // read back: the document normalizes what it stores (trailing empty paragraphs), and the
+     // baseline must match what a later getNotes returns
+@@ -873,11 +874,12 @@
+   }, [hasDoc, fitZoom, rawFit, viewMode])
+ 
+   const applyOpen = useCallback(
+-    (result: { path: string; slides: RenderSlide[]; defaultFont?: string } | null) => {
++    (result: { path: string; name: string; slides: RenderSlide[]; defaultFont?: string } | null) => {
+       if (!result) return
+       setSlides(result.slides)
+       setDefaultFont(result.defaultFont ?? null)
+       setPath(result.path)
++      setName(result.name)
+       setCurrent(0)
+       setSelectedSlides([0])
+       setSelectedIds([])
+@@ -893,7 +895,7 @@
+       setStatus(
+         result.path
+           ? t('appStatusOpened', {
+-              name: baseName(result.path),
++              name: result.name,
+               count: result.slides.length,
+             })
+           : t('appStatusNewBlank'),
+@@ -1129,10 +1131,22 @@
+ 
+   // Global shortcuts (keyboard-actions.ts): the handler reads the latest state via ctxRef, so attach once
+   useEffect(() => {
+-    const onKey = (e: KeyboardEvent) => handleGlobalKeydown(ctxRef.current, e)
++    const onKey = (e: KeyboardEvent) => {
++      const key = e.key.toLowerCase()
++      if (!e.defaultPrevented && !e.isComposing && (e.ctrlKey || e.metaKey) && !e.altKey &&
++          !ctxRef.current.slideShow && !ctxRef.current.presenter &&
++          (key === 's' || (key === 'o' && !e.shiftKey))) {
++        e.preventDefault()
++        const work = key === 'o' ? openDialog() : e.shiftKey
++          ? fileActions.saveAs(() => ctxRef.current) : fileActions.save(() => ctxRef.current)
++        void work.catch(error => showToast(String(error), 'error'))
++        return
++      }
++      handleGlobalKeydown(ctxRef.current, e)
++    }
+     window.addEventListener('keydown', onKey)
+     return () => window.removeEventListener('keydown', onKey)
+-  }, [])
++  }, [openDialog])
+ 
+   // Zoom preview shared by trackpad pinch and the status-bar slider: a setZoom per event
+   // re-renders the whole App (thumbnails included) dozens of times per gesture and froze
+@@ -1303,7 +1317,8 @@
+   useEffect(
+     () =>
+       window.slidesApi.onRenamed((p) => {
+-        setPath(p)
++        setPath(p.path)
++        setName(p.name)
+         void window.slidesApi.isDirty().then(setDirty)
+       }),
+     [],
+@@ -2612,7 +2627,7 @@
+         if (to != null) setCurrent(to)
+         return
+       }
+-      window.open(target.url, '_blank', 'noreferrer')
++      void window.slidesApi.openExternal(target.url)
+     },
+     [slides.length, current],
+   )
+@@ -3127,6 +3142,8 @@
+     slide,
+     path,
+     setPath,
++    name,
++    setName,
+     setDirty,
+     setStatus,
+     images,
+@@ -3230,6 +3247,35 @@
+   // Context menu items (context-menu-items.ts); the deps list covers all state the builder reads
++  useEffect(() => {
++    const action = (event: Event) => {
++      const request = (event as CustomEvent).detail as {
++        documentId: string; action: string; input: Record<string, unknown>; requestId: string;
++        edits: Pick<typeof window.slidesApi, 'applyEditScript' | 'insertImageUrl' | 'replacePictureUrl'>;
++        begin(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void;
++      }
++      void (async () => {
++        const ctx = ctxRef.current
++        if (ctx.path !== request.documentId) throw new Error('The requested presentation is not open.')
++        await fileActions.flushActiveEdit(ctx)
++        await ctx.flushNotes()
++        await request.begin()
++        if (ctxRef.current.path !== request.documentId) throw new Error('The presentation changed before the action.')
++        const access = {
++          getSlides: () => ctxRef.current.slides,
++          getCurrent: () => ctxRef.current.current,
++          getSelectedIds: () => ctxRef.current.selectedIds,
++          applySlide: ctx.applySlide, applyDeck: ctx.applyDeck, fitWidthPx: FIT_WIDTH,
++        }
++        const result = await createSlidesSkill(access, request.edits).executeTool({
++          id: request.requestId, name: request.action, input: request.input,
++        })
++        request.resolve(result)
++      })().catch(request.reject)
++    }
++    window.addEventListener('office:slides-action', action)
++    return () => window.removeEventListener('office:slides-action', action)
++  }, [])
+   const ctxItems = useMemo(
+     () => buildCtxItems(ctxRef.current),
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+     [
+       ctxMenu,
+@@ -3268,7 +3313,7 @@
+   const inkCount = useMemo(() => (slide ? inkNodesOf(slide).length : 0), [slide])
+   const clearInk = useCallback(() => arrangeActions.clearInk(ctxRef.current), [])
+ 
+-  const _fileName = slide ? path?.split('/').pop() || t('appUntitledPresentation') : undefined
++  const _fileName = slide ? name || t('appUntitledPresentation') : undefined
+ 
+   // genoffice CLI (`open --slide/--el`, `selection`): the shell evaluates this hook
+   useEffect(() => {
+@@ -3299,6 +3344,7 @@
+     <div className="app">
+       <ToastHost />
+       <Ribbon
++        trailingActions={trailingActions}
+         hasDoc={!!slide}
+         deckEmpty={deckEmpty}
+         canUndo={histState.canUndo}
+@@ -3346,7 +3392,7 @@
+         }
+         hasSelection={selectedIds.length > 0}
+         hasTextSelection={hasTextSelection}
+-        canPaste={hasClipboard}
++        canPaste={hasClipboard !== false}
+         onCopy={() => void copySelected()}
+         onCut={() => void cutSelected()}
+         onPaste={() => void pasteClipboard()}
+@@ -4554,6 +4600,7 @@
+           rehearseMode={slideShow.rehearse}
+           onRehearseDone={onRehearseDone}
+           recordMode={slideShow.record}
++          microphoneStream={slideShow.microphoneStream}
+           onRecordDone={onRecordDone}
+           onExit={exitSlideShow}
+         />

@@ -1,0 +1,19 @@
+--- a/genoffice/packages/cli/src/formats/image-source.ts
++++ b/genoffice/packages/cli/src/formats/image-source.ts
+@@ -26,7 +26,7 @@
+ 
+ export async function readImageSource(
+   url: string,
+-  ctx: PathContext,
++  ctx?: PathContext,
+   baseDir?: string,
+ ): Promise<ImageSource | null> {
+   if (url.startsWith('data:')) {
+@@ -51,6 +51,7 @@
+     const declared = (resp.headers.get('content-type') ?? '').split('/')[1]?.split(';')[0] ?? ''
+     return withType(bytes, declared)
+   }
++  if (!ctx) throw new Error('Local image paths require an authorized path context; upload image bytes as a data URL instead.')
+   const candidates = isAbsolute(url)
+     ? [url]
+     : [resolve(ctx.cwd, url), ...(baseDir ? [resolve(baseDir, url)] : [])]

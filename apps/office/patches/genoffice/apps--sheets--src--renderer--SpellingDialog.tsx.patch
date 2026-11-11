@@ -1,0 +1,84 @@
+--- a/genoffice/apps/sheets/src/renderer/SpellingDialog.tsx
++++ b/genoffice/apps/sheets/src/renderer/SpellingDialog.tsx
+@@ -7,6 +7,8 @@ import {
+   replaceInRichDoc,
+   replaceSuggestion,
+   runSheetSpellCheck,
++  tokenizeCellText,
++  isWhiteListed,
+   type RichDoc,
+   type SpellCellRef,
+   type SpellFinding,
+@@ -88,8 +90,10 @@ export function SpellingDialog({
+   const [truncated, setTruncated] = useState(false)
+   const learnedRef = useRef<Set<string>>(new Set())
+ 
+-  /** One synchronous pass over the workbook; bumped by Recheck and re-open. */
+-  const startRun = () => {
++  const runRef = useRef(0)
++
++  const startRun = async () => {
++    const run = ++runRef.current
+     setSelectedKey(null)
+     setTruncated(false)
+     setFindings([])
+@@ -113,11 +117,31 @@ export function SpellingDialog({
+       isWithheld,
+     )
+     setTruncated(capped)
+-    setFindings(runSheetSpellCheck(cells, engine, learnedRef.current, sessionIgnoredRef.current))
++    try {
++      let checker = engine
++      if (engine.checkWord) {
++        const verdicts = new Map<string, { misspelled: boolean; suggestions: string[] }>()
++        for (const cell of cells) {
++          for (const word of tokenizeCellText(cell.text)) {
++            if (verdicts.has(word) || isWhiteListed(word, learnedRef.current, sessionIgnoredRef.current)) continue
++            if (runRef.current !== run) return
++            verdicts.set(word, await engine.checkWord(word))
++          }
++        }
++        checker = {
++          isWordMisspelled: (word) => verdicts.get(word)?.misspelled === true,
++          getWordSuggestions: (word) => verdicts.get(word)?.suggestions ?? [],
++        }
++      }
++      if (runRef.current === run) setFindings(runSheetSpellCheck(cells, checker, learnedRef.current, sessionIgnoredRef.current))
++    } catch {
++      if (runRef.current === run) setPhase('unavailable')
++    }
+   }
+ 
+   useEffect(() => {
+-    startRun()
++    void startRun()
++    return () => { runRef.current += 1 }
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [])
+ 
+@@ -133,7 +157,15 @@ export function SpellingDialog({
+     setMessage(t('appSpellIgnoredAll', { word }))
+   }
+ 
+-  const learnWord = (word: string): void => {
++  const learnWord = async (word: string): Promise<void> => {
++    if (window.nativeSpell?.learnWord) {
++      try {
++        if (!(await window.nativeSpell.learnWord(word))) return
++      } catch {
++        setPhase('unavailable')
++        return
++      }
++    }
+     const lowered = word.toLowerCase()
+     learnedRef.current.add(lowered)
+     saveLearnedWords([...learnedRef.current])
+@@ -312,7 +344,7 @@ export function SpellingDialog({
+         </div>
+       )}
+       <div className="dialog-actions fr-actions">
+-        <button type="button" onClick={startRun}>
++        <button type="button" onClick={() => { void startRun() }}>
+           {t('appSpellRecheck')}
+         </button>
+         <button type="button" onClick={onClose}>

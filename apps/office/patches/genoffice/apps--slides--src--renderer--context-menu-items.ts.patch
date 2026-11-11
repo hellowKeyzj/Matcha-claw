@@ -1,0 +1,29 @@
+--- a/genoffice/apps/slides/src/renderer/context-menu-items.ts
++++ b/genoffice/apps/slides/src/renderer/context-menu-items.ts
+@@ -204,7 +204,7 @@
+       {
+         label: t('appCtxPaste'),
+         hint: '⌘V',
+-        disabled: !ctx.hasClipboard,
++        disabled: ctx.hasClipboard === false,
+         onClick: () => void clipboardActions.pasteClipboard(ctx),
+       },
+       null,
+@@ -235,7 +235,7 @@
+       {
+         label: t('appCtxPaste'),
+         hint: '⌘V',
+-        disabled: !ctx.hasClipboard,
++        disabled: ctx.hasClipboard === false,
+         onClick: native('paste'),
+       },
+       null,
+@@ -451,7 +451,7 @@
+     {
+       label: t('appCtxPaste'),
+       hint: '⌘V',
+-      disabled: !ctx.hasClipboard,
++      disabled: ctx.hasClipboard === false,
+       onClick: () => void clipboardActions.pasteClipboard(ctx),
+     },
+     {

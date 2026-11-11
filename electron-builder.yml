@@ -19,7 +19,7 @@ files:
 extraResources:
   - from: build/iab-guard-extension/
     to: iab-guard-extension/
-  - from: sdk/app-plugins/matcha-app-plugins-sdk-1.2.0.tgz
+  - from: sdk/app-plugins/matcha-app-plugins-sdk-1.5.0.tgz
     to: app-plugins/sdk.tgz
   - from: resources/
     to: resources/
@@ -99,13 +99,7 @@ mac:
   icon: resources/icons/icon.icns
   target:
     - target: dmg
-      arch:
-        - x64
-        - arm64
     - target: zip
-      arch:
-        - x64
-        - arm64
   darkModeSupport: true
   hardenedRuntime: true
   gatekeeperAssess: false
@@ -199,9 +193,6 @@ win:
   icon: resources/icons/icon.ico
   target:
     - target: nsis
-      arch:
-        - x64
-        - arm64
 
 nsis:
   oneClick: false

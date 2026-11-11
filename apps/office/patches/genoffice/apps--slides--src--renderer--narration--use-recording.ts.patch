@@ -1,0 +1,48 @@
+--- a/genoffice/apps/slides/src/renderer/narration/use-recording.ts
++++ b/genoffice/apps/slides/src/renderer/narration/use-recording.ts
+@@ -19,8 +19,10 @@
+   active: boolean,
+   slideIndex: number | undefined,
+   ended: boolean,
++  microphoneStream?: Promise<MediaStream>,
+ ) {
+   const recorderRef = useRef<NarrationRecorder | null>(null)
++  const streamRequestRef = useRef<Promise<MediaStream> | null>(null)
+   const marksRef = useRef<NarrationMark[]>([])
+   const [phase, setPhase] = useState<RecordingPhase>('starting')
+   const [, setTick] = useState(0)
+@@ -29,12 +31,17 @@
+   markIndexRef.current = markIndex
+ 
+   useEffect(() => {
+-    if (!active) return
++    if (!active || !microphoneStream) return
++    streamRequestRef.current = microphoneStream
+     let cancelled = false
+     void (async () => {
+       try {
+-        if (!(await window.slidesApi.microphoneAccess())) throw new Error('microphone refused')
+-        const recorder = await NarrationRecorder.start()
++        const stream = await microphoneStream
++        if (cancelled) {
++          if (streamRequestRef.current !== microphoneStream) stream.getTracks().forEach((track) => track.stop())
++          return
++        }
++        const recorder = await NarrationRecorder.start(stream)
+         if (cancelled) return recorder.dispose()
+         recorderRef.current = recorder
+         marksRef.current = [{ slideIndex: markIndexRef.current ?? 0, atMs: 0 }]
+@@ -46,11 +53,12 @@
+     const tick = window.setInterval(() => setTick((n) => n + 1), 500)
+     return () => {
+       cancelled = true
++      streamRequestRef.current = null
+       window.clearInterval(tick)
+       recorderRef.current?.dispose()
+       recorderRef.current = null
+     }
+-  }, [active])
++  }, [active, microphoneStream])
+ 
+   useEffect(() => {
+     const recorder = recorderRef.current

@@ -1,0 +1,35 @@
+--- a/genoffice/apps/docs/src/renderer/system-fonts.ts
++++ b/genoffice/apps/docs/src/renderer/system-fonts.ts
+@@ -1,20 +1,12 @@
++import type { DesktopApi } from '../../../../../src/docs/types'
++import { showDocsMessage } from '../../../../../src/docs/dialogs'
+ import { useCallback, useState } from 'react'
+ 
+ let cached: readonly string[] | null = null
+ let pending: Promise<readonly string[]> | null = null
+ 
+ async function queryFamilies(): Promise<readonly string[]> {
+-  const query = (window as { queryLocalFonts?: () => Promise<{ readonly family: string }[]> })
+-    .queryLocalFonts
+-  if (!query) return []
+-  try {
+-    const fonts = await query.call(window)
+-    const families = new Set<string>()
+-    for (const font of fonts) if (font.family) families.add(font.family)
+-    return [...families].sort((a, b) => a.localeCompare(b))
+-  } catch {
+-    return []
+-  }
++  return (window.desktop as DesktopApi).systemFontFamilies()
+ }
+ 
+ function loadSystemFontFamilies(): Promise<readonly string[]> {
+@@ -37,7 +29,7 @@
+ } {
+   const [families, setFamilies] = useState<readonly string[]>(cached ?? [])
+   const load = useCallback(() => {
+-    void loadSystemFontFamilies().then(setFamilies)
++    void loadSystemFontFamilies().then(setFamilies).catch(error => { pending = null; console.error('[office:docs:fonts]', error); void showDocsMessage(String(error)) })
+   }, [])
+   return { families, load }
+ }

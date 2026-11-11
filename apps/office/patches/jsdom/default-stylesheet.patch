@@ -1,0 +1,12 @@
+diff --git a/jsdom/lib/jsdom/living/helpers/style-rules.js b/jsdom/lib/jsdom/living/helpers/style-rules.js
+--- a/jsdom/lib/jsdom/living/helpers/style-rules.js
++++ b/jsdom/lib/jsdom/living/helpers/style-rules.js
+@@ -11,7 +11,7 @@ const { asciiLowercase } = require("./strings");
+ const { deprecatedAliases, systemColors } = require("./system-colors");
+
+ const defaultStyleSheet = fs.readFileSync(
+-  path.resolve(__dirname, "../../browser/default-stylesheet.css"),
++  path.resolve(__dirname, "./default-stylesheet.css"),
+   { encoding: "utf-8" }
+ );
+ let parsedDefaultStyleSheet;

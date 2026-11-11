@@ -94,7 +94,7 @@
     "developmentChatUnavailable": "当前没有可用的聊天草稿，请在普通聊天中提出制作需求。",
     "actionFailed": "{{action}}失败：{{reason}}",
     "catalog": "插件列表读取失败：{{reason}}",
-    "packageTooLarge": "插件 ZIP 不能超过 64 MiB，请选择更小的包。",
+    "packageTooLarge": "插件 ZIP 不能超过 {{limit}} MiB，请选择更小的包。",
     "packageRead": "读取插件包失败，请重新选择 ZIP 文件。",
     "packageUnavailable": "无法读取插件包，请重新选择文件。",
     "packageAborted": "读取插件包已取消，请重新选择文件。",

@@ -1,0 +1,19 @@
+--- a/genoffice/apps/sheets/src/renderer/save-scheduler.ts
++++ b/genoffice/apps/sheets/src/renderer/save-scheduler.ts
+@@ -53,7 +53,7 @@
+   isCsv: boolean
+   kind: 'save' | 'recovery'
+   /** recovery-only: the session is backed by the recovery copy itself */
+-  restoredFromRecovery: boolean
++  backingIsRecovery: boolean
+   /** recovery-only: the user declined recovery for this workbook */
+   automaticRecoveryDisabled: boolean
+ }
+@@ -62,6 +62,6 @@
+   if (s.saveInFlight || !s.hasWorkbook) return false
+   if (s.journalEmpty && !s.redactionsPendingSave) return false
+   if (s.editingCell || s.needsSaveAsNotUnsavedNew || s.isCsv) return false
+-  if (s.kind === 'recovery' && (s.restoredFromRecovery || s.automaticRecoveryDisabled)) return false
++  if (s.kind === 'recovery' && (s.backingIsRecovery || s.automaticRecoveryDisabled)) return false
+   return true
+ }

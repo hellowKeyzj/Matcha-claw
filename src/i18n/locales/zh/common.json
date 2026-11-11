@@ -1,5 +1,6 @@
 {
     "appFrame": {
+        "chooseScreen": "选择屏幕或窗口",
         "sessionChanged": "当前对话已切换，请重新打开插件后重试。",
         "mediaChanged": "会话媒体已更新，请重新读取后重试。",
         "mediaReadFailed": "无法读取会话媒体，请重试。",

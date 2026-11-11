@@ -1,0 +1,10 @@
+--- a/genoffice/apps/slides/src/renderer/components/ribbon-shared.tsx
++++ b/genoffice/apps/slides/src/renderer/components/ribbon-shared.tsx
+@@ -277,6 +277,7 @@ export function Group({
+ }
+ 
+ export interface Props {
++  trailingActions?: ReactNode
+   hasDoc: boolean
+   /** True when no slide has real content — the one-click AI actions grey out then */
+   deckEmpty: boolean

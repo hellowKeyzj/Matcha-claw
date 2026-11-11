@@ -1,0 +1,186 @@
+--- a/genoffice/apps/sheets/src/main/sheets-main.ts
++++ b/genoffice/apps/sheets/src/main/sheets-main.ts
+@@ -1774,7 +1774,7 @@
+   },
+ })
+ const tm = (key: Parameters<typeof tMain>[1], params?: Parameters<typeof tMain>[2]) =>
+-  tMain(getUiLang(), key, params)
++  tMain((runtime.uiLanguage ?? getUiLang()), key, params)
+ 
+ interface SessionInfo {
+   readonly path: string
+@@ -1836,6 +1836,8 @@
+ }
+ 
+ interface SheetsRuntimeConfig {
++  systemLocale?: string
++  uiLanguage?: ReturnType<typeof getUiLang>
+   /** absolute path to the sheets preload bundle */
+   preloadPath: string
+   /** dev-server URL for the sheets renderer (wins over rendererFile) */
+@@ -1859,6 +1861,7 @@
+ 
+ export function configureSheetsRuntime(config: SheetsRuntimeConfig): void {
+   runtime = config
++  cachedShortDate = undefined
+ }
+ 
+ /** After writing an exported/AI-generated file: open it in the right tab
+@@ -2997,7 +3000,48 @@
+ 
+   // shared with the other editor modules — last (identical) registration wins
+   ipcMain.removeHandler('app:get-language')
+-  ipcMain.handle('app:get-language', () => getUiLang())
++  // Standalone parity with docs-main's shell-wide handler: AI-supplied URLs are
++  // prompt-injectable, so fetchRemoteImage refuses non-http schemes and
++  // private/link-local targets and validates every redirect hop. Size-capped to
++  // match the local add_image limit.
++  ipcMain.handle(
++    'ai:fetch-image',
++    async (_event, url: unknown): Promise<{ base64: string; mime: string } | null> => {
++      try {
++        const resp = await fetchRemoteImage(z.string().parse(url))
++        if (!resp || !resp.ok || !resp.body) return null
++        const declared = Number(resp.headers.get('content-length') ?? 0)
++        if (declared > MAX_REMOTE_IMAGE_BYTES) return null
++        // Stream with a running cap: a missing/understated Content-Length must
++        // not let a prompt-injected URL buffer unbounded bytes before a
++        // post-hoc size check
++        const reader = resp.body.getReader()
++        const chunks: Buffer[] = []
++        let received = 0
++        for (;;) {
++          const { done, value } = await reader.read()
++          if (done) break
++          received += value.byteLength
++          if (received > MAX_REMOTE_IMAGE_BYTES) {
++            await reader.cancel()
++            return null
++          }
++          chunks.push(Buffer.from(value))
++        }
++        const buf = Buffer.concat(chunks)
++        const ct = resp.headers.get('content-type') ?? ''
++        const mime = ct.includes('png')
++          ? 'image/png'
++          : ct.includes('gif')
++            ? 'image/gif'
++            : 'image/jpeg'
++        return { base64: buf.toString('base64'), mime }
++      } catch {
++        return null
++      }
++    },
++  )
++  ipcMain.handle('app:get-language', () => (runtime.uiLanguage ?? getUiLang()))
+ 
+   /** returns true once when shell opened this tab for a new blank workbook */
+   ipcMain.handle('sheets:consume-new-blank', () => {
+@@ -4571,47 +4615,7 @@
+     }
+   })
+ 
+-  // Standalone parity with docs-main's shell-wide handler: AI-supplied URLs are
+-  // prompt-injectable, so fetchRemoteImage refuses non-http schemes and
+-  // private/link-local targets and validates every redirect hop. Size-capped to
+-  // match the local add_image limit.
+-  ipcMain.handle(
+-    'ai:fetch-image',
+-    async (_event, url: unknown): Promise<{ base64: string; mime: string } | null> => {
+-      try {
+-        const resp = await fetchRemoteImage(z.string().parse(url))
+-        if (!resp || !resp.ok || !resp.body) return null
+-        const declared = Number(resp.headers.get('content-length') ?? 0)
+-        if (declared > MAX_REMOTE_IMAGE_BYTES) return null
+-        // Stream with a running cap: a missing/understated Content-Length must
+-        // not let a prompt-injected URL buffer unbounded bytes before a
+-        // post-hoc size check
+-        const reader = resp.body.getReader()
+-        const chunks: Buffer[] = []
+-        let received = 0
+-        for (;;) {
+-          const { done, value } = await reader.read()
+-          if (done) break
+-          received += value.byteLength
+-          if (received > MAX_REMOTE_IMAGE_BYTES) {
+-            await reader.cancel()
+-            return null
+-          }
+-          chunks.push(Buffer.from(value))
+-        }
+-        const buf = Buffer.concat(chunks)
+-        const ct = resp.headers.get('content-type') ?? ''
+-        const mime = ct.includes('png')
+-          ? 'image/png'
+-          : ct.includes('gif')
+-            ? 'image/gif'
+-            : 'image/jpeg'
+-        return { base64: buf.toString('base64'), mime }
+-      } catch {
+-        return null
+-      }
+-    },
+-  )
++
+ }
+ 
+ // ── project-store IPC (standalone mode) ────────────────────────────────────
+@@ -5152,7 +5156,7 @@
+ /// gateway's save-side numFmtId mapping via setSystemShortDate.
+ function systemShortDate(): string {
+   if (cachedShortDate === undefined) {
+-    cachedShortDate = shortDatePatternForSystemLocale(app.getSystemLocale())
++    cachedShortDate = shortDatePatternForSystemLocale(runtime.systemLocale ?? app.getSystemLocale())
+     setSystemShortDate(cachedShortDate)
+   }
+   return cachedShortDate
+@@ -5212,7 +5216,7 @@
+   const snapshotPath = await snapshotWorkbook(path, snapshotBytes)
+   try {
+     const [rawOpened, digest, fileBytes, restoreTargetSha, csvSourceSha] = await Promise.all([
+-      client.open(snapshotPath, getUiLang(), systemShortDate()),
++      client.open(snapshotPath, (runtime.uiLanguage ?? getUiLang()), systemShortDate()),
+       sourceBytes
+         ? createHash('sha256').update(sourceBytes).digest('hex')
+         : sha256File(snapshotPath),
+@@ -5258,6 +5262,7 @@
+       ...(csvSourcePath === undefined ? {} : { csvPath: csvSourcePath }),
+       ...(emptyCsv ? { emptyCsv: true } : {}),
+       restoredFromRecovery: restoreTarget !== undefined,
++      backingIsRecovery: restoreTarget !== undefined,
+       automaticRecoveryDisabled: !allowsAutomaticWorkbookRecovery(opened.sheets),
+     })
+   } catch (error) {
+@@ -5299,7 +5304,7 @@
+     ja: 'shift_jis',
+     ko: 'euc-kr',
+   }
+-  return byLang[getUiLang()]
++  return byLang[(runtime.uiLanguage ?? getUiLang())]
+ }
+ 
+ /**
+@@ -5487,7 +5492,7 @@
+ /// the application menu and are forwarded to the renderer.
+ function installApplicationMenu(): void {
+   const sendMenuAction = sendSheetsMenuAction
+-  const labels = appMenuLabels(getUiLang())
++  const labels = appMenuLabels((runtime.uiLanguage ?? getUiLang()))
+   const appMenu = appMenuTemplate(process.platform, labels, {
+     appLabel: app.name,
+     extra: [settingsMenuItem(labels)],
+@@ -5643,7 +5648,7 @@
+ export function startSheetsStandalone(): void {
+   registerRendererScheme()
+   installNavigationGuard(app)
+-  installContextMenu(app, () => contextMenuLabels(getUiLang()))
++  installContextMenu(app, () => contextMenuLabels((runtime.uiLanguage ?? getUiLang())))
+   // GENOFFICE_USER_DATA: test drivers point this at a scratch dir so automated
+   // instances get their own userData AND single-instance lock (the lock is scoped
+   // to userData), allowing parallel instances alongside a normal dev run.
+@@ -5706,3 +5711,5 @@
+     }),
+   )
+ }
++
++export { sessionFor, resolveTransferredEdits, writeWorkbookTo, openWorkbookSession, prepareWorkbookForOpen, clearWorkbookRecovery, workbookSaveRequestSchema, recoveryPromptWaiters, recoveryPathFor, pendingRecoveryFor, promptRecoveryRestore };

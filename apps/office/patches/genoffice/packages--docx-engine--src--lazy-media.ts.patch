@@ -1,0 +1,31 @@
+--- a/genoffice/packages/docx-engine/src/lazy-media.ts
++++ b/genoffice/packages/docx-engine/src/lazy-media.ts
+@@ -8,6 +8,13 @@
+  */
+ 
+ export const LAZY_MEDIA_SCHEME = 'genoffice-docx-media'
++
++let lazyMediaBaseUrl = ''
++export const getLazyMediaBaseUrl = (): string => lazyMediaBaseUrl
++export function setLazyMediaBaseUrl(value: string): void {
++  if (value && !/^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{64}\/$/.test(value)) throw new Error('Invalid lazy media endpoint')
++  lazyMediaBaseUrl = value
++}
+ 
+ const MAGIC = 'GENOFFICE-LAZY-MEDIA\n'
+ const HASH_RE = /^[0-9a-f]{64}$/
+@@ -37,11 +44,12 @@
+ 
+ export function lazyMediaUrl(hash: string, partPath: string): string {
+   if (!HASH_RE.test(hash)) throw new Error(`lazy media: not a sha256 hex: ${hash}`)
+-  return `${LAZY_MEDIA_SCHEME}://${hash}/${partPath.split('/').map(encodeURIComponent).join('/')}`
++  return `${lazyMediaBaseUrl ? `${lazyMediaBaseUrl}media/` : `${LAZY_MEDIA_SCHEME}://`}${hash}/${partPath.split('/').map(encodeURIComponent).join('/')}`
+ }
+ 
+ export function parseLazyMediaUrl(url: string): { hash: string; partPath: string } | null {
+-  const m = new RegExp(`^${LAZY_MEDIA_SCHEME}://([0-9a-f]{64})/(.+)$`).exec(url)
++  const candidate = lazyMediaBaseUrl && url.startsWith(`${lazyMediaBaseUrl}media/`) ? `${LAZY_MEDIA_SCHEME}://${url.slice(`${lazyMediaBaseUrl}media/`.length)}` : url
++  const m = new RegExp(`^${LAZY_MEDIA_SCHEME}://([0-9a-f]{64})/(.+)$`).exec(candidate)
+   if (!m) return null
+   let partPath: string
+   try {

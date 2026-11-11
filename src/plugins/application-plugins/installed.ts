@@ -89,8 +89,9 @@ const subscribe = (listener: () => void) => {
 };
 const getSnapshot = () => view;
 
-export function useInstalledAppPlugins(): InstalledPluginView {
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+const inactiveSubscribe = () => () => {};
+export function useInstalledAppPlugins(active = true): InstalledPluginView {
+  return useSyncExternalStore(active ? subscribe : inactiveSubscribe, getSnapshot, getSnapshot);
 }
 
 export async function importAppPlugin(packageBase64: string, digest: string): Promise<void> {

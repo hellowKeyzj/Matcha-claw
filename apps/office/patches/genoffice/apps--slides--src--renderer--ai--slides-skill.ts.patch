@@ -1,0 +1,67 @@
+--- a/genoffice/apps/slides/src/renderer/ai/slides-skill.ts
++++ b/genoffice/apps/slides/src/renderer/ai/slides-skill.ts
+@@ -6,7 +6,7 @@
+   RenderSlide,
+   ShapeRenderNode,
+ } from '@genoffice/pptx-render'
+-import type { AgentToolCall, AgentToolDef } from '../../shared/ipc'
++import type { AgentToolCall, AgentToolDef, SlidesApi } from '../../shared/ipc'
+ import { OP_GROUPS, opGuide, opGuideCatalog, opSignatureIndex } from '@genoffice/pptx-ops/op-docs'
+ import { auditSlideLayout, formatAudit } from '@genoffice/pipelines/slides/layout-audit'
+ import { runLayoutScript, type LayoutScriptElement } from './layout-script'
+@@ -1048,7 +1048,10 @@
+   return `\n\nNote: ${[...hidden].join(' and ')} ${plural ? 'are' : 'is'} currently unavailable (no image/media provider: signed out of Genspark or cloud tools off, and no media API key in Settings). Do not call or promise ${plural ? 'them' : 'it'}; for imagery use image_search + insert_web_image instead.`
+ }
+ 
+-export function createSlidesSkill(access: DeckAccess): AgentSkill {
++export function createSlidesSkill(
++  access: DeckAccess,
++  edits: Pick<SlidesApi, 'applyEditScript' | 'insertImageUrl' | 'replacePictureUrl'> = window.slidesApi,
++): AgentSkill {
+   // The HTML pipeline was already used in this conversation → later calls without an explicit mode default to append.
+   /**
+    * Every label withheld anywhere in the deck, in first-seen order.
+@@ -1087,7 +1090,7 @@
+       const progress = buildProgressNote(state)
+       return progress ? `${outline}\n${progress}` : outline
+     },
+-    executeTool: (call, signal) => executeTool(access, call, state, signal),
++    executeTool: (call, signal) => executeTool(access, call, state, signal, edits),
+   }
+ }
+ 
+@@ -1377,6 +1380,7 @@
+   call: AgentToolCall,
+   state?: SkillState,
+   signal?: AbortSignal,
++  edits: Pick<SlidesApi, 'applyEditScript' | 'insertImageUrl' | 'replacePictureUrl'> = window.slidesApi,
+ ) {
+   const slides = access.getSlides()
+   switch (call.name) {
+@@ -1419,7 +1423,7 @@
+       // ── Dispatch: the whole script is ONE transaction — the collected primitives go
+       //   to the main process in a single IPC and apply atomically through the op
+       //   executor (any failure rolls the deck back there and returns a guided error).
+-      const applied = await window.slidesApi.applyEditScript({
++      const applied = await edits.applyEditScript({
+         slideIndex: idx,
+         fitWidthPx: access.fitWidthPx,
+         boxes: r.ops,
+@@ -1581,7 +1585,7 @@
+         if (!/^(https?|file):\/\//.test(url)) return fail(t('aiFailInsertImage'), 'Invalid url')
+         payload = { url }
+       }
+-      const r = await window.slidesApi.insertImageUrl({
++      const r = await edits.insertImageUrl({
+         slideIndex: idx,
+         ...payload,
+         xPx: Number(call.input.x),
+@@ -1633,7 +1637,7 @@
+         if (!/^(https?|file):\/\//.test(url)) return fail(t(failKey), 'Invalid url')
+         payload = { url }
+       }
+-      const updated = await window.slidesApi.replacePictureUrl({
++      const updated = await edits.replacePictureUrl({
+         slideIndex: idx,
+         sourceId,
+         ...payload,

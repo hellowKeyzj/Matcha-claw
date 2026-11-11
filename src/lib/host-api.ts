@@ -1,8 +1,9 @@
+import type { AppDocumentResourcesRequest, AppDocumentResourcesResult } from '../../sdk/app-plugins/src/document-resources';
 import { invokeIpc } from '@/lib/api-client';
 import type { CallReceipt } from '@/types/call-log';
 import type { IabSnapshot, IabUiRequest, IabUiResponse } from '@/types/desktop/iab';
 import type { AppPluginCatalog, AppPluginInspection, InstalledAppPlugin } from '@/types/desktop/app-plugin';
-import type { AppPluginCall, AppToolResult, AppWebviewApi } from '@/types/desktop/app-plugin-sdk';
+import type { AppPluginCall, AppToolResult, AppWebviewApi, AppPresentationBootstrap, AppSpellcheckRequest } from '@/types/desktop/app-plugin-sdk';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
 import { decodeSecurityCallDetail } from '@/types/call-log/security';
 import { waitForCall } from './call-log-await';
@@ -421,6 +422,65 @@ export function hostAppPluginCall(input: AppPluginCall): Promise<AppToolResult> 
 export async function hostWriteClipboardImage(input: Parameters<AppWebviewApi['writeClipboardImage']>[0]): Promise<void> {
   const result = await invokeIpc<{ outcome: 'written' | 'denied' | 'invalid-image' | 'write-failed' }>('shell:writeClipboardImage', input);
   if (result.outcome !== 'written') throw new Error(`clipboard:${result.outcome}`);
+}
+
+export function hostAppDesktopMedia(input: { frameName: string; operation: 'captureScreenSources' | 'captureScreenSource' | 'requestMicrophoneAccess' | 'prepareScreenStream'; id?: string }): Promise<unknown> {
+  return invokeIpc('app-plugins:desktop-media', input);
+}
+export function hostAppDocumentResourcesOwner(input: { ownerId: string; pluginId: string; digest: string; entry: string }): Promise<void> {
+  return invokeIpc('app-plugins:document-resources-owner', input);
+}
+export function hostAppDocumentResourcesCreate(ownerId: string, request: AppDocumentResourcesRequest): Promise<AppDocumentResourcesResult> {
+  return invokeIpc('app-plugins:document-resources-create', ownerId, request);
+}
+export function hostAppDocumentResourcesRelease(ownerId: string, request: { readonly id: string }): Promise<void> {
+  return invokeIpc('app-plugins:document-resources-release', ownerId, request);
+}
+export function hostAppDocumentResourcesReleaseOwner(ownerId: string): Promise<void> {
+  return invokeIpc('app-plugins:document-resources-release-owner', { ownerId });
+}
+export function hostAppPresentationBootstrap(): Promise<AppPresentationBootstrap> {
+  return invokeIpc('app-plugins:presentation-bootstrap', {});
+}
+export function hostAppPresentationCall(input: { frameId: string; name: string; arguments: Readonly<Record<string, unknown>> }): Promise<AppToolResult> {
+  return invokeIpc('app-plugins:presentation-call', input);
+}
+export function hostAppPresentationOwner(input: { frameId: string; pluginId: string; digest: string; applicationId: string; context: { language?: string; theme?: 'light' | 'dark' } }): Promise<void> {
+  return invokeIpc('app-plugins:presentation-owner', input);
+}
+export function hostAppPresentationRelease(frameId: string): Promise<void> {
+  return invokeIpc('app-plugins:presentation-release', { frameId });
+}
+export function hostAppPresentationRequest(frameId: string, request: { operation: string; input?: unknown }): Promise<unknown> {
+  return invokeIpc('app-plugins:presentation-request', { frameId, request });
+}
+export function hostAppSpellcheckOwner(input: { ownerId: string; pluginId: string; digest: string; entry: string; active: boolean }): Promise<void> {
+  return invokeIpc('app-plugins:spellcheck-owner', input);
+}
+export function hostAppSpellcheckCall(ownerId: string, request: AppSpellcheckRequest): Promise<unknown> {
+  return invokeIpc('app-plugins:spellcheck-call', ownerId, request);
+}
+export async function hostWriteClipboard(input: Parameters<AppWebviewApi['writeClipboard']>[0]): Promise<void> {
+  const result = await invokeIpc<{ outcome: string }>('shell:writeClipboard', input);
+  if (result.outcome !== 'written') throw new Error(`clipboard:${result.outcome}`);
+}
+export async function hostReadClipboard(): Promise<Awaited<ReturnType<AppWebviewApi['readClipboard']>>> {
+  const result = await invokeIpc<{ outcome: 'read'; content: Awaited<ReturnType<AppWebviewApi['readClipboard']>> } | { outcome: 'denied' | 'read-failed' }>('shell:readClipboard');
+  if (result.outcome !== 'read') throw new Error(`clipboard:${result.outcome}`);
+  return result.content;
+}
+
+export async function hostAppRenderPdf(input: Parameters<AppWebviewApi['renderPdf']>[0], signal: AbortSignal): Promise<Awaited<ReturnType<AppWebviewApi['renderPdf']>>> {
+  signal.throwIfAborted();
+  const requestId = crypto.randomUUID();
+  const abort = () => { void invokeIpc('app-plugins:render-pdf-cancel', requestId).catch(() => {}); };
+  signal.addEventListener('abort', abort, { once: true });
+  try {
+    const reply = await invokeIpc<{ outcome: 'rendered'; result: Awaited<ReturnType<AppWebviewApi['renderPdf']>> } | { outcome: 'failed'; code: string }>('app-plugins:render-pdf', requestId, input);
+    signal.throwIfAborted();
+    if (reply.outcome !== 'rendered') throw Object.assign(new Error(`PDF rendering failed (${reply.code}).`), { code: reply.code });
+    return reply.result;
+  } finally { signal.removeEventListener('abort', abort); }
 }
 
 export function hostAppPluginRuntimeStatus(input: {

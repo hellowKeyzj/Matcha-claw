@@ -1,0 +1,615 @@
+--- a/genoffice/apps/slides/src/main/slides-main.ts
++++ b/genoffice/apps/slides/src/main/slides-main.ts
+@@ -5,7 +5,6 @@
+  * future shell reuse.
+  */
+ import {
+-  clipboard,
+   app,
+   BrowserWindow,
+   desktopCapturer,
+@@ -84,10 +83,7 @@
+ } from './paste-cascade'
+ import {
+   ELEMENT_CLIPBOARD_FORMAT,
+-  canWriteElementClipboardImage,
+-  elementClipboardMarkerMatches,
+   isElementClipboardToken,
+-  writeElementClipboardImage,
+ } from './element-clipboard'
+ import { getUiLang, normalizeLang, setUiLang } from '@genoffice/i18n'
+ import { ProjectStore } from '@genoffice/project-store'
+@@ -313,7 +309,7 @@
+ } from './font-store'
+ 
+ /** One slide, copied from any deck open in this process, waiting to be pasted into another. */
+-let slideClipboard: { bundles: SlideBundle[]; pngs?: string[] } | null = null
++let slideClipboard: { bundles: SlideBundle[]; pngs?: string[]; token: string } | null = null
+ 
+ /** The immediately preceding slide paste per webContents, so the paste-options floater can redo it with another mode. */
+ const lastSlidePaste = new Map<number, { afterIndex: number; undoLen: number; changed: number[] }>()
+@@ -322,6 +318,10 @@
+ // by slides:local-page-generate are readable (the renderer can't point the reader at arbitrary files)
+ const GENERATED_PAGE_PREFIX = 'genpptx:'
+ const issuedGeneratedPages = new Set<string>()
++let imageDimensions: ((bytes: Uint8Array) => Promise<{ width: number; height: number } | null>) | undefined
++export function setImageDimensions(decode: NonNullable<typeof imageDimensions>): void {
++  imageDimensions = decode
++}
+ import { registerPresenterIpc } from './presenter-show'
+ import { registerAttachmentIpc } from './attachments-ipc'
+ 
+@@ -456,6 +456,9 @@
+   })
+ }
+ 
++// A copy replaces the committed bundle only after the matching native write succeeds.
++let pendingCopy: { token: string; senderId: number; format: string; commit: () => void } | null = null
++
+ // ── In-app element clipboard (app-wide, so elements copied in one deck paste into any other open deck; the cascade decides the paste offset) ─
+ let elementClipboard: {
+   items: ElementClipboardItem[]
+@@ -487,7 +490,7 @@
+     slidesOpenedHook?.(wc, path)
+     // Peer renderers keep the path in React state (Save As defaults, path-keyed
+     // guides); the saver also gets it from its own IPC result — idempotent
+-    wc.send('slides:renamed', path)
++    wc.send('slides:renamed', { path, name: basename(path) })
+     const win = standaloneWindows.get(id)
+     if (win && !win.isDestroyed()) win.setTitle(basename(path))
+   }
+@@ -590,7 +593,7 @@
+ 
+ // ── Autosave (crash recovery): dirty sessions write a recovery copy every 30s; a normal save cleans it up ──
+ const autosaveDir = () => join(app.getPath('userData'), 'slides-autosave')
+-const autosavePathFor = (filePath: string) =>
++export const autosavePathFor = (filePath: string) =>
+   join(autosaveDir(), `${createHash('sha1').update(filePath).digest('hex').slice(0, 16)}.pptx`)
+ 
+ function sessionDirty(session: Session): boolean {
+@@ -611,7 +614,7 @@
+  */
+ const autosaveBackoff = new Map<string, number>()
+ const AUTOSAVE_BACKOFF_TICKS = 10
+-let autosaveRunning = false
++let autosaveTask: Promise<void> | undefined
+ 
+ /**
+  * Recovery drafts for never-saved decks (wcId → visible path in <Documents>/GenOffice):
+@@ -627,9 +630,8 @@
+ }
+ 
+ setInterval(() => {
+-  if (autosaveRunning) return
+-  autosaveRunning = true
+-  void (async () => {
++  if (autosaveTask) return
++  autosaveTask = (async () => {
+     const seen = new Set<Session>() // aliased entries share the session; save it once
+     for (const [wcId, session] of sessions.entries()) {
+       if (seen.has(session)) continue
+@@ -637,7 +639,7 @@
+       if (session.masterEdit || !sessionDirty(session)) continue
+       let target: string
+       if (session.path) {
+-        target = autosavePathFor(session.path)
++        target = autosavePathFor(session.recoveryIdentityPath ?? session.path)
+       } else {
+         let draft = untitledRecovery.get(wcId)
+         if (!draft) {
+@@ -646,7 +648,7 @@
+         }
+         target = draft
+       }
+-      const backoffKey = session.path ?? target
++      const backoffKey = session.recoveryIdentityPath ?? session.path ?? target
+       const skip = autosaveBackoff.get(backoffKey) ?? 0
+       if (skip > 0) {
+         autosaveBackoff.set(backoffKey, skip - 1)
+@@ -662,9 +664,16 @@
+       }
+     }
+   })().finally(() => {
+-    autosaveRunning = false
++    autosaveTask = undefined
+   })
+ }, 30_000)
++
++/** Wait for an already-streaming recovery write before deleting its result. */
++export async function clearSlidesRecovery(identityPath: string): Promise<void> {
++  await autosaveTask
++  autosaveBackoff.delete(identityPath)
++  await rm(autosavePathFor(identityPath), { force: true })
++}
+ 
+ // ── Close guard (aligned with sheets/pdf): dirty sessions prompt Save/Don't Save/Cancel before closing a tab/window ──
+ const closeSaveWaiters = new Map<number, (ok: boolean) => void>()
+@@ -739,7 +748,7 @@
+   if (response === 1) {
+     // User explicitly discarded changes: also delete the recovery copy, so the next open does not show a pointless recovery prompt
+     const session = sessions.get(contents.id)
+-    if (session?.path) void rm(autosavePathFor(session.path), { force: true }).catch(() => {})
++    if (session?.path) void rm(autosavePathFor(session.recoveryIdentityPath ?? session.path), { force: true }).catch(() => {})
+     dropUntitledRecovery(contents.id)
+     return true
+   }
+@@ -755,7 +764,7 @@
+  */
+ export function discardSlidesRecovery(contents: WebContents): void {
+   const session = sessions.get(contents.id)
+-  if (session?.path) void rm(autosavePathFor(session.path), { force: true }).catch(() => {})
++  if (session?.path) void rm(autosavePathFor(session.recoveryIdentityPath ?? session.path), { force: true }).catch(() => {})
+   dropUntitledRecovery(contents.id)
+ }
+ 
+@@ -936,6 +945,7 @@
+   wc: WebContents,
+   path: string,
+   fitWidthPx: number,
++  recovery?: { recoveryIdentityPath: string; recovered: boolean },
+ ): Promise<OpenResult> {
+   // Same file already open in another window: attach to that session instead of
+   // opening an independent copy (which would silently lose the loser's edits on
+@@ -950,6 +960,7 @@
+     slidesOpenedHook?.(wc, path)
+     return {
+       path: existing.path,
++      name: basename(existing.path),
+       slides: buildAllRenderSlides(existing.opened, fitWidthPx),
+       size: { cx: existing.opened.deck.size.cx, cy: existing.opened.deck.size.cy },
+       defaultFont: deckDefaultFont(existing.opened),
+@@ -958,10 +969,10 @@
+   const raw = await readFile(path)
+   // a 0-byte .pptx is an empty deck, not a corrupt one: open the blank template
+   // under the file's own path so Save writes back to it
+-  const { bytes, recovered } = await maybeRecoverBytes(
+-    path,
+-    raw.length === 0 ? await createBlankPptx() : new Uint8Array(raw),
+-  )
++  const original = raw.length === 0 ? await createBlankPptx() : new Uint8Array(raw)
++  const { bytes, recovered } = recovery
++    ? { bytes: original, recovered: recovery.recovered }
++    : await maybeRecoverBytes(path, original)
+   await shapedMetricsReady() // Lay out only after complex-script shaped metrics are ready, avoiding an init race falling back to estimation
+   const opened = await openPptx(bytes)
+   adoptEmbeddedFonts(opened)
+@@ -969,6 +980,7 @@
+     path,
+     opened,
+     fitWidthPx,
++    ...(recovery ? { recoveryIdentityPath: recovery.recoveryIdentityPath } : {}),
+     undoStack: [],
+     redoStack: [],
+     ...(recovered ? { metaDirty: true } : {}),
+@@ -981,6 +993,7 @@
+   if (await refineComplexWidths(wc)) slides = buildAllRenderSlides(opened, fitWidthPx)
+   return {
+     path,
++    name: basename(path),
+     slides,
+     size: { cx: opened.deck.size.cx, cy: opened.deck.size.cy },
+     defaultFont: deckDefaultFont(opened),
+@@ -1027,44 +1040,6 @@
+     if (!existsSync(candidate)) return candidate
+   }
+   return join(draftsDir, newDraftFilename())
+-}
+-
+-/**
+- * Auto-save the draft to <Documents>/GenOffice/<name>.pptx after AI generation completes.
+- * Append mode reuses the session's existing draft path (overwrite); replace mode generates a
+- * new filename. On successful write, update session.path, pushRecent, slidesOpenedHook.
+- * On write failure, degrade silently (console.warn) without blocking the in-memory session.
+- */
+-async function saveDraftAfterGenerate(
+-  wc: WebContents,
+-  session: Session,
+-  bytes: Uint8Array,
+-  mode: 'replace' | 'append',
+-  deckName?: string,
+-): Promise<void> {
+-  try {
+-    const draftsDir = getDraftsDir()
+-    // Ensure the directory exists
+-    if (!existsSync(draftsDir)) mkdirSync(draftsDir, { recursive: true })
+-
+-    // Append mode: overwrite if the session already has a draft path; otherwise create a new file too
+-    let draftPath: string
+-    if (mode === 'append' && session.path && session.path.startsWith(draftsDir)) {
+-      draftPath = session.path
+-    } else {
+-      draftPath = pickDraftPath(draftsDir, deckName)
+-    }
+-
+-    await writeFile(draftPath, Buffer.from(bytes))
+-    session.path = draftPath
+-    await pushRecent(draftPath)
+-    slidesOpenedHook?.(wc, draftPath)
+-  } catch (err) {
+-    console.warn(
+-      '[slides] Failed to persist AI-generated draft to disk; the in-memory session still works:',
+-      err,
+-    )
+-  }
+ }
+ 
+ /** Theme body (minor) Latin font: fallback shown in the ribbon font box when the selection has no text element. */
+@@ -1464,7 +1439,12 @@
+       return { ok: false, error: err instanceof Error ? err.message : String(err) }
+     }
+   })
+-  ipcMain.handle('slides:font-install-local', async () => {
++  ipcMain.handle('slides:font-install-local', async (_e, paths?: string[]) => {
++    if (paths) {
++      const families = installLocalFontFiles(paths)
++      if (families.length) afterFontsChanged()
++      return { families }
++    }
+     const r = await showOpenDialogWithMemory(dialog, dialogParent(), {
+       properties: ['openFile', 'multiSelections'],
+       filters: [{ name: 'Fonts', extensions: ['ttf', 'otf', 'ttc', 'otc'] }],
+@@ -1518,12 +1498,12 @@
+     return openAndBuild(e.sender, prepared, fitWidthPx)
+   })
+ 
+-  ipcMain.handle('slides:open-path', async (e, path: string, fitWidthPx: number) => {
++  ipcMain.handle('slides:open-path', async (e, path: string, fitWidthPx: number, recovery?: { recoveryIdentityPath: string; recovered: boolean }) => {
+     if (!path || !existsSync(path)) return null
+     const prepared = await preparePresentationForOpen(path)
+     if (!prepared) return null
+     if (await rejectLegacyPpt(prepared)) return null
+-    return openAndBuild(e.sender, prepared, fitWidthPx)
++    return openAndBuild(e.sender, prepared, fitWidthPx, recovery)
+   })
+ 
+   ipcMain.handle('slides:consume-pending-open', async (e, fitWidthPx: number) => {
+@@ -1557,6 +1537,7 @@
+       session.fitWidthPx = fitWidthPx
+       return {
+         path: session.path,
++        name: basename(session.path),
+         slides: buildAllRenderSlides(session.opened, fitWidthPx),
+         size: { cx: session.opened.deck.size.cx, cy: session.opened.deck.size.cy },
+         defaultFont: deckDefaultFont(session.opened),
+@@ -1913,12 +1894,13 @@
+     async (
+       _e,
+       op: { specJson: string },
+-    ): Promise<{ ok: boolean; marker?: string; error?: string; imageFailures?: string[] }> => {
++    ): Promise<{ ok: boolean; marker?: string; error?: string; imageFailures?: string[]; imageWarnings?: string[] }> => {
+       const parsed = parsePageSpec(String(op?.specJson ?? ''))
+       if (!parsed.ok) return { ok: false, error: parsed.error }
+       try {
+         const started = Date.now()
+-        const { bytes, imageFailures } = await buildPagePptx(parsed.spec, {
++        const dimensions = new Map<Uint8Array, { width: number; height: number }>()
++        const { bytes, imageFailures, imageWarnings } = await buildPagePptx(parsed.spec, {
+           fontMetrics: getFontMetrics(),
+           fetchImage: async (url) => {
+             const resp = await fetchRemoteImage(url)
+@@ -1934,16 +1916,12 @@
+                   : /bmp/.test(mime)
+                     ? 'bmp'
+                     : 'jpg'
++            const size = await imageDimensions?.(buf)
++            if (!size) return null
++            dimensions.set(buf, size)
+             return { bytes: buf, ext }
+           },
+-          imageDims: (bytes) => {
+-            try {
+-              const s = nativeImage.createFromBuffer(Buffer.from(bytes)).getSize()
+-              return s.width > 0 && s.height > 0 ? s : null
+-            } catch {
+-              return null
+-            }
+-          },
++          imageDims: (bytes) => dimensions.get(bytes) ?? null,
+         })
+         console.log(
+           `[local-slide] page generated: bytes=${bytes.length} imageFails=${imageFailures.length} ms=${Date.now() - started}`,
+@@ -1957,6 +1935,7 @@
+           ok: true,
+           marker: GENERATED_PAGE_PREFIX + path,
+           ...(imageFailures.length ? { imageFailures } : {}),
++          ...(imageWarnings.length ? { imageWarnings } : {}),
+         }
+       } catch (err) {
+         return { ok: false, error: err instanceof Error ? err.message : String(err) }
+@@ -2050,18 +2029,9 @@
+             return { error: tm('errAppendFailed', { reason: lastErr ?? tm('errUnknown') }) }
+           }
+           existing.fitWidthPx = fitWidthPx
+-          // Save the draft: persist the current complete deck
+-          const bytes = await savePptx(opened)
+-          await saveDraftAfterGenerate(e.sender, existing, bytes, 'append', deckName)
+-          // Draft now matches memory: reopen from the output bytes to clear dirty (same as
+-          // slides:save) — otherwise pure AI generation (per-page append merges mark
+-          // structureDirty) would trigger the close confirmation even without edits
+-          if (existing.path) {
+-            existing.opened = await openPptx(bytes)
+-            existing.metaDirty = false
+-          }
+           return {
+             path: existing.path,
++            name: basename(existing.path),
+             slides: buildAllRenderSlides(existing.opened, fitWidthPx),
+             size: { cx: existing.opened.deck.size.cx, cy: existing.opened.deck.size.cy },
+             defaultFont: deckDefaultFont(existing.opened),
+@@ -2103,14 +2073,9 @@
+             return { error: r.failures?.[0]?.error ?? tm('errReplaceFailed') }
+           }
+           existing.fitWidthPx = fitWidthPx
+-          const bytes = await savePptx(opened)
+-          await saveDraftAfterGenerate(e.sender, existing, bytes, 'append', deckName)
+-          if (existing.path) {
+-            existing.opened = await openPptx(bytes)
+-            existing.metaDirty = false
+-          }
+           return {
+             path: existing.path,
++            name: basename(existing.path),
+             slides: buildAllRenderSlides(existing.opened, fitWidthPx),
+             size: { cx: existing.opened.deck.size.cx, cy: existing.opened.deck.size.cy },
+             defaultFont: deckDefaultFont(existing.opened),
+@@ -2149,14 +2114,9 @@
+             return { error: r.failures?.[0]?.error ?? tm('errInsertFailed') }
+           }
+           existing.fitWidthPx = fitWidthPx
+-          const bytes = await savePptx(opened)
+-          await saveDraftAfterGenerate(e.sender, existing, bytes, 'append', deckName)
+-          if (existing.path) {
+-            existing.opened = await openPptx(bytes)
+-            existing.metaDirty = false
+-          }
+           return {
+             path: existing.path,
++            name: basename(existing.path),
+             slides: buildAllRenderSlides(existing.opened, fitWidthPx),
+             size: { cx: existing.opened.deck.size.cx, cy: existing.opened.deck.size.cy },
+             defaultFont: deckDefaultFont(existing.opened),
+@@ -2168,22 +2128,23 @@
+         const { bytes } = await assembleDeck()
+         const opened = await openPptx(bytes)
+         const replaceSession: Session = {
+-          path: '',
++          path: sessions.get(e.sender.id)?.path ?? '',
++          recoveryIdentityPath: sessions.get(e.sender.id)?.recoveryIdentityPath,
+           opened,
+           fitWidthPx,
+           undoStack: [],
+           redoStack: [],
++          metaDirty: true,
+         }
+         const old = sessions.get(e.sender.id)
+         carryHistoryForReplacement(old, replaceSession)
+         sessions.set(e.sender.id, replaceSession)
+         // Re-point windows that shared the old session, or they diverge onto a dead deck
+         if (old) for (const id of attachedIds(old)) sessions.set(id, replaceSession)
+-        // Save the draft: await completion so the real path is returned; on failure degrade silently (session.path stays '')
+-        await saveDraftAfterGenerate(e.sender, replaceSession, bytes, 'replace', deckName)
+         scheduleDeckBroadcast(replaceSession)
+         return {
+           path: replaceSession.path,
++          name: basename(replaceSession.path),
+           slides: buildAllRenderSlides(opened, fitWidthPx),
+           size: { cx: opened.deck.size.cx, cy: opened.deck.size.cy },
+           defaultFont: deckDefaultFont(opened),
+@@ -2207,6 +2168,7 @@
+       scheduleHistoryNotify(sessions.get(e.sender.id)!)
+       return {
+         path: '',
++        name: tm('untitledDeck'),
+         slides: buildAllRenderSlides(opened, fitWidthPx),
+         size: { cx: opened.deck.size.cx, cy: opened.deck.size.cy },
+         defaultFont: deckDefaultFont(opened),
+@@ -2392,7 +2354,7 @@
+ 
+   // Shim over the canonical setBackground op (one slide per op; apply-to-all fans out;
+   // the full-bleed backdrop repaint lives in the op). File dialogs stay here.
+-  ipcMain.handle('slides:edit-background', async (e, op: EditBackgroundOp) => {
++  ipcMain.handle('slides:edit-background', async (e, op: EditBackgroundOp & { source?: { base64: string; ext: string } }) => {
+     const session = sessions.get(e.sender.id)
+     if (!session) return null
+     const slides = session.opened.deck.slides
+@@ -2402,7 +2364,9 @@
+ 
+     if (op.kind === 'image') {
+       let source: { bytes: Uint8Array; ext: string } | { mediaPath: string }
+-      if (op.pick !== false) {
++      if (op.source) {
++        source = { bytes: new Uint8Array(Buffer.from(op.source.base64, 'base64')), ext: op.source.ext.toLowerCase() }
++      } else if (op.pick !== false) {
+         const r = await showOpenDialogWithMemory(dialog, dialogParent(), {
+           title: tm('dlgInsertImage'),
+           properties: ['openFile' as const],
+@@ -2687,10 +2651,10 @@
+       bundles.push(bundle)
+     }
+     const pngs = op.pngs?.length === bundles.length ? op.pngs : undefined
+-    slideClipboard = { bundles, ...(pngs ? { pngs } : {}) }
+-    // Marker so plain ⌘V knows the latest copy was a slide (element copies / external copies overwrite it)
+-    clipboard.writeBuffer('io.genoffice.slides.slide', Buffer.from('1'))
+-    return true
++    const token = randomUUID()
++    const next = { bundles, ...(pngs ? { pngs } : {}), token }
++    pendingCopy = { token, senderId: e.sender.id, format: 'io.genoffice.slides.slide', commit: () => { slideClipboard = next } }
++    return { result: true, copyToken: token, clipboard: { metadata: { 'io.genoffice.slides.slide': token } } }
+   })
+ 
+   ipcMain.handle('slides:has-slide-clipboard', () => slideClipboard !== null)
+@@ -3344,7 +3308,7 @@
+     return { slide: rebuilt, sourceId: newId }
+   })
+ 
+-  ipcMain.handle('slides:edit-chart', async (e, op: EditChartOp) => {
++  ipcMain.handle('slides:edit-chart', async (e, op: EditChartOp & { confirmedLossy?: boolean }) => {
+     const session = sessions.get(e.sender.id)
+     if (!session) return null
+     const slide = session.opened.deck.slides[op.slideIndex]
+@@ -3355,19 +3319,7 @@
+     // and unmodeled fine-grained formatting (number formats/trendlines/error bars/per-point styles) is lost
+     const chartEl = slide.elements[elIdx] as { type?: string; descr?: string } | undefined
+     if (chartEl?.type === 'chart' && chartEl.descr !== 'aislides-chart') {
+-      const parent = dialogParent()
+-      const options = {
+-        type: 'warning' as const,
+-        buttons: [tm('chartSimplifyOk'), tm('btnCancel')],
+-        defaultId: 0,
+-        cancelId: 1,
+-        message: tm('chartSimplifyTitle'),
+-        detail: tm('chartSimplifyBody'),
+-      }
+-      const r = parent
+-        ? await dialog.showMessageBox(parent, options)
+-        : await dialog.showMessageBox(options)
+-      if (r.response !== 0) return null
++      if (!op.confirmedLossy) return { warning: 'chart-edit-lossy' }
+     }
+     const patch: Parameters<typeof editChartElement>[3] = {
+       ...(op.kind ? { kind: op.kind === 'barH' ? 'bar' : op.kind } : {}),
+@@ -3613,34 +3565,38 @@
+     },
+   )
+ 
+-  // Our marker still present = the last copy came from this app -> use internal element paste
+-  // (on macOS custom formats don't appear in availableFormats, so check via readBuffer)
+-  const clipboardMarker = (format: string) => {
+-    try {
+-      return clipboard.readBuffer(format).length > 0
+-    } catch {
+-      return false
+-    }
+-  }
+-
+-  ipcMain.handle('slides:clipboard-external', () => {
+-    if (slideClipboard && clipboardMarker('io.genoffice.slides.slide')) return { kind: 'slide' }
+-    if (elementClipboard && elementClipboardMarkerMatches(elementClipboard.token))
+-      return { kind: 'internal' }
+-    const img = clipboard.readImage()
+-    if (!img.isEmpty()) return { kind: 'image', base64: img.toPNG().toString('base64'), ext: 'png' }
+-    const text = clipboard.readText()
+-    if (text.trim()) return { kind: 'text', text }
++  type ClipboardContent = {
++    text?: string
++    html?: string
++    image?: { data: string; mimeType: 'image/png' }
++    metadata?: Partial<Record<'io.genoffice.slides.slide' | 'io.genoffice.slides.elements', string>>
++  }
++  const elementMarker = (content: ClipboardContent, token: string): boolean =>
++    content.metadata?.[ELEMENT_CLIPBOARD_FORMAT] === token ||
++    [...(content.html ?? '').matchAll(/<img\b[^>]*\bdata-genoffice-slides-elements\s*=\s*"([^"]*)"[^>]*>/gi)]
++      .some(match => match[1] === encodeURIComponent(token))
++  const clipboardContent = (content: ClipboardContent) => {
++    if (slideClipboard && content.metadata?.['io.genoffice.slides.slide'] === slideClipboard.token) return { kind: 'slide' }
++    if (elementClipboard && elementMarker(content, elementClipboard.token)) return { kind: 'internal' }
++    if (content.image) return { kind: 'image', base64: content.image.data, ext: 'png' }
++    if (content.text?.trim()) return { kind: 'text', text: content.text }
+     return { kind: 'none' }
+-  })
+-
+-  // Menu-enable probe: is there anything a paste would act on? (no image decode)
+-  ipcMain.handle('slides:clipboard-probe', () => {
+-    if (slideClipboard && clipboardMarker('io.genoffice.slides.slide')) return true
+-    if (elementClipboard && elementClipboardMarkerMatches(elementClipboard.token)) return true
+-    if (clipboard.availableFormats().some((f) => f.startsWith('image/'))) return true
+-    return clipboard.readText().trim().length > 0
+-  })
++  }
++  ipcMain.handle('slides:finish-copy', (e, token: string, content: ClipboardContent | null) => {
++    const pending = pendingCopy
++    if (!pending || pending.token !== token || pending.senderId !== e.sender.id) return false
++    pendingCopy = null
++    if (!content || !(pending.format === ELEMENT_CLIPBOARD_FORMAT
++      ? elementMarker(content, token)
++      : content.metadata?.['io.genoffice.slides.slide'] === token)) return false
++    pending.commit()
++    return true
++  })
++  ipcMain.handle('slides:cancel-copy', (e) => {
++    if (pendingCopy?.senderId === e.sender.id) pendingCopy = null
++  })
++  ipcMain.handle('slides:clipboard-external', (_e, content: ClipboardContent) => clipboardContent(content))
++  ipcMain.handle('slides:clipboard-probe', (_e, content: ClipboardContent) => clipboardContent(content).kind !== 'none')
+ 
+   ipcMain.handle('slides:copy-elements', (e, op: CopyElementsOp) => {
+     const session = sessions.get(e.sender.id)
+@@ -3653,21 +3609,27 @@
+       .map((el) => copyElementData(session.opened, slide, el))
+     if (items.length) {
+       const token = isElementClipboardToken(op.clipboardToken) ? op.clipboardToken : randomUUID()
+-      elementClipboard = {
++      const next = {
+         items,
+         cascade: newPasteCascade(op.cut ? null : pageKey(e.sender.id, op.slideIndex)),
+         token,
+         senderId: e.sender.id,
+       }
+-      // Write our marker to the OS clipboard: an external copy overwrites it, so at paste time it tells whether internal or external is newer
+-      clipboard.writeBuffer(ELEMENT_CLIPBOARD_FORMAT, Buffer.from(token))
++      pendingCopy = { token, senderId: e.sender.id, format: ELEMENT_CLIPBOARD_FORMAT, commit: () => { elementClipboard = next } }
++      return { result: items.length, copyToken: token, clipboard: { metadata: { [ELEMENT_CLIPBOARD_FORMAT]: token } } }
+     }
+     return items.length
+   })
+ 
+-  ipcMain.handle('slides:copy-elements-image', (e, clipboardToken: string, pngBase64: string) => {
+-    if (!canWriteElementClipboardImage(elementClipboard, e.sender.id, clipboardToken)) return false
+-    return writeElementClipboardImage(clipboardToken, pngBase64)
++  ipcMain.handle('slides:copy-elements-image', (e, clipboardToken: string, pngBase64: string, content: ClipboardContent) => {
++    if (!isElementClipboardToken(clipboardToken) || elementClipboard?.senderId !== e.sender.id ||
++      elementClipboard.token !== clipboardToken || !elementMarker(content, clipboardToken)) return false
++    return { result: true, clipboard: {
++      image: { data: pngBase64, mimeType: 'image/png' },
++      html: `<img src="data:image/png;base64,${pngBase64}" data-genoffice-slides-elements="${encodeURIComponent(clipboardToken)}">`,
++      metadata: { [ELEMENT_CLIPBOARD_FORMAT]: clipboardToken },
++      expected: { format: ELEMENT_CLIPBOARD_FORMAT, value: clipboardToken },
++    } }
+   })
+ 
+   ipcMain.handle('slides:paste-elements', (e, op: PasteElementsOp) => {
+@@ -3947,9 +3909,9 @@
+     bytes: Uint8Array,
+     ext: string,
+     name: string | undefined,
+-    opts: { filePath?: string; natural?: Size | null; center?: Point; fitWidthPx: number },
++    opts: { filePath?: string; poster?: { bytes: Uint8Array; ext: string }; natural?: Size | null; center?: Point; fitWidthPx: number },
+   ): Promise<AddMediaResult | null> => {
+-    const poster = kind === 'video' && opts.filePath ? await videoPoster(opts.filePath) : undefined
++    const poster = opts.poster ?? (kind === 'video' && opts.filePath ? await videoPoster(opts.filePath) : undefined)
+     const deckSize = session.opened.deck.size
+     const slideSize = { width: deckSize.cx, height: deckSize.cy }
+     const offset =
+@@ -4080,6 +4042,7 @@
+     const toEmu = (px: number) => Math.round((px / scale) * EMU_PER_PX_96)
+     return embedMedia(session, op.slideIndex, op.kind, bytes, op.ext, op.name, {
+       filePath: 'path' in op ? op.path : undefined,
++      ...(op.kind === 'video' && op.posterBase64 ? { poster: { bytes: Buffer.from(op.posterBase64, 'base64'), ext: 'png' } } : {}),
+       natural: op.natural,
+       center: op.centerPx ? { x: toEmu(op.centerPx.x), y: toEmu(op.centerPx.y) } : undefined,
+       fitWidthPx: op.fitWidthPx,
+@@ -4670,7 +4633,7 @@
+       const metaRevAtSave = session.metaRev ?? 0
+       await writeDeckFile(session.opened, session.path)
+       autosaveBackoff.delete(session.path)
+-      void rm(autosavePathFor(session.path), { force: true }).catch(() => {})
++      void rm(autosavePathFor(session.recoveryIdentityPath ?? session.path), { force: true }).catch(() => {})
+       dropUntitledRecovery(e.sender.id)
+       // Bake the saved patches back into the in-memory model (clears dirty, syncs
+       // anchor.originalXml with disk) — a full reopen would re-read and unzip the
+@@ -4681,6 +4644,7 @@
+       return {
+         ok: true,
+         path: session.path,
++        name: basename(session.path),
+         slides: buildAllRenderSlides(session.opened, session.fitWidthPx),
+       }
+     } catch (err) {
+@@ -4711,6 +4675,7 @@
+       return {
+         ok: true,
+         path: r.filePath,
++        name: basename(r.filePath),
+         slides: buildAllRenderSlides(session.opened, session.fitWidthPx),
+       }
+     } catch (err) {

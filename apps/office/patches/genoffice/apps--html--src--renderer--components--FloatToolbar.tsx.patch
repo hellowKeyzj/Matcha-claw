@@ -1,0 +1,47 @@
+--- a/genoffice/apps/html/src/renderer/components/FloatToolbar.tsx
++++ b/genoffice/apps/html/src/renderer/components/FloatToolbar.tsx
+@@ -29,7 +29,6 @@
+   IconRotateLeft,
+   IconRotateRight,
+   IconSliders,
+-  IconSparkle,
+   IconTrash,
+ } from './icons'
+ 
+@@ -44,14 +43,11 @@
+   pending: Record<string, string | null>
+   /** the element has one editable text run */
+   canEditText: boolean
+-  /** the element can carry an AI instruction (structural nodes cannot) */
+-  canAskAi: boolean
+   onStyle: StyleEdit
+   onEditText: () => void
+   onReplaceImage: () => void
+   onCropImage: () => void
+   onCutoutImage: () => void
+-  onAskAi: () => void
+   tag: string
+   onMove: (dir: -1 | 1) => void
+   onDuplicate: () => void
+@@ -371,21 +367,6 @@
+       >
+         <IconSliders size={16} />
+       </button>
+-      {p.canAskAi && (
+-        <>
+-          <span className="hx-float-sep" />
+-          <button
+-            type="button"
+-            className="hx-float-btn text ask"
+-            data-tip={t('aiAskTitle')}
+-            onMouseDown={stop}
+-            onClick={p.onAskAi}
+-          >
+-            <IconSparkle size={15} />
+-            {t('aiAskBtn')}
+-          </button>
+-        </>
+-      )}
+     </div>
+   )
+ }

@@ -1,9 +1,9 @@
 import { forwardRef, useEffect, useEffectEvent, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { hostAppPluginBundle, hostAppPluginCall, hostFileWriteBinary, hostWriteClipboardImage } from '@/lib/host-api';
+import { hostAppDocumentResourcesOwner, hostAppDocumentResourcesCreate, hostAppDocumentResourcesRelease, hostAppDocumentResourcesReleaseOwner, hostAppPluginBundle, hostAppPluginCall, hostAppRenderPdf, hostAppDesktopMedia, hostAppPresentationCall, hostAppPresentationOwner, hostAppPresentationRelease, hostAppPresentationRequest, hostAppSpellcheckOwner, hostAppSpellcheckCall, hostReadClipboard, hostWriteClipboard, hostFileWriteBinary, hostWriteClipboardImage } from '@/lib/host-api';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { subscribeHostEvent } from '@/lib/host-events';
-import { appPluginResources, appResourceUri, appToolName, validateAppComposeRequest, validateAppWorkspaceFileRequest, type AppComposeRequest, type AppComposeSource, type AppJson, type AppRuntimeEvent, type AppToolResult, type AppWebviewApi, type AppWebviewContext } from '@/types/desktop/app-plugin-sdk';
+import { APP_RENDER_PDF_MAX_BYTES, isAppRenderPdfRequest, isAppClipboardWriteRequest, isAppSpellcheckRequest, type AppPresentationBootstrap, type AppPresentationEvent, type AppSpellcheckContextMenu, appPluginResources, appResourceUri, appToolName, validateAppComposeRequest, validateAppWorkspaceFileRequest, type AppComposeRequest, type AppComposeSource, type AppJson, type AppRuntimeEvent, type AppToolResult, type AppWebviewApi, type AppWebviewContext } from '@/types/desktop/app-plugin-sdk';
 import type { AppPluginManifest } from '@/types/desktop/app-plugin';
 import { createMcpAppProtocol, mcpAppHostContext, onlyMcpAppParams as only } from '@/plugins/surfaces/mcp-app-protocol';
 import { isRecord, type SandboxMessage } from '@/plugins/surfaces/sandbox-channel';
@@ -16,12 +16,19 @@ import { useSettingsStore } from '@/plugins/settings/store';
 import { useResolvedTheme } from '@/lib/use-resolved-theme';
 import { createAppSessionMedia } from './session-media';
 import { AppPluginConfirmation } from './Confirmation';
+import { createAppDesktopMedia } from './desktop-media';
+import { isApplicationOpenRequest, type ApplicationOpenChannel } from './application-open';
 
 export interface AppFrameProps {
   pluginId: string;
   digest: string;
   html: string;
   title: string;
+  entry: string;
+  applicationId?: string;
+  applicationOpen?: ApplicationOpenChannel;
+  onOpenApplication?: AppWebviewApi['openApplication'];
+  presentation?: AppPresentationBootstrap;
   sessionIdentity?: SessionIdentity;
   workspaceDraftId?: string;
   onCompose?: (request: AppComposeRequest, source: AppComposeSource, signal: AbortSignal) => Promise<void>;
@@ -37,20 +44,22 @@ export interface AppFrameProps {
   };
 }
 
-export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFrame({ pluginId, digest, html, title, sessionIdentity, workspaceDraftId, onCompose, registerCloseHandler, development }, ref) {
+export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFrame({ pluginId, digest, html, title, entry, applicationId, applicationOpen, onOpenApplication, presentation, sessionIdentity, workspaceDraftId, onCompose, registerCloseHandler, development }, ref) {
   const { t, i18n } = useTranslation('common');
   const theme = useResolvedTheme(useSettingsStore((state) => state.theme));
   const framePort = useRef<MessagePort | null>(null);
   const developmentHandle = useRef<AppFrameHandle | null>(null);
   const mcpContextChanged = useRef<(() => void) | null>(null);
   const container = useRef<HTMLDivElement>(null);
-  const { catalog } = useInstalledAppPlugins();
+  const { catalog } = useInstalledAppPlugins(!presentation);
   const readManifest = useEffectEvent(() => {
+    if (presentation) return presentation.manifest;
     if (development) return development.manifest.id === pluginId ? development.manifest : undefined;
     return catalog.plugins.find((record) => record.manifest.id === pluginId && record.digest === digest && record.enabled)?.manifest;
   });
   const backendCall = useEffectEvent((name: string, args: Record<string, unknown>, signal: AbortSignal) => development
     ? development.call(name, args, signal)
+    : presentation ? hostAppPresentationCall({ frameId: presentation.presentationId, name, arguments: args })
     : hostAppPluginCall({ id: pluginId, digest, name, arguments: args }));
   const report = useEffectEvent((event: { level: 'info' | 'error'; message: string }) => development?.report(event));
   useImperativeHandle(ref, () => ({
@@ -59,8 +68,8 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     getBounds: () => developmentHandle.current?.getBounds() ?? null,
   }), [t]);
   const sessionIdentityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : undefined;
-  const identity = useMemo(() => ({ pluginId, digest, html, title, sessionIdentityKey, workspaceDraftId, development }), [pluginId, digest, html, title, sessionIdentityKey, workspaceDraftId, development]);
-  const readContext = useEffectEvent((): AppWebviewContext => ({ ...(sessionIdentity ? { sessionIdentity } : {}), ...(!development && workspaceDraftId ? { workspaceDraftId } : {}), language: i18n.resolvedLanguage ?? i18n.language, theme }));
+  const identity = useMemo(() => ({ pluginId, digest, html, title, entry, applicationId, applicationOpen, presentation, sessionIdentityKey, workspaceDraftId, development }), [pluginId, digest, html, title, entry, applicationId, applicationOpen, presentation, sessionIdentityKey, workspaceDraftId, development]);
+  const readContext = useEffectEvent((): AppWebviewContext => ({ ...(presentation?.context ?? {}), ...(applicationOpen?.initial?.data !== undefined ? { data: applicationOpen.initial.data } : {}), ...(sessionIdentity ? { sessionIdentity } : {}), ...(!development && workspaceDraftId ? { workspaceDraftId } : {}), language: i18n.resolvedLanguage ?? i18n.language, theme }));
   const isCurrentSession = useEffectEvent((sourceIdentityKey: string | undefined) => sourceIdentityKey === sessionIdentityKey);
   const canCompose = useEffectEvent(() => !!onCompose);
   const compose = useEffectEvent((request: AppComposeRequest, source: AppComposeSource, sourceIdentityKey: string | undefined, sourceDraftId: string | undefined, signal: AbortSignal) => {
@@ -68,6 +77,10 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     if (sourceIdentityKey !== sessionIdentityKey || sourceDraftId !== workspaceDraftId || source.pluginId !== pluginId || source.digest !== digest) throw new Error(t('appFrame.sessionChanged'));
     if (!onCompose) throw new Error(t('appFrame.noComposer'));
     return onCompose(request, source, signal);
+  });
+  const openApplication = useEffectEvent((request: Parameters<AppWebviewApi['openApplication']>[0]) => {
+    if (!onOpenApplication) throw new Error(t('appFrame.unavailable'));
+    return onOpenApplication(request);
   });
   const registerClose = useEffectEvent((handler: Parameters<NonNullable<AppWebviewApi['onCloseRequested']>>[0]) => registerCloseHandler?.(handler));
   const [workspaceSave, setWorkspaceSave] = useState<{
@@ -88,6 +101,9 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     if (!root) return;
     const frame = document.createElement('iframe');
     frame.title = identity.title;
+    const ownerId = identity.presentation?.presentationId ?? crypto.randomUUID();
+    frame.name = `matcha-app-${ownerId}`;
+    frame.allow = 'fullscreen *';
     // Opaque web origin separates the page from preload and the main Renderer, not from its trusted backend.
     frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-downloads');
     frame.referrerPolicy = 'no-referrer';
@@ -103,6 +119,21 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     let mediaReadPending: AbortSignal | undefined;
     let mediaListPending: AbortSignal | undefined;
     let workspaceSavePending = false;
+    let pdfPending = false;
+    let spellReady: Promise<void> | undefined;
+    let presentationReady: Promise<void> | undefined;
+    let documentResourcesReady: Promise<void> | undefined;
+    const stopNativeEvents: (() => void)[] = [];
+    const registerNativeOwners = () => {
+      if (!ready || identity.development || closed) return;
+      if (!identity.presentation) spellReady ??= hostAppSpellcheckOwner({ ownerId, pluginId: identity.pluginId, digest: identity.digest, entry: identity.entry, active: true });
+      void spellReady?.catch(() => {});
+      if (!identity.presentation) documentResourcesReady ??= hostAppDocumentResourcesOwner({ ownerId, pluginId: identity.pluginId, digest: identity.digest, entry: identity.entry });
+      void documentResourcesReady?.catch(() => {});
+      const declared = readManifest()?.contributes.applications?.find(application => identity.applicationId ? application.id === identity.applicationId : application.entry === identity.entry);
+      if (declared) presentationReady ??= hostAppPresentationOwner({ frameId: ownerId, pluginId: identity.pluginId, digest: identity.digest, applicationId: declared.id, context: { language: context.language, theme: context.theme } });
+      void presentationReady?.catch(() => {});
+    };
     let finishWorkspaceSave: ((allowed: boolean) => void) | null = null;
     let unsubscribeMedia = () => {};
     let loaded = false;
@@ -165,6 +196,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     let unsubscribe = () => {};
     const text = (key: string) => i18n.t(`common:appFrame.${key}`);
     const isMediaActive = () => !closed && ready && !frame.closest('[inert]') && isCurrentSession(identity.sessionIdentityKey);
+    const desktopMedia = createAppDesktopMedia(frame, channel.port1, { invoke: hostAppDesktopMedia, isActive: () => !closed && ready && !identity.presentation && !identity.development && !frame.closest('[inert]'), text: { chooseScreen: text('chooseScreen'), cancel: text('workspaceSaveCancel') } });
     const notifyMediaChanged = () => {
       mediaDirty = true;
       if (!isMediaActive() || mediaReadPending || mediaListPending) return;
@@ -186,6 +218,11 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     const dispose = () => {
       if (closed) return;
       closed = true;
+      desktopMedia.dispose();
+      stopNativeEvents.forEach(stop => stop());
+      if (spellReady) void hostAppSpellcheckOwner({ ownerId, pluginId: identity.pluginId, digest: identity.digest, entry: identity.entry, active: false }).catch(() => {});
+      if (presentationReady) void hostAppPresentationRelease(ownerId).catch(() => {});
+      if (documentResourcesReady) void hostAppDocumentResourcesReleaseOwner(ownerId).catch(() => {});
       mcp?.dispose();
       mcp = null;
       mcpContextChanged.current = null;
@@ -220,7 +257,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
       setResult({ identity, error: message.slice(0, 500) });
     };
     const showConnectedFrame = () => {
-      if (!closed && loaded && ready) { clearTimeout(timer); setResult({ identity }); }
+      if (!closed && loaded && ready) { registerNativeOwners(); clearTimeout(timer); setResult({ identity }); }
     };
     const load = () => {
       if (closed) return;
@@ -326,6 +363,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
         return;
       }
       const value = event.data as Record<string, unknown>;
+      if (desktopMedia.handleMessage(value)) return;
       if (value.type === 'development-result' && identity.development && Number.isSafeInteger(value.id)) {
         const request = commandPending.get(Number(value.id));
         if (!request) return;
@@ -335,10 +373,14 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
       }
       if (value.type === 'ready' && !ready) {
         ready = true;
+        registerNativeOwners();
         localeChanged();
         channel.port1.postMessage({ type: 'theme', theme: readContext().theme });
         showConnectedFrame();
         report({ level: 'info', message: 'Application bridge connected (rendering not verified)' });
+        stopNativeEvents.push(identity.applicationOpen?.subscribe(request => {
+          if (!closed && ready) channel.port1.postMessage({ type: 'event', topic: 'application.open', data: request.data === undefined ? {} : { data: request.data } });
+        }) ?? (() => {}));
         if (mediaDirty) notifyMediaChanged();
         return;
       }
@@ -395,7 +437,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
         active.finish(value.allowed);
         return;
       }
-      if ((value.type !== 'call' && value.type !== 'compose' && value.type !== 'clipboard' && value.type !== 'workspace-save' && value.type !== 'media-list' && value.type !== 'media-read') || !Number.isSafeInteger(value.id) || Number(value.id) < 1
+      if ((value.type !== 'document-resources' && value.type !== 'open-application' && value.type !== 'desktop-media' && value.type !== 'spellcheck' && value.type !== 'presentation' && value.type !== 'rich-clipboard-read' && value.type !== 'rich-clipboard-write' && value.type !== 'render-pdf' && value.type !== 'call' && value.type !== 'compose' && value.type !== 'clipboard' && value.type !== 'workspace-save' && value.type !== 'media-list' && value.type !== 'media-read') || !Number.isSafeInteger(value.id) || Number(value.id) < 1
         || pending.has(Number(value.id)) || pending.size >= 64) {
         fail(text('invalidRequest'));
         return;
@@ -418,6 +460,53 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
             || Object.keys(request).some((key) => key !== 'id') || typeof (request as Record<string, unknown>).id !== 'string'
             || !/^media_[a-f0-9]{64}$/.test((request as { id: string }).id)))) {
           channel.port1.postMessage({ type: 'result', id: value.id, error: text('invalidRequest') });
+          return;
+        }
+      } else if (value.type === 'document-resources') {
+        if (!ready || identity.development || identity.presentation || !isRecord(value.request)
+          || Object.keys(value).some(key => !['type', 'id', 'request'].includes(key))
+          || Object.keys(value.request).some(key => !['operation', 'input'].includes(key))
+          || !['create', 'release'].includes(String(value.request.operation))
+          || new TextEncoder().encode(JSON.stringify(value)).byteLength + 1024 > 8 * 1024 * 1024) {
+          channel.port1.postMessage({ type: 'result', id: value.id, error: text('invalidRequest') }); return;
+        }
+      } else if (value.type === 'open-application') {
+        const declared = readManifest()?.contributes.applications?.find(application => application.id === (isRecord(value.request) ? value.request.applicationId : undefined));
+        if (!ready || identity.development || identity.presentation || !isCurrentSession(identity.sessionIdentityKey) || frame.closest('[inert]')
+          || Object.keys(value).some(key => !['type', 'id', 'request'].includes(key)) || !isApplicationOpenRequest(value.request)
+          || !declared || ![undefined, 'page', 'chat-panel', 'both'].includes(declared.placement)) {
+          channel.port1.postMessage({ type: 'result', id: value.id, error: text('invalidRequest') }); return;
+        }
+      } else if (value.type === 'desktop-media') {
+        if (!ready || identity.presentation || identity.development || !document.hasFocus() || document.activeElement !== frame || frame.closest('[inert]') || !navigator.userActivation?.isActive
+          || !isRecord(value.request) || Object.keys(value).some(key => !['type', 'id', 'request'].includes(key)) || Object.keys(value.request).some(key => key !== 'operation' && key !== 'id')
+          || !['captureScreenSources', 'captureScreenSource', 'requestMicrophoneAccess'].includes(String(value.request.operation))) {
+          channel.port1.postMessage({ type: 'result', id: value.id, error: text('invalidRequest') }); return;
+        }
+      } else if (value.type === 'spellcheck' || value.type === 'presentation' || value.type === 'rich-clipboard-read' || value.type === 'rich-clipboard-write') {
+        const foreground = ready && document.hasFocus() && document.activeElement === frame && !frame.closest('[inert]');
+        const presentationInteraction = value.type === 'presentation' && isRecord(value.request) && ['open', 'setFullscreen', 'swap'].includes(String(value.request.operation));
+        const spellInitialization = value.type === 'spellcheck' && isRecord(value.request) && ['armContextMenu', 'contextMenuReady', 'languages'].includes(String(value.request.operation));
+        const foregroundRequired = value.type !== 'presentation' && !spellInitialization || presentationInteraction;
+        const gestureRequired = value.type.startsWith('rich-clipboard') || presentationInteraction;
+        if (!ready || value.type === 'spellcheck' && !!frame.closest('[inert]') || foregroundRequired && !foreground || gestureRequired && !navigator.userActivation?.isActive || Object.keys(value).some(key => !['type', 'id', 'request'].includes(key))
+          || value.type === 'spellcheck' && !isAppSpellcheckRequest(value.request) && !(isRecord(value.request) && (
+            value.request.operation === 'contextMenuReady' && Object.keys(value.request).every(key => ['operation', 'epoch'].includes(key)) && typeof value.request.epoch === 'string'
+            || value.request.operation === 'claimContextMenu' && Object.keys(value.request).every(key => ['operation', 'seq', 'nativeSeq', 'epoch', 'x', 'y', 'source'].includes(key))
+              && Number.isSafeInteger(value.request.seq) && Number(value.request.seq) > 0 && Number.isSafeInteger(value.request.nativeSeq) && Number(value.request.nativeSeq) > 0
+              && typeof value.request.epoch === 'string' && typeof value.request.x === 'number' && Number.isFinite(value.request.x) && typeof value.request.y === 'number' && Number.isFinite(value.request.y)
+              && ['pointer', 'keyboard'].includes(String(value.request.source))))
+          || value.type === 'rich-clipboard-write' && !isAppClipboardWriteRequest(value.request)
+          || value.type === 'presentation' && (!isRecord(value.request) || Object.keys(value.request).some(key => key !== 'operation' && key !== 'input') || !['displays', 'open', 'send', 'swap', 'close', 'setFullscreen'].includes(String(value.request.operation)))) {
+          channel.port1.postMessage({ type: 'result', id: value.id, error: text('invalidRequest') }); return;
+        }
+      } else if (value.type === 'render-pdf') {
+        if (!ready || pdfPending || Object.keys(value).some((key) => !['type', 'id', 'request'].includes(key)) || !isAppRenderPdfRequest(value.request)) {
+          channel.port1.postMessage({ type: 'result', id: value.id, error: text('invalidRequest'), code: pdfPending ? 'busy' : 'invalid-request' });
+          return;
+        }
+        if (new TextEncoder().encode(JSON.stringify(value)).byteLength + 1024 > APP_RENDER_PDF_MAX_BYTES) {
+          channel.port1.postMessage({ type: 'result', id: value.id, error: text('invalidRequest'), code: 'too-large' });
           return;
         }
       } else if (value.type === 'workspace-save') {
@@ -460,6 +549,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
       if (value.type === 'media-read') mediaReadPending = mediaSignal;
       if (value.type === 'media-list') mediaListPending = mediaSignal;
       if (value.type === 'workspace-save') workspaceSavePending = true;
+      if (value.type === 'render-pdf') pdfPending = true;
       pending.add(id);
       // Closing drops backend replies and any not-yet-dispatched local UI side effects.
       const operation = mediaOperation
@@ -470,6 +560,56 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
           mediaSignal.throwIfAborted();
           if (!isMediaActive()) throw new Error(text('sessionChanged'));
           return { content: [], structuredContent: { ...content } };
+        })
+        : value.type === 'document-resources'
+        ? Promise.resolve().then(async () => {
+          staging.signal.throwIfAborted(); manifest();
+          if (!documentResourcesReady) throw new Error(text('unavailable'));
+          await documentResourcesReady;
+          staging.signal.throwIfAborted();
+          const request = value.request as { operation: 'create'; input: Parameters<AppWebviewApi['documentResources']['create']>[0] } | { operation: 'release'; input: { id: string } };
+          if (request.operation === 'release') { await hostAppDocumentResourcesRelease(ownerId, request.input); return { content: [] }; }
+          const resource = await hostAppDocumentResourcesCreate(ownerId, request.input);
+          if (staging.signal.aborted) { await hostAppDocumentResourcesRelease(ownerId, { id: resource.id }); staging.signal.throwIfAborted(); }
+          return { content: [], structuredContent: { value: { ...resource } } };
+        })
+        : value.type === 'open-application'
+        ? Promise.resolve().then(async () => {
+          staging.signal.throwIfAborted(); manifest();
+          if (!isCurrentSession(identity.sessionIdentityKey) || frame.closest('[inert]')) throw new Error(text('sessionChanged'));
+          await openApplication(value.request as Parameters<AppWebviewApi['openApplication']>[0]);
+          return { content: [] };
+        })
+        : value.type === 'desktop-media'
+        ? Promise.resolve().then(async () => {
+          staging.signal.throwIfAborted(); manifest();
+          const request = value.request as { operation: 'captureScreenSources' | 'captureScreenSource' | 'requestMicrophoneAccess'; id?: string };
+          return { content: [], structuredContent: { value: await hostAppDesktopMedia({ frameName: frame.name, ...request }) } };
+        })
+        : value.type === 'spellcheck' || value.type === 'presentation' || value.type === 'rich-clipboard-read' || value.type === 'rich-clipboard-write'
+        ? Promise.resolve().then(async () => {
+          staging.signal.throwIfAborted(); manifest();
+          if (value.type === 'rich-clipboard-write') { await hostWriteClipboard(value.request as Parameters<AppWebviewApi['writeClipboard']>[0]); return { content: [] }; }
+          if (value.type === 'rich-clipboard-read') return { content: [], structuredContent: { ...await hostReadClipboard() } };
+          if (value.type === 'spellcheck') {
+            if (!spellReady) throw new Error(text('unavailable'));
+            await spellReady;
+            const request = { ...(value.request as Record<string, unknown>) };
+            if (request.operation === 'claimContextMenu' && request.source === 'pointer') { const bounds = frame.getBoundingClientRect(); request.x = Number(request.x) + bounds.x; request.y = Number(request.y) + bounds.y; }
+            return { content: [], structuredContent: { value: await hostAppSpellcheckCall(ownerId, request as Parameters<typeof hostAppSpellcheckCall>[1]) } };
+          }
+          if (!presentationReady) throw new Error(text('unavailable'));
+          await presentationReady;
+          return { content: [], structuredContent: { value: await hostAppPresentationRequest(ownerId, value.request as Parameters<typeof hostAppPresentationRequest>[1]) } };
+        })
+        : value.type === 'render-pdf'
+        ? Promise.resolve().then(async () => {
+          staging.signal.throwIfAborted();
+          manifest();
+          const result = await hostAppRenderPdf(value.request as Parameters<AppWebviewApi['renderPdf']>[0], staging.signal);
+          staging.signal.throwIfAborted();
+          manifest();
+          return { content: [], structuredContent: { ...result } };
         })
         : value.type === 'workspace-save'
         ? Promise.resolve().then(async () => {
@@ -506,7 +646,10 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
             await compose(value.request as AppComposeRequest, { pluginId: identity.pluginId, digest: identity.digest }, identity.sessionIdentityKey, identity.workspaceDraftId, staging.signal);
             return { content: [] };
           })
-          : Promise.resolve().then(() => callDeclaredTool(value.name as string, value.arguments as Record<string, unknown>));
+          : Promise.resolve().then(async () => {
+            if (identity.presentation) { if (!presentationReady) throw new Error(text('unavailable')); await presentationReady; }
+            return callDeclaredTool(value.name as string, value.arguments as Record<string, unknown>);
+          });
       void operation.then(
         (toolResult) => {
           if (closed) return;
@@ -515,8 +658,8 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
         },
         (error: unknown) => {
           if (closed) return;
-          const code = mediaOperation && error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
-            && ['unsupported', 'cursorInvalid', 'invalidReference', 'tooLarge', 'unavailable'].includes(error.code) ? error.code : undefined;
+          const code = (mediaOperation || value.type === 'render-pdf') && error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+            && ['unsupported', 'cursorInvalid', 'invalidReference', 'tooLarge', 'unavailable', 'invalid-request', 'too-large', 'busy', 'cancelled', 'deadline', 'render-failed'].includes(error.code) ? error.code : undefined;
           channel.port1.postMessage({ type: 'result', id, error: mediaOperation ? text('mediaReadFailed') : error instanceof Error ? error.message : text('requestFailed'), ...(code ? { code } : {}) });
         },
       ).catch(() => fail(text('resultFailed'))).finally(() => {
@@ -524,6 +667,7 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
         if (value.type === 'media-read') mediaReadPending = undefined;
         if (value.type === 'media-list') mediaListPending = undefined;
         if (value.type === 'workspace-save') workspaceSavePending = false;
+        if (value.type === 'render-pdf') pdfPending = false;
         if (mediaOperation && mediaDirty && !closed) {
           try { notifyMediaChanged(); }
           catch { fail(text('eventFailed')); }
@@ -538,8 +682,19 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
         catch { fail(text('eventFailed')); }
       }
     };
+    stopNativeEvents.push(window.electron.ipcRenderer.on('app-plugins:spellcheck-context-menu', (input: unknown) => {
+      const value = input as { ownerId?: string } & AppSpellcheckContextMenu;
+      if (!closed && ready && value?.ownerId === ownerId) channel.port1.postMessage({ type: 'spellcheck-context-menu', event: { seq: value.seq, misspelledWord: value.misspelledWord, suggestions: value.suggestions } });
+    }));
+    stopNativeEvents.push(window.electron.ipcRenderer.on('app-plugins:presentation-event', (input: unknown) => {
+      const value = input as { frameId?: string; event?: AppPresentationEvent };
+      if (!closed && ready && value?.frameId === ownerId) channel.port1.postMessage({ type: 'presentation-event', event: value.event });
+    }));
     unsubscribe = identity.development ? identity.development.subscribe(runtimeEvent)
-      : subscribeHostEvent<AppRuntimeEvent>('app-plugins:runtime', (event) => {
+      : identity.presentation ? window.electron.ipcRenderer.on('app-plugins:presentation-runtime', (input: unknown) => {
+        const value = input as { frameId?: string; event: AppRuntimeEvent };
+        if (value?.frameId === ownerId && value.event.pluginId === identity.pluginId && value.event.digest === identity.digest) runtimeEvent(value.event);
+      }) : subscribeHostEvent<AppRuntimeEvent>('app-plugins:runtime', (event) => {
         if (event.pluginId === identity.pluginId && event.digest === identity.digest) runtimeEvent(event);
       });
     unsubscribeMedia = media?.subscribe(() => {
@@ -553,7 +708,10 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
     window.addEventListener('message', connect);
     frame.addEventListener('load', load);
     frame.addEventListener('error', loadError);
-    frame.srcdoc = buildAppDocument(identity.pluginId, identity.html, context, !!identity.development);
+    const assetBaseUrl = identity.development
+      ? `matcha-app://${identity.pluginId}/development/${identity.development.developmentId}/${identity.development.revision}/${identity.digest}/`
+      : `matcha-app://${identity.pluginId}/${identity.digest}/`;
+    frame.srcdoc = buildAppDocument(identity.pluginId, identity.html, context, !!identity.development, assetBaseUrl);
     root.appendChild(frame);
     return dispose;
   }, [identity, i18n]);

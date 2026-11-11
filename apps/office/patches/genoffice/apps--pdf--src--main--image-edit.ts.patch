@@ -1,0 +1,82 @@
+--- a/genoffice/apps/pdf/src/main/image-edit.ts
++++ b/genoffice/apps/pdf/src/main/image-edit.ts
+@@ -1,4 +1,4 @@
+-import { nativeImage } from 'electron'
++import { decodePdfImage, encodePdfBitmap } from '@matcha/pdf-image'
+ import {
+   FPDF_PAGEOBJ_TEXT,
+   chainPdfium,
+@@ -157,25 +157,6 @@
+   return target
+ }
+ 
+-/** Decode a PNG/JPEG into straight-alpha BGRA (pdfium splits alpha into an SMask itself) */
+-function decodeImage(b64: string): { width: number; height: number; bgra: Buffer } {
+-  const img = nativeImage.createFromBuffer(Buffer.from(b64, 'base64'))
+-  if (img.isEmpty()) throw new Error('could not decode the image data')
+-  const { width, height } = img.getSize()
+-  // toBitmap() hands back premultiplied BGRA; un-premultiply so translucent pixels
+-  // keep their color once pdfium separates them into image + SMask
+-  const bgra = Buffer.from(img.toBitmap())
+-  for (let i = 0; i < bgra.length; i += 4) {
+-    const a = bgra[i + 3]!
+-    if (a > 0 && a < 255) {
+-      bgra[i] = Math.min(255, Math.round((bgra[i]! * 255) / a))
+-      bgra[i + 1] = Math.min(255, Math.round((bgra[i + 1]! * 255) / a))
+-      bgra[i + 2] = Math.min(255, Math.round((bgra[i + 2]! * 255) / a))
+-    }
+-  }
+-  return { width, height, bgra }
+-}
+-
+ /** Content matrix for a footprint rect, counter-rotated against the page's display
+     rotation so the image shows upright (same table as save-pdf's addImageStamp) */
+ function imageMatrix(rect: Rect, rotate: number): number[] {
+@@ -194,9 +175,9 @@
+   }
+ }
+ 
+-function insertImage(m: Pdfium, doc: number, page: number, edit: ImageEditInput): void {
++async function insertImage(m: Pdfium, doc: number, page: number, edit: ImageEditInput): Promise<void> {
+   if (edit.kind !== 'insertImage') return
+-  const { width, height, bgra } = decodeImage(edit.image)
++  const { width, height, bgra } = await decodePdfImage(edit.image)
+   const bufPtr = m._malloc(bgra.length)
+   m.HEAPU8.set(bgra, bufPtr)
+   const bmp = m._FPDFBitmap_CreateEx(width, height, FPDF_BITMAP_BGRA, bufPtr, width * 4)
+@@ -309,7 +290,7 @@
+   if (edit.kind !== 'replaceImage') return
+   const target = await resolveImage(m, page, edit.oldRect, guard)
+   if (edit.layer) moveToLayer(m, page, target.obj, edit.layer)
+-  const { width, height, bgra } = decodeImage(edit.image)
++  const { width, height, bgra } = await decodePdfImage(edit.image)
+   const bufPtr = m._malloc(bgra.length)
+   m.HEAPU8.set(bgra, bufPtr)
+   const bmp = m._FPDFBitmap_CreateEx(width, height, FPDF_BITMAP_BGRA, bufPtr, width * 4)
+@@ -374,7 +355,7 @@
+           // Objects are re-collected inside each op: every mutation shifts indices
+           for (const { edit, editIndex } of pageEdits) {
+             try {
+-              if (edit.kind === 'insertImage') insertImage(m, doc, page, edit)
++              if (edit.kind === 'insertImage') await insertImage(m, doc, page, edit)
+               else if (edit.kind === 'transformImage') await transformImage(m, page, edit, guard)
+               else if (edit.kind === 'replaceImage') await replaceImage(m, page, edit, guard)
+               else await deleteImage(m, page, edit, guard)
+@@ -472,7 +453,7 @@
+               row * w * 4,
+             )
+           }
+-          const png = nativeImage.createFromBitmap(tight, { width: w, height: h }).toPNG()
++          const png = await encodePdfBitmap(tight, w, h)
+           return png.toString('base64')
+         } finally {
+           m._FPDFBitmap_Destroy(bmp)
+@@ -548,7 +529,7 @@
+             flags,
+           )
+           const tight = Buffer.from(m.HEAPU8.subarray(bufPtr, bufPtr + w * h * 4))
+-          const png = nativeImage.createFromBitmap(tight, { width: w, height: h }).toPNG()
++          const png = await encodePdfBitmap(tight, w, h)
+           return { png: png.toString('base64'), textErased }
+         } finally {
+           m._FPDFBitmap_Destroy(bmp)

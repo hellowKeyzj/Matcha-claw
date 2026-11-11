@@ -1,0 +1,30 @@
+--- a/genoffice/apps/pdf/src/renderer/LinkLayer.tsx
++++ b/genoffice/apps/pdf/src/renderer/LinkLayer.tsx
+@@ -44,7 +44,7 @@
+   return out
+ }
+ 
+-/** Link annot hit areas: external links open a new window (main process routes to shell.openExternal); internal dests jump pages */
++/** Link annot hit areas: external links use the desktop API; internal dests jump pages */
+ export function LinkLayer({
+   doc,
+   pageNo,
+@@ -87,10 +87,14 @@
+           target={l.url ? '_blank' : undefined}
+           rel="noreferrer"
+           onClick={(e) => {
+-            if (!l.url) {
+-              e.preventDefault()
+-              onGoToDest(l.dest)
+-            }
++            e.preventDefault()
++            if (l.url) void window.pdfApi.openExternal(l.url).catch((error: unknown) => window.reportError(error))
++            else onGoToDest(l.dest)
++          }}
++          onAuxClick={(e) => {
++            if (e.button !== 1 || !l.url) return
++            e.preventDefault()
++            void window.pdfApi.openExternal(l.url).catch((error: unknown) => window.reportError(error))
+           }}
+         />
+       ))}

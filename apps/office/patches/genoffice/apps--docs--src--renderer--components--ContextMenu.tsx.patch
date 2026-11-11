@@ -1,0 +1,16 @@
+--- a/genoffice/apps/docs/src/renderer/components/ContextMenu.tsx
++++ b/genoffice/apps/docs/src/renderer/components/ContextMenu.tsx
+@@ -1,3 +1,4 @@
++import { copyDocsLink } from '../../../../../../src/docs/clipboard'
+ import { useEffect, useMemo, useRef, useState } from 'react'
+ import type { Editor } from '@tiptap/core'
+ import type { Command } from '@tiptap/pm/state'
+@@ -253,7 +254,7 @@
+     onLink()
+   }
+   const copyLink = () => {
+-    if (linkHref) void navigator.clipboard.writeText(linkHref)
++    if (linkHref) void copyDocsLink(linkHref)
+   }
+   const field = fieldRangeAt(editor.state, clickPos)
+   const canComment = hasSelection || wordRangeAtCaret(editor) !== null

@@ -7,6 +7,7 @@ import type { DirectRuntimeHost } from '../../main/runtime-host-delivery/direct-
 import type { RendererSessionObservationRegistry } from '../../main/sessions/observations';
 import type { HostApiDispatcher } from '../execution';
 import { registerShellHandlers } from './shell-ipc';
+import { registerAppRenderPdfHandlers } from '../../main/app-plugins/render-pdf';
 import { registerDialogHandlers } from './dialog-ipc';
 import { registerAppHandlers } from './app-ipc';
 import { registerWindowHandlers } from './window-ipc';
@@ -33,6 +34,7 @@ export function registerStaticIpcHandlers(
   registerHostApiProxyHandlers(dispatch, runtimeReady, sessionObservers, shutdownSignal);
   registerSettingsPrivateProxyHandlers();
   registerShellHandlers(getMainWindow);
+  registerAppRenderPdfHandlers(getMainWindow, shutdownSignal);
   registerDialogHandlers();
   registerAppHandlers();
   registerWindowHandlers(getMainWindow);

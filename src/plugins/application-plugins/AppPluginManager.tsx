@@ -23,6 +23,7 @@ import {
 } from './installed';
 import {
   appPluginHasKind,
+  MAX_APP_PLUGIN_ZIP_BYTES,
   type AppPluginInspection,
   type AppPluginKind,
   type AppPluginManifest,
@@ -103,9 +104,9 @@ function ApplicationLinks({ record }: { record: InstalledAppPlugin }) {
   const applications = record.manifest.contributes.applications ?? [];
   return <div className="flex flex-wrap gap-x-4 gap-y-2">
     {applications.map((application) => (
-      <Link key={application.id} to={application.placement === 'chat-panel' ? '/' : applicationPath(record.manifest.id, application.id)}
-        state={application.placement === 'chat-panel' ? { applicationWorkspace: { pluginId: record.manifest.id, applicationId: application.id } } : undefined}
-        title={application.placement === 'chat-panel' ? `${application.name} · ${t('chatPlacement')}` : undefined}
+      <Link key={application.id} to={application.placement === 'chat-panel' || application.placement === 'both' ? '/' : applicationPath(record.manifest.id, application.id)}
+        state={application.placement === 'chat-panel' || application.placement === 'both' ? { applicationWorkspace: { pluginId: record.manifest.id, applicationId: application.id } } : undefined}
+        title={application.placement === 'chat-panel' || application.placement === 'both' ? `${application.name} · ${t('chatPlacement')}` : undefined}
         className="inline-flex max-w-full items-center gap-1 rounded-sm text-xs font-medium leading-5 text-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <span className="[overflow-wrap:anywhere]">{applications.length === 1 ? t('open') : t('openNamed', { name: application.name })}</span>
         <ArrowUpRight className="size-3.5 shrink-0" aria-hidden="true" />
@@ -115,7 +116,7 @@ function ApplicationLinks({ record }: { record: InstalledAppPlugin }) {
 }
 
 function readPackage(file: File, t: TFunction<'applicationPlugins'>): Promise<string> {
-  if (file.size > 64 * 1024 * 1024) return Promise.reject(new Error(t('errors.packageTooLarge')));
+  if (file.size > MAX_APP_PLUGIN_ZIP_BYTES) return Promise.reject(new Error(t('errors.packageTooLarge', { limit: MAX_APP_PLUGIN_ZIP_BYTES / 1024 / 1024 })));
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -343,7 +344,7 @@ function AppPluginManagerContent({ category, page = false, onClose }: { category
                     <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs leading-5 text-muted-foreground">
                       <span className="inline-flex items-center gap-1.5"><span aria-hidden="true" className={`size-1.5 rounded-full ${record.enabled ? 'bg-emerald-600 dark:bg-emerald-400' : 'bg-[hsl(var(--shell-icon))]'}`} />{t(record.enabled ? 'enabled' : 'disabled')}</span>
                       <span aria-hidden="true">·</span><span className="[overflow-wrap:anywhere]">v{record.manifest.version}</span>
-                      {category === 'application' && <><span aria-hidden="true">·</span><span>{t(applications.length === 0 ? 'background' : applications.every((application) => application.placement === 'chat-panel') ? 'chatPlacement' : 'pagePlacement')}</span></>}
+                      {category === 'application' && <><span aria-hidden="true">·</span><span>{t(applications.length === 0 ? 'background' : applications.every((application) => application.placement === 'chat-panel' || application.placement === 'both') ? 'chatPlacement' : 'pagePlacement')}</span></>}
                     </div>
                     {category === 'application' && record.enabled && applications.length > 0 && <div className="mt-3"><ApplicationLinks record={record} /></div>}
                   </div>

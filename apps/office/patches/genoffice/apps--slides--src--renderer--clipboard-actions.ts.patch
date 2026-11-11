@@ -1,0 +1,23 @@
+--- a/genoffice/apps/slides/src/renderer/clipboard-actions.ts
++++ b/genoffice/apps/slides/src/renderer/clipboard-actions.ts
+@@ -174,7 +174,19 @@
+ }
+ 
+ export async function pasteClipboard(ctx: ActionCtx): Promise<void> {
+-  const external = await window.slidesApi.clipboardExternal()
++  let external: Awaited<ReturnType<typeof window.slidesApi.clipboardExternal>>
++  try {
++    external = await window.slidesApi.clipboardExternal()
++  } catch (error) {
++    ctx.setStatus(error instanceof Error ? error.message : String(error))
++    return
++  }
++  if (external.kind === 'none') {
++    ctx.setHasClipboard(false)
++    ctx.setStatus(t('ribbonPasteTipDisabled'))
++    return
++  }
++  ctx.setHasClipboard(true)
+   if (external.kind === 'slide') {
+     await pasteSlideAfter(ctx, Math.max(...ctx.selectedSlides, ctx.current))
+     return

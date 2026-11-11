@@ -1,0 +1,24 @@
+--- a/genoffice/apps/sheets/src/renderer/function-arguments-runtime.ts
++++ b/genoffice/apps/sheets/src/renderer/function-arguments-runtime.ts
+@@ -220,13 +220,20 @@
+           index: link.index,
+           name: pathBasename(link.source ?? link.rawTarget),
+           source: link.source ?? link.rawTarget,
+-          open: tab !== undefined,
++          open: tab !== undefined || /^\/office-workbooks\/doc_[a-f0-9]{16}$/.test(link.source ?? ''),
+           wcId: tab?.wcId ?? null,
+           sheetNames: link.sheetNames,
+         }
+       })
+     },
+     pickExternalRange(target, onPick) {
++      if (/^\/office-workbooks\/doc_[a-f0-9]{16}$/.test(target.source)) {
++        const request = { sessionId: getSessionId(), index: target.index, requestId: crypto.randomUUID(),
++          pick: (selection: Parameters<typeof formatExternalPickRef>[1]) => onPick(formatExternalPickRef(target, selection)),
++          cancel: () => {} }
++        window.dispatchEvent(new CustomEvent('office:sheets-pick-range', { detail: request }))
++        return () => request.cancel()
++      }
+       if (target.wcId === null) return () => undefined
+       const wcId = target.wcId
+       let disposed = false

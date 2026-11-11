@@ -1,0 +1,11 @@
+--- a/genoffice/apps/pdf/src/renderer/OutlinePanel.tsx
++++ b/genoffice/apps/pdf/src/renderer/OutlinePanel.tsx
+@@ -200,7 +200,7 @@
+   onDelete?: (path: string) => void
+ }): ReactElement {
+   const onGo = (n: OutlineNode) => {
+-    if (n.url) window.open(n.url, '_blank')
++    if (n.url) void window.pdfApi.openExternal(n.url).catch((error: unknown) => window.reportError(error))
+     else if (n.dest != null) onGoToDest(n.dest)
+   }
+   if (

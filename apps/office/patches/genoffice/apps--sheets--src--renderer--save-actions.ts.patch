@@ -1,0 +1,78 @@
+--- a/genoffice/apps/sheets/src/renderer/save-actions.ts
++++ b/genoffice/apps/sheets/src/renderer/save-actions.ts
+@@ -435,6 +435,7 @@
+   quiet = false,
+   explicitTarget?: { path: string; overwrite: boolean },
+   defaultName?: string,
++  snapshotOnly?: (payload: WorkbookSaveRequest, second?: WorkbookSaveRequest) => Promise<{ ok: boolean }>,
+ ): Promise<SaveOutcome> {
+   const state = ctx.lazyWorkbookRef.current
+   // Captured at save start (the Ctrl+S moment): the post-save session swap
+@@ -662,7 +663,7 @@
+   // An unsaved new workbook's Save is its first Save As, journal or not: a
+   // quiet AutoSave may already have moved the work into the backing file.
+   const firstSaveAs = mode === 'save' && state.file.unsavedNew === true && !quiet
+-  if (total === 0 && mode !== 'save-as' && !restoreWriteBack && !firstSaveAs) {
++  if (total === 0 && mode !== 'save-as' && !restoreWriteBack && !firstSaveAs && !snapshotOnly) {
+     // A quiet save is background work (autosave, the links panel's pre-Update
+     // save): nothing to write is a no-op there, not a status message.
+     if (mode !== 'recovery' && !quiet) ctx.setMessage(t('appNoEditsToSave'))
+@@ -782,6 +783,58 @@
+     redactionStates,
+     slicerState,
+     externalLinkOps,
++  }
++  if (snapshotOnly) {
++    const first = { ...payload,
++      tableAdditions: splitSave && heldTables.length > 0 ? [] : tableAdditions,
++      tableEdits: phaseOneTableEdits,
++      pivotAdditions: splitSave && heldPivots.length > 0 ? [] : pivotAdditions,
++      definedNamesState: splitSave ? null : definedNamesState,
++      slicerState: hasShifts ? null : slicerState,
++    }
++    const second: WorkbookSaveRequest | undefined = splitSave ? {
++        sessionId: state.file.sessionId,
++        mode: 'save',
++        // an unsaved new workbook's quiet save writes its backing file in
++        // place; without the flag the second phase would open Save As
++        ...(quiet ? { quiet: true } : {}),
++        edits: [],
++        bulkConstantFills: [],
++        structuralOps: [],
++        chartEdits: [],
++        visualEdits: [],
++        visualAdditions: [],
++        cellImageAdditions: [],
++        tableAdditions: heldTables,
++        tableEdits: heldTableEdits,
++        pivotAdditions: heldPivots,
++        sheetOps: [],
++        sheetOrder: [],
++        filterStates: [],
++        hyperlinkEdits: [],
++        cfStates: [],
++        dvStates: [],
++        pageSetupStates: [],
++        noteStates: [],
++        pivotCacheRefreshPaths: [],
++        pivotRefreshUpdates: [],
++        sheetProtections: [],
++        sparklineAdditions: [],
++        slicerState: heldSlicerState,
++        // The first phase already refreshed the cached values
++        formulaValues: [],
++        definedNamesState: heldNames,
++        themeState: null,
++        workbookProtectionState: null,
++        protectedRangeStates: [],
++        // Phase one already wrote the marks, re-keyed for the renames it
++        // performed. Sending them again would rewrite the part under the names
++        // this session loaded — the pre-rename ones — and orphan it.
++        redactionStates: null,
++        // link ops rode with the first phase; a second phase carries none
++        externalLinkOps: null,
++      } : undefined
++    return snapshotOnly(first, second)
+   }
+   if (mode === 'recovery') {
+     // Best-effort; a failure only means this tick's copy is skipped — but an

@@ -1,0 +1,21 @@
+--- a/genoffice/apps/slides/src/main/session-state.ts
++++ b/genoffice/apps/slides/src/main/session-state.ts
+@@ -53,6 +53,8 @@
+ // One session per renderer process (standalone window or shell tab), keyed by webContents.id
+ export interface Session {
+   path: string
++  /** Stable recovery identity when the working file is temporary. */
++  recoveryIdentityPath?: string
+   opened: OpenedPptx
+   fitWidthPx: number
+   undoStack: HistorySnapshot[]
+@@ -598,7 +600,8 @@
+         ...(slidePath ? { slidePath } : {}),
+       })
+     }
+-    return url
++    const display = readSlideMedia(url)
++    return display ? `data:${display.mime};base64,${Buffer.from(display.body).toString('base64')}` : undefined
+   }
+ }
+ 

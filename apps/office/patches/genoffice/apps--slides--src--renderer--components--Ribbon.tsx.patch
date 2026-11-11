@@ -1,0 +1,124 @@
+--- a/genoffice/apps/slides/src/renderer/components/Ribbon.tsx
++++ b/genoffice/apps/slides/src/renderer/components/Ribbon.tsx
+@@ -1,3 +1,4 @@
++import { usePendingEdits } from '../file-actions'
+ /**
+  * Ribbon: tab bar + grouped buttons. Same mechanism as the apps/docs Ribbon
+  * (local state switches tabs, .ribbon-body dispatches); content is trimmed to slide capabilities,
+@@ -1066,6 +1067,7 @@
+ }
+ 
+ export function Ribbon({
++  trailingActions,
+   hasDoc,
+   deckEmpty,
+   canUndo,
+@@ -1251,13 +1253,14 @@
+   const [shapeFillOpen, setShapeFillOpen] = useState(false)
+   // Debounced picture-border commit: color drags fire repeatedly, and a pending
+   // color commit must not clobber a width click landing meanwhile
++  const pendingEdits = usePendingEdits()
+   const pictureBorderTimer = useRef<number | null>(null)
+   const pictureBorderDraft = useRef<{ color: string; widthPt: number } | null>(null)
+   const commitPictureBorder = (
+     patch: Partial<{ color: string; widthPt: number }>,
+     immediate = false,
+   ) => {
+-    if (pictureBorderTimer.current) window.clearTimeout(pictureBorderTimer.current)
++    if (pictureBorderTimer.current) pendingEdits.cancel(pictureBorderTimer.current)
+     const base = pictureBorderDraft.current ?? {
+       color: toPickerHex(contextPictureStroke?.color) ?? '#000000',
+       widthPt: contextPictureStroke?.widthPt ?? 1,
+@@ -1272,7 +1275,7 @@
+       })
+     }
+     if (immediate) fire()
+-    else pictureBorderTimer.current = window.setTimeout(fire, 200)
++    else pictureBorderTimer.current = pendingEdits.schedule(fire, 200)
+   }
+   const [lastColor, setLastColor] = useState('#C43E1C')
+   // Bullet color "more colors" native picker echo
+@@ -1530,8 +1533,8 @@
+   const onCustomTextColor = (value: string) => {
+     const hex = value.toUpperCase()
+     setLastColor(hex)
+-    if (customColorTimer.current) window.clearTimeout(customColorTimer.current)
+-    customColorTimer.current = window.setTimeout(() => {
++    if (customColorTimer.current) pendingEdits.cancel(customColorTimer.current)
++    customColorTimer.current = pendingEdits.schedule(() => {
+       if (editing) {
+         restoreEditSelection()
+         onTextColor(hex)
+@@ -1560,8 +1563,8 @@
+   const onCustomBulletColor = (value: string) => {
+     const hex = value.toUpperCase()
+     setLastBulletColor(hex)
+-    if (bulletColorTimer.current) window.clearTimeout(bulletColorTimer.current)
+-    bulletColorTimer.current = window.setTimeout(() => onParagraphFormat({ bulletColor: hex }), 200)
++    if (bulletColorTimer.current) pendingEdits.cancel(bulletColorTimer.current)
++    bulletColorTimer.current = pendingEdits.schedule(() => onParagraphFormat({ bulletColor: hex }), 200)
+   }
+ 
+   // One-time acknowledgement before whole-document AI rewrites:
+@@ -1715,7 +1718,7 @@
+         }`}
+         onDoubleClick={collapse.onTabsDoubleClick}
+       >
+-        {!IS_MAC && (
++        {(
+           <div className="file-tab-wrap">
+             <button
+               className={`ribbon-tab ribbon-tab-file ${fileOpen ? 'open' : ''}`}
+@@ -1735,7 +1738,7 @@
+                     onOpen()
+                   }}
+                 >
+-                  {t('ribbonFileOpen')} <span className="file-menu-key">Ctrl+O</span>
++                  {t('ribbonFileOpen')} <span className="file-menu-key">{IS_MAC ? '⌘O' : 'Ctrl+O'}</span>
+                 </button>
+                 <button
+                   disabled={!hasDoc}
+@@ -1744,7 +1747,7 @@
+                     onSave()
+                   }}
+                 >
+-                  {t('ribbonFileSave')} <span className="file-menu-key">Ctrl+S</span>
++                  {t('ribbonFileSave')} <span className="file-menu-key">{IS_MAC ? '⌘S' : 'Ctrl+S'}</span>
+                 </button>
+                 <button
+                   disabled={!hasDoc}
+@@ -1753,7 +1756,7 @@
+                     onSaveAs()
+                   }}
+                 >
+-                  {t('ribbonFileSaveAs')} <span className="file-menu-key">Ctrl+Shift+S</span>
++                  {t('ribbonFileSaveAs')} <span className="file-menu-key">{IS_MAC ? '⇧⌘S' : 'Ctrl+Shift+S'}</span>
+                 </button>
+                 <button
+                   disabled={!hasDoc}
+@@ -1886,6 +1889,7 @@
+           </button>
+         )}
+         <span className="ribbon-tabs-spacer" />
++        {trailingActions}
+       </div>
+ 
+       <div className="ribbon-body" data-ribbon-body="" ref={bodyRef}>
+@@ -3142,7 +3146,7 @@
+                         // A pending debounced color commit still holds the prior draft
+                         // in its closure and would re-apply the border after the clear
+                         if (pictureBorderTimer.current) {
+-                          window.clearTimeout(pictureBorderTimer.current)
++                          pendingEdits.cancel(pictureBorderTimer.current)
+                           pictureBorderTimer.current = null
+                         }
+                         pictureBorderDraft.current = null
+@@ -3432,7 +3436,7 @@
+                         // A pending debounced color commit still holds the prior draft
+                         // in its closure and would re-apply the border after the clear
+                         if (pictureBorderTimer.current) {
+-                          window.clearTimeout(pictureBorderTimer.current)
++                          pendingEdits.cancel(pictureBorderTimer.current)
+                           pictureBorderTimer.current = null
+                         }
+                         pictureBorderDraft.current = null

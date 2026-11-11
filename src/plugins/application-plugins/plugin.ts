@@ -1,5 +1,5 @@
 import { createElement } from 'react';
-import { AppWindow, Puzzle } from 'lucide-react';
+import { Puzzle } from 'lucide-react';
 import { AppsNavigationIcon } from '@/components/icons/navigation';
 import { applicationNavigation, applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload, type ApplicationPlugin } from '@/plugin-host/core';
@@ -8,18 +8,15 @@ import { imagePreviewActions, messageContextTags, type ImagePreviewAction } from
 import { workspaceLaunchers } from '@/plugins/workspace/extensions';
 import type { InstalledAppPlugin } from '@/types/desktop/app-plugin';
 import { ImageEditorAction } from './ImageEditorAction';
-import { applicationWorkspacePage } from './application-workspace';
+import { applicationPath, applicationWorkspacePage } from './application-workspace';
+import { applicationIcon } from './application-icon';
+import { ApplicationRoute } from './ApplicationRoute';
+export { applicationPath } from './application-workspace';
 import { developmentRecoveryPage } from './development-workspace';
-import type { InstalledApplicationProps } from './InstalledApplication';
 
 const ApplicationsPage = lazyWithPreload(() => import('./page'));
 const DevelopmentPreview = lazyWithPreload(() => import('./DevelopmentPreview'));
 const DevelopmentWorkspace = lazyWithPreload<ChatWorkspaceContentProps>(() => import('./DevelopmentWorkspace'));
-const InstalledApplication = lazyWithPreload<InstalledApplicationProps>(() => import('./InstalledApplication').then((module) => ({ default: module.InstalledApplication })));
-
-export function applicationPath(pluginId: string, applicationId: string): string {
-  return `/applications/${encodeURIComponent(pluginId)}/${encodeURIComponent(applicationId)}`;
-}
 
 export function createInstalledApplicationPlugin(record: InstalledAppPlugin): ApplicationPlugin {
   return definePlugin({
@@ -32,6 +29,7 @@ export function createInstalledApplicationPlugin(record: InstalledAppPlugin): Ap
       ...(record.manifest.contributes.applications ?? []).flatMap((application) => {
         const id = `installed:${record.manifest.id}:application:${application.id}`;
         const path = applicationPath(record.manifest.id, application.id);
+        const icon = applicationIcon(application.icon);
         const editor = application.imageEditor;
         const imageAction: ImagePreviewAction | undefined = editor ? {
           id: `${id}:image-editor`,
@@ -40,17 +38,13 @@ export function createInstalledApplicationPlugin(record: InstalledAppPlugin): Ap
             label: editor.label, translations: editor.translations, tool: editor.tool, action: imageAction!,
           }),
         } : undefined;
-        const component = function ApplicationView() {
-          return createElement(InstalledApplication, { pluginId: record.manifest.id, digest: record.digest, entry: application.entry, title: application.name });
-        };
         return [
           ...(imageAction ? [contribute(imagePreviewActions, imageAction)] : []),
           ...(application.placement !== 'chat-panel' ? [
-            contribute(applicationPages, { id, path, component, viewport: 'workspace' }),
-            contribute(applicationNavigation, { id, to: path, label: application.name, icon: AppWindow, order: 90 }),
+            contribute(applicationPages, { id, path, component: ApplicationRoute, viewport: 'workspace' }),
           ] : []),
           ...(application.placement === 'chat-panel' || application.placement === 'both' ? [
-            contribute(workspaceLaunchers, { id, order: 50, icon: AppWindow, label: application.name, defaultLabel: application.name,
+            contribute(workspaceLaunchers, { id, order: 50, icon, label: application.name, defaultLabel: application.name,
               execute: ({ workspace }) => workspace.openPage(applicationWorkspacePage(record, application)) }),
           ] : []),
         ];

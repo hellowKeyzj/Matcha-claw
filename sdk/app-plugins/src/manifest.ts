@@ -1,9 +1,14 @@
 export type AppPluginKind = 'reader' | 'connector' | 'application';
 
+export interface AppApplicationIcon {
+  readonly paths: readonly string[];
+}
+
 export interface AppApplicationManifest {
   readonly id: string;
   readonly name: string;
   readonly entry: string;
+  readonly icon?: AppApplicationIcon;
   readonly placement?: 'page' | 'chat-panel' | 'both';
   readonly scope?: 'session' | 'workspace';
   readonly imageEditor?: {

@@ -1,0 +1,97 @@
+--- a/genoffice/apps/sheets/src/renderer/App.tsx
++++ b/genoffice/apps/sheets/src/renderer/App.tsx
+@@ -790,7 +790,7 @@
+           needsSaveAsNotUnsavedNew: Boolean(state.file.needsSaveAs) && !state.file.unsavedNew,
+           isCsv: state.file.csvPath !== undefined,
+           kind: 'save',
+-          restoredFromRecovery: false,
++          backingIsRecovery: false,
+           automaticRecoveryDisabled: false,
+         })
+       )
+@@ -826,7 +826,7 @@
+           needsSaveAsNotUnsavedNew: Boolean(state.file.needsSaveAs) && !state.file.unsavedNew,
+           isCsv: state.file.csvPath !== undefined,
+           kind: 'recovery',
+-          restoredFromRecovery: state.file.restoredFromRecovery === true,
++          backingIsRecovery: state.file.backingIsRecovery === true,
+           automaticRecoveryDisabled: state.file.automaticRecoveryDisabled === true,
+         })
+       )
+@@ -1317,25 +1317,8 @@
+   const aiSettingsRef = useRef<AiSettings | null>(null)
+   aiSettingsRef.current = aiSettings
+ 
+-  /** gsk login state for the cloud-tools gate (refreshed on mount and window focus) */
++  /** gsk login state for the cloud-tools gate */
+   const gskLoggedInRef = useRef(false)
+-  useEffect(() => {
+-    let alive = true
+-    const refresh = () => {
+-      void window.desktopApi
+-        ?.aiGskStatus()
+-        .then((s) => {
+-          if (alive) gskLoggedInRef.current = !!s?.loggedIn
+-        })
+-        .catch(() => {})
+-    }
+-    refresh()
+-    window.addEventListener('focus', refresh)
+-    return () => {
+-      alive = false
+-      window.removeEventListener('focus', refresh)
+-    }
+-  }, [])
+   const [aiBusy, setAiBusy] = useState(false)
+   // Display history survives restarts via localStorage; the AgentLoop's model
+   // context does not, so restored turns are read-only transcript.
+@@ -2021,6 +2004,7 @@
+     const api = univerRef.current?.univerAPI
+     if (!api) return
+     api.onCommandExecuted((command: { id?: string }) => {
++      officeStateVersion.current += 1
+       if (!command?.id || !STRUCTURAL_EDIT_COMMAND_PATTERN.test(command.id)) return
+       rebuildRedactionIndex()
+     })
+@@ -2217,6 +2201,41 @@
+       createDocument: (request) => createAiDocument({ univerRef, lazyWorkbookRef }, request),
+     }
+   }
++
++  const officeActionRef = useRef<(request: {
++    path: string; sessionId: string; requestId: string; action: string; input: Record<string, unknown>;
++    resolve: (result: unknown) => void; reject: (error: unknown) => void;
++  }) => Promise<void>>(async () => {})
++  const officeStateVersion = useRef(0)
++  officeActionRef.current = async (request) => {
++    const file = lazyWorkbookRef.current?.file
++    if (!file || file.path !== request.path || file.sessionId !== request.sessionId) throw new Error('The requested workbook generation is not open.')
++    if (!(await commitActiveEditor())) throw new Error('The active cell could not be committed.')
++    if (lazyWorkbookRef.current?.file !== file) throw new Error('The workbook changed before the action.')
++    if (request.action === '__snapshot') {
++      await saveGateRef.current.run(async () => {
++        const outcome = await handleSaveImpl(saveContext(), 'recovery', true, undefined, undefined,
++          async (payload, second) => { request.resolve({ snapshotPayload: payload, snapshotSecondPayload: second }); return { ok: true } })
++        if (!outcome.ok) throw new Error('The current workbook could not be snapshotted.')
++      })
++      return
++    }
++    const version = officeStateVersion.current
++    const result = await createWorkbookSkill(sheetsSkillDeps()).executeTool({
++      id: request.requestId, name: request.action, input: request.input,
++    })
++    if (lazyWorkbookRef.current?.file !== file) throw new Error('The workbook changed during the action.')
++    request.resolve({ ...result, sessionId: file.sessionId, stateVersion: officeStateVersion.current,
++      changedDuringAction: version !== officeStateVersion.current })
++  }
++  useEffect(() => {
++    const action = (event: Event) => {
++      const request = (event as CustomEvent).detail
++      void officeActionRef.current(request).catch(request.reject)
++    }
++    window.addEventListener('office:sheets-action', action)
++    return () => window.removeEventListener('office:sheets-action', action)
++  }, [])
+ 
+   useEffect(() => {
+     const loadSettings = () => void window.desktopApi.getAiSettings().then(setAiSettingsState)

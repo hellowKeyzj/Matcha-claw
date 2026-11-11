@@ -124,6 +124,8 @@ WeChat（`openclaw-weixin`）の cron 能動配信は利用できますが、制
 事前構築されたスキルでAIエージェントを拡張できます。統合スキルパネルからスキルの閲覧、インストール、ローカルのスキルフォルダ/ZIP/Markdown ファイルのアップロード、管理が可能です。パッケージマネージャーは不要です。
 MatchaClaw はドキュメント処理スキル（`pdf`、`xlsx`、`docx`、`pptx`）もフル内容で同梱し、起動時に `~/.openclaw/skills` へ自動配備し、初回インストール時に既定で有効化します。追加の同梱スキル（`find-skills`、`tavily-search`、`multi-search-engine`、`web-extract`、`daily-news-briefing`）も既定で有効化されますが、必要な API キーが未設定の場合は OpenClaw が実行時に設定エラーを表示します。
 
+同梱のアプリケーションプラグイン **Matcha Office** は GenOffice のソーススナップショットを移植したもので、`.docx`・`.xlsx`・`.pptx` の Docs / Sheets / Slides 編集ページを提供します。作成・読み取り・編集・検査と `.pdf`・`.md`・`.html` の入出力はプラグイン tools として MatchaClaw 自身のエージェントから利用できます。ファイルはプラグインのローカルライブラリに保存されます。GenOffice のデスクトップシェル、内蔵エージェント/AI パネル、AI プロバイダー機構、CLI/MCP サーバーは起動しません。
+
 主な検索スキルで必要な環境変数:
 - `TAVILY_API_KEY`: `tavily-search` 用（上流ランタイムで OAuth 対応の場合あり）
 

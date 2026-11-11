@@ -1,0 +1,32 @@
+--- a/genoffice/apps/markdown/src/renderer/file-naming.ts
++++ b/genoffice/apps/markdown/src/renderer/file-naming.ts
+@@ -20,29 +20,7 @@
+  * reader's explicit request reaches the model.
+  */
+ import type { Editor } from '@tiptap/core'
+-import { suggestFileName } from '@genoffice/ui'
+-import { modelTextOf } from './editor/redact'
+ import { deriveAutoFileName } from './auto-file-name'
+-
+-/** The document's own text, as the model may read it. Never the raw document. */
+-function modelTextOfDocument(editor: Editor): string {
+-  return modelTextOf(editor.state.doc.toJSON() as never)
+-}
+-
+-/**
+- * Ask the model to name this document, on request.
+- *
+- * The result is the stem for the Save As dialog rather than a rename: moving a
+- * file that may be open elsewhere, referenced from a note, or synced is not
+- * something to do behind the reader's back. The dialog is the confirmation.
+- *
+- * An empty answer is not a failure to report: the model may have no provider,
+- * may be unreachable, may decline, or may have nothing to work from, and in
+- * every one of those cases the reader keeps the name the document already had.
+- */
+-export async function modelSaveAsName(editor: Editor): Promise<string> {
+-  return suggestFileName({ content: modelTextOfDocument(editor) })
+-}
+ 
+ /**
+  * The name a save should offer, or nothing when it should offer none.

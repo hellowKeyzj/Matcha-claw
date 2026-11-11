@@ -24,13 +24,13 @@ export function AppPluginConfirmation({ pluginId, digest, container }: { pluginI
     const id = ownerId.current;
     let active = false;
     const invoke = (channel: string, input: unknown) => invokeIpc(channel, input);
-    const visible = () => root.isConnected && !root.closest('[inert], [hidden]') && getComputedStyle(root).visibility === 'visible' && document.visibilityState === 'visible' && document.hasFocus() && root.getBoundingClientRect().width > 0 && root.getBoundingClientRect().height > 0;
+    const visible = () => root.isConnected && !root.closest('[inert], [hidden]') && getComputedStyle(root).visibility === 'visible' && root.getBoundingClientRect().width > 0 && root.getBoundingClientRect().height > 0;
     const refresh = () => {
       const next = visible();
       if (next === active) return;
       active = next;
       if (!next) setPending(null);
-      void invoke('app-plugins:confirmation-owner', { ownerId: id, pluginId, digest, active: next }).catch(() => { active = false; });
+      void invoke('app-plugins:confirmation-owner', { ownerId: id, pluginId, digest, active: next }).catch(() => {});
     };
     const unsubscribe = subscribeHostEvent<ConfirmationEvent>('app-plugins:confirmation', (event) => {
       if (event.ownerId !== id || event.pluginId !== pluginId || event.digest !== digest) return;
@@ -45,17 +45,11 @@ export function AppPluginConfirmation({ pluginId, digest, container }: { pluginI
     for (let node: Element | null = root; node; node = node.parentElement) mutation.observe(node, { attributes: true, attributeFilter: ['inert', 'hidden', 'style', 'class'] });
     const resize = new ResizeObserver(refresh);
     resize.observe(root);
-    document.addEventListener('visibilitychange', refresh);
-    window.addEventListener('focus', refresh);
-    window.addEventListener('blur', refresh);
     refresh();
     return () => {
       unsubscribe();
       mutation.disconnect();
       resize.disconnect();
-      document.removeEventListener('visibilitychange', refresh);
-      window.removeEventListener('focus', refresh);
-      window.removeEventListener('blur', refresh);
       void invoke('app-plugins:confirmation-owner', { ownerId: id, pluginId, digest, active: false }).catch(() => {});
     };
   }, [pluginId, digest, container]);

@@ -1,0 +1,842 @@
+[
+  {
+    "source": "apps/slides/src/main/pdf-export.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "f5f59e51df862770c855abe95e768bff93e15e61bcd7782de5dbd8bcf9203283",
+    "relative": "genoffice/apps/slides/src/main/pdf-export.ts",
+    "patch": "genoffice/apps--slides--src--main--pdf-export.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/main/session-state.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "ae4179ed2543e318d7818089ee93920af40d5a691933a60e08029b12bdca6da3",
+    "relative": "genoffice/apps/slides/src/main/session-state.ts",
+    "patch": "genoffice/apps--slides--src--main--session-state.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/main/docx-encryption.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "b884ba1bb903c6d1e5d9fc290a14099ea9f20bf2d54d8f154661ebeaec9f70c0",
+    "relative": "genoffice/apps/docs/src/main/docx-encryption.ts",
+    "patch": "genoffice/apps--docs--src--main--docx-encryption.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/pdf/src/main/wasm-path.ts",
+    "manifest": "apps/pdf/package.json",
+    "name": "@genoffice/pdf",
+    "version": "0.1.0",
+    "sha256": "9e1b993dffaad77125212b9a3aa3b19744bf9a3e6400cc4062051cf06bd61a60",
+    "relative": "genoffice/apps/pdf/src/main/wasm-path.ts",
+    "patch": "genoffice/apps--pdf--src--main--wasm-path.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "packages/hwp2docx/src/hwp.ts",
+    "manifest": "packages/hwp2docx/package.json",
+    "name": "@genoffice/hwp2docx",
+    "version": "0.1.0",
+    "sha256": "cde3d5d898bcc7947f6db0ef984023e14831318c17616411c70861b6114eeef1",
+    "relative": "genoffice/packages/hwp2docx/src/hwp.ts",
+    "patch": "genoffice/packages--hwp2docx--src--hwp.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "packages/cli/src/resources.ts",
+    "manifest": "packages/cli/package.json",
+    "name": "@genoffice/cli",
+    "version": "0.10.0",
+    "sha256": "cf3ca93e9792414dc3086fd99a9ccd4b8fdcc6eb31112e1e22fd5d8bb80c7914",
+    "relative": "genoffice/packages/cli/src/resources.ts",
+    "patch": "genoffice/packages--cli--src--resources.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/parse-off-thread.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "466231e988f935f832043191782775432a83889b8b7d8055b18306f7e1fb241e",
+    "relative": "genoffice/apps/docs/src/renderer/parse-off-thread.ts",
+    "patch": "genoffice/apps--docs--src--renderer--parse-off-thread.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/markdown/src/renderer/App.tsx",
+    "manifest": "apps/markdown/package.json",
+    "name": "@genoffice/markdown",
+    "version": "0.1.0",
+    "sha256": "36ad605cfae5949d5329f4549fa82555874ee5b68ff54c03fe989f34381e8455",
+    "relative": "genoffice/apps/markdown/src/renderer/App.tsx",
+    "patch": "genoffice/apps--markdown--src--renderer--App.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/markdown/src/renderer/components/Ribbon.tsx",
+    "manifest": "apps/markdown/package.json",
+    "name": "@genoffice/markdown",
+    "version": "0.1.0",
+    "sha256": "6ba8555e2dedf762f0f10b2ac08773d1e6c4aa14e531400a0a99881bf950132f",
+    "relative": "genoffice/apps/markdown/src/renderer/components/Ribbon.tsx",
+    "patch": "genoffice/apps--markdown--src--renderer--components--Ribbon.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/markdown/src/renderer/editor/extensions.ts",
+    "manifest": "apps/markdown/package.json",
+    "name": "@genoffice/markdown",
+    "version": "0.1.0",
+    "sha256": "7e76ad7399df1604061b22ff984bed457ff42573d3e7332e778be61b34a7ab26",
+    "relative": "genoffice/apps/markdown/src/renderer/editor/extensions.ts",
+    "patch": "genoffice/apps--markdown--src--renderer--editor--extensions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/markdown/src/renderer/file-naming.ts",
+    "manifest": "apps/markdown/package.json",
+    "name": "@genoffice/markdown",
+    "version": "0.1.0",
+    "sha256": "8a78b0265db248adb3908cd3ef04f70a2981243c1e10023d1f5e6e573f634716",
+    "relative": "genoffice/apps/markdown/src/renderer/file-naming.ts",
+    "patch": "genoffice/apps--markdown--src--renderer--file-naming.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/markdown/src/renderer/editor/localImage.ts",
+    "manifest": "apps/markdown/package.json",
+    "name": "@genoffice/markdown",
+    "version": "0.1.0",
+    "sha256": "c3c1ab1109df08b33459e16184ce929938bbcf1519d3ca3e414056c4044872c5",
+    "relative": "genoffice/apps/markdown/src/renderer/editor/localImage.ts",
+    "patch": "genoffice/apps--markdown--src--renderer--editor--localImage.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/sheets/src/preload/index.ts",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "d36fd43e3de35c5965f8d382702725d194efdfb21510665b54e2204424f5d5cc",
+    "relative": "genoffice/apps/sheets/src/preload/index.ts",
+    "patch": "genoffice/apps--sheets--src--preload--index.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/html/src/renderer/App.tsx",
+    "manifest": "apps/html/package.json",
+    "name": "@genoffice/html",
+    "version": "0.1.0",
+    "sha256": "f0a53293b614d6487496ede43f052fd6ba90b46da39c41c876847e5a0647fbe0",
+    "relative": "genoffice/apps/html/src/renderer/App.tsx",
+    "patch": "genoffice/apps--html--src--renderer--App.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/html/src/renderer/components/Ribbon.tsx",
+    "manifest": "apps/html/package.json",
+    "name": "@genoffice/html",
+    "version": "0.1.0",
+    "sha256": "fc21a5e3e75a84e812dbc164352eb53166ba9094f9b36b0f93d298f92977b6c3",
+    "relative": "genoffice/apps/html/src/renderer/components/Ribbon.tsx",
+    "patch": "genoffice/apps--html--src--renderer--components--Ribbon.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/html/src/renderer/components/FloatToolbar.tsx",
+    "manifest": "apps/html/package.json",
+    "name": "@genoffice/html",
+    "version": "0.1.0",
+    "sha256": "82ebdcb616d471cc0e9b3bb86d3cfa94e01845d532b9c06978025646b2872427",
+    "relative": "genoffice/apps/html/src/renderer/components/FloatToolbar.tsx",
+    "patch": "genoffice/apps--html--src--renderer--components--FloatToolbar.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/pdf/src/main/pdf-main.ts",
+    "manifest": "apps/pdf/package.json",
+    "name": "@genoffice/pdf",
+    "version": "0.1.0",
+    "sha256": "8b7f91dee963f380335d35683ce76d01c7fc48ac7737dafbb3193af00acdec8e",
+    "relative": "genoffice/apps/pdf/src/main/pdf-main.ts",
+    "patch": "genoffice/apps--pdf--src--main--pdf-main.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/pdf/src/main/image-edit.ts",
+    "manifest": "apps/pdf/package.json",
+    "name": "@genoffice/pdf",
+    "version": "0.1.0",
+    "sha256": "96530768f84e41c2559139e858632d1acb86f3e5b384079c8380540078831cfb",
+    "relative": "genoffice/apps/pdf/src/main/image-edit.ts",
+    "patch": "genoffice/apps--pdf--src--main--image-edit.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/pdf/src/renderer/App.tsx",
+    "manifest": "apps/pdf/package.json",
+    "name": "@genoffice/pdf",
+    "version": "0.1.0",
+    "sha256": "53ea2e95206eb3272cf890676f9dcb9aa84da38fad91dc50ccb7fcb75afaa5bb",
+    "relative": "genoffice/apps/pdf/src/renderer/App.tsx",
+    "patch": "genoffice/apps--pdf--src--renderer--App.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "packages/html2docx/src/generate.ts",
+    "manifest": "packages/html2docx/package.json",
+    "name": "@genoffice/html2docx",
+    "version": "0.1.0",
+    "sha256": "7d380be876299f7e30fe4327f828e4968ef069123e1401c2ef412bf956e9563d",
+    "relative": "genoffice/packages/html2docx/src/generate.ts",
+    "patch": "genoffice/packages--html2docx--src--generate.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "packages/html2docx/src/generate/page-settings.ts",
+    "manifest": "packages/html2docx/package.json",
+    "name": "@genoffice/html2docx",
+    "version": "0.1.0",
+    "sha256": "eb96cd4214dd95d8e13970d902605f198b5374de18e7a69d1fa1fc4500e6fc17",
+    "relative": "genoffice/packages/html2docx/src/generate/page-settings.ts",
+    "patch": "genoffice/packages--html2docx--src--generate--page-settings.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/main/slides-main.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "9dc34f539e3e3722b37e27411a110c86562da56a437f2501959f7ed5cef1247d",
+    "relative": "genoffice/apps/slides/src/main/slides-main.ts",
+    "patch": "genoffice/apps--slides--src--main--slides-main.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/sheets/src/renderer/SpellingDialog.tsx",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "1190b4cb90bd372870113aa4c0c6e2be5eba310ce5507ed0fc607db860d9af37",
+    "relative": "genoffice/apps/sheets/src/renderer/SpellingDialog.tsx",
+    "patch": "genoffice/apps--sheets--src--renderer--SpellingDialog.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/sheets/src/renderer/env.d.ts",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "daa23e5237bf061777cc4485f07555d19630efe7a341f08a1f06a9e0c39c85d8",
+    "relative": "genoffice/apps/sheets/src/renderer/env.d.ts",
+    "patch": "genoffice/apps--sheets--src--renderer--env.d.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/main/zotero-wire.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "be746ac07df076252867ad47e40529865824b4dd86b3182dd2a998707d56c6b3",
+    "relative": "genoffice/apps/docs/src/main/zotero-wire.ts",
+    "patch": "genoffice/apps--docs--src--main--zotero-wire.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/pdf/src/preload/index.ts",
+    "manifest": "apps/pdf/package.json",
+    "name": "@genoffice/pdf",
+    "version": "0.1.0",
+    "sha256": "39d811234749841a9f2e6e449630939d0011964322db2a55c2fd786851c48cdf",
+    "relative": "genoffice/apps/pdf/src/preload/index.ts",
+    "patch": "genoffice/apps--pdf--src--preload--index.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/pdf/src/shared/ipc.ts",
+    "manifest": "apps/pdf/package.json",
+    "name": "@genoffice/pdf",
+    "version": "0.1.0",
+    "sha256": "42b4b54ceb05c5135ded166e416d3809d9257deedad00579f82fc196b65982aa",
+    "relative": "genoffice/apps/pdf/src/shared/ipc.ts",
+    "patch": "genoffice/apps--pdf--src--shared--ipc.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/App.tsx",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "436681bbd7a50ae71dd94bfd2f3a84e4cd2cef205fd7deb21748cf82b2893243",
+    "relative": "genoffice/apps/docs/src/renderer/App.tsx",
+    "patch": "genoffice/apps--docs--src--renderer--App.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/docs/src/renderer/shortcuts.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "b39920bc7167ad6d1dd5d691d0673cf926ace650be3e37593922bc34d88ad4bc",
+    "relative": "genoffice/apps/docs/src/renderer/shortcuts.ts",
+    "patch": "genoffice/apps--docs--src--renderer--shortcuts.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/sheets/src/renderer/ScreenshotDialog.tsx",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "027afaaaee85f3e1ae384332dcab454499e1e7d7cbec06492979578d17926f4f",
+    "relative": "genoffice/apps/sheets/src/renderer/ScreenshotDialog.tsx",
+    "patch": "genoffice/apps--sheets--src--renderer--ScreenshotDialog.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/renderer/action-context.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "9fb3ba3ad45c45c6ee4b5f44f6788c791f22b5dfaeb734d478792d3a741742a7",
+    "relative": "genoffice/apps/slides/src/renderer/action-context.ts",
+    "patch": "genoffice/apps--slides--src--renderer--action-context.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/show-actions.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "d71e13c737a6a5d94440b414e0046fe92ae5f84077f5139902b817c73c0cfb9e",
+    "relative": "genoffice/apps/slides/src/renderer/show-actions.ts",
+    "patch": "genoffice/apps--slides--src--renderer--show-actions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/App.tsx",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "ec8c2da65a1e39dd661c68ecb1fd63e93b3152646eb0a32fe2ad67c1055f68c1",
+    "relative": "genoffice/apps/slides/src/renderer/App.tsx",
+    "patch": "genoffice/apps--slides--src--renderer--App.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/renderer/components/SlideShowView.tsx",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "a52121f289769c7d91d12e141a6c10764a141f09087f42c5bb66a5e99d559a79",
+    "relative": "genoffice/apps/slides/src/renderer/components/SlideShowView.tsx",
+    "patch": "genoffice/apps--slides--src--renderer--components--SlideShowView.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/renderer/narration/use-recording.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "3344f0959c7bb70d9bc523026f487c8674f2bef7402587f3cf75341ed8e85324",
+    "relative": "genoffice/apps/slides/src/renderer/narration/use-recording.ts",
+    "patch": "genoffice/apps--slides--src--renderer--narration--use-recording.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/narration/recorder.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "32a9d4cd6a231fc2d51d0d57469692426d36b0e535467d36a5360110b3857b75",
+    "relative": "genoffice/apps/slides/src/renderer/narration/recorder.ts",
+    "patch": "genoffice/apps--slides--src--renderer--narration--recorder.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/insert-actions.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "dded693b15f96309887e6e86f6d01870a5b8b89acabcd395bffe7ad022497ac4",
+    "relative": "genoffice/apps/slides/src/renderer/insert-actions.ts",
+    "patch": "genoffice/apps--slides--src--renderer--insert-actions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/embedded-fonts.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "c8b6c25b8e39957a3697fedd52c9666cd6c85faa84efb0ae4a71d2d42179e32e",
+    "relative": "genoffice/apps/docs/src/renderer/embedded-fonts.ts",
+    "patch": "genoffice/apps--docs--src--renderer--embedded-fonts.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/export-fonts.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "ef0cfef807cc1aec80ecc79d8e4b84f6489bfb9dec91a4bc0c35ee1620ad2911",
+    "relative": "genoffice/apps/slides/src/renderer/export-fonts.ts",
+    "patch": "genoffice/apps--slides--src--renderer--export-fonts.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/file-actions.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "224965add8f4bb4c859aa5ecf396530e804cf5cc070e83a0e20315d0ad4d2a82",
+    "relative": "genoffice/apps/docs/src/renderer/file-actions.ts",
+    "patch": "genoffice/apps--docs--src--renderer--file-actions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/shared/ipc.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "94afc8f035a64d8c3833288502c50bea8ee44c61d535e803d23ca2a5398262d6",
+    "relative": "genoffice/apps/docs/src/shared/ipc.ts",
+    "patch": "genoffice/apps--docs--src--shared--ipc.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/sheets/src/renderer/WorkbookVisuals.tsx",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "9ce7368c9d70a47cc7157b07973f97087ef2152384d6174a2b33554c377cbb0b",
+    "relative": "genoffice/apps/sheets/src/renderer/WorkbookVisuals.tsx",
+    "patch": "genoffice/apps--sheets--src--renderer--WorkbookVisuals.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/main/env.d.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "57ec5e8f4d06010022295eeb83c3ad70f15f502376f6eac517e816ec764770f2",
+    "relative": "genoffice/apps/slides/src/main/env.d.ts",
+    "patch": "genoffice/apps--slides--src--main--env.d.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/bidi-js.d.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "ed09fddeaacb80866147b8e474f32bd7d051abe2a50cb5610755f6a7cd6838cf",
+    "relative": "genoffice/apps/docs/src/renderer/bidi-js.d.ts",
+    "patch": "genoffice/apps--docs--src--renderer--bidi-js.d.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/shared/ipc.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "b0ce7a55a9dea0016fde776899d5714912e301b5e2ac36b9e9c568933a5b8221",
+    "relative": "genoffice/apps/slides/src/shared/ipc.ts",
+    "patch": "genoffice/apps--slides--src--shared--ipc.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/env.d.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "c4398d560cad741ae732f1d6f8995fb721efd32d37f5dcaa8b3f7515e65e1d66",
+    "relative": "genoffice/apps/slides/src/renderer/env.d.ts",
+    "patch": "genoffice/apps--slides--src--renderer--env.d.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "packages/pptx-render/src/bidi-js.d.ts",
+    "manifest": "packages/pptx-render/package.json",
+    "name": "@genoffice/pptx-render",
+    "version": "0.1.0",
+    "sha256": "22bec36791782b492f652c6e24819baf1dbd8c66fe770e8523a331a572289d10",
+    "relative": "genoffice/packages/pptx-render/src/bidi-js.d.ts",
+    "patch": "genoffice/packages--pptx-render--src--bidi-js.d.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/sheets/src/renderer/App.tsx",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "ac38d35b5c6e8d83747a278d76a430b873784c0ab3fda5ec558a35498865b3fd",
+    "relative": "genoffice/apps/sheets/src/renderer/App.tsx",
+    "patch": "genoffice/apps--sheets--src--renderer--App.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/renderer/context-menu-items.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "18b2456101acf07484fcf26833fafff2f7fa4a9c8efa5d2bdd6cc432adde880b",
+    "relative": "genoffice/apps/slides/src/renderer/context-menu-items.ts",
+    "patch": "genoffice/apps--slides--src--renderer--context-menu-items.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/clipboard-actions.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "10d3d59fe33b2ac62671fd63fa20ca9d992a5857818e61e5d8df73ec3c91b256",
+    "relative": "genoffice/apps/slides/src/renderer/clipboard-actions.ts",
+    "patch": "genoffice/apps--slides--src--renderer--clipboard-actions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/preload/index.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "d8644539a1516b7bdcecd8cf24a2d6cca84f6c6c0c452ea9893005f4c221fc2a",
+    "relative": "genoffice/apps/slides/src/preload/index.ts",
+    "patch": "genoffice/apps--slides--src--preload--index.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/pdf/src/renderer/OutlinePanel.tsx",
+    "manifest": "apps/pdf/package.json",
+    "name": "@genoffice/pdf",
+    "version": "0.1.0",
+    "sha256": "9ee600466f664d041e22cef240cb27005587d64ae59f00d74bdf08d80ff7ea76",
+    "relative": "genoffice/apps/pdf/src/renderer/OutlinePanel.tsx",
+    "patch": "genoffice/apps--pdf--src--renderer--OutlinePanel.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/pdf/src/renderer/LinkLayer.tsx",
+    "manifest": "apps/pdf/package.json",
+    "name": "@genoffice/pdf",
+    "version": "0.1.0",
+    "sha256": "00c028d7643335a21e904587072380adba6358c13e07bf520cffc4ec5d392fdb",
+    "relative": "genoffice/apps/pdf/src/renderer/LinkLayer.tsx",
+    "patch": "genoffice/apps--pdf--src--renderer--LinkLayer.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/renderer/components/Ribbon.tsx",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "6a261cf18bbdbf2b39fa51add3d30383a10ded4a072303e0012cb7e5cde00aba",
+    "relative": "genoffice/apps/slides/src/renderer/components/Ribbon.tsx",
+    "patch": "genoffice/apps--slides--src--renderer--components--Ribbon.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/renderer/components/ribbon-shared.tsx",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "945b7774947861734ffa7f6fa36d73647d8c0f5ebfcb85c015477bb631aeef25",
+    "relative": "genoffice/apps/slides/src/renderer/components/ribbon-shared.tsx",
+    "patch": "genoffice/apps--slides--src--renderer--components--ribbon-shared.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/sheets/src/shared/desktop-api.ts",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "dca480a689b2e322b520e777274d0f93ca4403370a9cb270e698de694d5a17a2",
+    "relative": "genoffice/apps/sheets/src/shared/desktop-api.ts",
+    "patch": "genoffice/apps--sheets--src--shared--desktop-api.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/sheets/src/renderer/save-scheduler.ts",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "1134d428260f11b6297a1d5d4f2a2eaaf7076cf02217c05bef9e91514b44600f",
+    "relative": "genoffice/apps/sheets/src/renderer/save-scheduler.ts",
+    "patch": "genoffice/apps--sheets--src--renderer--save-scheduler.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/html/src/main/asset-mime.ts",
+    "manifest": "apps/html/package.json",
+    "name": "@genoffice/html",
+    "version": "0.1.0",
+    "sha256": "d681e3130fe049c8c9222f1f6a22c1db7969a8b79378ecdc016dc33e4e5bd4d0",
+    "relative": "genoffice/apps/html/src/main/asset-mime.ts",
+    "patch": "genoffice/apps--html--src--main--asset-mime.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/sheets/src/renderer/function-arguments-runtime.ts",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "aa392a0b08f66bfff8c256955235be6d52c08f71442be4e238de80b434dfab87",
+    "relative": "genoffice/apps/sheets/src/renderer/function-arguments-runtime.ts",
+    "patch": "genoffice/apps--sheets--src--renderer--function-arguments-runtime.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "packages/docx-engine/src/lazy-media.ts",
+    "manifest": "packages/docx-engine/package.json",
+    "name": "@genoffice/docx-engine",
+    "version": "0.1.0",
+    "sha256": "1960a444e7a3cc1e9d860a9bf21e6a088b3e38cd9080617a3202a131208c4c15",
+    "relative": "genoffice/packages/docx-engine/src/lazy-media.ts",
+    "patch": "genoffice/packages--docx-engine--src--lazy-media.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/parse-worker.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "a3365bfff82143efd22c1250d49976aaef6c1fab0a08b336e94bf2a731468701",
+    "relative": "genoffice/apps/docs/src/renderer/parse-worker.ts",
+    "patch": "genoffice/apps--docs--src--renderer--parse-worker.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/export-markdown.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "a52e4a7c399428cf09d817df24fbdcba251a3a757765df78f6b0ed18107bde9c",
+    "relative": "genoffice/apps/docs/src/renderer/export-markdown.ts",
+    "patch": "genoffice/apps--docs--src--renderer--export-markdown.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/file-actions.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "a7ea90c72c9d242002ff18daeb6907988db91ebabc014b007516cfd4cb017962",
+    "relative": "genoffice/apps/slides/src/renderer/file-actions.ts",
+    "patch": "genoffice/apps--slides--src--renderer--file-actions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/main/shaped-metrics.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "faaa6d155e0cc3c0a57036382d098de1d22660d493569c043d97ff460914ecf3",
+    "relative": "genoffice/apps/slides/src/main/shaped-metrics.ts",
+    "patch": "genoffice/apps--slides--src--main--shaped-metrics.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/html/src/main/single-file-html.ts",
+    "manifest": "apps/html/package.json",
+    "name": "@genoffice/html",
+    "version": "0.1.0",
+    "sha256": "647caae5d5cbde786ab7f9e261ce13c8c8d077a4bbf53ebe70ad95c08e0bca76",
+    "relative": "genoffice/apps/html/src/main/single-file-html.ts",
+    "patch": "genoffice/apps--html--src--main--single-file-html.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/components/ContextMenu.tsx",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "96eca460e013315c5968271421ffcc2c2b3c52a1a30ae7a8511c7ad1e7fe7291",
+    "relative": "genoffice/apps/docs/src/renderer/components/ContextMenu.tsx",
+    "patch": "genoffice/apps--docs--src--renderer--components--ContextMenu.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/docs/src/renderer/components/PasteSpecialDialog.tsx",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "60dd6cbafd987698aa35a9ccd84b8207e55b4e40fe69c7310eb94628a7809fd4",
+    "relative": "genoffice/apps/docs/src/renderer/components/PasteSpecialDialog.tsx",
+    "patch": "genoffice/apps--docs--src--renderer--components--PasteSpecialDialog.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/docs/src/renderer/components/ribbon-references-tab.tsx",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "aff83892497b72266608beb11368e1fd464ed10c6d9eabd93347d37fb53ae48e",
+    "relative": "genoffice/apps/docs/src/renderer/components/ribbon-references-tab.tsx",
+    "patch": "genoffice/apps--docs--src--renderer--components--ribbon-references-tab.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/docs/src/renderer/components/Ribbon.tsx",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "e4edc64326a46a64f48878e3b89472d2239fc308ddc1c13cda63e234449e5f66",
+    "relative": "genoffice/apps/docs/src/renderer/components/Ribbon.tsx",
+    "patch": "genoffice/apps--docs--src--renderer--components--Ribbon.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/docs/src/renderer/editor/extensions.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "9cdf58c1da8fadbcfc1cb9126207e211e017e7cc0678d45829ffc0368fdc188b",
+    "relative": "genoffice/apps/docs/src/renderer/editor/extensions.ts",
+    "patch": "genoffice/apps--docs--src--renderer--editor--extensions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/editor/paste-actions.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "e0f294a093d5dc0b0165a744eb143d7d1700176a244cc6b3830b89e2d84768e7",
+    "relative": "genoffice/apps/docs/src/renderer/editor/paste-actions.ts",
+    "patch": "genoffice/apps--docs--src--renderer--editor--paste-actions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/system-fonts.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "73314f76cc3039304c4fae9f08ad2335a6c57281c98ef5340a0f7ed6f81f2dca",
+    "relative": "genoffice/apps/docs/src/renderer/system-fonts.ts",
+    "patch": "genoffice/apps--docs--src--renderer--system-fonts.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/zotero/controller.ts",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "e7b5d1e1e7ddffca49ca45a81f7cd26e0515b3fc24a8de62e53e17c174ddcb4d",
+    "relative": "genoffice/apps/docs/src/renderer/zotero/controller.ts",
+    "patch": "genoffice/apps--docs--src--renderer--zotero--controller.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/html/src/renderer/preview/inspector.js",
+    "manifest": "apps/html/package.json",
+    "name": "@genoffice/html",
+    "version": "0.1.0",
+    "sha256": "fdd3b945a616c754fddb00718409f923733c8d029a9ae0c1160ee99e330d1740",
+    "relative": "genoffice/apps/html/src/renderer/preview/inspector.js",
+    "patch": "genoffice/apps--html--src--renderer--preview--inspector.js.patch",
+    "loader": "js"
+  },
+  {
+    "source": "apps/html/src/renderer/preview/inspector-protocol.ts",
+    "manifest": "apps/html/package.json",
+    "name": "@genoffice/html",
+    "version": "0.1.0",
+    "sha256": "2e44951bd8df5dc44855a0c70b4004da002995b0e0f6ce9c831a951c9c2d1d4b",
+    "relative": "genoffice/apps/html/src/renderer/preview/inspector-protocol.ts",
+    "patch": "genoffice/apps--html--src--renderer--preview--inspector-protocol.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/docs/src/renderer/components/ribbon-tabs.tsx",
+    "manifest": "apps/docs/package.json",
+    "name": "@genoffice/docs",
+    "version": "0.1.0",
+    "sha256": "d475b39d10a2b8dacfcf6a5293ec87f15e0a2d00b9d22d46f8e35ebb39e1cff2",
+    "relative": "genoffice/apps/docs/src/renderer/components/ribbon-tabs.tsx",
+    "patch": "genoffice/apps--docs--src--renderer--components--ribbon-tabs.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/renderer/picture-edit-actions.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "b889af840c902b53f7bf5fdcd91fb9eb0dbb1c0658fdc964dfc2519768c74fde",
+    "relative": "genoffice/apps/slides/src/renderer/picture-edit-actions.ts",
+    "patch": "genoffice/apps--slides--src--renderer--picture-edit-actions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/markdown/src/renderer/editor/CodeBlockView.tsx",
+    "manifest": "apps/markdown/package.json",
+    "name": "@genoffice/markdown",
+    "version": "0.1.0",
+    "sha256": "432e2c4892616b55bcae99e5a4b37f9c32a69ab8f7c31a16c6d7be8fb97d3bd0",
+    "relative": "genoffice/apps/markdown/src/renderer/editor/CodeBlockView.tsx",
+    "patch": "genoffice/apps--markdown--src--renderer--editor--CodeBlockView.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "packages/cli/src/formats/docx.ts",
+    "manifest": "packages/cli/package.json",
+    "name": "@genoffice/cli",
+    "version": "0.10.0",
+    "sha256": "c4acfc64ff12784ebd466ab4c70babb75d580b31967aea90665a57b6d4c95969",
+    "relative": "genoffice/packages/cli/src/formats/docx.ts",
+    "patch": "genoffice/packages--cli--src--formats--docx.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "packages/cli/src/formats/image-source.ts",
+    "manifest": "packages/cli/package.json",
+    "name": "@genoffice/cli",
+    "version": "0.10.0",
+    "sha256": "1208b10453f594fb1f03635d38fa6806dc81f5523c21e31c3fe6c78293508694",
+    "relative": "genoffice/packages/cli/src/formats/image-source.ts",
+    "patch": "genoffice/packages--cli--src--formats--image-source.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/sheets/src/renderer/save-actions.ts",
+    "manifest": "apps/sheets/package.json",
+    "name": "@genoffice/sheets",
+    "version": "0.1.0",
+    "sha256": "43c1f523ff5c8a02b39abf6866a0c395f27b0d61fc9f1bc9ad6350b5e15afde0",
+    "relative": "genoffice/apps/sheets/src/renderer/save-actions.ts",
+    "patch": "genoffice/apps--sheets--src--renderer--save-actions.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/components/FormatPane.tsx",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "7af130c4cd8901b83c96ae7bd0f534c97ed8a083415518ccd624655516a342cd",
+    "relative": "genoffice/apps/slides/src/renderer/components/FormatPane.tsx",
+    "patch": "genoffice/apps--slides--src--renderer--components--FormatPane.tsx.patch",
+    "loader": "tsx"
+  },
+  {
+    "source": "apps/slides/src/main/ai-ipc.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "856ec7cc4b08bdfd332f35950e517365f99d7496979f12c9c8bc8011ba1f4c72",
+    "relative": "genoffice/apps/slides/src/main/ai-ipc.ts",
+    "patch": "genoffice/apps--slides--src--main--ai-ipc.ts.patch",
+    "loader": "ts"
+  },
+  {
+    "source": "apps/slides/src/renderer/ai/slides-skill.ts",
+    "manifest": "apps/slides/package.json",
+    "name": "@genoffice/slides",
+    "version": "0.1.0",
+    "sha256": "d55386ed080794b922895c39a6552e474a15e66ffee4f5f7c044f760e1ec6336",
+    "relative": "genoffice/apps/slides/src/renderer/ai/slides-skill.ts",
+    "patch": "genoffice/apps--slides--src--renderer--ai--slides-skill.ts.patch",
+    "loader": "ts"
+  }
+]

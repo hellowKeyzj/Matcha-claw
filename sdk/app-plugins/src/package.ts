@@ -3,11 +3,9 @@ import { promisify } from 'node:util';
 import { crc32, inflateRaw } from 'node:zlib';
 import { zipSync } from 'fflate';
 import type { AppPluginManifest } from './manifest.js';
+import { MAX_APP_PLUGIN_ZIP_BYTES, MAX_APP_PLUGIN_CONTENT_BYTES, MAX_APP_PLUGIN_FILE_BYTES, MAX_APP_PLUGIN_FILES } from './limits.js';
 
-export const MAX_APP_PLUGIN_ZIP_BYTES = 64 * 1024 * 1024;
-export const MAX_APP_PLUGIN_CONTENT_BYTES = 128 * 1024 * 1024;
-export const MAX_APP_PLUGIN_FILE_BYTES = 96 * 1024 * 1024;
-export const MAX_APP_PLUGIN_FILES = 1024;
+export { MAX_APP_PLUGIN_ZIP_BYTES, MAX_APP_PLUGIN_CONTENT_BYTES, MAX_APP_PLUGIN_FILE_BYTES, MAX_APP_PLUGIN_FILES } from './limits.js';
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_SCHEMA_BYTES = 16 * 1024;
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -155,13 +153,21 @@ export function validateAppPluginManifest(value: unknown): AppPluginManifest {
   }
   const applicationIds = new Set<string>();
   for (const value of applications) {
-    const application = requireObject(value, ['id', 'name', 'entry', 'placement', 'scope', 'imageEditor']);
+    const application = requireObject(value, ['id', 'name', 'entry', 'icon', 'placement', 'scope', 'imageEditor']);
     requirePluginId(application.id);
     requireValid(!applicationIds.has(application.id), 'Duplicate application identifier.');
     applicationIds.add(application.id);
     requireText(application.name, 120, 'application name');
     requirePackagePath(application.entry);
     requireValid(/\.html$/i.test(application.entry), 'Application entry must be a package HTML file.');
+    if (application.icon !== undefined) {
+      const icon = requireObject(application.icon, ['paths']);
+      requireValid(Array.isArray(icon.paths) && icon.paths.length > 0 && icon.paths.length <= 16, 'Application icons require 1 to 16 paths.');
+      for (const path of icon.paths) {
+        requireValid(typeof path === 'string' && path.length > 0 && path.length <= 1024
+          && !/[^MmZzLlHhVvCcSsQqTtAa0-9 ,.+eE-]/.test(path) && /[MmZzLlHhVvCcSsQqTtAa]/.test(path), 'Invalid application icon path.');
+      }
+    }
     requireValid(application.placement === undefined || ['page', 'chat-panel', 'both'].includes(application.placement as string), 'Invalid application placement.');
     requireValid(application.scope === undefined || application.scope === 'session' || application.scope === 'workspace', 'Invalid application scope.');
     if (application.imageEditor !== undefined) {

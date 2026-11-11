@@ -1,0 +1,22 @@
+import Ajv from 'ajv';
+import type { AppJson } from '@matcha/app-plugins-sdk';
+
+export const htmlActionSchemas = {
+  "get_outline": {"type":"object","properties":{"depth":{"type":"integer","description":"Nesting depth to show (default 3)"},"from_sid":{"type":"integer","description":"Only this element and its subtree"}}},
+  "read_source": {"type":"object","properties":{"start_line":{"type":"integer"},"end_line":{"type":"integer"},"sid":{"type":"integer"},"page":{"type":"integer"}}},
+  "apply_ops": {"type":"object","required":["ops"],"properties":{"ops":{"type":"array","minItems":1,"maxItems":40,"items":{"type":"object","required":["op"],"properties":{"op":{"type":"string","enum":["str_replace","replace_element","set_inner_html","set_text","insert_html","remove","move","set_attr","set_style"]},"old":{"type":"string"},"new":{"type":"string"},"replace_all":{"type":"boolean"},"sid":{"type":"integer"},"ref_sid":{"type":"integer"},"html":{"type":"string"},"text":{"type":"string"},"position":{"type":"string","enum":["before","after","prepend","append"]},"name":{"type":"string"},"value":{"type":["string","null"]},"styles":{"type":"object","additionalProperties":{"type":["string","null"]}}}}},"summary":{"type":"string","description":"One short sentence shown to the user"}}},
+  "context": {"type":"object","properties":{}},
+  "pin_brief": {"type":"object","required":["brief"],"properties":{"brief":{"type":"object","required":["core_hook","style","sections","version"],"properties":{"core_hook":{"type":"string"},"style":{"type":"object","required":["tone","palette","typography"],"properties":{"name":{"type":"string"},"tone":{"type":"string"},"layout":{"type":"string"},"density":{"type":"string"},"docx_friendly":{"type":"boolean"},"palette":{"type":"object","properties":{"primary":{"type":"string"},"accent":{"type":"string"},"bg":{"type":"string"},"surface":{"type":"string"},"text":{"type":"string"}}},"typography":{"type":"object","properties":{"heading":{"type":"string"},"body":{"type":"string"},"scale":{"type":"string"}}},"tokens":{"type":"object","properties":{"radius":{"type":"string"},"spacing":{"type":"string"},"shadow":{"type":"string"}}}}},"alternatives":{"type":"array","items":{"type":"object","required":["tone","palette","typography"],"properties":{"name":{"type":"string"},"tone":{"type":"string"},"layout":{"type":"string"},"density":{"type":"string"},"docx_friendly":{"type":"boolean"},"palette":{"type":"object","properties":{"primary":{"type":"string"},"accent":{"type":"string"},"bg":{"type":"string"},"surface":{"type":"string"},"text":{"type":"string"}}},"typography":{"type":"object","properties":{"heading":{"type":"string"},"body":{"type":"string"},"scale":{"type":"string"}}},"tokens":{"type":"object","properties":{"radius":{"type":"string"},"spacing":{"type":"string"},"shadow":{"type":"string"}}}}}},"sections":{"type":"array","items":{"type":"object","required":["title","brief"],"properties":{"title":{"type":"string"},"type":{"type":"string"},"brief":{"type":"string"},"layout":{"type":"string"},"image_queries":{"type":"array","items":{"type":"string"}}}}},"meta":{"type":"object","properties":{"title":{"type":"string"},"language":{"type":"string"},"audience":{"type":"string"},"length":{"type":"string"}}},"user_edited":{"type":"array","items":{"type":"string"}},"version":{"const":1}}}}}
+} as const;
+export type HtmlAction = keyof typeof htmlActionSchemas;
+export const htmlActionInputSchema = {
+  type: 'object', required: ['documentId', 'action'], additionalProperties: false,
+  properties: { documentId: { type: 'string', pattern: '^doc_[a-f0-9]{16}$' }, action: { type: 'string', enum: Object.keys(htmlActionSchemas) }, input: { type: 'object' } },
+  oneOf: Object.entries(htmlActionSchemas).map(([action, schema]) => ({ ...('required' in schema ? { required: ['input'] } : {}), properties: { action: { const: action }, input: schema } }))
+};
+const ajv = new Ajv({ strict: true, allowUnionTypes: true, addUsedSchema: false });
+const validators = new Map(Object.entries(htmlActionSchemas).map(([action, schema]) => [action, ajv.compile(schema)]));
+export function validateHtmlAction(action: unknown, input: unknown): asserts input is Record<string, AppJson> {
+  const validate = typeof action === 'string' ? validators.get(action) : undefined;
+  if (!validate || !validate(input)) throw new Error('Invalid HTML document action or input.');
+}

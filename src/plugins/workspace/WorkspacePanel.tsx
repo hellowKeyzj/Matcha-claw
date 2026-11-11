@@ -234,10 +234,10 @@ export const WorkspacePanel = memo(function WorkspacePanel(props: WorkspacePanel
     <PaneHeader pane="side" pageTabs={sideTabs} workspace={workspace} launchers={launchers} visible={props.visible}
       style={props.sideStyle.header} onHide={props.onHide} id={id} onDragStart={startDrag} onDragEnd={endDrag} pendingPageFocusRef={pendingPageFocusRef} />
     {sidePages.length === 0 && <div style={{ ...props.sideStyle.body, display: props.visible ? undefined : 'none' }} inert={!props.visible}
-      className="flex min-h-0 min-w-0 items-center justify-center overflow-y-auto bg-card p-6">
-      <div className="w-full max-w-xs space-y-1">
+      className="flex min-h-0 min-w-0 flex-col items-center overflow-y-auto bg-card p-6">
+      <div className="my-auto w-full max-w-xs shrink-0 space-y-1">
         <p className="px-3 pb-2 text-sm text-muted-foreground">{t(launchers.length ? 'addPage' : 'noLaunchers')}</p>
-        {launchers.slice(0, 6).map((launcher) => <LauncherItem key={launcher.id} launcher={launcher} workspace={workspace} />)}
+        {launchers.map((launcher) => <LauncherItem key={launcher.id} launcher={launcher} workspace={workspace} />)}
       </div>
     </div>}
     {pages.map((page) => {

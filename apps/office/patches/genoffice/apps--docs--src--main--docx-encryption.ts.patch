@@ -1,0 +1,11 @@
+--- a/genoffice/apps/docs/src/main/docx-encryption.ts
++++ b/genoffice/apps/docs/src/main/docx-encryption.ts
+@@ -16,7 +16,7 @@
+   isEncryptedOoxml as isEncryptedDocx,
+   OoxmlDecryptError as DocxDecryptError,
+   type OoxmlDecryptFailReason as DecryptFailReason,
+-} from '@genoffice/electron-utils'
++} from '@genoffice/electron-utils/ooxml-encryption'
+ 
+ export { decryptDocx, encryptDocx, isEncryptedDocx, DocxDecryptError, type DecryptFailReason }
+ 

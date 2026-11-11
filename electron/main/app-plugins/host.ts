@@ -1,7 +1,7 @@
 import { rm } from 'node:fs/promises';
 import type { AppPluginCatalog, InstalledAppPlugin } from '../../../src/types/desktop/app-plugin';
 import { APP_SERVICE_VERSION, AppServiceError } from '../../../src/types/desktop/app-plugin-sdk';
-import type { AppServiceRequest, AppServiceResult, AppExecutionRequest, AppExecutionResult, AppPluginContext, AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginCall, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppRenderDocumentRead, AppServiceRequest, AppServiceResult, AppExecutionRequest, AppExecutionResult, AppPluginContext, AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginCall, AppRuntimeEvent, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
 import { logger } from '../../utils/logger';
 import { materializePlugin } from './loader';
 import type { ApplicationPluginOwner } from './owner';
@@ -33,7 +33,7 @@ export interface AppPluginHostOptions {
   publish(event: AppRuntimeEvent): void;
   publishConfirmation?(event: AppPluginConfirmationEvent): void;
   execute?(request: AppExecutionRequest, signal: AbortSignal, requestConfirmation?: AppPluginContext['requestConfirmation']): Promise<AppExecutionResult>;
-  service?(pluginId: string, request: AppServiceRequest, signal: AbortSignal): Promise<AppServiceResult>;
+  service?(pluginId: string, request: AppServiceRequest, signal: AbortSignal, read?: AppRenderDocumentRead, packageIdentity?: { digest: string }): Promise<AppServiceResult>;
   list(request: AppMediaModelListRequest, signal: AbortSignal): Promise<AppMediaModelList>;
   generate(request: AppModelRequest, signal: AbortSignal): Promise<AppModelResult>;
   submitVideo(request: AppModelRequest & { readonly kind: 'video' }, signal: AbortSignal): Promise<AppVideoTaskResult>;
@@ -283,12 +283,23 @@ export class AppPluginHost {
             signal.throwIfAborted();
             return this.options.execute(request, signal, requestConfirmation);
           },
-          service: async (request, signal) => {
-            await this.requireEnabled(plugin.manifest.id, plugin.digest);
+          service: async (request, signal, read) => {
+            await this.requireEnabled(load.manifest.id, load.digest);
             if (entry.failed) throw entry.failed;
             if (entry.retiring || !this.options.service) throw new AppServiceError('unavailable', 'Application services are unavailable.');
             signal.throwIfAborted();
-            return this.options.service(plugin.manifest.id, request, signal);
+            const boundRead: AppRenderDocumentRead | undefined = read && (async (input, readSignal) => {
+              const combined = readSignal ? AbortSignal.any([signal, readSignal]) : signal;
+              await this.requireEnabled(load.manifest.id, load.digest);
+              combined.throwIfAborted();
+              if (entry.failed || entry.retiring) throw new AppServiceError('unavailable', 'The document read belongs to an inactive plugin version.');
+              const result = await read(input, combined);
+              await this.requireEnabled(load.manifest.id, load.digest);
+              combined.throwIfAborted();
+              if (entry.failed || entry.retiring) throw new AppServiceError('unavailable', 'The document read belongs to an inactive plugin version.');
+              return result;
+            });
+            return this.options.service(load.manifest.id, request, signal, boundRead, { digest: load.digest });
           },
           requestConfirmation,
           log: (level, message) => logger[level](`[AppPlugins:${plugin.manifest.id}] ${message.slice(0, 2000)}`),

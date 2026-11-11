@@ -1,0 +1,289 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "types": [
+      "node"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@matcha/app-plugins-sdk": [
+        "../../sdk/app-plugins/src/index.ts"
+      ],
+      "@genoffice/agent-core": [
+        "./genoffice/packages/agent-core/src/index.ts"
+      ],
+      "@genoffice/agent-core/redact-core": [
+        "./genoffice/packages/agent-core/src/redact-core.ts"
+      ],
+      "@genoffice/agent-core/redact-range": [
+        "./genoffice/packages/agent-core/src/redact-range.ts"
+      ],
+      "@genoffice/agent-core/mind-map": [
+        "./genoffice/packages/agent-core/src/mind-map.ts"
+      ],
+      "@genoffice/agent-core/*": [
+        "./genoffice/packages/agent-core/src/*"
+      ],
+      "@genoffice/ai-provider": [
+        "./genoffice/packages/ai-provider/src/index.ts"
+      ],
+      "@genoffice/ai-provider/browser": [
+        "./genoffice/packages/ai-provider/src/browser.ts"
+      ],
+      "@genoffice/ai-provider/codex-app-server": [
+        "./genoffice/packages/ai-provider/src/codex-app-server.ts"
+      ],
+      "@genoffice/ai-provider/*": [
+        "./genoffice/packages/ai-provider/src/*"
+      ],
+      "@genoffice/ai-search": [
+        "./genoffice/packages/ai-search/src/index.ts"
+      ],
+      "@genoffice/file-parse": [
+        "./genoffice/packages/file-parse/src/index.ts"
+      ],
+      "@genoffice/compound-file": [
+        "./genoffice/packages/compound-file/src/index.ts"
+      ],
+      "@genoffice/docx-engine": [
+        "./genoffice/packages/docx-engine/src/index.ts"
+      ],
+      "@genoffice/docx-engine/math": [
+        "./genoffice/packages/docx-engine/src/math.ts"
+      ],
+      "@genoffice/docx-engine/metafile": [
+        "./genoffice/packages/docx-engine/src/metafile.ts"
+      ],
+      "@genoffice/docx-engine/lazy-media": [
+        "./genoffice/packages/docx-engine/src/lazy-media.ts"
+      ],
+      "@genoffice/docx-engine/zip-splice": [
+        "./genoffice/packages/docx-engine/src/zip-splice.ts"
+      ],
+      "@genoffice/docx-engine/*": [
+        "./genoffice/packages/docx-engine/src/*"
+      ],
+      "@genoffice/electron-utils/headless-export": [
+        "./genoffice/packages/electron-utils/src/headless-export.ts"
+      ],
+      "@genoffice/electron-utils": [
+        "./genoffice/packages/electron-utils/src/index.ts"
+      ],
+      "@genoffice/electron-utils/*": [
+        "./genoffice/packages/electron-utils/src/*"
+      ],
+      "@genoffice/electron-utils/atomic-write": [
+        "./genoffice/packages/electron-utils/src/atomic-write.ts"
+      ],
+      "@genoffice/electron-utils/safe-external-url": [
+        "./genoffice/packages/electron-utils/src/safe-external-url.ts"
+      ],
+      "@genoffice/font-metrics": [
+        "./genoffice/packages/font-metrics/src/index.ts"
+      ],
+      "@genoffice/font-metrics/resolve": [
+        "./genoffice/packages/font-metrics/src/resolve.ts"
+      ],
+      "@genoffice/font-metrics/word-faces.json": [
+        "./genoffice/packages/font-metrics/word-faces.json"
+      ],
+      "@genoffice/font-metrics/*": [
+        "./genoffice/packages/font-metrics/src/*"
+      ],
+      "@genoffice/i18n": [
+        "./genoffice/packages/i18n/src/index.ts"
+      ],
+      "@genoffice/odf2ooxml": [
+        "./genoffice/packages/odf2ooxml/src/index.ts"
+      ],
+      "@genoffice/ppt2pptx": [
+        "./genoffice/packages/ppt2pptx/src/index.ts"
+      ],
+      "@genoffice/project-store": [
+        "./genoffice/packages/project-store/src/index.ts"
+      ],
+      "@genoffice/pptx-engine": [
+        "./genoffice/packages/pptx-engine/src/index.ts"
+      ],
+      "@genoffice/pptx-engine/chart-workbook": [
+        "./genoffice/packages/pptx-engine/src/chart-workbook.ts"
+      ],
+      "@genoffice/pptx-engine/custgeom": [
+        "./genoffice/packages/pptx-engine/src/custgeom.ts"
+      ],
+      "@genoffice/pptx-engine/dgm-hier": [
+        "./genoffice/packages/pptx-engine/src/dgm-hier.ts"
+      ],
+      "@genoffice/pptx-engine/table-grid": [
+        "./genoffice/packages/pptx-engine/src/table-grid.ts"
+      ],
+      "@genoffice/pptx-engine/identity": [
+        "./genoffice/packages/pptx-engine/src/identity.ts"
+      ],
+      "@genoffice/pptx-engine/background-promote": [
+        "./genoffice/packages/pptx-engine/src/background-promote.ts"
+      ],
+      "@genoffice/pptx-engine/*": [
+        "./genoffice/packages/pptx-engine/src/*"
+      ],
+      "@genoffice/pptx-render": [
+        "./genoffice/packages/pptx-render/src/index.ts"
+      ],
+      "@genoffice/pptx-render/preset-geometry": [
+        "./genoffice/packages/pptx-render/src/preset-geometry.ts"
+      ],
+      "@genoffice/pptx-render/auto-num": [
+        "./genoffice/packages/pptx-render/src/auto-num.ts"
+      ],
+      "@genoffice/pptx-render/*": [
+        "./genoffice/packages/pptx-render/src/*"
+      ],
+      "@genoffice/pptx-ops": [
+        "./genoffice/packages/pptx-ops/src/index.ts"
+      ],
+      "@genoffice/pptx-ops/*": [
+        "./genoffice/packages/pptx-ops/src/*"
+      ],
+      "@genoffice/pipelines": [
+        "./genoffice/packages/pipelines/src/index.ts"
+      ],
+      "@genoffice/pipelines/slides": [
+        "./genoffice/packages/pipelines/src/slides/index.ts"
+      ],
+      "@genoffice/pipelines/slides/layout-audit": [
+        "./genoffice/packages/pipelines/src/slides/layout-audit.ts"
+      ],
+      "@genoffice/xlsx-gateway": [
+        "./genoffice/packages/xlsx-gateway/src/index.ts"
+      ],
+      "@genoffice/xlsx-gateway/*": [
+        "./genoffice/packages/xlsx-gateway/src/*"
+      ],
+      "@genoffice/electron-utils/remote-image": [
+        "./genoffice/packages/electron-utils/src/remote-image.ts"
+      ],
+      "@genoffice/ui": [
+        "./genoffice/packages/ui/src/index.ts"
+      ],
+      "@genoffice/ui/*": [
+        "./genoffice/packages/ui/src/*"
+      ],
+      "@genoffice/zip-gate": [
+        "./genoffice/packages/zip-gate/src/index.ts"
+      ],
+      "@matcha/sheets-main": [
+        "./src/sheets/sheets-main.d.ts"
+      ],
+      "@matcha/sheets-save-runtime": [
+        "./src/sheets/save-runtime.d.ts"
+      ],
+      "@matcha/slides-main": [
+        "./src/slides/slides-main.d.ts"
+      ],
+      "@matcha/slides-session-state": [
+        "./src/slides/session-state.d.ts"
+      ],
+      "@genoffice/cli": [
+        "./genoffice/packages/cli/src/index.ts"
+      ],
+      "@genoffice/cli/*": [
+        "./genoffice/packages/cli/src/*"
+      ],
+      "@genoffice/doc2docx": [
+        "./genoffice/packages/doc2docx/src/index.ts"
+      ],
+      "@genoffice/doc2docx/*": [
+        "./genoffice/packages/doc2docx/src/*"
+      ],
+      "@genoffice/hwp2docx": [
+        "./genoffice/packages/hwp2docx/src/index.ts"
+      ],
+      "@genoffice/hwp2docx/*": [
+        "./genoffice/packages/hwp2docx/src/*"
+      ],
+      "@genoffice/html2docx": [
+        "./genoffice/packages/html2docx/src/index.ts"
+      ],
+      "@genoffice/html2docx/*": [
+        "./genoffice/packages/html2docx/src/*"
+      ],
+      "@genoffice/pdf2docx": [
+        "./genoffice/packages/pdf2docx/src/index.ts"
+      ],
+      "@genoffice/pdf2docx/*": [
+        "./genoffice/packages/pdf2docx/src/*"
+      ],
+      "@genoffice/compound-file/*": [
+        "./genoffice/packages/compound-file/src/*"
+      ],
+      "@genoffice/odf2ooxml/*": [
+        "./genoffice/packages/odf2ooxml/src/*"
+      ],
+      "@genoffice/ppt2pptx/*": [
+        "./genoffice/packages/ppt2pptx/src/*"
+      ],
+      "@genoffice/file-parse/*": [
+        "./genoffice/packages/file-parse/src/*"
+      ],
+      "@genoffice/i18n/*": [
+        "./genoffice/packages/i18n/src/*"
+      ],
+      "@genoffice/project-store/*": [
+        "./genoffice/packages/project-store/src/*"
+      ],
+      "@genoffice/zip-gate/*": [
+        "./genoffice/packages/zip-gate/src/*"
+      ],
+      "@matcha/slides-pdf-export": [
+        "./genoffice/apps/slides/src/main/pdf-export.ts"
+      ],
+      "@matcha/slides-audience": [
+        "./genoffice/apps/slides/src/renderer/components/AudienceView.tsx"
+      ],
+      "@matcha/pdf-main": [
+        "./genoffice/apps/pdf/src/main/pdf-main.ts"
+      ],
+      "@matcha/pdf-app": [
+        "./genoffice/apps/pdf/src/renderer/App.tsx"
+      ],
+      "@matcha/pdf-locale": [
+        "./genoffice/apps/pdf/src/renderer/i18n/locale.tsx"
+      ],
+      "@matcha/pdf-dialog": [
+        "./src/pdf/dialog.ts"
+      ],
+      "@matcha/pdf-image": [
+        "./src/pdf/image.ts"
+      ],
+      "katex": ["../../node_modules/genoffice-katex/types/katex.d.ts"],
+      "katex/*": ["../../node_modules/genoffice-katex/*"],
+      "@matcha/pdf-actions": ["./src/ui/document-actions.ts"],
+      "@matcha/html-app": [
+        "./genoffice/apps/html/src/renderer/App.tsx"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "genoffice/apps/*/src/renderer/env.d.ts",
+    "genoffice/apps/*/src/main/env.d.ts"
+  ]
+}

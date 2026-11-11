@@ -94,7 +94,7 @@
     "developmentChatUnavailable": "No current chat draft is available. Describe what you want to build in a normal chat.",
     "actionFailed": "{{action}} failed: {{reason}}",
     "catalog": "Could not load the plugin list: {{reason}}",
-    "packageTooLarge": "The plugin ZIP must not exceed 64 MiB. Choose a smaller package.",
+    "packageTooLarge": "The plugin ZIP must not exceed {{limit}} MiB. Choose a smaller package.",
     "packageRead": "Could not read the plugin package. Select the ZIP file again.",
     "packageUnavailable": "The plugin package could not be read. Select the file again.",
     "packageAborted": "Reading the plugin package was canceled. Select the file again.",

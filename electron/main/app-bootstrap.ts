@@ -3,6 +3,11 @@ import type { Server } from 'node:http';
 import { join } from 'node:path';
 import { ApplicationPluginOwner } from './app-plugins/owner';
 import { AppPluginPackageWorker } from './app-plugins/package-client';
+import { registerAppPluginAssets } from './app-plugins/assets';
+import { registerAppDocumentResourcesHandlers } from './app-plugins/document-resources';
+import { registerAppPluginPresentationHandlers } from './app-plugins/presentation';
+import { registerAppSpellcheckHandlers } from './app-plugins/spellcheck';
+import { registerAppDesktopMediaHandlers } from './app-plugins/desktop-media';
 import { AppPluginHost, type AppPluginHostOptions } from './app-plugins/host';
 import { createAppPluginExecution } from './app-plugins/execution';
 import { createAppPluginServices } from './app-plugins/services';
@@ -240,10 +245,14 @@ export function bootstrapMainApplication(deps: {
   });
   const appPluginRoot = join(app.getPath('userData'), 'app-plugins');
   const appPluginPackages = new AppPluginPackageWorker();
+  let appPresentation: ReturnType<typeof registerAppPluginPresentationHandlers> | undefined;
+  let appDocumentResources: ReturnType<typeof registerAppDocumentResourcesHandlers> | undefined;
   const appPlugins = new ApplicationPluginOwner({
     rootDir: appPluginRoot, packageWorker: appPluginPackages,
     onChanged: async (event, catalog) => {
       const retired = appPluginHost.changed(catalog);
+      appPresentation?.reconcile(catalog);
+      appDocumentResources?.reconcile(catalog);
       void appPluginAgentGateway.then((gateway) => gateway.changed(), () => undefined);
       deps.hostEventBus.emit('app-plugins:changed', event);
       await retired;
@@ -262,13 +271,15 @@ export function bootstrapMainApplication(deps: {
   });
   const appPluginServices = createAppPluginServices({
     rootDir: appPluginRoot,
+    getMainWindow: deps.getMainWindow,
+    readAsset: (pluginId, digest, path) => appPlugins.readAsset(pluginId, digest, path),
     getTransports: async () => { await apiRuntime; return transportBundle!.hostApiTransports; },
   });
   const appPluginHost = new AppPluginHost({
     rootDir: appPluginRoot, owner: appPlugins, packageWorker: appPluginPackages,
     execute: appPluginExecution.execute,
     service: appPluginServices.service,
-    publish: (event) => deps.hostEventBus.emit('app-plugins:runtime', event),
+    publish: (event) => { deps.hostEventBus.emit('app-plugins:runtime', event); appPresentation?.publishRuntime(event); },
     publishConfirmation: (event) => deps.hostEventBus.emit('app-plugins:confirmation', event),
     list: async (request, signal) => {
       await apiRuntime;
@@ -329,12 +340,21 @@ export function bootstrapMainApplication(deps: {
     owner: appPlugins, host: appPluginHost,
     onPreview: (developmentId) => deps.hostEventBus.emit('app-plugins:preview', { developmentId }),
     root: join(app.getPath('userData'), 'app-plugin-agent'),
-    sdkArchive: app.isPackaged ? join(process.resourcesPath, 'app-plugins', 'sdk.tgz') : join(app.getAppPath(), 'sdk', 'app-plugins', 'matcha-app-plugins-sdk-1.2.0.tgz'),
+    sdkArchive: app.isPackaged ? join(process.resourcesPath, 'app-plugins', 'sdk.tgz') : join(app.getAppPath(), 'sdk', 'app-plugins', 'matcha-app-plugins-sdk-1.5.0.tgz'),
   }));
+  const stopAppPluginAssets = registerAppPluginAssets({
+    owner: appPlugins,
+    development: () => appPluginAgentGateway.then((gateway) => gateway.development),
+    documentResources: () => appDocumentResources,
+  });
   const appPluginGatewaySettled = appPluginAgentGateway.then(() => undefined, () => {
     logger.warn('[AppPlugins] Agent SDK gateway unavailable; existing runtimes will start without plugin development tools');
   });
   const shutdown = new AbortController();
+  appDocumentResources = registerAppDocumentResourcesHandlers({ window: mainWindow, plugins: appPlugins, signal: shutdown.signal });
+  appPresentation = registerAppPluginPresentationHandlers({ window: mainWindow, owner: appPlugins, host: appPluginHost, shutdownSignal: shutdown.signal, documentResources: appDocumentResources });
+  const stopAppSpellcheck = registerAppSpellcheckHandlers({ window: mainWindow, plugins: appPlugins, signal: shutdown.signal });
+  registerAppDesktopMediaHandlers(deps.getMainWindow, shutdown.signal);
   const access = createAccess({ root: join(getRuntimeHostStateDir(), 'access') });
   const networkAccess = createNetworkAccess({
     root: join(app.getPath('userData'), 'network-access'),
@@ -591,6 +611,9 @@ export function bootstrapMainApplication(deps: {
       void appPluginsClosed.catch(() => undefined);
       stopIabIpc();
       stopAppPluginConfirmation();
+      stopAppPluginAssets();
+      appPresentation?.close();
+      void stopAppSpellcheck();
       appPluginExecutionTargets.close();
       const iabClosed = iab.close();
       void iabClosed.catch(() => undefined);
@@ -651,6 +674,9 @@ export function bootstrapMainApplication(deps: {
   };
   const forceClose = (): Promise<void> => {
     shutdown.abort();
+    stopAppPluginAssets();
+    appPresentation?.close();
+    void stopAppSpellcheck();
     forceCloseTask ??= (async () => {
       const results = await Promise.allSettled([interconnect.then((owner) => owner.close(), () => undefined).finally(() => sharedFolders.close()), networkAccess.then((network) => network.close()), access.close(), iab.close(), appPluginAgentGateway.then((gateway) => gateway.forceClose(), () => undefined), appPluginHost.forceClose(), appPlugins.close(), appPluginPackages.forceClose(), ...[...heldRuntimeHosts].map((host) => host.forceKill())]);
       const failures = results.filter((result) => result.status === 'rejected');

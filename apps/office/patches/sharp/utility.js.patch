@@ -1,0 +1,21 @@
+--- a/sharp/lib/utility.js
++++ b/sharp/lib/utility.js
+@@ -61,15 +61,15 @@
+ if (!libvipsVersion.isGlobal) {
+   if (!libvipsVersion.isWasm) {
+     try {
+-      versions = require(`@img/sharp-${runtimePlatform}/versions`);
++      versions = require(`sharp-${runtimePlatform}/versions`);
+     } catch (_) {
+       try {
+-        versions = require(`@img/sharp-libvips-${runtimePlatform}/versions`);
++        versions = require(`sharp-libvips-${runtimePlatform}/versions`);
+       } catch (_) {}
+     }
+   } else {
+     try {
+-      versions = require('@img/sharp-wasm32/versions');
++      versions = require('sharp-wasm32/versions');
+     } catch (_) {}
+   }
+ }

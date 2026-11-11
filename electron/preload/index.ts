@@ -2,12 +2,19 @@
  * Preload Script
  * Exposes safe APIs to the renderer process via contextBridge
  */
-import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron';
 import {
   isRetainedEventChannel,
   isRetainedInvokeChannel,
   isRetainedOnceChannel,
 } from './ipc-contract';
+
+ipcRenderer.on('app-plugins:spellcheck-check-word', (_event, request: unknown) => {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return;
+  const { id, word } = request as { id?: unknown; word?: unknown };
+  if (typeof id !== 'string' || id.length > 128 || typeof word !== 'string' || !word.length || word.length > 256) return;
+  ipcRenderer.send('app-plugins:spellcheck-word-result', { id, misspelled: webFrame.isWordMisspelled(word), suggestions: webFrame.getWordSuggestions(word) });
+});
 
 const traceEnabled = process.env.MATCHACLAW_TRACE === '1';
 if (traceEnabled) {

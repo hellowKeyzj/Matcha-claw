@@ -1,0 +1,75 @@
+--- a/genoffice/apps/sheets/src/renderer/ScreenshotDialog.tsx
++++ b/genoffice/apps/sheets/src/renderer/ScreenshotDialog.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useState } from 'react'
++import { useEffect, useRef, useState } from 'react'
+ 
+ import type { ScreenSourcesResult } from '../shared/desktop-api'
+ import { useI18n } from './i18n/locale'
+@@ -10,6 +10,7 @@ import { useModalDialog } from './modal-dialog'
+ /// floating picture at the selection.
+ 
+ type LoadState =
++  | { phase: 'idle' }
+   | { phase: 'loading' }
+   | { phase: 'denied' }
+   | { phase: 'ready'; sources: ScreenSourcesResult['sources'] }
+@@ -22,31 +23,30 @@ export function ScreenshotDialog({
+   readonly onClose: () => void
+ }): React.JSX.Element {
+   const { t } = useI18n()
+-  const [state, setState] = useState<LoadState>({ phase: 'loading' })
+-  const [refreshTick, setRefreshTick] = useState(0)
++  const [state, setState] = useState<LoadState>({ phase: 'idle' })
++  const loadRef = useRef(0)
+   const [capturingId, setCapturingId] = useState<string | null>(null)
+   const [failed, setFailed] = useState(false)
+ 
+-  useEffect(() => {
+-    let stale = false
++  useEffect(() => () => { loadRef.current += 1 }, [])
++
++  const refresh = (): void => {
++    const load = ++loadRef.current
+     setState({ phase: 'loading' })
+     setFailed(false)
+     window.desktopApi
+       .captureScreenSources()
+       .then((result) => {
+-        if (stale) return
++        if (loadRef.current !== load) return
+         if (result.status === 'denied') setState({ phase: 'denied' })
+         else setState({ phase: 'ready', sources: result.sources })
+       })
+       .catch(() => {
+-        if (stale) return
++        if (loadRef.current !== load) return
+         setFailed(true)
+         setState({ phase: 'ready', sources: [] })
+       })
+-    return () => {
+-      stale = true
+-    }
+-  }, [refreshTick])
++  }
+ 
+   const capture = (id: string): void => {
+     if (capturingId !== null) return
+@@ -58,7 +58,7 @@ export function ScreenshotDialog({
+         if (!result) {
+           setFailed(true)
+           setCapturingId(null)
+-          setRefreshTick((tick) => tick + 1)
++          setState({ phase: 'idle' })
+           return
+         }
+         onInsert(`data:${result.mediaType};base64,${result.base64}`, result.width, result.height)
+@@ -130,7 +130,7 @@ export function ScreenshotDialog({
+           <button
+             className="secondary"
+             disabled={state.phase === 'loading' || capturingId !== null}
+-            onClick={() => setRefreshTick((tick) => tick + 1)}
++            onClick={refresh}
+           >
+             {t('dlgScreenshotRefresh')}
+           </button>

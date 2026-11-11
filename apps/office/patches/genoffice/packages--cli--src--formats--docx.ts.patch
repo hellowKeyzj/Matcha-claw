@@ -1,0 +1,18 @@
+--- a/genoffice/packages/cli/src/formats/docx.ts
++++ b/genoffice/packages/cli/src/formats/docx.ts
+@@ -1731,7 +1731,6 @@
+ ): Promise<{ output?: string; error?: string }> {
+   const url = typeof op.url === 'string' ? op.url.trim() : ''
+   if (!url) return { error: 'url must be a local path, a data: URL or an http(s) URL' }
+-  if (!opts.ctx) return { error: 'image sources need a path context' }
+   const source = await readImageSource(url, opts.ctx, opts.baseDir)
+   if (!source) return { error: `image not found or not downloadable: ${url}` }
+   const size = imageSize(source.bytes)
+@@ -1779,7 +1778,6 @@
+ ): Promise<{ output?: string; error?: string }> {
+   const url = String(op.image).trim()
+   if (!url) return { error: 'image must be a local path, a data: URL or an http(s) URL' }
+-  if (!opts.ctx) return { error: 'image sources need a path context' }
+   const source = await readImageSource(url, opts.ctx, opts.baseDir)
+   if (!source) return { error: `image not found or not downloadable: ${url}` }
+   const size = imageSize(source.bytes)

@@ -1,0 +1,22 @@
+--- a/genoffice/apps/sheets/src/renderer/WorkbookVisuals.tsx
++++ b/genoffice/apps/sheets/src/renderer/WorkbookVisuals.tsx
+@@ -2840,8 +2840,8 @@
+                 setRanges((previous) => ({
+                   ...previous,
+                   [String(index)]: {
+-                    categories: '',
+                     ...previous[String(index)],
++                    categories: previous[String(index)]?.categories ?? '',
+                     values: event.target.value,
+                   },
+                 }))
+@@ -2858,8 +2858,8 @@
+                 setRanges((previous) => ({
+                   ...previous,
+                   [String(index)]: {
+-                    values: '',
+                     ...previous[String(index)],
++                    values: previous[String(index)]?.values ?? '',
+                     categories: event.target.value,
+                   },
+                 }))

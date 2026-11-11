@@ -1,14 +1,15 @@
 {
   "schemaVersion": 1,
   "apiVersion": 1,
+  "minSdkVersion": "1.6.0",
   "id": "matcha.design",
   "name": "Matcha 设计",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "会话工作区画板：自由画布、图层、文字、图片编辑、用户自带素材、模型生成、多镜头生成与合成及本地导出。每个会话独立保存。",
   "main": "main.cjs",
   "contributes": {
     "chat": { "contextTag": "mcp_app_model_context" },
-    "applications": [{ "id": "editor", "name": "设计画板", "entry": "editor.html", "placement": "chat-panel", "imageEditor": { "label": "画布编辑", "tool": "image_open", "translations": { "en": "Edit on canvas", "ja": "キャンバスで編集", "ru": "Редактировать на холсте" } } }],
+    "applications": [{ "id": "editor", "name": "设计画板", "icon": { "paths": ["M13 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-8", "m17 3 4 4-9 9-5 1 1-5ZM15 5l4 4"] }, "entry": "editor.html", "placement": "chat-panel", "imageEditor": { "label": "画布编辑", "tool": "image_open", "translations": { "en": "Edit on canvas", "ja": "キャンバスで編集", "ru": "Редактировать на холсте" } } }],
     "tools": [
       {
         "name": "documents_list",

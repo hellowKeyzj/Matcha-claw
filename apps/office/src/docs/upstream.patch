@@ -1,0 +1,217 @@
+--- a/apps/docs/src/renderer/App.tsx
++++ b/apps/docs/src/renderer/App.tsx
+@@ -112,7 +112,7 @@
+   type MailMergeResponse,
+ } from './mail-merge/output'
+ import { ZoteroDocumentController } from './zotero/controller'
+-import { AiPanel, aiRevisionAuthor } from './ai/AiPanel'
++import { aiRevisionAuthor } from './ai/revision-author'
+ import type { AiCommentsAccess, AiDocExtras, AiHeaderFooterAccess } from './ai/tools'
+ import type { AiStyleInfo } from './ai/style-ops'
+ import { applyResolvedPageSetup, describeSection, type AiPageSetupAccess } from './ai/page-setup'
+@@ -141,7 +141,6 @@
+ import { hfFooterLine, hfLayoutResolved, hfPhantomSpec, hfWithPhantom } from './hf-phantom'
+ import { hfVariantHeightsPx, sectionHfHeights } from './hf-heights'
+ import { makeGapNotesEl, measureNoteHeightDom, noteRowMetrics } from './editor/note-dom'
+-import { AiAskPopover } from './components/AiAskPopover'
+ import { EDIT_QUEUE_MAX, selectionForAnchor, type DocsEditQueueItem } from './ai/edit-queue'
+ import { addQueueAnchor, clearQueueAnchors, removeQueueAnchors } from './editor/ai-queue-anchors'
+ import {
+@@ -166,7 +165,6 @@
+   type PlanOf,
+   type PlanDiff,
+ } from './pagination-plan'
+-import { PrintDialog } from './components/PrintDialog'
+ import {
+   hfVariantOf,
+   hfVariantReservedPx,
+@@ -508,7 +506,6 @@
+   exportImages as exportImagesImpl,
+   loadFile as loadFileImpl,
+   newFile as newFileImpl,
+-  printDoc as printDocImpl,
+   save as saveImpl,
+   suggestedSaveAsName,
+   writeRecoveryCopy as writeRecoveryCopyImpl,
+@@ -3069,7 +3066,6 @@
+     [],
+   )
+   const exportImages = useCallback(() => exportImagesImpl(fileCtxRef.current), [])
+-  const printDoc = useCallback(() => printDocImpl(fileCtxRef.current), [])
+ 
+   // for real-device verification: trigger export directly via CDP (same as __pageDebug)
+   useEffect(() => {
+@@ -3155,14 +3151,6 @@
+     }, 1200)
+     return () => window.clearTimeout(timer)
+   }, [showPagePreview, pendingExportTick, exportPdf])
+-
+-  const closePrintDialog = useCallback(() => {
+-    setShowPrintDialog(false)
+-    if (printAutoOpenedPreviewRef.current) {
+-      printAutoOpenedPreviewRef.current = false
+-      setShowPagePreview(false)
+-    }
+-  }, [])
+ 
+   // ---- References: footnotes / endnotes ----
+ 
+@@ -6595,9 +6583,6 @@
+         case 'export-images':
+           void exportImages()
+           break
+-        case 'print':
+-          if (doc) void printDoc()
+-          break
+       }
+     })
+   }, [
+@@ -6612,7 +6597,6 @@
+     exportHtml,
+     exportMarkdown,
+     exportImages,
+-    printDoc,
+     zoomFit,
+     openStats,
+     startNewComment,
+@@ -8330,55 +8314,6 @@
+       />
+ 
+       <div className="app-main">
+-        {doc && (
+-          <div
+-            className={`ai-dock${showAi ? '' : ' collapsed'}${
+-              !aiSidebarEnabled && !showAi ? ' ai-dock-off' : ''
+-            }`}
+-          >
+-            {/* always mounted: collapse must not drop state or in-flight runs */}
+-            <AiPanel
+-              key={aiPanelKey}
+-              editor={editor}
+-              blocks={doc.parsed.blocks}
+-              settings={settings}
+-              docEmpty={wordCount === 0}
+-              numIdFallback={
+-                doc.isBlank ? { bullet: BLANK_BULLET_NUM_ID, ordered: BLANK_ORDERED_NUM_ID } : null
+-              }
+-              preset={aiPreset}
+-              open={showAi}
+-              hideRail={!aiSidebarEnabled}
+-              onExpand={() => setShowAi(true)}
+-              onCollapse={() => setShowAi(false)}
+-              filePath={doc?.filePath ?? null}
+-              editQueue={editQueue}
+-              onQueueEditInstruction={queueUpdate}
+-              onQueueRemove={queueRemove}
+-              onQueueClear={queueClear}
+-              onQueueFocus={queueFocus}
+-              onQueueConsume={queueConsume}
+-              commentsAccess={aiCommentsAccess}
+-              hfAccess={aiHfAccess}
+-              pageSetupAccess={aiPageSetupAccess}
+-              docExtras={aiDocExtras}
+-              notesAccess={aiNotesAccess}
+-              trackChanges={trackChanges}
+-              trackChangesLocked={isProtected || trackChangesForced}
+-              onTrackChangesToggle={() => setTrackChanges((v) => !v)}
+-              revisionCount={revisionCount}
+-              onRevisions={(action) => {
+-                if (!isProtected && !trackChangesForced) handleRevision(action, 'all')
+-              }}
+-              reviewEntries={allReviewEntries}
+-              activeReviewIndex={activeAllReviewIndex}
+-              onRevisionSelect={showRevision}
+-              onRevisionRange={(action, rev) => {
+-                if (!isProtected && !trackChangesForced) handleRevisionRange(action, rev)
+-              }}
+-            />
+-          </div>
+-        )}
+         <div className="app-content">
+           <div className={workspaceClass}>
+             {doc && showFind && (
+@@ -8405,17 +8340,6 @@
+                 pageInfo={pageInfo}
+                 onClose={closeNav}
+                 cuts={cutsNow}
+-              />
+-            )}
+-            {doc && (
+-              <AiAskPopover
+-                editor={editor}
+-                queueFull={editQueue.length >= EDIT_QUEUE_MAX}
+-                getItem={getQueueItem}
+-                onSendNow={askSendNow}
+-                onQueueAdd={queueAdd}
+-                onQueueUpdate={queueUpdate}
+-                onQueueRemove={queueRemove}
+               />
+             )}
+             {doc && <PasteOptionsChip editor={editor} />}
+@@ -9200,7 +9124,6 @@
+         />
+       )}
+ 
+-      {doc && showPrintDialog && <PrintDialog onClose={closePrintDialog} setStatus={setStatus} />}
+ 
+       {stats && <WordCountDialog stats={stats} onClose={() => setStats(null)} />}
+ 
+--- a/apps/docs/src/renderer/shortcuts.ts
++++ b/apps/docs/src/renderer/shortcuts.ts
+@@ -46,7 +46,6 @@
+   { id: 'open', group: 'file', labelKey: 'ribbonOpen', keys: '⌘O' },
+   { id: 'save', group: 'file', labelKey: 'appSave', keys: '⌘S' },
+   { id: 'save-as', group: 'file', labelKey: 'ribbonSaveAs', keys: '⇧⌘S' },
+-  { id: 'print', group: 'file', labelKey: 'appPrintTitle', keys: '⌘P' },
+   { id: 'close', group: 'file', labelKey: 'appClose', keys: '⌘W' },
+ 
+   // ---- Edit ----
+--- a/apps/docs/src/renderer/embedded-fonts.ts
++++ b/apps/docs/src/renderer/embedded-fonts.ts
+@@ -3,6 +3,11 @@
+ 
+ let active: FontFace[] = []
+ let generation = 0
++let exportCss = ''
++
++export function embeddedFontExportCss(): string {
++  return exportCss
++}
+ 
+ function sfntBuffer(data: Uint8Array): ArrayBuffer {
+   const whole = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+@@ -36,6 +41,14 @@
+     }),
+   )
+   if (my !== generation) return false
++  exportCss = loaded.map((face, i) => {
++    if (!face) return ''
++    const font = (fonts ?? [])[i]
++    let binary = ''
++    for (let offset = 0; offset < font.data.length; offset += 0x8000)
++      binary += String.fromCharCode(...font.data.subarray(offset, offset + 0x8000))
++    return `@font-face{font-family:${JSON.stringify(font.family)};font-weight:${font.bold ? 700 : 400};font-style:${font.italic ? 'italic' : 'normal'};src:url("data:font/ttf;base64,${btoa(binary)}")}`
++  }).join('\n')
+   const revoked = active
+   for (const face of revoked) document.fonts.delete(face)
+   active = []
+--- a/apps/docs/src/shared/ipc.ts
++++ b/apps/docs/src/shared/ipc.ts
+@@ -482,6 +482,7 @@
+     auto?: boolean,
+   ): Promise<{
+     ok: boolean
++    path?: string
+     error?: string
+     reason?: 'external-modified'
+     /** a newer password choice arrived after this save's snapshot */
+--- a/apps/docs/src/renderer/file-actions.ts
++++ b/apps/docs/src/renderer/file-actions.ts
+@@ -1234,6 +1234,7 @@
+         }
+         return false
+       }
++      savedPath = result.path ?? savedPath
+       passwordIntentPending = result.passwordIntentPending === true
+       if (result.dataUrl) fullBytes = await fetchDocBytes(result.dataUrl)
+     }

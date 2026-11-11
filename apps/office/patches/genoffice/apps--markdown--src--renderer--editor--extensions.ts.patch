@@ -1,0 +1,14 @@
+--- a/genoffice/apps/markdown/src/renderer/editor/extensions.ts
++++ b/genoffice/apps/markdown/src/renderer/editor/extensions.ts
+@@ -162,7 +162,10 @@
+     // an aliased link reads as its alias: the syntax is hidden in the view only
+     WikiAliasDisplay,
+     // `^id` block markers: written on demand, dimmed in the view, plain text in the file
+-    BlockLink.configure(options.blockLink ?? {}),
++    BlockLink.configure({ ...options.blockLink, write: async (text) => {
++      try { await window.matchaApp!.writeClipboard({ text }) }
++      catch (error) { console.error('[markdown] clipboard failed:', error); const { showToast } = await import('../components/toast-bus'); showToast(t('saveFailed'), 'error'); throw error }
++    } }),
+     // pasted `[[links]]` and `![[embeds]]` take their live shape at once
+     WikiPasteLive,
+     WikiSuggest.configure({

@@ -1,0 +1,312 @@
+--- a/genoffice/apps/docs/src/renderer/App.tsx
++++ b/genoffice/apps/docs/src/renderer/App.tsx
+@@ -1,3 +1,6 @@
++import { confirmDocsAction } from '../../../../../src/docs/dialogs'
++import { docsFileName, openDocsExternalUrl } from '../../../../../src/docs/desktop'
++import type { DesktopApi } from '../../../../../src/docs/types'
+ import { scriptFontHtml } from './editor/script-fonts'
+ import { carryDocSeen } from './ai/tools'
+ import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
+@@ -12,7 +15,7 @@
+   useRef,
+   useState,
+ } from 'react'
+-import type { CSSProperties, MouseEvent as ReactMouseEvent, SetStateAction } from 'react'
++import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction } from 'react'
+ import { EditorContent, useEditor } from '@tiptap/react'
+ import type { Editor } from '@tiptap/core'
+ import { handleDocsControl, type ControlRequest } from './control'
+@@ -112,7 +115,7 @@
+   type MailMergeResponse,
+ } from './mail-merge/output'
+ import { ZoteroDocumentController } from './zotero/controller'
+-import { AiPanel, aiRevisionAuthor } from './ai/AiPanel'
++import { aiRevisionAuthor } from './ai/revision-author'
+ import type { AiCommentsAccess, AiDocExtras, AiHeaderFooterAccess } from './ai/tools'
+ import type { AiStyleInfo } from './ai/style-ops'
+ import { applyResolvedPageSetup, describeSection, type AiPageSetupAccess } from './ai/page-setup'
+@@ -141,7 +144,6 @@
+ import { hfFooterLine, hfLayoutResolved, hfPhantomSpec, hfWithPhantom } from './hf-phantom'
+ import { hfVariantHeightsPx, sectionHfHeights } from './hf-heights'
+ import { makeGapNotesEl, measureNoteHeightDom, noteRowMetrics } from './editor/note-dom'
+-import { AiAskPopover } from './components/AiAskPopover'
+ import { EDIT_QUEUE_MAX, selectionForAnchor, type DocsEditQueueItem } from './ai/edit-queue'
+ import { addQueueAnchor, clearQueueAnchors, removeQueueAnchors } from './editor/ai-queue-anchors'
+ import {
+@@ -166,7 +168,6 @@
+   type PlanOf,
+   type PlanDiff,
+ } from './pagination-plan'
+-import { PrintDialog } from './components/PrintDialog'
+ import {
+   hfVariantOf,
+   hfVariantReservedPx,
+@@ -508,7 +509,6 @@
+   exportImages as exportImagesImpl,
+   loadFile as loadFileImpl,
+   newFile as newFileImpl,
+-  printDoc as printDocImpl,
+   save as saveImpl,
+   suggestedSaveAsName,
+   writeRecoveryCopy as writeRecoveryCopyImpl,
+@@ -784,7 +784,7 @@
+   return diffs
+ }
+ 
+-export function App() {
++export function App({ trailingActions }: { trailingActions?: ReactNode } = {}) {
+   // subscribe to language switches for re-render; strings all go through module-level t, so memoized callbacks never capture stale closures
+   const { lang } = useI18n()
+   const [doc, setDoc] = useState<DocState | null>(null)
+@@ -1765,12 +1765,14 @@
+     dirtyRef.current = true
+     return picked.length
+   }
+-  const setHfLink = (si: number, kind: 'header' | 'footer', variant: HfView, on: boolean) => {
++  const setHfLink = async (si: number, kind: 'header' | 'footer', variant: HfView, on: boolean) => {
++    const state = hfStateRef.current
+     if (
+       on &&
+-      !window.confirm(t(kind === 'header' ? 'appHfLinkConfirmHeader' : 'appHfLinkConfirmFooter'))
++      !await confirmDocsAction(t(kind === 'header' ? 'appHfLinkConfirmHeader' : 'appHfLinkConfirmFooter'))
+     )
+       return
++    if (hfStateRef.current !== state) return
+     // the open editor holds the strip being discarded: it must not commit it anywhere
+     if (on) hfEditorRef.current?.discard()
+     if (!withHfLink(hfState, si, kind, variant, on)) return
+@@ -3069,7 +3071,6 @@
+     [],
+   )
+   const exportImages = useCallback(() => exportImagesImpl(fileCtxRef.current), [])
+-  const printDoc = useCallback(() => printDocImpl(fileCtxRef.current), [])
+ 
+   // for real-device verification: trigger export directly via CDP (same as __pageDebug)
+   useEffect(() => {
+@@ -3155,14 +3156,6 @@
+     }, 1200)
+     return () => window.clearTimeout(timer)
+   }, [showPagePreview, pendingExportTick, exportPdf])
+-
+-  const closePrintDialog = useCallback(() => {
+-    setShowPrintDialog(false)
+-    if (printAutoOpenedPreviewRef.current) {
+-      printAutoOpenedPreviewRef.current = false
+-      setShowPagePreview(false)
+-    }
+-  }, [])
+ 
+   // ---- References: footnotes / endnotes ----
+ 
+@@ -6141,7 +6134,17 @@
+       return !!(el as HTMLElement).closest('.ProseMirror, td[contenteditable]')
+     }
+     const handler = (e: KeyboardEvent) => {
++      if (e.defaultPrevented || document.querySelector('[role="dialog"], dialog[open]')) return
+       const canEdit = !!editor?.isEditable && focusInEditor()
++      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
++        if (e.code === 'KeyN') { e.preventDefault(); void newFile(); return }
++        if (e.code === 'Slash') { e.preventDefault(); setShowShortcuts(true); return }
++        if (doc && (e.code === 'Equal' || e.code === 'Minus' || e.code === 'Digit0')) {
++          e.preventDefault()
++          setZoom((z) => e.code === 'Digit0' ? 100 : stepDocsZoom(z, e.code === 'Equal' ? 1 : -1))
++          return
++        }
++      }
+       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+         e.preventDefault()
+         void save(e.shiftKey)
+@@ -6367,17 +6370,14 @@
+           insertField(instr)
+         }
+       }
+-      // Proofread F7 (Word's spelling & grammar check)
+-      if (e.key === 'F7' && !e.shiftKey && doc) {
+-        e.preventDefault()
+-        runAiProofread()
+-      }
++
+     }
+     window.addEventListener('keydown', handler)
+     return () => window.removeEventListener('keydown', handler)
+   }, [
+     save,
+     openFile,
++    newFile,
+     editor,
+     doc,
+     updateFields,
+@@ -6595,9 +6595,6 @@
+         case 'export-images':
+           void exportImages()
+           break
+-        case 'print':
+-          if (doc) void printDoc()
+-          break
+       }
+     })
+   }, [
+@@ -6612,7 +6609,6 @@
+     exportHtml,
+     exportMarkdown,
+     exportImages,
+-    printDoc,
+     zoomFit,
+     openStats,
+     startNewComment,
+@@ -6651,7 +6647,7 @@
+   const openLink = useCallback(
+     (href: string, tocTitle = '') => {
+       const target = linkTarget(href)
+-      if (target?.kind === 'external') window.open(target.url)
++      if (target?.kind === 'external') openDocsExternalUrl(target.url)
+       else if (target?.kind === 'anchor' || tocTitle) {
+         jumpToAnchor(target?.kind === 'anchor' ? target.name : '', tocTitle)
+       }
+@@ -6978,7 +6974,7 @@
+         }
+         break
+       case 'linkToPrevious':
+-        if (cur) setHfLink(cur.section, cur.kind, cur.variant, action.on)
++        if (cur) void setHfLink(cur.section, cur.kind, cur.variant, action.on)
+         if (!action.on) refocus()
+         break
+       case 'distance':
+@@ -7808,6 +7804,16 @@
+     () => (
+       <>
+         <button
++          type="button"
++          className="ribbon-tab"
++          disabled={!hasDoc}
++          onClick={() => void newFile()}
++        >
++          {t('appNew')}
++        </button>
++        <button type="button" className="ribbon-tab" onClick={() => setShowPreferences(true)}>{t('appPrefsTitle')}</button>
++        <button type="button" className="ribbon-tab" onClick={() => setShowShortcuts(true)}>{t('appScTitle')}</button>
++        <button
+           className="qa-btn"
+           data-tip={t('appSaveShortcutTip')}
+           aria-label={t('appSaveShortcutTip')}
+@@ -7847,7 +7853,7 @@
+       </>
+     ),
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-    [hasDoc, hasUnsavedChanges, autoSave, editor, save, lang, histState],
++    [hasDoc, hasUnsavedChanges, autoSave, editor, save, newFile, lang, histState],
+   )
+ 
+   // ---- Multiple Pages: the grid is a function of zoom × pane width ----
+@@ -8194,6 +8200,21 @@
+   return (
+     <div
+       className={`app ${readMode ? 'read-mode' : ''}${commentsUi.panel ? ' comments-pane-open' : ''}${revisionDisplay !== 'all' ? ` rev-display-${revisionDisplay}` : ''}${balloonsActive && balloonMode === 'revisions' ? ' rev-balloon' : ''}${revisionFilter.insDel ? '' : ' rev-hide-insdel'}${revisionFilter.format ? '' : ' rev-hide-format'}${tcOptions.balloonLines ? '' : ' markup-no-lines'}`}
++      onDragOverCapture={(event) => {
++        if ([...event.dataTransfer.items].some(item => item.kind === 'file' && !item.type.startsWith('image/'))) event.preventDefault()
++      }}
++      onDropCapture={(event) => {
++        const file = [...event.dataTransfer.files].find(file => /\.(docx|doc|dot|odt|ott|hwp|hwpx)$/i.test(file.name))
++        if (!file) return
++        event.preventDefault()
++        event.stopPropagation()
++        void runGuardedCandidate(
++          () => window.desktop.confirmDocumentReplace(),
++          () => (window.desktop as DesktopApi).openDocxFile(file),
++          commitOpenedFile,
++          replacesDocument,
++        ).catch(error => { console.error('[office:docs:drop]', error); showToast(t('appOpenFailed', { error: String(error) }), 'error') })
++      }}
+       data-balloons={balloonsActive ? balloonMode : undefined}
+       data-comment-cards={commentsUi.cards ? '' : undefined}
+       data-comment-focus={commentFocus?.id}
+@@ -8245,6 +8266,7 @@
+       <Ribbon
+         actionsRef={ribbonActionsRef}
+         quickActions={quickActions}
++        trailingActions={trailingActions}
+         mergeSource={mergeSource}
+         editor={editor}
+         formatState={formatState}
+@@ -8330,55 +8352,6 @@
+       />
+ 
+       <div className="app-main">
+-        {doc && (
+-          <div
+-            className={`ai-dock${showAi ? '' : ' collapsed'}${
+-              !aiSidebarEnabled && !showAi ? ' ai-dock-off' : ''
+-            }`}
+-          >
+-            {/* always mounted: collapse must not drop state or in-flight runs */}
+-            <AiPanel
+-              key={aiPanelKey}
+-              editor={editor}
+-              blocks={doc.parsed.blocks}
+-              settings={settings}
+-              docEmpty={wordCount === 0}
+-              numIdFallback={
+-                doc.isBlank ? { bullet: BLANK_BULLET_NUM_ID, ordered: BLANK_ORDERED_NUM_ID } : null
+-              }
+-              preset={aiPreset}
+-              open={showAi}
+-              hideRail={!aiSidebarEnabled}
+-              onExpand={() => setShowAi(true)}
+-              onCollapse={() => setShowAi(false)}
+-              filePath={doc?.filePath ?? null}
+-              editQueue={editQueue}
+-              onQueueEditInstruction={queueUpdate}
+-              onQueueRemove={queueRemove}
+-              onQueueClear={queueClear}
+-              onQueueFocus={queueFocus}
+-              onQueueConsume={queueConsume}
+-              commentsAccess={aiCommentsAccess}
+-              hfAccess={aiHfAccess}
+-              pageSetupAccess={aiPageSetupAccess}
+-              docExtras={aiDocExtras}
+-              notesAccess={aiNotesAccess}
+-              trackChanges={trackChanges}
+-              trackChangesLocked={isProtected || trackChangesForced}
+-              onTrackChangesToggle={() => setTrackChanges((v) => !v)}
+-              revisionCount={revisionCount}
+-              onRevisions={(action) => {
+-                if (!isProtected && !trackChangesForced) handleRevision(action, 'all')
+-              }}
+-              reviewEntries={allReviewEntries}
+-              activeReviewIndex={activeAllReviewIndex}
+-              onRevisionSelect={showRevision}
+-              onRevisionRange={(action, rev) => {
+-                if (!isProtected && !trackChangesForced) handleRevisionRange(action, rev)
+-              }}
+-            />
+-          </div>
+-        )}
+         <div className="app-content">
+           <div className={workspaceClass}>
+             {doc && showFind && (
+@@ -8405,17 +8378,6 @@
+                 pageInfo={pageInfo}
+                 onClose={closeNav}
+                 cuts={cutsNow}
+-              />
+-            )}
+-            {doc && (
+-              <AiAskPopover
+-                editor={editor}
+-                queueFull={editQueue.length >= EDIT_QUEUE_MAX}
+-                getItem={getQueueItem}
+-                onSendNow={askSendNow}
+-                onQueueAdd={queueAdd}
+-                onQueueUpdate={queueUpdate}
+-                onQueueRemove={queueRemove}
+               />
+             )}
+             {doc && <PasteOptionsChip editor={editor} />}
+@@ -9200,7 +9162,6 @@
+         />
+       )}
+ 
+-      {doc && showPrintDialog && <PrintDialog onClose={closePrintDialog} setStatus={setStatus} />}
+ 
+       {stats && <WordCountDialog stats={stats} onClose={() => setStats(null)} />}
+ 

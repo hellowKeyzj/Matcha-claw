@@ -1,0 +1,63 @@
+--- a/genoffice/apps/markdown/src/renderer/editor/localImage.ts
++++ b/genoffice/apps/markdown/src/renderer/editor/localImage.ts
+@@ -6,10 +6,16 @@
+ import { MAX_PASTED_IMAGE_BYTES } from '../../shared/ipc'
+ import { t } from '../i18n/locale'
+ import { showToast } from '../components/toast-bus'
+-import { getImageHostConfig } from '../imageHostCache'
+ 
+ /** Directory of the open .md file; relative image paths resolve against it for display */
+ let imageBaseDir: string | null = null
++let imageResolver: ((src: string, baseDir: string | null) => string) | null = null
++let imageUnresolver: ((src: string, baseDir: string | null) => string) | null = null
++
++export function setImageResourceResolver(resolve: typeof imageResolver, unresolve: typeof imageUnresolver): void {
++  imageResolver = resolve
++  imageUnresolver = unresolve
++}
+ 
+ export function setImageBaseDir(dir: string | null): void {
+   imageBaseDir = dir
+@@ -37,6 +43,7 @@
+ export const VIEW_IMAGE_EVENT = 'markdown-view-image'
+ 
+ export function resolveImageSrc(src: string, baseDir: string | null = imageBaseDir): string {
++  if (imageResolver) return imageResolver(src, baseDir)
+   if (!src) return src
+   // ':' is legal in URL path segments (RFC 3986) — restore it after encoding so
+   // Windows drive prefixes stay `C:` instead of the `C%3A` Chromium rejects
+@@ -67,6 +74,7 @@
+  * bakes display URLs into the stored document / serialized markdown.
+  */
+ export function unresolveImageSrc(src: string, baseDir: string | null = imageBaseDir): string {
++  if (imageUnresolver) return imageUnresolver(src, baseDir)
+   if (!src.startsWith('md-asset://')) return src
+   // Reuse the guarded decoder: a lone `%` (e.g. in a file named `100%.png`)
+   // throws a URIError from decodeURIComponent, and parseHTML calls this for
+@@ -110,26 +118,6 @@
+   }
+   const base64 = btoa(binary)
+   const alt = file.name.replace(/\.[a-z0-9]+$/i, '')
+-  // a configured image host gets the paste first (genoffice#388); the local
+-  // assets/ copy is the fallback when it is disabled or the upload fails, so
+-  // the note stays self-contained even offline
+-  const host = await getImageHostConfig()
+-  if (host) {
+-    const up = await window.markdownApi.uploadImage({
+-      base64,
+-      ext: EXT_BY_MIME[file.type]!,
+-      name: file.name,
+-    })
+-    if (up.ok && up.url) {
+-      editor
+-        .chain()
+-        .focus()
+-        .insertContentAt(pos, { type: 'image', attrs: { src: up.url, alt } })
+-        .run()
+-      return
+-    }
+-    showToast(t('imageHostFallback', { error: up.error ?? '' }), 'error')
+-  }
+   const rel = await window.markdownApi.saveImage({ base64, ext: EXT_BY_MIME[file.type]! })
+   // untitled documents have no assets/ directory yet — tell the user to save first
+   if (!rel) {

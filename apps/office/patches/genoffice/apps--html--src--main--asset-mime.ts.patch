@@ -1,0 +1,18 @@
+--- a/genoffice/apps/html/src/main/asset-mime.ts
++++ b/genoffice/apps/html/src/main/asset-mime.ts
+@@ -1,4 +1,3 @@
+-import { basename, extname } from 'node:path'
+ import type { ImageData } from '../shared/ipc'
+
+ /** Sibling files the preview may load through html-asset:// by extension.
+@@ -114,8 +113,8 @@
+   const binary = sniffBinaryAssetMime(head)
+   if (binary)
+     return (binary.startsWith('image/') ? slot === 'image' : slot === 'other') ? binary : null
+-  const name = basename(target)
+-  if (extname(name) !== '' || name.startsWith('.')) return null
++  const name = target.split(/[\\/]/).pop()!
++  if (name.includes('.')) return null
+   if (slot === 'image') return looksLikeSvg(head) ? 'image/svg+xml' : null
+   return TEXT_MIME_BY_SLOT[slot] ?? null
+ }

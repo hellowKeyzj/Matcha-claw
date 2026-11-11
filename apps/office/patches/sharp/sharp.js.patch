@@ -1,0 +1,31 @@
+--- a/sharp/lib/sharp.js
++++ b/sharp/lib/sharp.js
+@@ -13,8 +13,8 @@
+ const paths = [
+   `../src/build/Release/sharp-${runtimePlatform}.node`,
+   '../src/build/Release/sharp-wasm32.node',
+-  `@img/sharp-${runtimePlatform}/sharp.node`,
+-  '@img/sharp-wasm32/sharp.node'
++  `sharp-${runtimePlatform}/sharp.node`,
++  'sharp-wasm32/sharp.node'
+ ];
+ 
+ /* node:coverage disable */
+@@ -30,7 +30,7 @@
+   }
+ }
+ 
+-if (sharp && path.startsWith('@img/sharp-linux-x64') && !sharp._isUsingX64V2()) {
++if (sharp && path.startsWith('sharp-linux-x64') && !sharp._isUsingX64V2()) {
+   const err = new Error('Prebuilt binaries for linux-x64 require v2 microarchitecture');
+   err.code = 'Unsupported CPU';
+   errors.push(err);
+@@ -79,7 +79,7 @@
+   }
+   if (isLinux && /(symbol not found|CXXABI_)/i.test(messages)) {
+     try {
+-      const { config } = require(`@img/sharp-libvips-${runtimePlatform}/package`);
++      const { config } = require(`sharp-libvips-${runtimePlatform}/package`);
+       const libcFound = `${familySync()} ${versionSync()}`;
+       const libcRequires = `${config.musl ? 'musl' : 'glibc'} ${config.musl || config.glibc}`;
+       help.push(

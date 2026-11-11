@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import type { ReadableStream } from 'node:stream/web';
 import { isTraceEnabled, startupTrace } from '../../utils/trace-logger';
 
 import type {
@@ -238,7 +239,7 @@ async function downloadCloudPackage(token: string, request: CloudPackageDownload
       const file = await open(temporary, 'wx');
       temporaryCreated = true;
       try {
-        const source = response.body ? Readable.fromWeb(response.body) : Readable.from([]);
+        const source = response.body ? Readable.fromWeb(response.body as ReadableStream<Uint8Array>) : Readable.from([]);
         const meter = new Transform({
           transform(chunk: Buffer, _encoding, callback) {
             hash.update(chunk);

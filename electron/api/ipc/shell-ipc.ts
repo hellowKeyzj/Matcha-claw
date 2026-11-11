@@ -1,6 +1,5 @@
-import { clipboard, ClipboardItem, ipcMain, nativeImage, shell, type BrowserWindow } from 'electron';
-import { Blob } from 'node:buffer';
-import { crc32 } from 'node:zlib';
+import { ipcMain, shell, type BrowserWindow } from 'electron';
+import { readAppClipboard, writeAppClipboard } from '../../main/app-plugins/clipboard';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
@@ -200,60 +199,21 @@ async function openChromeExtensionsPage(): Promise<void> {
   );
 }
 
-function decodeClipboardPng(value: unknown): Electron.NativeImage | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const request = value as Record<string, unknown>;
-  const maximumBytes = 20 * 1024 * 1024;
-  if (Object.keys(request).some((key) => key !== 'data' && key !== 'mimeType') || request.mimeType !== 'image/png'
-    || typeof request.data !== 'string' || !request.data.length || request.data.length > 4 * Math.ceil(maximumBytes / 3)
-    || request.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(request.data)) return null;
-  const bytes = Buffer.from(request.data, 'base64');
-  if (bytes.length > maximumBytes || bytes.toString('base64') !== request.data || bytes.length < 57
-    || bytes.readBigUInt64BE(0) !== 0x89504e470d0a1a0an || bytes.readUInt32BE(8) !== 13 || bytes.toString('ascii', 12, 16) !== 'IHDR') return null;
-  const width = bytes.readUInt32BE(16);
-  const height = bytes.readUInt32BE(20);
-  if (!width || !height || width > 16384 || height > 16384 || width * height > 67_108_864) return null;
-  let hasImageData = false;
-  let hasEnd = false;
-  for (let offset = 8; offset < bytes.length;) {
-    if (offset + 12 > bytes.length) return null;
-    const length = bytes.readUInt32BE(offset);
-    const end = offset + 12 + length;
-    if (end > bytes.length || crc32(bytes.subarray(offset + 4, end - 4)) !== bytes.readUInt32BE(end - 4)) return null;
-    const type = bytes.toString('ascii', offset + 4, offset + 8);
-    if ((type === 'IHDR' && offset !== 8) || ['acTL', 'fcTL', 'fdAT'].includes(type)) return null;
-    if (type === 'IDAT') hasImageData = true;
-    if (type === 'IEND') {
-      if (length || end !== bytes.length || !hasImageData) return null;
-      hasEnd = true;
-    }
-    offset = end;
-  }
-  if (!hasEnd) return null;
-  const image = nativeImage.createFromBuffer(bytes);
-  const size = image.getSize();
-  return !image.isEmpty() && size.width === width && size.height === height ? image : null;
-}
-
 export function registerShellHandlers(getMainWindow: () => BrowserWindow | null): void {
   ipcMain.handle('shell:writeClipboardImage', async (event, request: unknown) => {
     const window = getMainWindow();
     const isTrustedCaller = () => window && !window.isDestroyed() && !window.webContents.isDestroyed() && window.isFocused()
       && event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame;
-    if (!isTrustedCaller()) return { outcome: 'denied' };
-    try {
-      const image = decodeClipboardPng(request);
-      if (!image) return { outcome: 'invalid-image' };
-      const png = image.toPNG();
-      if (!png.length || png.length > 20 * 1024 * 1024) return { outcome: 'invalid-image' };
-      const item = new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) });
-      if (!isTrustedCaller()) return { outcome: 'denied' };
-      await clipboard.write([item]);
-      return { outcome: 'written' };
-    } catch {
-      return { outcome: 'write-failed' };
-    }
+    const result = await writeAppClipboard({ image: request }, () => !!isTrustedCaller());
+    return result.outcome === 'invalid-content' ? { outcome: 'invalid-image' } : result;
   });
+  const clipboardAuthorized = (event: Electron.IpcMainInvokeEvent) => {
+    const window = getMainWindow();
+    return !!window && !window.isDestroyed() && !window.webContents.isDestroyed() && window.isFocused()
+      && event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame;
+  };
+  ipcMain.handle('shell:writeClipboard', (event, request: unknown) => writeAppClipboard(request, () => clipboardAuthorized(event)));
+  ipcMain.handle('shell:readClipboard', (event) => readAppClipboard(() => clipboardAuthorized(event)));
 
   ipcMain.handle('shell:openExternal', async (_, url: string) => {
     if (!isAllowedExternalUrl(url)) {

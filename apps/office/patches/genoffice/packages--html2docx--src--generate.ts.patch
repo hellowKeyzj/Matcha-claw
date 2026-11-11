@@ -1,0 +1,11 @@
+--- a/genoffice/packages/html2docx/src/generate.ts
++++ b/genoffice/packages/html2docx/src/generate.ts
+@@ -26,7 +26,7 @@
+   addPageBackgroundFloat(generator, parts.pageBgNode)
+   const rendered = renderSection(generator, parts)
+   const document = createDocument(context, parts, rendered, generator)
+-  return Packer.toBuffer(document)
++  return Packer.toArrayBuffer(document)
+ }
+ 
+ export { generateDocx }

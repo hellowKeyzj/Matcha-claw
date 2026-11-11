@@ -1,0 +1,150 @@
+--- a/genoffice/apps/slides/src/renderer/file-actions.ts
++++ b/genoffice/apps/slides/src/renderer/file-actions.ts
+@@ -1,3 +1,4 @@
++import { useEffect, useRef } from 'react'
+ /**
+  * File actions extracted from App.tsx: save / save-as, image & PDF
+  * export. Each function takes the ActionCtx built fresh per call.
+@@ -5,14 +6,44 @@
+  */
+ import type { RenderSlide } from '@genoffice/pptx-render'
+ import type { ExportPdfLink } from '../shared/ipc'
+-import { baseName } from '../shared/base-name'
+ import { modelSaveAsName } from './file-naming'
+ import type { ActionCtx } from './action-context'
+ import { collectExportPdfLinks } from './export-links'
+ import { renderSlidesToPdfPages } from './export-pages'
+ import { renderSlidesToImageBase64 } from './export-render'
+-import { t } from './i18n/locale'
++import { getLang, t } from './i18n/locale'
+ import { showToast } from './components/toast-bus'
++
++// Timer ownership stays in the mounted panel; save/leave only requests its pending work.
++const pendingPanels = new Set<{ flush(): void; cancel(): void; pending(): boolean }>()
++export const hasPendingEdits = (): boolean => [...pendingPanels].some(panel => panel.pending())
++export function flushPendingEdits(): void { for (const panel of pendingPanels) panel.flush() }
++export function cancelPendingEdits(): void { for (const panel of pendingPanels) panel.cancel() }
++export function usePendingEdits() {
++  const owner = useRef<{ jobs: Map<number, () => void>; flush(): void; cancel(): void; pending(): boolean } | null>(null)
++  if (!owner.current) {
++    const jobs = new Map<number, () => void>()
++    owner.current = {
++      jobs,
++      flush() { for (const [id, fire] of [...jobs]) { window.clearTimeout(id); jobs.delete(id); fire() } },
++      cancel() { for (const id of jobs.keys()) window.clearTimeout(id); jobs.clear() },
++      pending() { return jobs.size > 0 },
++    }
++  }
++  const panel = owner.current
++  useEffect(() => {
++    pendingPanels.add(panel)
++    return () => { panel.flush(); pendingPanels.delete(panel) }
++  }, [panel])
++  return {
++    schedule(fire: () => void, delay: number): number {
++      const id = window.setTimeout(() => { panel.jobs.delete(id); fire() }, delay)
++      panel.jobs.set(id, fire)
++      return id
++    },
++    cancel(id: number): void { window.clearTimeout(id); panel.jobs.delete(id) },
++  }
++}
+ 
+ /**
+  * If a text box/table is still being edited on ⌘S/close-save, blur first so the
+@@ -21,8 +52,9 @@
+  */
+ export async function flushActiveEdit(ctx: ActionCtx): Promise<void> {
+   const active = document.activeElement as HTMLElement | null
++  active?.blur()
++  flushPendingEdits()
+   if (!active?.isContentEditable) return
+-  active.blur()
+   for (let i = 0; i < 40 && ctx.editingActiveRef.current; i++) {
+     await new Promise((r) => setTimeout(r, 50))
+   }
+@@ -94,6 +126,7 @@
+     const ctx = getCtx()
+     await flushActiveEdit(ctx)
+     await ctx.flushNotes()
++    await window.slidesApi.isDirty()
+     // No name is proposed here: a save never waits on a model round-trip. An
+     // untitled deck keeps the app's own name, the localized "Untitled
+     // presentation" the main process produces in `pickDraftPath`.
+@@ -101,6 +134,7 @@
+     if (r.ok) {
+       if (r.slides) adoptSavedSlides(ctx, r.slides)
+       if (r.path) ctx.setPath(r.path)
++      if (r.name) ctx.setName(r.name)
+       ctx.setDirty(false)
+       const saved = t('appStatusSaved')
+       ctx.setStatus(saved)
+@@ -113,6 +147,11 @@
+       showToast(failed, 'error')
+     }
+     return r.ok
++  }).catch(error => {
++    const failed = t('appStatusSaveFailed', { error: String(error) })
++    getCtx().setStatus(failed)
++    showToast(failed, 'error')
++    return false
+   })
+ }
+ 
+@@ -156,11 +195,13 @@
+     const ctx = getCtx()
+     await flushActiveEdit(ctx)
+     await ctx.flushNotes()
+-    const target = name ?? (baseName(ctx.path ?? '') || 'presentation.pptx')
++    await window.slidesApi.isDirty()
++    const target = name ?? ((ctx.name ?? '') || 'presentation.pptx')
+     const r = await window.slidesApi.saveAs(target)
+     if (r.ok) {
+       if (r.slides) adoptSavedSlides(ctx, r.slides)
+       ctx.setPath(r.path ?? ctx.path)
++      ctx.setName(r.name ?? ctx.name)
+       ctx.setDirty(false)
+       const saved = t('appStatusSavedAs')
+       ctx.setStatus(saved)
+@@ -172,12 +213,22 @@
+       ctx.setStatus(failed)
+       showToast(failed, 'error')
+     }
++  }).catch(error => {
++    const failed = t('appStatusSaveFailed', { error: String(error) })
++    getCtx().setStatus(failed)
++    showToast(failed, 'error')
+   })
+ }
+ 
+ /** Export base name: file name without the .pptx extension */
+ export function exportBaseName(ctx: ActionCtx): string {
+-  return (baseName(ctx.path ?? '') || t('appUntitledPresentation')).replace(/\.pptx$/i, '')
++  return ((ctx.name ?? '') || t('appUntitledPresentation')).replace(/\.pptx$/i, '')
++}
++
++/** Browser delivery acknowledges dispatch, not a confirmed filesystem write. */
++export function downloadStartedLabel(): string {
++  const labels: Partial<Record<string, string>> = { zh: '已发起下载', en: 'Download started', ja: 'ダウンロードを開始しました', ru: 'Скачивание начато' }
++  return labels[getLang()] ?? labels.en!
+ }
+ 
+ /** Export as images: each page (skipping hidden ones) rendered offscreen to 2x PNG or JPG, written to disk by the main process */
+@@ -200,7 +251,7 @@
+     })
+     ctx.setStatus(
+       r.ok
+-        ? t('appExportImagesDone', { count: r.paths?.length ?? 0, dir })
++        ? downloadStartedLabel()
+         : t('appExportImagesFailed', { error: r.error ?? t('appUnknownError') }),
+     )
+   } catch (err) {
+@@ -258,7 +309,7 @@
+     })
+     ctx.setStatus(
+       r.ok
+-        ? t('appExportPdfDone', { path: r.path ?? '' })
++        ? downloadStartedLabel()
+         : t('appExportPdfFailed', { error: r.error ?? t('appUnknownError') }),
+     )
+     return r.ok

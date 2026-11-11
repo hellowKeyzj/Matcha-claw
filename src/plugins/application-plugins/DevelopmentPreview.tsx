@@ -105,7 +105,7 @@ function DevelopmentFrame({ developmentId, bundle, status, active, visible, regi
     })();
   }, [status, developmentId, bundle, visible, handled, lifetime, isCurrent, onError, t]);
 
-  return <AppFrame ref={frame} pluginId={bundle.manifest.id} digest={bundle.digest} html={bundle.html}
+  return <AppFrame ref={frame} pluginId={bundle.manifest.id} digest={bundle.digest} entry={bundle.entry} html={bundle.html}
     title={bundle.manifest.contributes.applications?.find((application) => application.entry === bundle.entry)?.name ?? bundle.manifest.name}
     development={development} registerCloseHandler={registerCloseHandler} />;
 }

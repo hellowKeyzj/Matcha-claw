@@ -1,0 +1,9 @@
+html, body, #root { width: 100%; height: 100%; margin: 0; }
+.matcha-pdf-page { display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; }
+.matcha-pdf-page > .app { flex: 1; min-height: 0; }
+.matcha-pdf-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border, #d8d8d8); background: var(--bg, #fff); }
+.matcha-pdf-toolbar button { font: inherit; }
+.matcha-pdf-toolbar [role="alert"] { color: #b42318; }
+.matcha-pdf-products { max-height: 120px; overflow: auto; padding: 4px 10px; border-bottom: 1px solid var(--border, #d8d8d8); }
+.matcha-pdf-products ul { margin: 4px 0; padding-inline-start: 20px; }
+.matcha-pdf-products button { font: inherit; }

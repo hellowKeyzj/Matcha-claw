@@ -1,0 +1,13 @@
+--- a/genoffice/packages/pptx-render/src/bidi-js.d.ts
++++ b/genoffice/packages/pptx-render/src/bidi-js.d.ts
+@@ -1,9 +1 @@
+-declare module 'bidi-js' {
+-  interface BidiApi {
+-    getEmbeddingLevels(
+-      text: string,
+-      explicitDirection?: 'ltr' | 'rtl',
+-    ): { levels: Uint8Array; paragraphs: Array<{ start: number; end: number; level: number }> }
+-  }
+-  export default function bidiFactory(): BidiApi
+-}
++export {}

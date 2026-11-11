@@ -3,8 +3,8 @@ import { APP_SERVICE_MAX_BYTES, APP_SERVICE_OPERATIONS, AppServiceError, AppConf
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { join } from 'node:path';
-import type { AppMediaModelListRequest, AppModelRequest, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppVideoTaskRequest, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
-import { isExecutionPayload, parseExecutionRequest, isServicePayload, parseServiceRequest, serviceError, isJson, isModelErrorCode, isToolResult, toolError, type PluginLoad } from './protocol';
+import type { AppJson, AppRenderDocumentRead, AppMediaModelListRequest, AppModelRequest, AppMusicModelRequest, AppSpeechModelRequest, AppTranscriptionModelRequest, AppTextModelRequest, AppVideoTaskRequest, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import { isExecutionPayload, parseExecutionRequest, isServicePayload, parseServiceRequest, serviceError, isServiceErrorCode, isServiceReadEnvelope, isJson, isModelErrorCode, isToolResult, toolError, type PluginLoad } from './protocol';
 import { preparePluginPython, pluginProcessEnvironment } from './python-runtime';
 import { AppPluginProcess } from './runtime-process';
 import { AppPluginRuntimeStartupError, capturePluginLog, within, type AppPluginDevelopmentRuntime, type AppPluginModels, type AppPluginRuntimeCallbacks } from './runtime';
@@ -28,6 +28,7 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
   private readonly pending = new Map<string, { name?: string; resolve(value: unknown): void; reject(error: unknown): void }>();
   private readonly hostRequests = new Map<RequestId, { callId?: string; controller: AbortController; done: Promise<void> }>();
   private readonly confirmations = new Map<RequestId, { callId: string; controller: AbortController }>();
+  private readonly serviceReads = new Map<string, { parentRequestId: RequestId; resolve(result: AppJson): void; reject(error: unknown): void }>();
   private readonly schemas = new Map<string, { input: ValidateFunction; output?: ValidateFunction }>();
   private chunks: Buffer[] = [];
   private frameBytes = 0;
@@ -165,6 +166,24 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
     });
   }
 
+  private readService(parentRequestId: RequestId, input: AppJson, signal: AbortSignal): Promise<AppJson> {
+    const parent = this.hostRequests.get(parentRequestId);
+    if (!parent || this.state !== 'active' || this.controller.signal.aborted || parent.controller.signal.aborted) return Promise.reject(new AppServiceError('unavailable', 'Document read requires the active parent render request.'));
+    if (this.serviceReads.size >= 128 || [...this.serviceReads.values()].filter(read => read.parentRequestId === parentRequestId).length >= 32) return Promise.reject(new AppServiceError('unavailable', 'Document reads exceed the bounded concurrency limit.'));
+    signal.throwIfAborted();
+    const readId = randomUUID();
+    const params = { parentRequestId, pluginId: this.load.manifest.id, digest: this.load.digest, readId, input };
+    if (!isServiceReadEnvelope({ type: 'service-read', ...params })) return Promise.reject(new AppServiceError('invalid-request', 'Document read input exceeds 8 MiB or is not JSON.'));
+    return new Promise((resolve, reject) => {
+      const finish = () => { signal.removeEventListener('abort', cancel); this.serviceReads.delete(readId); };
+      const cancel = () => { finish(); parent.controller.abort(signal.reason); reject(new AppServiceError('cancelled', 'Document read cancelled.')); };
+      this.serviceReads.set(readId, { parentRequestId, resolve: result => { finish(); resolve(result); }, reject: error => { finish(); reject(error); } });
+      signal.addEventListener('abort', cancel, { once: true });
+      try { this.send({ jsonrpc: '2.0', id: readId, method: 'matcha/service-read', params }, APP_SERVICE_MAX_BYTES); }
+      catch (error) { finish(); reject(error); }
+    });
+  }
+
   private send(value: Record<string, unknown>, maximum = MAX_FRAME_BYTES): void {
     const input = this.process?.child.stdin;
     if (!input || input.destroyed || input.writableEnded) throw new Error('App plugin stdio is closed; the operation was not retried.');
@@ -220,16 +239,39 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
       if (value.id !== undefined) {
         if (!isRequestId(value.id)) throw new Error('Invalid app plugin JSON-RPC request.');
         if (SERVICE_METHODS.has(value.method) && typeof value.id === 'string' && (!value.id.length || value.id.length > 128)) throw new Error('Invalid app service request identifier.');
-        if (SERVICE_METHODS.has(value.method) && (bytes > APP_SERVICE_MAX_BYTES || Object.keys(value).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key)))) {
+        if (SERVICE_METHODS.has(value.method) && (bytes > APP_SERVICE_MAX_BYTES || Object.keys(value).some((key) => !['jsonrpc', 'id', 'method', 'params', 'hasRead'].includes(key))
+          || Object.hasOwn(value, 'hasRead') && (value.hasRead !== true || value.method !== 'matcha/rendering/renderDocument'))) {
           this.send({ jsonrpc: '2.0', id: value.id, error: { code: -32602, message: 'App service request must use a closed JSON-RPC envelope within 8 MiB.', data: { code: 'invalid-request' } } }, APP_SERVICE_MAX_BYTES);
           return;
         }
-        void this.receiveRequest(value.id, value.method, value.params);
+        void this.receiveRequest(value.id, value.method, value.params, value.hasRead === true);
       } else this.receiveNotification(value.method, value.params);
       return;
     }
     if (!isRequestId(value.id) || ('result' in value) === ('error' in value)) throw new Error('Invalid app plugin JSON-RPC response.');
     if (typeof value.id !== 'string') return;
+    const read = this.serviceReads.get(value.id);
+    if (read) {
+      const parent = this.hostRequests.get(read.parentRequestId);
+      if (!parent || parent.controller.signal.aborted || this.state !== 'active' || this.controller.signal.aborted) return;
+      if (bytes > APP_SERVICE_MAX_BYTES || Object.keys(value).some(key => !['jsonrpc', 'id', 'result', 'error'].includes(key))) {
+        read.reject(new AppServiceError('response-too-large', 'Invalid document read JSON-RPC response envelope.')); return;
+      }
+      if (value.error !== undefined) {
+        if (!isRecord(value.error) || !Number.isInteger(value.error.code) || typeof value.error.message !== 'string') throw new Error('Invalid document read JSON-RPC error.');
+        const code = isRecord(value.error.data) && isServiceErrorCode(value.error.data.code) ? value.error.data.code : 'unavailable';
+        const error = new AppServiceError(code, value.error.message.slice(0, 2000));
+        read.reject(error);
+        return;
+      }
+      const response = value.result;
+      if (!isRecord(response) || response.parentRequestId !== read.parentRequestId || response.readId !== value.id
+        || response.pluginId !== this.load.manifest.id || response.digest !== this.load.digest) return;
+      if (!isServiceReadEnvelope({ type: 'service-read-result', ...response })) read.reject(new AppServiceError('response-too-large', 'Invalid document read response envelope.'));
+      else if (typeof response.error === 'string') read.reject(new AppServiceError(isServiceErrorCode(response.errorCode) ? response.errorCode : 'unavailable', response.error));
+      else read.resolve(response.result as AppJson);
+      return;
+    }
     const pending = this.pending.get(value.id);
     if (value.error !== undefined) {
       if (!isRecord(value.error) || !Number.isInteger(value.error.code) || typeof value.error.message !== 'string') throw new Error('Invalid app plugin JSON-RPC error.');
@@ -266,7 +308,7 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
     } else if (method === 'notifications/tools/list_changed') throw new Error('App plugin tools are fixed by its manifest; update the package before changing tools.');
   }
 
-  private async receiveRequest(id: RequestId, method: string, request: unknown): Promise<void> {
+  private async receiveRequest(id: RequestId, method: string, request: unknown, hasRead = false): Promise<void> {
     let controller: AbortController | undefined;
     let finish = () => undefined as void;
     const service = SERVICE_METHODS.get(method);
@@ -312,7 +354,8 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
       if (serviceRequest) {
         if (!isServicePayload({ jsonrpc: '2.0', id, method, params: request })) throw new AppServiceError('invalid-request', 'App service request envelope exceeds 8 MiB.');
         if (!this.callbacks.service) throw new AppServiceError('unavailable', 'App service unavailable: this plugin runtime has no service owner.');
-        result = await this.callbacks.service(serviceRequest, signal);
+        const read: AppRenderDocumentRead | undefined = hasRead ? (input, readSignal) => this.readService(id, input, readSignal ? AbortSignal.any([signal, readSignal]) : signal) : undefined;
+        result = await this.callbacks.service(serviceRequest, signal, read);
         if (signal.aborted || this.state !== 'active') throw new AppServiceError('outcome-unknown', 'App service observation ended; external effects may already have occurred.');
         if (!isServicePayload(result)) throw new AppServiceError('response-too-large', 'App service result must be a JSON object within 8 MiB.');
       } else if (execution) {
@@ -336,7 +379,7 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
       this.send({ jsonrpc: '2.0', id, result }, service ? APP_SERVICE_MAX_BYTES : MAX_FRAME_BYTES);
     } catch (error) {
       if (service) {
-        const safeError = serviceError(error, controller?.signal);
+        const safeError = hasRead && error instanceof AppServiceError ? new AppServiceError(error.code, error.message.slice(0, 2000)) : serviceError(error, controller?.signal);
         try { this.send({ jsonrpc: '2.0', id, error: { code: -32603, message: safeError.message, data: { code: safeError.code } } }, APP_SERVICE_MAX_BYTES); }
         catch { /* Never replay a reverse service request or expose its input/result after process exit. */ }
         return;
@@ -346,7 +389,10 @@ export class StdioPluginRuntime implements AppPluginDevelopmentRuntime {
         ...(code === undefined ? {} : { data: { code } }) } }); }
       catch { /* Never replay a reverse request after process exit. */ }
     } finally {
-      if (controller && this.hostRequests.get(id)?.controller === controller) this.hostRequests.delete(id);
+      if (controller && this.hostRequests.get(id)?.controller === controller) {
+        for (const read of this.serviceReads.values()) if (read.parentRequestId === id) read.reject(new AppServiceError('cancelled', 'Parent document render request ended.'));
+        this.hostRequests.delete(id);
+      }
       finish();
     }
   }

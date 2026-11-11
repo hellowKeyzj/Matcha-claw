@@ -1,0 +1,38 @@
+--- a/genoffice/apps/slides/src/renderer/components/SlideShowView.tsx
++++ b/genoffice/apps/slides/src/renderer/components/SlideShowView.tsx
+@@ -72,6 +72,7 @@
+   rehearseMode,
+   onRehearseDone,
+   recordMode,
++  microphoneStream,
+   onRecordDone,
+ }: {
+   slides: RenderSlide[]
+@@ -88,6 +89,7 @@
+   onRehearseDone?: (perPageSec: number[]) => void
+   /** Record mode (Slide Show > Record): records the microphone narration of each slide */
+   recordMode?: boolean
++  microphoneStream?: Promise<MediaStream>
+   /** Called before onExit with the recording, which resolves once the microphone stops */
+   onRecordDone?: (take: Promise<NarrationTake | null>) => void
+ }) {
+@@ -212,7 +214,7 @@
+     player.load(allAnims?.[order[pos]!] ?? [], navModeRef.current)
+   }, [allAnims, pos, order, player.load]) // eslint-disable-line react-hooks/exhaustive-deps
+ 
+-  const recording = useNarrationRecording(!!recordMode, curIdx, ended)
++  const recording = useNarrationRecording(!!recordMode, curIdx, ended, microphoneStream)
+ 
+   const exitRef = useRef(() => {})
+   exitRef.current = () => {
+@@ -419,8 +421,8 @@
+             return
+         }
+       }
+-      // Electron routes window.open to the system browser (setWindowOpenHandler denies in-app windows)
+-      window.open(target.url, '_blank', 'noreferrer')
++      // The plugin bridge validates URLs before opening the system browser.
++      void window.slidesApi.openExternal(target.url)
+     },
+     [order, goTo, pos, lastViewed],
+   )

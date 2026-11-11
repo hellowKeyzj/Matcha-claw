@@ -1,0 +1,2331 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "minSdkVersion": "1.6.0",
+  "id": "matcha.office",
+  "name": "Matcha Office",
+  "version": "0.2.7",
+  "description": "本地 Office 文档库：基于 GenOffice 引擎编辑 Docs、Sheets、Slides、PDF、Markdown 和 HTML，支持格式转换与导入导出。",
+  "main": "main.cjs",
+  "contributes": {
+    "applications": [
+      {
+        "id": "docs",
+        "name": "Matcha Office Docs",
+        "icon": {
+          "paths": [
+            "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z",
+            "M14 2v6h6",
+            "M8 12h8M8 16h8M8 8h2"
+          ]
+        },
+        "entry": "docs.html",
+        "placement": "both",
+        "scope": "workspace"
+      },
+      {
+        "id": "sheets",
+        "name": "Matcha Office Sheets",
+        "icon": {
+          "paths": [
+            "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z",
+            "M3 8h18M3 14h18M9 8v13M15 8v13"
+          ]
+        },
+        "entry": "sheets.html",
+        "placement": "both",
+        "scope": "workspace"
+      },
+      {
+        "id": "slides",
+        "name": "Matcha Office Slides",
+        "icon": {
+          "paths": [
+            "M2 3h20M4 3v13h16V3M12 16v5M8 21h8",
+            "M7 12l3-3 3 3 4-5"
+          ]
+        },
+        "entry": "slides.html",
+        "placement": "both",
+        "scope": "workspace"
+      },
+      {
+        "id": "pdf",
+        "name": "Matcha Office PDF",
+        "icon": {
+          "paths": [
+            "M15 2H5a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8ZM15 2v6h6",
+            "M6 18v-6h1a1.5 1.5 0 0 1 0 3H6",
+            "M11 12v6h1a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2Z",
+            "M17 18v-6h2M17 15h2"
+          ]
+        },
+        "entry": "pdf.html",
+        "placement": "both",
+        "scope": "workspace"
+      },
+      {
+        "id": "markdown",
+        "name": "Matcha Office Markdown",
+        "icon": {
+          "paths": [
+            "M3 17V7l4 5 4-5v10",
+            "M18 7v10M14 13l4 4 4-4"
+          ]
+        },
+        "entry": "markdown.html",
+        "placement": "both",
+        "scope": "workspace"
+      },
+      {
+        "id": "html",
+        "name": "Matcha Office HTML",
+        "icon": {
+          "paths": [
+            "m7 7-5 5 5 5M17 7l5 5-5 5M14 4l-4 16"
+          ]
+        },
+        "entry": "html.html",
+        "placement": "both",
+        "scope": "workspace"
+      }
+    ],
+    "tools": [
+      {
+        "name": "office_sheets_ipc",
+        "description": "Internal Sheets editor IPC bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "channel"
+          ],
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_sheets_open",
+        "description": "Internal Sheets library-open bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_slides_ipc",
+        "description": "Internal Slides editor IPC bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "channel"
+          ],
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_slides_open",
+        "description": "Internal Slides library-open bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_docs_ipc",
+        "description": "Internal Docs editor IPC bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "channel"
+          ],
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_pdf_ipc",
+        "description": "Internal PDF editor IPC bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "channel"
+          ],
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_pdf_open",
+        "description": "Internal PDF library-open bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_markdown_ipc",
+        "description": "Internal Markdown editor IPC bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "channel"
+          ],
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_markdown_open",
+        "description": "Internal Markdown library-open bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_html_ipc",
+        "description": "Internal HTML editor IPC bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "channel"
+          ],
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "office_html_open",
+        "description": "Internal HTML library-open bridge.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "editorId": {
+              "type": "string",
+              "pattern": "^[a-f0-9-]{36}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "_meta": {
+          "ui": {
+            "visibility": [
+              "app"
+            ]
+          }
+        }
+      },
+      {
+        "name": "documents_list",
+        "description": "List documents in the local Matcha Office library. Returns id, name, type, size, revision and timestamps. Use document_read for content.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "document_create",
+        "description": "Create a library document. docx source is Markdown or restricted HTML; xlsx is workbook JSON or CSV; csv preserves native CSV source text; pptx is deck spec JSON or ops JSON; md/html/txt/json is source text. pdf creates a blank A4 page and requires no source; import or convert for existing content.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "docx",
+                "xlsx",
+                "csv",
+                "pptx",
+                "md",
+                "html",
+                "txt",
+                "json",
+                "pdf"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "source": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 8000000
+            },
+            "sourceFormat": {
+              "type": "string",
+              "enum": [
+                "markdown",
+                "html",
+                "json",
+                "csv",
+                "spec",
+                "ops",
+                "text",
+                "blank"
+              ]
+            },
+            "header": {
+              "type": "boolean"
+            },
+            "resources": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "data"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "data": {
+                    "type": "string",
+                    "maxLength": 80000000
+                  }
+                },
+                "additionalProperties": false
+              },
+              "description": "Markdown/HTML document resources, with canonical relative paths and base64 bytes. Omit to preserve existing resources; [] clears them. Commits atomically with the body."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "pdf"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "maxLength": 0
+                  },
+                  "sourceFormat": {
+                    "type": "string",
+                    "const": "blank"
+                  }
+                }
+              },
+              "else": {
+                "required": [
+                  "source"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "document_import",
+        "description": "Import document bytes into the library. Native .docx/.xlsx/.xlsm/.pptx/.pdf/.md/.html/.txt/.json are preserved; supported legacy Word/HWP/ODF, spreadsheet and presentation formats are converted by the original engines and return conversion details. data is canonical base64, not a data URL. Native .csv files keep their original bytes, name and CSV identity; importing CSV does not convert it to XLSX.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "mimeType",
+            "data"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "mimeType": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "data": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80000000
+            },
+            "resources": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "data"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "data": {
+                    "type": "string",
+                    "maxLength": 80000000
+                  }
+                },
+                "additionalProperties": false
+              },
+              "description": "Markdown/HTML document resources, with canonical relative paths and base64 bytes. Omit to preserve existing resources; [] clears them. Commits atomically with the body."
+            }
+          }
+        }
+      },
+      {
+        "name": "document_write",
+        "description": "Replace a document's bytes at expectedRevision. Used by the Matcha Office editor when it saves. Revision conflicts never overwrite newer edits.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "documentId",
+            "expectedRevision",
+            "data"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "data": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80000000
+            },
+            "resources": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "data"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "data": {
+                    "type": "string",
+                    "maxLength": 80000000
+                  }
+                },
+                "additionalProperties": false
+              },
+              "description": "Markdown/HTML document resources, with canonical relative paths and base64 bytes. Omit to preserve existing resources; [] clears them. Commits atomically with the body."
+            }
+          }
+        }
+      },
+      {
+        "name": "document_read",
+        "description": "Read a document and return a preview. docx returns restricted document HTML and block indexes. xlsx returns a cell grid and formulas. pptx returns slides and element geometry. pdf returns page text. md/html/txt/json returns text. CSV uses the Sheets reader and retains document.type=csv.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "full": {
+              "type": "boolean"
+            },
+            "sheet": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "range": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 50
+            },
+            "password": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "from": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      },
+      {
+        "name": "document_edit",
+        "description": "Apply GenOffice ops or sheet cells at expectedRevision, or replace Markdown/HTML/TXT/JSON with source text. Revision conflicts never overwrite newer edits. Use document_guide for op syntax. Native CSV accepts literal cells only (cell, value, optional sheet=Sheet1), not formulas, styles or ops. CSV import preserves formula-like source text as literal cells; convert to XLSX for formula or structural editing.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "documentId",
+            "expectedRevision"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ops": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "object"
+              }
+            },
+            "cells": {
+              "type": "array",
+              "maxItems": 10000,
+              "items": {
+                "type": "object"
+              }
+            },
+            "source": {
+              "type": "string",
+              "maxLength": 8000000
+            },
+            "pdf": {
+              "type": "object",
+              "description": "GenOffice PDF SavePdfRequest editing fields, excluding path and targetPath. Redactions create a clean copy and leave the source unchanged."
+            },
+            "resources": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "data"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "data": {
+                    "type": "string",
+                    "maxLength": 80000000
+                  }
+                },
+                "additionalProperties": false
+              },
+              "description": "Markdown/HTML document resources, with canonical relative paths and base64 bytes. Omit to preserve existing resources; [] clears them. Commits atomically with the body."
+            }
+          }
+        }
+      },
+      {
+        "name": "document_check",
+        "description": "Run GenOffice document, workbook or deck checks and return warnings and errors. docx uses docs check, xlsx uses sheet check, pptx uses slides audit. CSV is checked with the Sheets algorithms without replacing its native bytes.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "password": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          }
+        }
+      },
+      {
+        "name": "document_export",
+        "description": "Return a document's original bytes, or convert docx to Markdown / xlsx to CSV, as canonical base64. Use the Matcha Office UI for large downloads. CSV original/csv export preserves native source bytes.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "format": {
+              "type": "string",
+              "enum": [
+                "original",
+                "md",
+                "csv"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "name": "document_delete",
+        "description": "Delete a document from the local Matcha Office library. This is irreversible.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            }
+          }
+        }
+      },
+      {
+        "name": "document_guide",
+        "description": "Return the GenOffice op guide for docs, sheets or slides. The guide lists every supported op, its fields and examples.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "domain"
+          ],
+          "properties": {
+            "domain": {
+              "type": "string",
+              "enum": [
+                "docs",
+                "sheets",
+                "slides"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "name": "document_convert",
+        "description": "Convert a library document to another supported format and create a new library document, leaving the source unchanged. Returns source, document and warnings. Availability follows the original format engines. Native CSV supports conversion to XLSX or PDF; XLSX to CSV exports one selected sheet and returns data-loss warnings.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId",
+            "to"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "to": {
+              "type": "string",
+              "enum": [
+                "docx",
+                "xlsx",
+                "pptx",
+                "pdf",
+                "md",
+                "html",
+                "csv"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "password": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "sheet": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "document_render",
+        "description": "Render a library document to PNG page images. page is 1-based; omit it to render all pages. Returns document and images with page, width, height, mimeType and base64 data. CSV is rendered through the Sheets layout pipeline.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId"
+          ],
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "scale": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 4
+            },
+            "page": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "password": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "document_html_action",
+        "description": "Use the original HTML editor document tools on the exact document already open in its application page. context returns the redacted current context; get_outline and read_source expose stable element IDs and source; apply_ops applies validated edits with the original undo and dirty lifecycle; pin_brief updates the embedded design brief. Open the document first. Unavailable when its editor is not open; navigation acknowledgement alone does not prove it is ready.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId",
+            "action"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "get_outline",
+                "read_source",
+                "apply_ops",
+                "context",
+                "pin_brief"
+              ]
+            },
+            "input": {
+              "type": "object"
+            }
+          },
+          "oneOf": [
+            {
+              "properties": {
+                "action": {
+                  "const": "get_outline"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "depth": {
+                      "type": "integer",
+                      "description": "Nesting depth to show (default 3)"
+                    },
+                    "from_sid": {
+                      "type": "integer",
+                      "description": "Only this element and its subtree"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "read_source"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "start_line": {
+                      "type": "integer"
+                    },
+                    "end_line": {
+                      "type": "integer"
+                    },
+                    "sid": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "required": [
+                "input"
+              ],
+              "properties": {
+                "action": {
+                  "const": "apply_ops"
+                },
+                "input": {
+                  "type": "object",
+                  "required": [
+                    "ops"
+                  ],
+                  "properties": {
+                    "ops": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 40,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "op"
+                        ],
+                        "properties": {
+                          "op": {
+                            "type": "string",
+                            "enum": [
+                              "str_replace",
+                              "replace_element",
+                              "set_inner_html",
+                              "set_text",
+                              "insert_html",
+                              "remove",
+                              "move",
+                              "set_attr",
+                              "set_style"
+                            ]
+                          },
+                          "old": {
+                            "type": "string"
+                          },
+                          "new": {
+                            "type": "string"
+                          },
+                          "replace_all": {
+                            "type": "boolean"
+                          },
+                          "sid": {
+                            "type": "integer"
+                          },
+                          "ref_sid": {
+                            "type": "integer"
+                          },
+                          "html": {
+                            "type": "string"
+                          },
+                          "text": {
+                            "type": "string"
+                          },
+                          "position": {
+                            "type": "string",
+                            "enum": [
+                              "before",
+                              "after",
+                              "prepend",
+                              "append"
+                            ]
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "styles": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "summary": {
+                      "type": "string",
+                      "description": "One short sentence shown to the user"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "context"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            },
+            {
+              "required": [
+                "input"
+              ],
+              "properties": {
+                "action": {
+                  "const": "pin_brief"
+                },
+                "input": {
+                  "type": "object",
+                  "required": [
+                    "brief"
+                  ],
+                  "properties": {
+                    "brief": {
+                      "type": "object",
+                      "required": [
+                        "core_hook",
+                        "style",
+                        "sections",
+                        "version"
+                      ],
+                      "properties": {
+                        "core_hook": {
+                          "type": "string"
+                        },
+                        "style": {
+                          "type": "object",
+                          "required": [
+                            "tone",
+                            "palette",
+                            "typography"
+                          ],
+                          "properties": {
+                            "name": {
+                              "type": "string"
+                            },
+                            "tone": {
+                              "type": "string"
+                            },
+                            "layout": {
+                              "type": "string"
+                            },
+                            "density": {
+                              "type": "string"
+                            },
+                            "docx_friendly": {
+                              "type": "boolean"
+                            },
+                            "palette": {
+                              "type": "object",
+                              "properties": {
+                                "primary": {
+                                  "type": "string"
+                                },
+                                "accent": {
+                                  "type": "string"
+                                },
+                                "bg": {
+                                  "type": "string"
+                                },
+                                "surface": {
+                                  "type": "string"
+                                },
+                                "text": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "typography": {
+                              "type": "object",
+                              "properties": {
+                                "heading": {
+                                  "type": "string"
+                                },
+                                "body": {
+                                  "type": "string"
+                                },
+                                "scale": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "tokens": {
+                              "type": "object",
+                              "properties": {
+                                "radius": {
+                                  "type": "string"
+                                },
+                                "spacing": {
+                                  "type": "string"
+                                },
+                                "shadow": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "alternatives": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "tone",
+                              "palette",
+                              "typography"
+                            ],
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "tone": {
+                                "type": "string"
+                              },
+                              "layout": {
+                                "type": "string"
+                              },
+                              "density": {
+                                "type": "string"
+                              },
+                              "docx_friendly": {
+                                "type": "boolean"
+                              },
+                              "palette": {
+                                "type": "object",
+                                "properties": {
+                                  "primary": {
+                                    "type": "string"
+                                  },
+                                  "accent": {
+                                    "type": "string"
+                                  },
+                                  "bg": {
+                                    "type": "string"
+                                  },
+                                  "surface": {
+                                    "type": "string"
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  }
+                                }
+                              },
+                              "typography": {
+                                "type": "object",
+                                "properties": {
+                                  "heading": {
+                                    "type": "string"
+                                  },
+                                  "body": {
+                                    "type": "string"
+                                  },
+                                  "scale": {
+                                    "type": "string"
+                                  }
+                                }
+                              },
+                              "tokens": {
+                                "type": "object",
+                                "properties": {
+                                  "radius": {
+                                    "type": "string"
+                                  },
+                                  "spacing": {
+                                    "type": "string"
+                                  },
+                                  "shadow": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "sections": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "title",
+                              "brief"
+                            ],
+                            "properties": {
+                              "title": {
+                                "type": "string"
+                              },
+                              "type": {
+                                "type": "string"
+                              },
+                              "brief": {
+                                "type": "string"
+                              },
+                              "layout": {
+                                "type": "string"
+                              },
+                              "image_queries": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "meta": {
+                          "type": "object",
+                          "properties": {
+                            "title": {
+                              "type": "string"
+                            },
+                            "language": {
+                              "type": "string"
+                            },
+                            "audience": {
+                              "type": "string"
+                            },
+                            "length": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "user_edited": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "version": {
+                          "const": 1
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "document_markdown_action",
+        "description": "Use the original markdown document tools on the exact document already open in its application page. Actions preserve native validation, undo, dirty and save lifecycle. Open the document first; unavailable without a matching editor. Navigation acknowledgement alone does not prove readiness.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "get_document_context",
+                "read_blocks",
+                "apply_ops",
+                "read_frontmatter",
+                "generate_mindmap",
+                "anchor_selection",
+                "resolve_anchor",
+                "focus_anchor",
+                "remove_anchor",
+                "navigate"
+              ]
+            },
+            "input": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "documentId",
+            "action",
+            "input"
+          ],
+          "additionalProperties": false,
+          "oneOf": [
+            {
+              "properties": {
+                "action": {
+                  "const": "get_document_context"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "read_blocks"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "startIndex": {
+                      "type": "integer",
+                      "description": "0-based index of the first block"
+                    },
+                    "endIndex": {
+                      "type": "integer",
+                      "description": "0-based index of the last block (inclusive)"
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "description": "Character offset to continue a previously truncated read"
+                    }
+                  },
+                  "required": [
+                    "startIndex",
+                    "endIndex"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "apply_ops"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "ops": {
+                      "type": "array",
+                      "description": "Ordered list of op objects (see the op catalogue)",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  },
+                  "required": [
+                    "ops"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "read_frontmatter"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "generate_mindmap"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "focus": {
+                      "type": "string",
+                      "description": "optional: the aspect the map should center on (e.g. \"risk controls\", \"for beginners\"); omit for a whole-document map"
+                    },
+                    "root": {
+                      "type": "object",
+                      "description": "the mind map tree: root node with nested children",
+                      "properties": {
+                        "label": {
+                          "type": "string",
+                          "description": "short node label (2-8 words) in the document's language, taken from its headings or key phrases"
+                        },
+                        "block": {
+                          "type": "integer",
+                          "description": "0-based block index this node summarizes (from the current block list); omit when the node spans several blocks"
+                        },
+                        "children": {
+                          "type": "array",
+                          "description": "sub-topics; 2-5 per node reads best",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "label": {
+                                "type": "string",
+                                "description": "short node label (2-8 words) in the document's language, taken from its headings or key phrases"
+                              },
+                              "block": {
+                                "type": "integer",
+                                "description": "0-based block index this node summarizes (from the current block list); omit when the node spans several blocks"
+                              },
+                              "children": {
+                                "type": "array",
+                                "description": "sub-topics; 2-5 per node reads best",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "label": {
+                                      "type": "string",
+                                      "description": "short node label (2-8 words) in the document's language, taken from its headings or key phrases"
+                                    },
+                                    "block": {
+                                      "type": "integer",
+                                      "description": "0-based block index this node summarizes (from the current block list); omit when the node spans several blocks"
+                                    },
+                                    "children": {
+                                      "type": "array",
+                                      "description": "sub-topics; 2-5 per node reads best",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "label": {
+                                            "type": "string",
+                                            "description": "short node label (2-8 words) in the document's language, taken from its headings or key phrases"
+                                          },
+                                          "block": {
+                                            "type": "integer",
+                                            "description": "0-based block index this node summarizes (from the current block list); omit when the node spans several blocks"
+                                          },
+                                          "children": {
+                                            "type": "array",
+                                            "description": "sub-topics; 2-5 per node reads best",
+                                            "items": {
+                                              "type": "object",
+                                              "properties": {
+                                                "label": {
+                                                  "type": "string",
+                                                  "description": "short node label (2-8 words) in the document's language, taken from its headings or key phrases"
+                                                },
+                                                "block": {
+                                                  "type": "integer",
+                                                  "description": "0-based block index this node summarizes (from the current block list); omit when the node spans several blocks"
+                                                },
+                                                "children": {
+                                                  "type": "array",
+                                                  "description": "sub-topics; 2-5 per node reads best",
+                                                  "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                      "label": {
+                                                        "type": "string",
+                                                        "description": "short node label (2-8 words) in the document's language, taken from its headings or key phrases"
+                                                      },
+                                                      "block": {
+                                                        "type": "integer",
+                                                        "description": "0-based block index this node summarizes (from the current block list); omit when the node spans several blocks"
+                                                      },
+                                                      "children": {
+                                                        "type": "array",
+                                                        "description": "sub-topics; 2-5 per node reads best",
+                                                        "items": {
+                                                          "type": "object",
+                                                          "properties": {
+                                                            "label": {
+                                                              "type": "string",
+                                                              "description": "short node label (2-8 words) in the document's language"
+                                                            }
+                                                          },
+                                                          "required": [
+                                                            "label"
+                                                          ]
+                                                        }
+                                                      }
+                                                    },
+                                                    "required": [
+                                                      "label"
+                                                    ]
+                                                  }
+                                                }
+                                              },
+                                              "required": [
+                                                "label"
+                                              ]
+                                            }
+                                          }
+                                        },
+                                        "required": [
+                                          "label"
+                                        ]
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "label"
+                                  ]
+                                }
+                              }
+                            },
+                            "required": [
+                              "label"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "label"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "root"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "anchor_selection"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "resolve_anchor"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "qid": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "qid"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "focus_anchor"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "qid": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "qid"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "remove_anchor"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "qid": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "qid"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "navigate"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "index": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "index"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "document_sheets_action",
+        "description": "Use the original Sheets document tools on the exact workbook already open in its application page. Includes workbook context, ranges, aggregation, formats, features, cell search, selection, formula tracing, operation proposals, guide lookup and document creation. Actions preserve native validation, undo, dirty and save lifecycle. Unavailable without a matching editor; navigation acknowledgement alone does not prove readiness.",
+        "inputSchema": {
+          "type": "object",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "get_workbook_context"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {},
+                  "required": []
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "read_range"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "range": {
+                      "type": "string",
+                      "description": "Range like \"A1:D20\"; a single cell like \"B2\" is also accepted"
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Sheet to read from (id from get_workbook_context); reads the active sheet when omitted"
+                    }
+                  },
+                  "required": [
+                    "range"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "aggregate_range"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "range": {
+                      "type": "string",
+                      "description": "Range like \"D2:D88588\" (typically one column, excluding the header)"
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Target sheet id; the active sheet when omitted"
+                    },
+                    "topValues": {
+                      "type": "number",
+                      "description": "How many most-frequent values to return (0-50, default 10)"
+                    }
+                  },
+                  "required": [
+                    "range"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "load_guide"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "guides": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Guide names to load, e.g. [\"writing\",\"formatting\"]"
+                    }
+                  },
+                  "required": [
+                    "guides"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "read_formats"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "range": {
+                      "type": "string",
+                      "description": "Range like \"A1:D20\""
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Sheet to read from (id from get_workbook_context); reads the active sheet when omitted"
+                    }
+                  },
+                  "required": [
+                    "range"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "read_sheet_features"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Target sheet id; reads the active sheet when omitted"
+                    }
+                  },
+                  "required": []
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "read_cells"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "addresses": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "List of cell addresses, e.g. [\"A1\",\"B2\"], max 100"
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Sheet to read from (id from get_workbook_context); reads the active sheet when omitted"
+                    }
+                  },
+                  "required": [
+                    "addresses"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "find_cells"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "query": {
+                      "type": "string",
+                      "description": "Text or regex to find; may be omitted only when errors_only=true"
+                    },
+                    "regex": {
+                      "type": "boolean",
+                      "description": "Treat query as a JavaScript regex (default false)"
+                    },
+                    "look_in": {
+                      "type": "string",
+                      "enum": [
+                        "values",
+                        "formulas",
+                        "both"
+                      ],
+                      "default": "both",
+                      "description": "What to match against (default both)"
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Restrict the search to one sheet; searches every sheet when omitted"
+                    },
+                    "errors_only": {
+                      "type": "boolean",
+                      "description": "Find cells whose calculated value is a formula error (default false)"
+                    },
+                    "max_results": {
+                      "type": "integer",
+                      "description": "Maximum matches returned, default 50, max 200"
+                    }
+                  },
+                  "required": []
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "select_range"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "range": {
+                      "type": "string",
+                      "description": "Range like \"A1:D20\"; a single cell is also accepted"
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Target sheet id; defaults to the active sheet"
+                    }
+                  },
+                  "required": [
+                    "range"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "trace_precedents"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "description": "Formula cell to audit, e.g. \"C10\""
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Sheet the cell lives on; defaults to the active sheet"
+                    }
+                  },
+                  "required": [
+                    "address"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "trace_dependents"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "description": "Target cell, e.g. \"B2\""
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "Sheet the cell lives on; defaults to the active sheet"
+                    }
+                  },
+                  "required": [
+                    "address"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "propose_operations"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "operations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "Array of operations in the workbook DSL discriminated-union format"
+                    },
+                    "summary": {
+                      "type": "string",
+                      "description": "One-sentence summary of this batch of changes"
+                    }
+                  },
+                  "required": [
+                    "operations",
+                    "summary"
+                  ]
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "pattern": "^doc_[a-f0-9]{16}$"
+                },
+                "action": {
+                  "const": "create_document"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "xlsx",
+                        "csv",
+                        "docx",
+                        "pdf",
+                        "md",
+                        "html"
+                      ],
+                      "description": "target file type (default 'xlsx')"
+                    },
+                    "sheetId": {
+                      "type": "string",
+                      "description": "xlsx/csv only: the worksheet to export (id from get_workbook_context); defaults to the active sheet"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "file name without extension (required for docx/pdf/md; xlsx/csv default to the sheet name)"
+                    },
+                    "content": {
+                      "type": "string",
+                      "description": "docx/pdf: simple HTML; md: Markdown source. Forbidden for xlsx/csv — their data comes from the worksheet"
+                    }
+                  },
+                  "required": []
+                }
+              },
+              "required": [
+                "documentId",
+                "action",
+                "input"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "document_slides_action",
+        "description": "Use the original Slides document algorithms on the exact presentation already open in its application page. execute_slide_script (execute_layout_script alias) edits live page elements atomically with one undo step; insert_web_image and replace_image use remote image URLs with original frame/crop semantics. Uses the current editor geometry, history, dirty state and normal save lifecycle. Open the document first; navigation acknowledgement alone does not prove readiness. Does not run a model or image-generation provider.",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "documentId",
+            "action",
+            "input"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "pattern": "^doc_[a-f0-9]{16}$"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "execute_slide_script",
+                "insert_web_image",
+                "replace_image",
+                "execute_layout_script"
+              ]
+            },
+            "input": {
+              "type": "object"
+            }
+          },
+          "oneOf": [
+            {
+              "properties": {
+                "action": {
+                  "const": "execute_slide_script"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "slideIndex": {
+                      "type": "integer",
+                      "description": "Page number (0-based)"
+                    },
+                    "code": {
+                      "type": "string",
+                      "description": "JS script body (synchronous code; may use els/canvas plus setBox/moveBy/resizeBy/setText/setStyle/setFill/setStroke/log; may return a summary)"
+                    },
+                    "explanation": {
+                      "type": "string",
+                      "description": "One sentence describing what this script does (≤60 chars, shown to the user)"
+                    }
+                  },
+                  "required": [
+                    "slideIndex",
+                    "code"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "insert_web_image"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "slideIndex": {
+                      "type": "integer"
+                    },
+                    "url": {
+                      "type": "string",
+                      "description": "Direct image link (imageUrl from image_search), or attachment://<file name> to embed a user-attached image as-is"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "w": {
+                      "type": "number"
+                    },
+                    "h": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "slideIndex",
+                    "url",
+                    "x",
+                    "y",
+                    "w",
+                    "h"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "replace_image"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "slideIndex": {
+                      "type": "integer"
+                    },
+                    "sourceId": {
+                      "type": "string",
+                      "description": "Picture element id"
+                    },
+                    "url": {
+                      "type": "string",
+                      "description": "Direct image link"
+                    },
+                    "keepCrop": {
+                      "type": "boolean",
+                      "description": "Keep the existing crop window (default false)"
+                    }
+                  },
+                  "required": [
+                    "slideIndex",
+                    "sourceId",
+                    "url"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "execute_layout_script"
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "slideIndex": {
+                      "type": "integer",
+                      "description": "Page number (0-based)"
+                    },
+                    "code": {
+                      "type": "string",
+                      "description": "JS script body (synchronous code; may use els/canvas plus setBox/moveBy/resizeBy/setText/setStyle/setFill/setStroke/log; may return a summary)"
+                    },
+                    "explanation": {
+                      "type": "string",
+                      "description": "One sentence describing what this script does (≤60 chars, shown to the user)"
+                    }
+                  },
+                  "required": [
+                    "slideIndex",
+                    "code"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

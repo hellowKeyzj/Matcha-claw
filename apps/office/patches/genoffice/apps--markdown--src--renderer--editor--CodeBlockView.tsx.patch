@@ -1,0 +1,21 @@
+--- a/genoffice/apps/markdown/src/renderer/editor/CodeBlockView.tsx
++++ b/genoffice/apps/markdown/src/renderer/editor/CodeBlockView.tsx
+@@ -106,8 +106,7 @@
+   }, [diagramLang, source])
+ 
+   const copy = () => {
+-    void navigator.clipboard
+-      .writeText(node.textContent)
++    void window.matchaApp!.writeClipboard({ text: node.textContent })
+       .then(() => {
+         if (!mountedRef.current) return
+         if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current)
+@@ -117,7 +116,7 @@
+           setCopied(false)
+         }, 1500)
+       })
+-      .catch(() => {})
++      .catch(async (error) => { console.error('[markdown] clipboard failed:', error); const { showToast } = await import('../components/toast-bus'); showToast(t('saveFailed'), 'error') })
+   }
+ 
+   const editSource = () => {

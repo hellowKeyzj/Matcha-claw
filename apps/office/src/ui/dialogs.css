@@ -1,0 +1,59 @@
+.matcha-library-dialog {
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: 13px/1.4 system-ui, sans-serif;
+  box-shadow: var(--shadow-modal-strong);
+}
+
+.matcha-library-dialog::backdrop {
+  background: var(--color-bg-overlay);
+}
+
+.matcha-library-dialog h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.matcha-library-dialog button {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.matcha-library-dialog input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+}
+
+.matcha-library-dialog button:hover {
+  background: var(--hover);
+}
+
+.matcha-library-dialog button:focus-visible {
+  outline: 2px solid var(--accent, #0d74ce);
+  outline-offset: 2px;
+}

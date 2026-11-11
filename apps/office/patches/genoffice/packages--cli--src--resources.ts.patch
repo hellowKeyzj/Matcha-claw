@@ -1,0 +1,30 @@
+--- a/genoffice/packages/cli/src/resources.ts
++++ b/genoffice/packages/cli/src/resources.ts
+@@ -17,8 +17,7 @@
+ let cachedResources: string | null | undefined
+ export function packagedResourcesDir(): string | null {
+   if (cachedResources !== undefined) return cachedResources
+-  const candidate = resolve(scriptDir(), '..')
+-  cachedResources = existsSync(join(candidate, 'wasm', 'pdfium.wasm')) ? candidate : null
++  cachedResources = scriptDir()
+   return cachedResources
+ }
+ 
+@@ -47,7 +46,7 @@
+ export function pdfiumWasmPath(): string {
+   if (process.env.GENOFFICE_PDFIUM_WASM) return process.env.GENOFFICE_PDFIUM_WASM
+   const packaged = packagedResourcesDir()
+-  if (packaged) return join(packaged, 'wasm', 'pdfium.wasm')
++  if (packaged) return join(packaged, 'native', 'pdfium.wasm')
+   const root = repoRoot()
+   if (root) {
+     try {
+@@ -74,7 +73,7 @@
+   const helper = process.platform === 'darwin' ? 'vision-ocr' : 'win-ocr.exe'
+   const packaged = packagedResourcesDir()
+   const candidates = [
+-    ...(packaged ? [join(packaged, 'ocr', helper)] : []),
++    ...(packaged ? [join(packaged, 'native', 'ocr', helper)] : []),
+     ...(repoRoot() ? [join(repoRoot()!, 'packages/pdf2docx/ocr-helper', helper)] : []),
+   ]
+   return candidates.find((p) => existsSync(p)) ?? null

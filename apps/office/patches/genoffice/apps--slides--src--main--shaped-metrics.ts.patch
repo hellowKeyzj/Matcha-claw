@@ -1,0 +1,87 @@
+--- a/genoffice/apps/slides/src/main/shaped-metrics.ts
++++ b/genoffice/apps/slides/src/main/shaped-metrics.ts
+@@ -278,9 +278,14 @@
+  * meaning the caller should rebuild the layout. If the page is not ready or the call fails,
+  * keep them pending and retry next time.
+  */
+-export async function refineComplexWidths(wc: {
+-  executeJavaScript(code: string): Promise<unknown>
+-}): Promise<boolean> {
++export type WidthItem = { key: string; family: string; text: string; bold: boolean; italic: boolean }
++let measureWidths: ((wcId: number, items: WidthItem[]) => Promise<Record<string, number | null>>) | undefined
++export function setWidthMeasurer(measure: typeof measureWidths): void {
++  measureWidths = measure
++}
++
++export async function refineComplexWidths(wc: { id: number }): Promise<boolean> {
++  if (!measureWidths) return false
+   if (!gtPending.size) return false
+   const items = [...gtPending]
+   gtPending.clear()
+@@ -295,63 +300,10 @@
+     }
+   })
+   try {
+-    const widths = (await wc.executeJavaScript(`(async () => {
+-      const items = ${JSON.stringify(payload)}
+-      // Ground truth requires the REAL faces: layout may resolve to Office-private
+-      // fonts Chromium cannot see by name, and this refinement can run before
+-      // doc-fonts syncs them — measuring the fallback would bake wrong widths in
+-      const need = new Set(items.map((it) => it.family))
+-      let privateFams = new Set()
+-      try {
+-        const faces = await window.slidesApi.privateFontFaces()
+-        privateFams = new Set((Array.isArray(faces) ? faces : []).map((f) => f.family))
+-        for (const f of Array.isArray(faces) ? faces : []) {
+-          if (!need.has(f.family)) continue
+-          // Each face registers independently: one bad face must not skip the rest
+-          try {
+-            const weight = f.bold ? '700' : '400'
+-            const style = f.italic ? 'italic' : 'normal'
+-            let have = false
+-            document.fonts.forEach((x) => {
+-              if (x.family === f.family && x.weight === weight && x.style === style) have = true
+-            })
+-            if (have) continue
+-            const data = await window.slidesApi.privateFontData(f.id)
+-            if (!data) continue
+-            const face = new FontFace(f.family, data, { weight, style })
+-            document.fonts.add(face)
+-            await face.load()
+-          } catch { /* this face keeps the fallback; check() below skips it */ }
+-        }
+-      } catch { /* no private-face listing: system fonts still pass check() */ }
+-      // fonts.check() returns true for unknown families on modern Chromium
+-      // (fallback counts as renderable), so it cannot gate this. A family is
+-      // measurable when it is NOT a private face (main resolved it to a system
+-      // font Chromium sees by name) or any face of it is registered — missing
+-      // styles are synthesized identically by canvas drawing and measureText.
+-      const registered = new Set()
+-      document.fonts.forEach((x) => registered.add(x.family))
+-      const ctx = document.createElement('canvas').getContext('2d')
+-      // The renderer's own drawing stack (konva-adapter displayFontFamily): glyphs the face
+-      // lacks fall back per family (Korean-named faces to Malgun/Apple SD Gothic Neo, …), and
+-      // measuring them in any other fallback font would shift every following glyph
+-      const stackOf = typeof window.__genofficeDisplayFontFamily === 'function'
+-        ? window.__genofficeDisplayFontFamily
+-        : (f) => '"' + f + '", \\'PingFang SC\\', \\'Microsoft YaHei\\', \\'Yu Gothic\\', \\'Malgun Gothic\\', sans-serif'
+-      const out = {}
+-      for (const it of items) {
+-        if (privateFams.has(it.family) && !registered.has(it.family)) {
+-          out[it.key] = null // family not available yet — stays pending
+-          continue
+-        }
+-        ctx.font = (it.italic ? 'italic ' : '') + (it.bold ? 'bold ' : '') +
+-          '100px ' + stackOf(it.family)
+-        out[it.key] = ctx.measureText(it.text).width
+-      }
+-      return out
+-    })()`)) as Record<string, number>
++    const widths = await measureWidths(wc.id, payload)
+     let added = false
+-    for (const [k, w] of Object.entries(widths)) {
++    for (const k of items) {
++      const w = widths[k]
+       if (typeof w === 'number' && Number.isFinite(w)) {
+         gtCache.set(k, w)
+         added = true

@@ -6,12 +6,16 @@ import { hostAppPluginBundle } from '@/lib/host-api';
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
 import type { AppComposeRequest, AppComposeSource, AppWebviewApi } from '@/types/desktop/app-plugin-sdk';
 import { AppFrame } from './AppFrame';
+import type { ApplicationOpenChannel } from './application-open';
 
 export interface InstalledApplicationProps {
   pluginId: string;
   digest: string;
   entry: string;
   title: string;
+  applicationId?: string;
+  applicationOpen?: ApplicationOpenChannel;
+  onOpenApplication?: AppWebviewApi['openApplication'];
   sessionIdentity?: SessionIdentity;
   workspaceDraftId?: string;
   onCompose?: (request: AppComposeRequest, source: AppComposeSource, signal: AbortSignal) => Promise<void>;
@@ -25,7 +29,7 @@ type BundleState = { key: string } & (
 
 const bundles = new Map<string, { digest: string; promise: Promise<{ html: string }> }>();
 
-export function InstalledApplication({ pluginId, digest, entry, title, sessionIdentity, workspaceDraftId, onCompose, registerCloseHandler }: InstalledApplicationProps) {
+export function InstalledApplication({ pluginId, digest, entry, title, applicationId, applicationOpen, onOpenApplication, sessionIdentity, workspaceDraftId, onCompose, registerCloseHandler }: InstalledApplicationProps) {
   const { t } = useTranslation('common');
   const key = JSON.stringify([pluginId, digest, entry]);
   const [state, setState] = useState<BundleState | null>(null);
@@ -53,5 +57,5 @@ export function InstalledApplication({ pluginId, digest, entry, title, sessionId
     <p className="max-w-prose text-destructive [overflow-wrap:anywhere]">{state.message}</p>
     <Button type="button" variant="outline" size="sm" onClick={() => { setState(null); setAttempt((value) => value + 1); }}>{t('appFrame.retry')}</Button>
   </div>;
-  return <AppFrame pluginId={pluginId} digest={digest} html={state.html} title={title} sessionIdentity={sessionIdentity} workspaceDraftId={workspaceDraftId} onCompose={onCompose} registerCloseHandler={registerCloseHandler} />;
+  return <AppFrame pluginId={pluginId} digest={digest} entry={entry} html={state.html} title={title} applicationId={applicationId} applicationOpen={applicationOpen} onOpenApplication={onOpenApplication} sessionIdentity={sessionIdentity} workspaceDraftId={workspaceDraftId} onCompose={onCompose} registerCloseHandler={registerCloseHandler} />;
 }

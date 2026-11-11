@@ -1,0 +1,21 @@
+--- a/genoffice/apps/slides/src/preload/index.ts
++++ b/genoffice/apps/slides/src/preload/index.ts
+@@ -139,6 +139,7 @@
+     return () => ipcRenderer.removeListener('app:chrome-pressed', listener)
+   },
+   setShowFullScreen: (on) => ipcRenderer.invoke('slides:show-fullscreen', on),
++  openExternal: (url) => ipcRenderer.invoke('office:open-external', url),
+   privateFontFaces: () => ipcRenderer.invoke('slides:private-font-faces'),
+   privateFontData: (id) => ipcRenderer.invoke('slides:private-font-data', id),
+   fontCatalog: () => ipcRenderer.invoke('slides:font-catalog'),
+@@ -423,8 +424,8 @@
+     ipcRenderer.on('slides:opened', listener)
+     return () => ipcRenderer.removeListener('slides:opened', listener)
+   },
+-  onRenamed: (handler: (newPath: string) => void) => {
+-    const listener = (_e: IpcRendererEvent, newPath: string) => handler(newPath)
++  onRenamed: (handler: (document: { path: string; name: string }) => void) => {
++    const listener = (_e: IpcRendererEvent, document: { path: string; name: string }) => handler(document)
+     ipcRenderer.on('slides:renamed', listener)
+     return () => ipcRenderer.removeListener('slides:renamed', listener)
+   },

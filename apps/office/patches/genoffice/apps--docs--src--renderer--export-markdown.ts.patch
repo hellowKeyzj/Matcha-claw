@@ -1,0 +1,16 @@
+--- a/genoffice/apps/docs/src/renderer/export-markdown.ts
++++ b/genoffice/apps/docs/src/renderer/export-markdown.ts
+@@ -1,3 +1,4 @@
++import { parseLazyMediaUrl } from '@genoffice/docx-engine/lazy-media'
+ import type { Editor } from '@tiptap/core'
+ import { isTrackedDeleted } from './ai/doc-utils'
+ import { serializeRangeToHtml } from './ai/protocol'
+@@ -21,7 +22,7 @@
+ function imageExt(src: string): string | null {
+   const data = /^data:(image\/[\w.+-]+);base64,/.exec(src)
+   if (data) return IMAGE_EXT[data[1]] ?? null
+-  if (src.startsWith('genoffice-docx-media://')) {
++  if (parseLazyMediaUrl(src)) {
+     const ext = /\.(\w+)$/.exec(src)?.[1]?.toLowerCase()
+     if (!ext) return null
+     return Object.values(IMAGE_EXT).includes(ext === 'jpeg' ? 'jpg' : ext) ? ext : null

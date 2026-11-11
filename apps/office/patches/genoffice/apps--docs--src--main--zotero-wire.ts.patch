@@ -1,0 +1,11 @@
+--- a/genoffice/apps/docs/src/main/zotero-wire.ts
++++ b/genoffice/apps/docs/src/main/zotero-wire.ts
+@@ -101,7 +101,7 @@
+       socket.on('data', (chunk) => {
+         let frames: ZoteroWireFrame[]
+         try {
+-          frames = decoder.push(chunk)
++          frames = decoder.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
+         } catch (error) {
+           socket.destroy(error instanceof Error ? error : new Error(String(error)))
+           return

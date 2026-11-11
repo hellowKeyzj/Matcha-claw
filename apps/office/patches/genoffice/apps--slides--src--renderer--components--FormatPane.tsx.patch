@@ -1,0 +1,113 @@
+--- a/genoffice/apps/slides/src/renderer/components/FormatPane.tsx
++++ b/genoffice/apps/slides/src/renderer/components/FormatPane.tsx
+@@ -1,3 +1,4 @@
++import { usePendingEdits } from '../file-actions'
+ /**
+  * Format pane (a trimmed-down PowerPoint Format Pane): position/size/rotation/fill of the
+  * selected element. Shares the right dock area with the AI panel, mutually exclusive. Inputs
+@@ -593,6 +594,7 @@
+   const dragging = useRef(false)
+   const lastSent = useRef(0)
+   const trailing = useRef<number | null>(null)
++  const pendingEdits = usePendingEdits()
+   useEffect(() => {
+     if (!dragging.current) {
+       setCur(value)
+@@ -602,18 +604,18 @@
+   }, [value])
+   useEffect(
+     () => () => {
+-      if (trailing.current) window.clearTimeout(trailing.current)
++      if (trailing.current) pendingEdits.cancel(trailing.current)
+     },
+     [],
+   )
+   const send = (v: number, force = false) => {
+-    if (trailing.current) window.clearTimeout(trailing.current)
++    if (trailing.current) pendingEdits.cancel(trailing.current)
+     const now = performance.now()
+     if (force || now - lastSent.current > 120) {
+       lastSent.current = now
+       onChange(v)
+     } else {
+-      trailing.current = window.setTimeout(() => onChange(v), 130)
++      trailing.current = pendingEdits.schedule(() => onChange(v), 130)
+     }
+   }
+   const set = (v: number) => {
+@@ -813,17 +815,18 @@
+ }: Props) {
+   const { t } = useI18n()
+   // The color picker fires change repeatedly while dragging; debounce before IPC
++  const pendingEdits = usePendingEdits()
+   const fillTimer = useRef<number | null>(null)
+   const debouncedFill = (sourceId: string, value: string) => {
+-    if (fillTimer.current) window.clearTimeout(fillTimer.current)
+-    fillTimer.current = window.setTimeout(() => onFill(sourceId, value), 200)
++    if (fillTimer.current) pendingEdits.cancel(fillTimer.current)
++    fillTimer.current = pendingEdits.schedule(() => onFill(sourceId, value), 200)
+   }
+ 
+   const strokeTimer = useRef<number | null>(null)
+   const pointColorTimer = useRef<number | null>(null)
+   const debouncedPointColor = (si: number, pi: number, value: string) => {
+-    if (pointColorTimer.current) window.clearTimeout(pointColorTimer.current)
+-    pointColorTimer.current = window.setTimeout(() => onChartPointColor?.(si, pi, value), 200)
++    if (pointColorTimer.current) pendingEdits.cancel(pointColorTimer.current)
++    pointColorTimer.current = pendingEdits.schedule(() => onChartPointColor?.(si, pi, value), 200)
+   }
+   // The two gradient edit colors (stashed locally before applying)
+   const [gradFrom, setGradFrom] = useState('#4472C4')
+@@ -1049,16 +1052,16 @@
+       pendingAngle = normAngle(deg)
+       if (dot) dot.style.transform = `rotate(${pendingAngle}deg) translateX(6px)`
+       const now = performance.now()
+-      if (dialTimer.current) window.clearTimeout(dialTimer.current)
++      if (dialTimer.current) pendingEdits.cancel(dialTimer.current)
+       if (now - lastCommit > 100) {
+         lastCommit = now
+         applyGradient({ angleDeg: pendingAngle })
+       } else {
+-        dialTimer.current = window.setTimeout(() => applyGradient({ angleDeg: pendingAngle }), 120)
++        dialTimer.current = pendingEdits.schedule(() => applyGradient({ angleDeg: pendingAngle }), 120)
+       }
+     }
+     const up = () => {
+-      if (dialTimer.current) window.clearTimeout(dialTimer.current)
++      if (dialTimer.current) pendingEdits.cancel(dialTimer.current)
+       applyGradient({ angleDeg: pendingAngle })
+       el.removeEventListener('pointermove', move)
+       el.removeEventListener('pointerup', up)
+@@ -1146,7 +1149,7 @@
+     patch: Partial<Omit<StrokeDraft, 'id'>>,
+     immediate = false,
+   ) => {
+-    if (strokeTimer.current) window.clearTimeout(strokeTimer.current)
++    if (strokeTimer.current) pendingEdits.cancel(strokeTimer.current)
+     const prev: StrokeDraft =
+       strokeDraft.current?.id === sourceId
+         ? strokeDraft.current
+@@ -1183,10 +1186,10 @@
+       })
+     }
+     if (immediate) fire()
+-    else strokeTimer.current = window.setTimeout(fire, 200)
++    else strokeTimer.current = pendingEdits.schedule(fire, 200)
+   }
+   const clearStroke = (sourceId: string) => {
+-    if (strokeTimer.current) window.clearTimeout(strokeTimer.current)
++    if (strokeTimer.current) pendingEdits.cancel(strokeTimer.current)
+     strokeTimer.current = null
+     strokeDraft.current = null
+     onStroke(sourceId, null)
+@@ -1365,8 +1368,8 @@
+   const effectTimers = useRef(new Map<string, number>())
+   const debouncedEffects = (channel: string, fire: () => void) => {
+     const prev = effectTimers.current.get(channel)
+-    if (prev) window.clearTimeout(prev)
+-    effectTimers.current.set(channel, window.setTimeout(fire, 200))
++    if (prev) pendingEdits.cancel(prev)
++    effectTimers.current.set(channel, pendingEdits.schedule(fire, 200))
+   }
+   /** hex6 + transparency% → #RRGGBB(AA) */
+   const withAlpha = (hex6: string, transparencyPct: number) => {

@@ -1,0 +1,38 @@
+--- a/sharp/lib/libvips.js
++++ b/sharp/lib/libvips.js
+@@ -53,11 +53,11 @@
+ 
+ const buildSharpLibvipsIncludeDir = () => {
+   try {
+-    return require(`@img/sharp-libvips-dev-${buildPlatformArch()}/include`);
++    return require(`sharp-libvips-dev-${buildPlatformArch()}/include`);
+   } catch {
+     /* node:coverage ignore next 5 */
+     try {
+-      return require('@img/sharp-libvips-dev/include');
++      return require('sharp-libvips-dev/include');
+     } catch {}
+   }
+   return '';
+@@ -66,18 +66,18 @@
+ const buildSharpLibvipsCPlusPlusDir = () => {
+   /* node:coverage ignore next 4 */
+   try {
+-    return require('@img/sharp-libvips-dev/cplusplus');
++    return require('sharp-libvips-dev/cplusplus');
+   } catch {}
+   return '';
+ };
+ 
+ const buildSharpLibvipsLibDir = () => {
+   try {
+-    return require(`@img/sharp-libvips-dev-${buildPlatformArch()}/lib`);
++    return require(`sharp-libvips-dev-${buildPlatformArch()}/lib`);
+   } catch {
+     /* node:coverage ignore next 5 */
+     try {
+-      return require(`@img/sharp-libvips-${buildPlatformArch()}/lib`);
++      return require(`sharp-libvips-${buildPlatformArch()}/lib`);
+     } catch {}
+   }
+   return '';

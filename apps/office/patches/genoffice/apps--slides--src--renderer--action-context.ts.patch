@@ -1,0 +1,30 @@
+--- a/genoffice/apps/slides/src/renderer/action-context.ts
++++ b/genoffice/apps/slides/src/renderer/action-context.ts
+@@ -57,6 +57,7 @@
+   rehearse?: boolean
+   /** Slide Show > Record: the show records the narration of each slide */
+   record?: boolean
++  microphoneStream?: Promise<MediaStream>
+ }
+ 
+ export type CtxMenuState =
+@@ -155,6 +156,8 @@
+   slide: RenderSlide | undefined
+   path: string | null
+   setPath: Set<string | null>
++  name: string | null
++  setName: Set<string | null>
+   setDirty: Set<boolean>
+   setStatus: Set<string>
+   images: Map<string, HTMLImageElement>
+@@ -174,8 +177,8 @@
+   setUngroupedSets: Set<UngroupedSet[]>
+ 
+   // Clipboard / format painter
+-  setHasClipboard: Set<boolean>
+-  hasClipboard: boolean
++  setHasClipboard: Set<boolean | null>
++  hasClipboard: boolean | null
+   canPasteSlide: boolean
+   setCanPasteSlide: Set<boolean>
+   /** Paste-options floater on the just-pasted slide's thumbnail (PowerPoint-style) */

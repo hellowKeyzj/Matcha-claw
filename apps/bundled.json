@@ -1,3 +1,4 @@
 [
-  { "id": "matcha.design", "build": "apps/design/build.mjs" }
+  { "id": "matcha.design", "build": "apps/design/build.mjs" },
+  { "id": "matcha.office", "build": "apps/office/build.mjs" }
 ]

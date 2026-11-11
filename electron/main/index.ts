@@ -27,6 +27,9 @@ import { acquireProcessInstanceFileLock } from './lifecycle/instance-lock';
 import { configureE2EWorldBootstrap } from '@electron/e2e-fixture-loader';
 import { createGraphicsController } from './desktop/graphics';
 import { registerGraphicsHandlers } from '../api/ipc/graphics-ipc';
+import { registerAppPluginAssetScheme } from './app-plugins/assets';
+
+registerAppPluginAssetScheme();
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.MatchaClaw.desktop';
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';

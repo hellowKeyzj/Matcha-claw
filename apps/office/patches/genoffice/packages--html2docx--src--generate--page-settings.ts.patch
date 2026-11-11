@@ -1,0 +1,68 @@
+--- a/genoffice/packages/html2docx/src/generate/page-settings.ts
++++ b/genoffice/packages/html2docx/src/generate/page-settings.ts
+@@ -14,7 +14,6 @@
+ import { bidiLangOf, detectCJK, eastAsiaLangOf } from './document-meta'
+ import { buildNumberingConfig } from './numbering'
+ import { spacerParagraph } from './word-utils'
+-import zlib from 'node:zlib'
+ 
+ function partitionIr(ir) {
+   const docSettings = ir.find((node) => node.type === 'docsettings')
+@@ -45,26 +44,44 @@
+   const valid = parsePageBgColor(hex)
+   if (!valid) return null
+   const rgb = [0, 2, 4].map((i) => parseInt(valid.slice(i, i + 2), 16))
++  const crc32 = (bytes) => {
++    let crc = 0xffffffff
++    for (const byte of bytes) {
++      crc ^= byte
++      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0)
++    }
++    return (crc ^ 0xffffffff) >>> 0
++  }
+   const chunk = (type, data) => {
+-    const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
+-    const out = Buffer.alloc(body.length + 8)
+-    out.writeUInt32BE(data.length, 0)
+-    body.copy(out, 4)
+-    out.writeUInt32BE(zlib.crc32(body) >>> 0, body.length + 4)
++    const out = new Uint8Array(data.length + 12)
++    const view = new DataView(out.buffer)
++    view.setUint32(0, data.length)
++    out.set(new TextEncoder().encode(type), 4)
++    out.set(data, 8)
++    view.setUint32(data.length + 8, crc32(out.subarray(4, data.length + 8)))
+     return out
+   }
+-  const ihdr = Buffer.alloc(13)
+-  ihdr.writeUInt32BE(1, 0)
+-  ihdr.writeUInt32BE(1, 4)
++  const ihdr = new Uint8Array(13)
++  const header = new DataView(ihdr.buffer)
++  header.setUint32(0, 1)
++  header.setUint32(4, 1)
+   ihdr[8] = 8 // bit depth
+   ihdr[9] = 2 // color type: RGB
+-  const idat = zlib.deflateSync(Buffer.from([0, ...rgb]))
+-  return Buffer.concat([
+-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
++  // A single uncompressed DEFLATE block: filter byte + RGB, with zlib Adler-32.
++  const scanline = [0, ...rgb]
++  let a = 1, b = 0
++  for (const byte of scanline) { a = (a + byte) % 65521; b = (b + a) % 65521 }
++  const idat = new Uint8Array([0x78, 0x01, 0x01, 4, 0, 0xfb, 0xff, ...scanline, b >>> 8, b & 255, a >>> 8, a & 255])
++  const chunks = [
++    new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+     chunk('IHDR', ihdr),
+     chunk('IDAT', idat),
+-    chunk('IEND', Buffer.alloc(0)),
+-  ])
++    chunk('IEND', new Uint8Array()),
++  ]
++  const png = new Uint8Array(chunks.reduce((length, bytes) => length + bytes.length, 0))
++  let offset = 0
++  for (const bytes of chunks) { png.set(bytes, offset); offset += bytes.length }
++  return png
+ }
+ 
+ function addPageBackgroundFloat(generator, pageBgNode) {

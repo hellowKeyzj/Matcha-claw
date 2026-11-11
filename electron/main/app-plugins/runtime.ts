@@ -1,8 +1,8 @@
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { AppServiceError, AppConfirmationUnavailableError, type AppServiceRequest, type AppServiceResult, type AppExecutionRequest, type AppExecutionResult, type AppPluginContext, type AppRuntimeEvent, type AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
-import { isExecutionEnvelope, isExecutionPayload, parseExecutionRequest, isServiceEnvelope, isServicePayload, parseServiceRequest, serviceError, isModelErrorCode, type HostRequest, type PluginLoad, type WorkerMessage } from './protocol';
+import { AppServiceError, AppConfirmationUnavailableError, type AppJson, type AppRenderDocumentRead, type AppServiceRequest, type AppServiceResult, type AppExecutionRequest, type AppExecutionResult, type AppPluginContext, type AppRuntimeEvent, type AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import { isExecutionEnvelope, isExecutionPayload, parseExecutionRequest, isServiceEnvelope, isServicePayload, parseServiceRequest, serviceError, isServiceReadEnvelope, isModelErrorCode, type HostRequest, type PluginLoad, type WorkerMessage } from './protocol';
 
 export type AppPluginModels = AppPluginContext['models'];
 export interface AppPluginRuntimeCallbacks {
@@ -10,7 +10,7 @@ export interface AppPluginRuntimeCallbacks {
   log(level: 'info' | 'error', message: string): void;
   failed?(error: Error): void;
   execute?(request: AppExecutionRequest, signal: AbortSignal): Promise<AppExecutionResult>;
-  service?(request: AppServiceRequest, signal: AbortSignal): Promise<AppServiceResult>;
+  service?(request: AppServiceRequest, signal: AbortSignal, read?: AppRenderDocumentRead): Promise<AppServiceResult>;
   requestConfirmation?(request: import('../../../src/types/desktop/app-plugin-sdk').AppConfirmationRequest, signal: AbortSignal): Promise<boolean>;
 }
 export interface AppPluginDevelopmentRuntime {
@@ -52,6 +52,7 @@ export class NodePluginWorker {
   private readonly pending = new Map<string, { resolve(value?: AppToolResult): void; reject(error: unknown): void; type: 'activate' | 'deactivate' | 'call'; pluginId: string }>();
   private readonly hostRequests = new Map<string, { pluginId: string; digest: string; kind: 'model' | 'execution' | 'service'; callId?: string; controller: AbortController; done: Promise<void> }>();
   private readonly confirmations = new Map<string, { pluginId: string; callId: string; controller: AbortController }>();
+  private readonly serviceReads = new Map<string, { parentRequestId: string; pluginId: string; digest: string; resolve(result: AppJson): void; reject(error: unknown): void }>();
 
   constructor(private readonly modelApi: AppPluginModels, private readonly log: AppPluginRuntimeCallbacks['log']) {}
 
@@ -151,7 +152,40 @@ export class NodePluginWorker {
     });
   }
 
+  private readService(parentRequestId: string, pluginId: string, digest: string, input: AppJson, signal?: AbortSignal): Promise<AppJson> {
+    const parent = this.hostRequests.get(parentRequestId);
+    const plugin = this.plugins.get(pluginId);
+    if (!parent || parent.kind !== 'service' || parent.pluginId !== pluginId || parent.digest !== digest || parent.controller.signal.aborted
+      || plugin?.load.digest !== digest || plugin.retiring || this.stopped || !this.child) return Promise.reject(new AppServiceError('unavailable', 'Document read requires the active parent render request.'));
+    if (this.serviceReads.size >= 128 || [...this.serviceReads.values()].filter(read => read.parentRequestId === parentRequestId).length >= 32) return Promise.reject(new AppServiceError('unavailable', 'Document reads exceed the bounded concurrency limit.'));
+    const combined = signal ? AbortSignal.any([parent.controller.signal, signal]) : parent.controller.signal;
+    combined.throwIfAborted();
+    const readId = randomUUID();
+    const message = { type: 'service-read', parentRequestId, pluginId, digest, readId, input } satisfies HostRequest;
+    if (!isServiceReadEnvelope(message)) return Promise.reject(new AppServiceError('invalid-request', 'Document read input exceeds 8 MiB or is not JSON.'));
+    return new Promise((resolve, reject) => {
+      const finish = () => { combined.removeEventListener('abort', cancel); this.serviceReads.delete(readId); };
+      const cancel = () => { finish(); parent.controller.abort(combined.reason); reject(new AppServiceError('cancelled', 'Document read cancelled.')); };
+      this.serviceReads.set(readId, { parentRequestId, pluginId, digest,
+        resolve: result => { finish(); resolve(result); }, reject: error => { finish(); reject(error); } });
+      combined.addEventListener('abort', cancel, { once: true });
+      try { this.child!.postMessage(message); } catch (error) { finish(); reject(error); }
+    });
+  }
+
   private receive(message: WorkerMessage): void {
+    if (message.type === 'service-read-result') {
+      const pending = this.serviceReads.get(message.readId);
+      const parent = this.hostRequests.get(message.parentRequestId);
+      const plugin = this.plugins.get(message.pluginId);
+      if (!pending || pending.parentRequestId !== message.parentRequestId || pending.pluginId !== message.pluginId || pending.digest !== message.digest
+        || parent?.kind !== 'service' || parent.pluginId !== message.pluginId || parent.digest !== message.digest || parent.controller.signal.aborted
+        || plugin?.load.digest !== message.digest || plugin.retiring || this.stopped) return;
+      if (!isServiceReadEnvelope(message)) pending.reject(new AppServiceError('response-too-large', 'Invalid document read response envelope.'));
+      else if (typeof message.error === 'string') pending.reject(new AppServiceError(message.errorCode!, message.error));
+      else pending.resolve(message.result!);
+      return;
+    }
     if (message.type === 'result') {
       const pending = this.pending.get(message.requestId);
       if (message.error) pending?.reject(new Error(message.error)); else pending?.resolve(message.result);
@@ -228,7 +262,9 @@ export class NodePluginWorker {
         if (message.type === 'service-request') {
           const request = parseServiceRequest(message.request);
           if (!plugin.callbacks.service) throw new AppServiceError('unavailable', 'App service unavailable: this plugin runtime has no service owner.');
-          const result = await plugin.callbacks.service(request, controller.signal);
+          const read: AppRenderDocumentRead | undefined = message.hasRead
+            ? (input, signal) => this.readService(message.requestId, message.pluginId, message.digest, input, signal) : undefined;
+          const result = await plugin.callbacks.service(request, controller.signal, read);
           if (controller.signal.aborted || this.plugins.get(message.pluginId) !== plugin || plugin.retiring || this.stopped) throw new AppServiceError('outcome-unknown', 'App service observation ended; external effects may already have occurred.');
           const response = { type: 'service-result', requestId: message.requestId, pluginId: message.pluginId, digest: message.digest, result } satisfies HostRequest;
           if (!isServicePayload(result) || !isServiceEnvelope(response)) throw new AppServiceError('response-too-large', 'App service result must be a JSON object within 8 MiB.');
@@ -261,7 +297,8 @@ export class NodePluginWorker {
           this.child?.postMessage({ type: 'media-model-result', requestId: message.requestId, result } satisfies HostRequest);
         }
       } catch (error) {
-        const safeError = message.type === 'service-request' ? serviceError(error, controller.signal) : undefined;
+        const safeError = message.type === 'service-request' ? message.hasRead && error instanceof AppServiceError
+          ? new AppServiceError(error.code, error.message.slice(0, 2000)) : serviceError(error, controller.signal) : undefined;
         const text = safeError?.message ?? (error instanceof Error ? error.message.slice(0, 2000) : 'Host request failed; native execution or external effects may already have occurred.');
         if (message.type === 'service-request') {
           this.child?.postMessage({ type: 'service-result', requestId: message.requestId, pluginId: message.pluginId, digest: message.digest,
@@ -276,7 +313,10 @@ export class NodePluginWorker {
           this.child?.postMessage(response);
         }
       } finally {
-        if (this.hostRequests.get(message.requestId)?.controller === controller) this.hostRequests.delete(message.requestId);
+        if (this.hostRequests.get(message.requestId)?.controller === controller) {
+          for (const read of this.serviceReads.values()) if (read.parentRequestId === message.requestId) read.reject(new AppServiceError('cancelled', 'Parent document render request ended.'));
+          this.hostRequests.delete(message.requestId);
+        }
         finish();
       }
     })().catch((error) => this.log('error', message.type === 'service-request' ? 'App service response delivery failed.'

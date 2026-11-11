@@ -1,0 +1,16 @@
+--- a/genoffice/apps/slides/src/renderer/show-actions.ts
++++ b/genoffice/apps/slides/src/renderer/show-actions.ts
+@@ -97,7 +97,12 @@
+   ctx.setEditing(null)
+   ctx.setCtxMenu(null)
+   const first = ctx.slides.findIndex((s) => !s.hidden)
+-  ctx.setSlideShow({ startAt: fromStart ? Math.max(0, first) : ctx.current, record: true })
++  const api = window.matchaApp
++  const microphoneStream = api
++    ? api.getMicrophoneStream()
++    : Promise.reject(new Error('Microphone capture is unavailable.'))
++  void microphoneStream.catch(() => {})
++  ctx.setSlideShow({ startAt: fromStart ? Math.max(0, first) : ctx.current, record: true, microphoneStream })
+ }
+ 
+ /** Recording ended: once the microphone stops, prompt "keep the recording?" */

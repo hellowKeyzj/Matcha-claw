@@ -1,0 +1,11 @@
+--- a/ppt-to-text/ppt.js
++++ b/ppt-to-text/ppt.js
+@@ -5,7 +5,7 @@
+
+ if(typeof require !== 'undefined') {
+ 	if(typeof CFB === 'undefined') CFB = require('cf'+'b');
+-	if(typeof cptable === 'undefined') cptable = require('code'+'page');
++	if(typeof cptable === 'undefined') throw new Error('Legacy PPT decoder was not initialized.');
+ }
+ var parsenoop = function(blob, length) { blob.l += length; }; // 跳过未实现的记录类型，而不是抛出错误
+ var parsenoop2 = function(blob, length) { blob.l += length; };

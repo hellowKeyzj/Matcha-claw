@@ -121,6 +121,8 @@ tests/e2e/
 graphify-out/
 runtime-host/graphify-out/
 patches/
+!apps/office/patches/
+!apps/office/patches/**
 .cargo-target-final/
 .target-connector-store/
 .target-runtime-host-timeline/
@@ -131,3 +133,7 @@ design_web/
 build/
 .playwright-cli/
 apps/commerce/
+apps/office/.build-office-*/
+apps/office/.office-previous-*/
+apps/office/.build/
+0001-matcchaagent-code.patch

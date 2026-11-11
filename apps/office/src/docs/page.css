@@ -1,0 +1,8 @@
+/* MatchaClaw owns AI; remove GenOffice's entries and the entire dock slot. */
+.ribbon-group:has(.ai-entry),
+.qa-name-with-ai,
+.ai-dock,
+.ai-ask-trigger,
+.ai-ask-pop {
+  display: none !important;
+}

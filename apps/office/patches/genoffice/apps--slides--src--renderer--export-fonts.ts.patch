@@ -1,0 +1,14 @@
+--- a/genoffice/apps/slides/src/renderer/export-fonts.ts
++++ b/genoffice/apps/slides/src/renderer/export-fonts.ts
+@@ -54,8 +54,9 @@
+         .trim()
+         .replace(/^['"]|['"]$/g, '')
+       if (!names.has(family.normalize('NFKC').toLowerCase())) continue
+-      const url = /url\(\s*['"]?([^'")]+)['"]?\s*\)/.exec(style.getPropertyValue('src'))?.[1]
+-      if (!url) continue
++      const parsedUrl = /url\(\s*['"]?([^'")]+)['"]?\s*\)/.exec(style.getPropertyValue('src'))?.[1]
++      if (!parsedUrl) continue
++      const url = new URL(parsedUrl, sheet.href ?? document.baseURI).href
+       const weight = style.getPropertyValue('font-weight') || 'normal'
+       const fontStyle = style.getPropertyValue('font-style') || 'normal'
+       let data = bundledCache.get(url)

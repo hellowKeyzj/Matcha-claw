@@ -1,0 +1,64 @@
+--- a/genoffice/apps/docs/src/renderer/parse-off-thread.ts
++++ b/genoffice/apps/docs/src/renderer/parse-off-thread.ts
+@@ -1,3 +1,4 @@
++import { getLazyMediaBaseUrl } from '@genoffice/docx-engine/lazy-media'
+ import { parseDocx } from '@genoffice/docx-engine'
+ 
+ type Parsed = Awaited<ReturnType<typeof parseDocx>>
+@@ -5,6 +6,7 @@
+ export interface ParseWorkerRequest {
+   id: number
+   bytes: ArrayBuffer
++  mediaBaseUrl: string
+ }
+ 
+ export type ParseWorkerResponse =
+@@ -21,15 +23,28 @@
+  */
+ 
+ let worker: Worker | null = null
++let workerSource: Promise<string> | null = null
+ let nextId = 0
+ const pending = new Map<number, (r: ParseWorkerResponse) => void>()
+ 
+-function getWorker(): Worker | null {
++async function getWorker(): Promise<Worker | null> {
+   if (worker) return worker
+   if (typeof Worker === 'undefined') return null
+   try {
+-    worker = new Worker(new URL('./parse-worker.ts', import.meta.url), { type: 'module' })
++    workerSource ??= fetch(new URL('renderer/docs-parse-worker.classic.js.gz', document.baseURI)).then((response) => {
++      if (!response.ok) throw new Error(`Parse worker fetch failed: ${response.status}`)
++      return new Response(response.body!.pipeThrough(new DecompressionStream('gzip'))).text()
++    })
++    const source = await workerSource
++    if (worker) return worker
++    const wrapper = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }))
++    try {
++      worker = new Worker(wrapper)
++    } finally {
++      URL.revokeObjectURL(wrapper)
++    }
+   } catch {
++    workerSource = null
+     return null
+   }
+   worker.onmessage = (e: MessageEvent<ParseWorkerResponse>) => {
+@@ -66,7 +81,7 @@
+   bytes: Uint8Array,
+   options: ParseOffThreadOptions = {},
+ ): Promise<Parsed> {
+-  const w = getWorker()
++  const w = await getWorker()
+   if (!w) {
+     parseStats.inline++
+     return parseDocx(bytes)
+@@ -77,7 +92,7 @@
+   const id = ++nextId
+   const response = await new Promise<ParseWorkerResponse>((resolve) => {
+     pending.set(id, resolve)
+-    w.postMessage({ id, bytes: owned } satisfies ParseWorkerRequest, [owned])
++    w.postMessage({ id, bytes: owned, mediaBaseUrl: getLazyMediaBaseUrl() } satisfies ParseWorkerRequest, [owned])
+   })
+   if (response.ok) {
+     parseStats.worker++

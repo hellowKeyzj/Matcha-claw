@@ -94,7 +94,7 @@
     "developmentChatUnavailable": "現在のチャットの下書きがありません。通常のチャットで作りたいものを伝えてください。",
     "actionFailed": "{{action}}に失敗しました：{{reason}}",
     "catalog": "プラグイン一覧を読み込めませんでした：{{reason}}",
-    "packageTooLarge": "プラグインの ZIP は 64 MiB 以下にしてください。より小さいパッケージを選択してください。",
+    "packageTooLarge": "プラグインの ZIP は {{limit}} MiB 以下にしてください。より小さいパッケージを選択してください。",
     "packageRead": "プラグインパッケージを読み込めませんでした。ZIP ファイルを選び直してください。",
     "packageUnavailable": "プラグインパッケージを読み込めません。ファイルを選び直してください。",
     "packageAborted": "プラグインパッケージの読み込みがキャンセルされました。ファイルを選び直してください。",

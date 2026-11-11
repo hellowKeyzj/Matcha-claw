@@ -1,0 +1,28 @@
+--- a/genoffice/packages/hwp2docx/src/hwp.ts
++++ b/genoffice/packages/hwp2docx/src/hwp.ts
+@@ -8,8 +8,8 @@
+  */
+ 
+ import { readFile } from 'node:fs/promises'
+-import { createRequire } from 'node:module'
+-import { join } from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { dirname, join } from 'node:path'
+ import { convertHwpxToDocx, type HwpxToDocxResult } from './hwpx-docx'
+ import { HwpConvertError, isHwpBinary } from './package'
+ 
+@@ -23,13 +23,7 @@
+  * to Resources/wasm (apps/shell/electron-builder.cjs, like pdfium.wasm).
+  */
+ function rhwpWasmPath(): string {
+-  try {
+-    return createRequire(import.meta.url).resolve('@rhwp/core/rhwp_bg.wasm')
+-  } catch {
+-    const resources = (process as { resourcesPath?: string }).resourcesPath
+-    if (resources) return join(resources, 'wasm', 'rhwp_bg.wasm')
+-    throw new HwpConvertError('unreadable')
+-  }
++  return join(dirname(fileURLToPath(import.meta.url)), 'native', 'rhwp_bg.wasm')
+ }
+ 
+ /** rhwp's WebAssembly module, compiled once per process */

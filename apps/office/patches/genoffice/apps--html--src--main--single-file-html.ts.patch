@@ -1,0 +1,19 @@
+--- a/genoffice/apps/html/src/main/single-file-html.ts
++++ b/genoffice/apps/html/src/main/single-file-html.ts
+@@ -77,6 +77,7 @@
+ export async function inlineImagesForSingleFile(
+   text: string,
+   documentPath: string | null,
++  resolveImage: (documentPath: string, source: string) => Promise<string | null> = readAsDataUrl,
+ ): Promise<SingleFileHtmlResult> {
+   // an unsaved document has no assets/ to resolve against — its images are already data URLs
+   if (!documentPath) return { html: text, inlined: 0, skipped: [] }
+@@ -89,7 +90,7 @@
+   const dataBySource = new Map<string, string>()
+   const skipped: string[] = []
+   for (const source of candidates) {
+-    const data = await readAsDataUrl(documentPath, source)
++    const data = await resolveImage(documentPath, source)
+     if (data) dataBySource.set(source, data)
+     else skipped.push(source)
+   }

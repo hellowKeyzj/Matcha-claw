@@ -48,7 +48,7 @@ node "$CLI" install --connection "$CONNECTION" --digest '<latest-successful-sha2
 
 - `build [directory] --connection <file>`：一次构建、上传成功后请求预览。
 - `watch [directory] --connection <file>` 与 `dev`：首次成功上传后只请求一次预览；失败或错过显示可显式运行 `preview`。`dev` 必须带连接；不带连接的 `build`／`watch` 仅本地构建，不联网。
-- `pack <built-directory> <output.zip>`：仅打包已构建文件，输出必须在输入目录外且尚不存在。生成项目可用 `npm --prefix "$PROJECT" run pack`。
+- `pack <built-directory> <output.zip>`：仅打包已构建文件，输出必须在输入目录外且尚不存在。生成项目可用 `npm --prefix "$PROJECT" run pack`。包限制统一为 ZIP ≤256 MiB、解压总量 ≤512 MiB、单文件 ≤384 MiB、最多4096个文件；Host 与打包工具共用 SDK 限额。
 - 退出 watch 不会安装或停止 Host 开发实例。显式 `stop --connection <file>` 才关闭该实例；它不停止已安装正式插件。
 
 构建／ZIP 校验失败保留上一成功预览；新 revision 后台启动失败不能当作旧版本仍 ready。`status` 提供 revision、最新 digest、最多 128 条脱敏日志及 32 条事件（单事件 ≤64 KiB），不是持久日志存储。
@@ -65,6 +65,24 @@ node "$CLI" install --connection "$CONNECTION" --digest '<latest-successful-sha2
 `window.matchaApp.context` 在每次 iframe 生命周期内冻结。会话工作区页的 `sessionIdentity` 仅在正式会话中存在；可选 `workspaceDraftId` 是当前草稿实例的 opaque ID，同一草稿创建正式会话时保留，普通切会话不传递。它只用于插件自己的文档承接，不授予会话、媒体或文件权限；插件应在原文档 owner 内幂等绑定，并拒绝将已归属另一会话的文档重新绑定。开发预览按 application 的声明保留工作区页面，但始终没有聊天身份或 compose；预览恢复列表保留原生命周期。
 
 `scope` 不是后台权限沙箱：正式后台仍按显式目标调用 SDK，`imageEditor` 仍使用用户点击图片所属的明确会话身份，不从独立页面推断当前会话。
+
+## Application 图标（SDK 1.6）
+
+`contributes.applications[]` 可声明 `icon:{paths:["M4 4h16v16H4z"]}`，并声明 `minSdkVersion:"1.6.0"`。图标为 24×24 单色描边 SVG，宿主沿既有 stroke／currentColor 样式渲染；仅接受1–16条非空、各≤1024字符且至少含一个路径命令的 `d` 数据，字符限 SVG 路径命令 `MmZzLlHhVvCcSsQqTtAa`、数字、空格、逗号、点、正负号和 `eE`。不接受额外字段、SVG markup、URL 或脚本，不提供任意 HTML 或全局图标注册。
+
+宿主将可工作区打开的应用放在“打开页面”列表，不为每个安装应用新增主侧栏按钮；`placement:"both"` 保留独立路由并提供工作区入口，`scope` 仍独立决定会话归属。未声明图标时使用通用窗口图标。
+
+## 页面打开与文档资源（SDK 1.5）
+
+依赖以下页面能力的插件声明 `minSdkVersion:"1.5.0"`，需要包含相应实现的新 Host，更新插件包不会更新运行中的 Host。
+
+`window.matchaApp.openApplication({applicationId,data?})` 只打开当前插件、当前 digest 中已声明且当前容器允许的 application；目标沿原 application singleton 页面身份复用，不销毁已有未保存文档。首次打开数据来自冻结的 `context.data`；目标已存在时，通过 `subscribe` 收到 `{topic:'application.open',data:{data?}}`。插件在自己的文档 owner 中确认替换和处理取消，调用返回不代表目标已经接受文档。独立路由不取得聊天身份；不能借此跨 placement 或把 session 页面变成 workspace 页面。积压打开事件在第一个订阅者注册时交付，应用应在一个订阅入口分发业务事件，避免无关订阅抢先消费。
+
+`window.matchaApp.documentResources.create({entry:{path,data,mimeType},resources:[{path,data,mimeType}]})` 创建只读、不可变的资源快照，返回 `{id,url,rootUrl}`；`data` 是 canonical base64，路径为文档内相对路径。每份快照有独立随机 URL 根，用于隔离预览中的标准相对 URL、module import 和 fetch，不接受本机路径、不提供任意文件服务器。`release({id})` 释放客户端持有；frame 关闭、插件停用或 digest 改变会撤销资源。输入及实际字节仍受 Host 预算限制，不能用插件 ZIP 限额推导页面传输容量。
+
+可信后台的 `context.rendering.renderDocument({entry,document,payload?})` 可使用同形状的输入资源快照；`document` 与原 `html` 互斥，不接受 UI lease、任意 URL 或本机路径。动态文档在无 Node／preload 的隔离窗口执行作者脚本；可信 `entry` 必须是自包含 ESM，由 Host 读取后仅在 isolated world 加载，不向作者页面发布包资源或原生端口。后台 worker 收到 `{document:true,payload}`，原 `html` 模式不变；`ready` 等待当前资源与布局稳定，`print` 对当前 DOM 导出 PDF，不重新装载静态 HTML。输入和结果仍受服务信封预算限制，长轮询／持续动画不保证达到稳定状态。
+
+这些能力的源码接线与构建检查不等于真实应用中的导航、资源渲染或导出验收。
 
 ## Manifest 与三种后台
 
@@ -167,6 +185,19 @@ if (approval?.status === 'pending' && approval.subject !== 'stage') {
 
 service 错误用 `AppServiceError.code`：`invalid-request`、`unavailable`、`outcome-unknown`、`cancelled`、`response-too-large`、`not-found`、`conflict`、`permission-denied`、`storage-unavailable`；stdio 对应 `error.data.code`，不依赖错误文案分支。写入派发后的 `outcome-unknown` 表示可能已改文件或产生外部效果，不自动重试；取消只停止观察，不证明回滚。SDK 1.2 的源码／类型及本文合同不替代正式三语言、系统密钥库、归档或 native 业务实测。[VERIFY: sdk/app-plugins/src/services.ts:6-10] [VERIFY: electron/main/app-plugins/workspace.ts:15-16,149-157] [VERIFY: electron/main/app-plugins/protocol.ts:88-94] [VERIFY: electron/main/app-plugins/stdio-runtime.ts:327-331]
 
+## 可信后台桌面能力
+
+正式后台使用只读 `context.desktop`，Python／Rust 使用 `matcha/desktop/<operation>`，params 原样传 input。沿既有后台 service 协议和实例身份校验，不提供开发后台、`window.matchaApp` 或任意 UI 路径入口。
+
+| 操作 | 输入与结果 |
+| --- | --- |
+| `systemLocale({})` | SDK 1.5，由 Electron `app.getSystemLocale()` 返回 `{locale:string}`；是系统地区事实，不是页面语言或 `navigator.language`。 |
+| `openExternal({url})` | 仅绝对 `http:`／`https:`／`mailto:` URL，拒绝凭据、空白及控制字符；交系统默认应用打开后返回 `{opened:true}`，不证明网页加载成功。 |
+| `revealFile({path})` | 必须是存在的绝对本机路径，拒绝 UNC／设备路径及解析到网络的链接；只在文件管理器定位，绝不执行文件，返回 `{revealed:true}`。 |
+| `pickFile({extensions})` | `extensions` 为1–64个不带点／通配符的1–32位字母数字扩展名。Main 以现主窗口为 parent 打开单选 `openFile` 原生文件选择器，返回 `{path:string|null}`；取消为 null，无可用主窗口为 `unavailable`。 |
+
+本机路径只供可信后台使用，不得进入工具结果、模型、事件、日志或 opaque UI；UI 后续操作应使用插件后台持有的 opaque 暂存标识。文件选择不是业务确认，不替代原有可信人工确认。`capabilities.describe` 包含 `desktop.*`；`pickFile` 为依主窗口与用户选择而定，其他操作的 available 不保证本次 URL／路径或系统应用可用。沿既有取消／`outcome-unknown` 语义，不自动重试。旧宿主不能仅更新 SDK 获得此能力。[VERIFY: sdk/app-plugins/src/services.ts] [VERIFY: electron/main/app-plugins/desktop.ts] [VERIFY: electron/main/app-plugins/services.ts]
+
 ## 后台启动与持久待办（SDK 1.1）
 
 声明 `background:true` 且具有 `main` 或 `backend` 的已启用插件，在宿主运行环境就绪后沿原生命周期激活；缺省仍按工具调用懒激活。插件自行持有业务定时器和 SQLite 进度，返回 disposer 负责取消并等待自身资源。关闭页面不停止正式后台；禁用、更新、卸载和退出仍按原 owner 退役。应用关闭或操作系统睡眠时不保证按时运行，重启后由业务 owner 恢复到期任务。
@@ -187,6 +218,7 @@ CJS `context.models` 与下述 stdio 扩展共用合同。既有 `list`／`gener
 
 | Matcha 扩展方法 | 原 params（不套 `{request:...}`） |
 | --- | --- |
+| `matcha/desktop/<operation>` | 上述 `AppDesktopInputs[operation]`，openExternal／revealFile／pickFile／systemLocale，仅可信后台 |
 | `matcha/workspace/<operation>` | 上述 `AppWorkspaceInputs[operation]`，六项操作 |
 | `matcha/knowledge/<operation>` | 上述 `AppKnowledgeInputs[operation]`，含 listDir／archive／archiveStatus 共七项 |
 | `matcha/credentials/<operation>` | 上述 `AppCredentialsInputs[operation]`，四项操作，不接受 pluginId |
