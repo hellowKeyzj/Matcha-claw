@@ -1,4 +1,7 @@
-use platform::capability::CapabilityDecisionVerifier;
+use platform::{
+    capability::CapabilityDecisionVerifier,
+    loopback::{Request, Response},
+};
 
 use std::{
     sync::Arc,
@@ -10,110 +13,42 @@ use tokio::sync::Mutex;
 
 use super::{DecodeError, Delivery, decode, dispatch};
 
-const AUTHORIZATION_HEADER: &str = "authorization";
 pub(crate) const ROUTE: &str = "/api/team/skill";
-const BEARER_PREFIX: &str = "Bearer ";
 
-pub(crate) async fn handle_loopback(
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::OrganizationHandle,
-) -> platform::loopback::Response {
-    handle(
-        Request {
-            method,
-            path,
-            headers,
-            body,
-        },
-        verifier,
-        owner,
-    )
-    .await
-    .into_loopback()
-}
-
-async fn handle(
+pub(crate) async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::OrganizationHandle,
 ) -> Response {
-    if request.method != "POST" || request.path != ROUTE {
-        return Response::not_found();
+    if request.method() != "POST" || request.path() != ROUTE {
+        return Response::error(404, "TeamSkill selection route is not available");
     }
-    let Some(authorization) = request
-        .headers
-        .iter()
-        .find(|(name, _)| name == AUTHORIZATION_HEADER)
-        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
-    else {
-        return Response::unauthorized();
+    let Some(authorization) = request.bearer_authorization() else {
+        return Response::error(401, "TeamSkill selection authorization is invalid");
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
-        Err(_) => return Response::bad_request(),
+        Err(_) => return Response::error(400, "TeamSkill selection request is invalid"),
     };
     let mut verifier = verifier.lock().await;
     let request = match decode(value, authorization, &mut verifier, now_millis()) {
         Ok(request) => request,
-        Err(DecodeError::Unauthorized) => return Response::unauthorized(),
-        Err(DecodeError::Invalid) => return Response::bad_request(),
+        Err(DecodeError::Unauthorized) => {
+            return Response::error(401, "TeamSkill selection authorization is invalid");
+        }
+        Err(DecodeError::Invalid) => {
+            return Response::error(400, "TeamSkill selection request is invalid");
+        }
     };
     drop(verifier);
     if matches!(request, super::Request::Materialize { .. }) {
         return match owner.admit_team_workflow(crate::call::TeamWorkflow::Skill(request)).await {
-            Ok(receipt) => Response { status: 202, body: serde_json::json!(receipt) },
-            Err(_) => Response::from_delivery(Delivery::Unavailable),
+            Ok(receipt) => Response::json(202, serde_json::json!(receipt)),
+            Err(_) => Response::json(Delivery::Unavailable.status_code(), Delivery::Unavailable.body()),
         };
     }
-    Response::from_delivery(dispatch(&owner, request).await)
-}
-
-struct Request {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-struct Response {
-    status: u16,
-    body: Value,
-}
-
-impl Response {
-    fn bad_request() -> Self {
-        Self::fixed(400, "TeamSkill selection request is invalid")
-    }
-
-    fn unauthorized() -> Self {
-        Self::fixed(401, "TeamSkill selection authorization is invalid")
-    }
-
-    fn not_found() -> Self {
-        Self::fixed(404, "TeamSkill selection route is not available")
-    }
-
-    fn fixed(status: u16, error: &'static str) -> Self {
-        Self {
-            status,
-            body: serde_json::json!({ "success": false, "error": error }),
-        }
-    }
-
-    fn from_delivery(delivery: Delivery) -> Self {
-        Self {
-            status: delivery.status_code(),
-            body: delivery.body(),
-        }
-    }
-
-    fn into_loopback(self) -> platform::loopback::Response {
-        platform::loopback::Response::json(self.status, self.body)
-    }
+    let delivery = dispatch(&owner, request).await;
+    Response::json(delivery.status_code(), delivery.body())
 }
 
 fn now_millis() -> u64 {

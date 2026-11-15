@@ -34,6 +34,18 @@ pub(crate) fn team_public_projection(
     )
 }
 
+pub(crate) fn team_node_review_history(
+    store: &OrganizationStore,
+    team_id: &TeamId,
+    run_id: &GraphRunId,
+    node_id: &crate::NodeId,
+    query: &crate::run::public_projection::TeamNodeReviewHistoryQuery,
+) -> Option<crate::run::public_projection::TeamNodeReviewHistoryResult> {
+    crate::run::public_projection::query_team_node_review_history(
+        store.facts(), team_id, run_id, node_id, query,
+    )
+}
+
 pub(crate) fn team_run_public_snapshot(
     store: &OrganizationStore,
     team_id: Option<TeamId>,
@@ -41,23 +53,30 @@ pub(crate) fn team_run_public_snapshot(
     event_cursor: Option<u64>,
     event_limit: Option<u64>,
     message_cursor: Option<crate::run::public_projection::TeamRunMessageCursor>,
-) -> Option<organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome> {
-    match team_id {
+    message_projection: &mut crate::run::public_projection::TeamRunMessageProjectionCache,
+) -> (
+    Option<organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome>,
+    Option<Vec<RoleSessionReceipt>>,
+) {
+    let snapshot = match team_id {
         Some(team_id) => {
-            organization::run::public_projection::TeamRunPublicSnapshotRequest::try_new(
-                team_id,
-                run_id,
-                event_cursor.unwrap_or_default(),
-                event_limit,
-            )
-            .ok()
-            .map(|request| {
-                let request = request.with_message_cursor(message_cursor);
-                organization::run::public_projection::produce_team_run_public_snapshot(
-                    store.facts(),
-                    &request,
+            let Ok(request) =
+                organization::run::public_projection::TeamRunPublicSnapshotRequest::try_new(
+                    team_id,
+                    run_id.clone(),
+                    event_cursor.unwrap_or_default(),
+                    event_limit,
                 )
-            })
+            else {
+                message_projection.clear();
+                return (None, None);
+            };
+            let request = request.with_message_cursor(message_cursor);
+            Some(organization::run::public_projection::produce_team_run_public_snapshot(
+                store.facts(),
+                &request,
+                message_projection,
+            ))
         }
         None => organization::run::public_projection::produce_team_run_public_snapshot_for_run(
             store.facts(),
@@ -65,7 +84,16 @@ pub(crate) fn team_run_public_snapshot(
             event_cursor.unwrap_or_default(),
             event_limit,
             message_cursor,
+            message_projection,
         )
         .ok(),
-    }
+    };
+    let role_sessions = match &snapshot {
+        Some(organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(_)) => {
+            store.facts().run(&run_id)
+                .and_then(|run| crate::run::query::query_run_role_sessions(store.facts(), run.team(), run.run_id()))
+        }
+        _ => None,
+    };
+    (snapshot, role_sessions)
 }

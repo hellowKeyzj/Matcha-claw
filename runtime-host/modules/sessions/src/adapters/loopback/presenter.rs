@@ -17,6 +17,7 @@ pub(crate) fn session_view(view: &SessionView) -> Value {
         "ownership": &view.ownership,
         "modelState": &view.model_state,
         "goal": &view.goal,
+        "requestPending": view.request_pending,
         "identity": identity_value(view),
         "epoch": view.epoch,
         "seq": view.seq,

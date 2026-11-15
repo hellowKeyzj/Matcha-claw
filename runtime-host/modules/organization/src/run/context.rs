@@ -5,10 +5,7 @@ use crate::{
     TeamRunQuery, TeamRunQueryOutcome, query_team_run,
 };
 
-const MAX_CONTEXT_NODES: usize = 64;
-const MAX_CONTEXT_EDGES: usize = 128;
 const MAX_CONTEXT_EVENTS: usize = 20;
-const MAX_CONTEXT_APPROVALS: usize = 32;
 const MAX_CONTEXT_IDENTIFIER_BYTES: usize = 128;
 const MAX_CONTEXT_OUTPUT_PORT_BYTES: usize = 128;
 
@@ -222,14 +219,14 @@ pub(crate) fn query_team_graph_context(
     facts: &OrganizationFacts,
     query: &TeamGraphContextQuery,
 ) -> TeamGraphContextResult {
-    match query_team_run(
+    let projection = match query_team_run(
         facts,
         &TeamRunQuery::get(query.team.clone(), query.run.clone()),
     ) {
         TeamRunQueryOutcome::Unavailable => return TeamGraphContextResult::Unavailable,
         TeamRunQueryOutcome::OutcomeUnknown => return TeamGraphContextResult::OutcomeUnknown,
-        TeamRunQueryOutcome::Available(_) => {}
-    }
+        TeamRunQueryOutcome::Available(projection) => projection,
+    };
     let Some(run) = facts.run(&query.run) else {
         return TeamGraphContextResult::Unavailable;
     };
@@ -264,7 +261,6 @@ pub(crate) fn query_team_graph_context(
                     .map(ToOwned::to_owned),
             })
         })
-        .take(MAX_CONTEXT_NODES)
         .collect::<Vec<_>>();
     if query.view == TeamGraphContextView::CurrentNode && nodes.is_empty() {
         return TeamGraphContextResult::Unavailable;
@@ -285,7 +281,6 @@ pub(crate) fn query_team_graph_context(
                 && is_safe_context_identifier(edge.source_node_id().as_str())
                 && is_safe_context_identifier(edge.target_node_id().as_str())
         })
-        .take(MAX_CONTEXT_EDGES)
         .map(|edge| ContextEdge {
             edge_id: edge.id().as_str().to_owned(),
             source_node_id: edge.source_node_id().as_str().to_owned(),
@@ -293,32 +288,27 @@ pub(crate) fn query_team_graph_context(
         })
         .collect();
     let pending_approval_ids = facts
-        .approvals()
+        .approvals_for_run(query.run.as_str())
         .filter(|approval| {
-            approval.facts().run_id == query.run.as_str()
-                && approval.status() == ApprovalStatus::Pending
+            approval.status() == ApprovalStatus::Pending
                 && is_safe_context_identifier(&approval.facts().approval_id)
         })
-        .take(MAX_CONTEXT_APPROVALS)
         .map(|approval| approval.facts().approval_id.clone())
         .collect();
     let approvals = if query.view == TeamGraphContextView::CurrentNode {
         facts
-            .approvals()
+            .approvals_for_run(query.run.as_str())
             .filter(|approval| {
                 let facts = approval.facts();
-                facts.run_id == query.run.as_str()
-                    && facts.execution_fence.as_deref() == query.node_execution_id()
-                    && is_safe_context_identifier(&facts.approval_id)
-                    && match &facts.subject {
-                        crate::ApprovalSubject::WorkNode { node_id }
-                        | crate::ApprovalSubject::HumanDecision { node_id } => {
-                            selected_ids.contains(&node_id.as_str())
+                is_safe_context_identifier(&facts.approval_id)
+                    && match facts.binding() {
+                        Some(super::approval::ApprovalBinding::WorkNode { node_id, execution_fence }
+                            | super::approval::ApprovalBinding::HumanDecision { node_id, execution_fence }) => {
+                            Some(execution_fence) == query.node_execution_id() && selected_ids.contains(&node_id)
                         }
-                        crate::ApprovalSubject::Stage { .. } => false,
+                        _ => false,
                     }
             })
-            .take(MAX_CONTEXT_APPROVALS)
             .map(|approval| ContextApproval {
                 approval_id: approval.facts().approval_id.clone(),
                 subject: approval.facts().subject.clone(),
@@ -342,7 +332,7 @@ pub(crate) fn query_team_graph_context(
     TeamGraphContextResult::Available(TeamGraphContext {
         team: query.team.clone(),
         run: query.run.clone(),
-        graph_status: crate::project(graph).status,
+        graph_status: projection.graph_status(),
         nodes,
         edges,
         pending_approval_ids,

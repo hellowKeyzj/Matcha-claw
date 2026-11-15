@@ -17,22 +17,24 @@ pub(super) struct Projection {
 impl Sessions {
     pub(super) async fn accept_title_locked(
         &self,
+        session: &Session,
         execution: &mut Execution,
         message: &Value,
     ) -> rpc::Result<Option<String>> {
-        if execution.record.title_attempted {
+        let record = session.record();
+        if execution.title_attempted || record.title_attempted {
             return Ok(None);
         }
         let Some(text) = user_text(message) else {
             return Ok(None);
         };
-        let Some(projection) = &execution.record.native_title else {
+        let Some(projection) = &record.native_title else {
             return Ok(None);
         };
-        let generate = execution.record.title.is_none()
+        let generate = record.title.is_none()
             && projection.custom.is_none()
             && projection.ai.is_none();
-        let mut updated = execution.record.clone();
+        let mut updated = (*record).clone();
         updated.title_attempted = true;
         if generate {
             updated
@@ -43,10 +45,9 @@ impl Sessions {
         }
         // Fence this first message even if storage fails. Never start a model
         // request without the durable marker, or retry it on a later ACK.
-        execution.record.title_attempted = true;
-        record::save_session(&self.0.database, &updated).await?;
-        let changed = updated.native_title != execution.record.native_title;
-        execution.record = updated;
+        execution.title_attempted = true;
+        let changed = updated.native_title != record.native_title;
+        session.commit(&self.0.database, execution, updated).await?;
         if changed {
             self.0.catalog_changes.send_replace(());
         }
@@ -60,7 +61,7 @@ impl Sessions {
         description: String,
         native_execution: Option<Value>,
     ) {
-        let record = session.data.lock().await.record.clone();
+        let record = session.record();
         let result = self
             .generate_title_inner(&session, &instance_id, &record, description, native_execution)
             .await;
@@ -71,7 +72,7 @@ impl Sessions {
 
     async fn generate_title_inner(
         &self,
-        session: &Session,
+        session: &Arc<Session>,
         instance_id: &str,
         record: &record::Record,
         description: String,
@@ -82,14 +83,14 @@ impl Sessions {
         self.project_title(session, metadata).await?;
         let control = {
             let execution = session.data.lock().await;
-            let projection = execution
-                .record
+            let record = session.record();
+            let projection = record
                 .native_title
                 .as_ref()
                 .expect("new session projection");
             if execution.closing
-                || execution.record.status != record::Status::Open
-                || execution.record.title.is_some()
+                || record.status != record::Status::Open
+                || record.title.is_some()
                 || projection.custom.is_some()
                 || projection.ai.is_some()
                 || self.0.shutdown.load(std::sync::atomic::Ordering::Acquire)
@@ -131,7 +132,7 @@ impl Sessions {
         self.project_title(session, metadata).await.map(|_| ())
     }
 
-    pub(super) async fn hydrate_titles(&self, records: &mut [record::Record]) {
+    pub(super) async fn hydrate_titles(&self, records: &mut [Arc<record::Record>]) {
         let mut groups = BTreeMap::<(PathBuf, PathBuf), Vec<usize>>::new();
         for (index, record) in records.iter().enumerate() {
             if record.native_title.is_none() && record.status != record::Status::Deleting {
@@ -182,31 +183,46 @@ impl Sessions {
 
     async fn project_title(
         &self,
-        session: &Session,
+        session: &Arc<Session>,
         metadata: Projection,
-    ) -> rpc::Result<record::Record> {
-        let mut execution = session.data.lock().await;
-        if execution.record.status == record::Status::Deleting || metadata == Projection::default()
-        {
-            return Ok(execution.record.clone());
+    ) -> rpc::Result<Arc<record::Record>> {
+        if metadata == Projection::default() {
+            return Ok(session.record());
         }
-        let mut updated = execution.record.clone();
-        let projection = updated.native_title.get_or_insert_with(Projection::default);
-        if metadata.custom.is_some() {
-            projection.custom = metadata.custom;
-        }
-        if metadata.ai.is_some() {
-            projection.ai = metadata.ai;
-        }
-        if projection.fallback.is_none() {
-            projection.fallback = metadata.fallback;
-        }
-        if updated.native_title != execution.record.native_title {
-            record::save_session(&self.0.database, &updated).await?;
-            execution.record = updated;
-            self.0.catalog_changes.send_replace(());
-        }
-        Ok(execution.record.clone())
+        let owner = self.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            let mut execution = session.data.lock().await;
+            let record = session.record();
+            if session.mutable().is_err() {
+                return Ok(record);
+            }
+            let mut updated = (*record).clone();
+            let projection = updated.native_title.get_or_insert_with(Projection::default);
+            if metadata.custom.is_some() {
+                projection.custom = metadata.custom;
+            }
+            if metadata.ai.is_some() {
+                projection.ai = metadata.ai;
+            }
+            if projection.fallback.is_none() {
+                projection.fallback = metadata.fallback;
+            }
+            if updated.native_title != record.native_title {
+                session.commit(&owner.0.database, &mut execution, updated).await?;
+                owner.0.catalog_changes.send_replace(());
+            }
+            Ok(session.record())
+        })
+        .await
+        .map_err(|error| {
+            rpc::Error::new(
+                -32006,
+                "session_title_unknown",
+                "Session title projection could not be confirmed",
+            )
+            .with_source(error)
+        })?
     }
 
     async fn title_metadata_failure(&self, record: &record::Record, error: &rpc::Error) {

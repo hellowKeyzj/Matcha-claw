@@ -86,5 +86,10 @@ export function registerAppPluginAssets(options: {
       return new Response(null, { status, headers });
     }
   });
-  return () => protocol.unhandle('matcha-app');
+  let registered = true;
+  return () => {
+    if (!registered) return;
+    protocol.unhandle('matcha-app');
+    registered = false;
+  };
 }

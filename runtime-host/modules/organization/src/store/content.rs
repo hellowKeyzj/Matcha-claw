@@ -5,6 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::StoreFault;
@@ -21,7 +22,8 @@ pub(crate) enum ContentScope<'a> {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ContentRef {
     pub(crate) sha256: [u8; 32],
     pub(crate) byte_len: u64,
@@ -42,17 +44,27 @@ impl ContentStore {
         scope: ContentScope<'_>,
         bytes: &[u8],
     ) -> Result<ContentRef, StoreFault> {
-        let reference = ContentRef {
+        self.put_reusing(scope, bytes, None)
+    }
+
+    // Only a reference paired with unchanged, previously verified facts may be reused.
+    // The file is still fully checked and synced on every write.
+    pub(crate) fn put_reusing(
+        &self,
+        scope: ContentScope<'_>,
+        bytes: &[u8],
+        previous: Option<&ContentRef>,
+    ) -> Result<ContentRef, StoreFault> {
+        let previous = previous.filter(|reference| reference.byte_len == bytes.len() as u64);
+        let reference = previous.cloned().unwrap_or_else(|| ContentRef {
             sha256: Sha256::digest(bytes).into(),
             byte_len: bytes.len() as u64,
-        };
+        });
         let directory = self.directory(scope, true).map_err(commit_fault)?;
         let target = directory.join(hex_digest(&reference.sha256));
         match fs::symlink_metadata(&target) {
             Ok(_) => {
-                if self.read(scope, &reference)? != bytes {
-                    return Err(StoreFault::InvalidFacts);
-                }
+                self.verify_existing(scope, &reference, bytes)?;
                 OpenOptions::new()
                     .write(true)
                     .open(&target)
@@ -61,7 +73,12 @@ impl ContentStore {
                 sync_directory(&directory).map_err(commit_fault)?;
                 return Ok(reference);
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if previous.is_some() {
+                    // A missing body still follows the original hash/publication path.
+                    return self.put(scope, bytes);
+                }
+            }
             Err(error) => return Err(commit_fault(error)),
         }
         let (temporary, mut file) = temporary_file(&directory).map_err(commit_fault)?;
@@ -72,9 +89,7 @@ impl ContentStore {
         match published {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if self.read(scope, &reference)? != bytes {
-                    return Err(StoreFault::InvalidFacts);
-                }
+                self.verify_existing(scope, &reference, bytes)?;
             }
             Err(error) => return Err(commit_fault(error)),
         }
@@ -107,6 +122,16 @@ impl ContentStore {
         Ok(bytes)
     }
 
+    fn verify_existing(
+        &self,
+        scope: ContentScope<'_>,
+        reference: &ContentRef,
+        expected: &[u8],
+    ) -> Result<(), StoreFault> {
+        let directory = self.directory(scope, false).map_err(read_fault)?;
+        verify_file(&directory.join(hex_digest(&reference.sha256)), reference, expected)
+    }
+
     fn directory(&self, scope: ContentScope<'_>, create: bool) -> io::Result<PathBuf> {
         // Host supplies a private root; identities never become path components.
         check_directory(&self.root, create)?;
@@ -133,7 +158,46 @@ impl ContentStore {
     }
 }
 
-fn check_directory(path: &Path, create: bool) -> io::Result<()> {
+fn verify_file(
+    path: &Path,
+    reference: &ContentRef,
+    expected: &[u8],
+) -> Result<(), StoreFault> {
+    let metadata = fs::symlink_metadata(path).map_err(read_fault)?;
+    if is_redirect(&metadata) || !metadata.is_file() || metadata.len() != reference.byte_len {
+        return Err(StoreFault::InvalidFacts);
+    }
+    let mut file = File::open(path)
+        .map_err(read_fault)?
+        .take(reference.byte_len.saturating_add(1));
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    let mut offset = 0;
+    let mut matches = true;
+    loop {
+        let count = match file.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(read_fault(error)),
+        };
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        digest.update(chunk);
+        matches &= expected.get(offset..offset + count) == Some(chunk);
+        offset += count;
+    }
+    if offset as u64 != reference.byte_len
+        || <[u8; 32]>::from(digest.finalize()) != reference.sha256
+        || !matches
+    {
+        return Err(StoreFault::InvalidFacts);
+    }
+    Ok(())
+}
+
+pub(crate) fn check_directory(path: &Path, create: bool) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if create && error.kind() == io::ErrorKind::NotFound => {

@@ -70,8 +70,10 @@ impl OrganizationStore {
                         NodeKind::Join => "join",
                         NodeKind::End => "end",
                     };
-                    let mut value =
-                        json!({"nodeId": node.id().as_str(), "kind": kind, "title": node.title()});
+                    let mut value = json!({
+                        "nodeId": node.id().as_str(), "kind": kind, "title": node.title(),
+                        "reworkLimits": node.rework_limits(),
+                    });
                     if let Some((role, prompt)) = node
                         .work_assignment()
                         .map(|work| (work.role_id(), work.prompt()))

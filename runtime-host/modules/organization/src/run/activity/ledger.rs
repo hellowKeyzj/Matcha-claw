@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::{BTreeMap, BTreeSet}, fmt};
 
 use super::{
     Activity, ActivityId, ActivityRequest, ActivityRequestError, ActivitySnapshot,
@@ -9,6 +9,7 @@ use super::{
 pub struct ActivityLedger {
     activities: BTreeMap<ActivityId, Activity>,
     activity_ids_by_run_and_idempotency_key: BTreeMap<(String, String), ActivityId>,
+    activity_ids_by_run: BTreeMap<String, BTreeSet<ActivityId>>,
     undo: Option<BTreeMap<ActivityId, Option<Activity>>>,
 }
 
@@ -96,15 +97,45 @@ impl ActivityLedger {
         for snapshot in snapshot.into_activities() {
             let activity =
                 Activity::restore(snapshot).map_err(RestoreActivityLedgerError::InvalidActivity)?;
-            let facts = activity.facts();
-            if ledger.activities.contains_key(&facts.activity_id) {
-                return Err(RestoreActivityLedgerError::DuplicateActivityId(
-                    facts.activity_id.clone(),
-                ));
-            }
-            ledger.restore_record(activity)?;
+            ledger.insert_restored(activity)?;
         }
         Ok(ledger)
+    }
+
+    pub(crate) fn from_restored(
+        activities: impl IntoIterator<Item = Activity>,
+    ) -> Result<Self, RestoreActivityLedgerError> {
+        let mut ledger = Self::default();
+        for activity in activities {
+            ledger.insert_restored(activity)?;
+        }
+        Ok(ledger)
+    }
+
+    fn insert_restored(&mut self, activity: Activity) -> Result<(), RestoreActivityLedgerError> {
+        let facts = activity.facts();
+        if self.activities.contains_key(&facts.activity_id) {
+            return Err(RestoreActivityLedgerError::DuplicateActivityId(
+                facts.activity_id.clone(),
+            ));
+        }
+        self.restore_record(activity)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), RestoreActivityLedgerError> {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut keys = std::collections::BTreeSet::new();
+        for activity in self.activities() {
+            activity.validate_restored().map_err(RestoreActivityLedgerError::InvalidActivity)?;
+            let facts = activity.facts();
+            if !ids.insert(&facts.activity_id) {
+                return Err(RestoreActivityLedgerError::DuplicateActivityId(facts.activity_id.clone()));
+            }
+            if !keys.insert((facts.run_id.as_str(), facts.idempotency_key.as_str())) {
+                return Err(RestoreActivityLedgerError::DuplicateIdempotencyKey);
+            }
+        }
+        Ok(())
     }
 
     pub fn register(
@@ -136,6 +167,7 @@ impl ActivityLedger {
         }
         self.activity_ids_by_run_and_idempotency_key
             .insert(key, facts.activity_id.clone());
+        self.activity_ids_by_run.entry(facts.run_id.as_str().to_owned()).or_default().insert(facts.activity_id.clone());
         self.activities
             .insert(facts.activity_id.clone(), activity.clone());
         Ok(ActivityRegistrationOutcome::Recorded(activity))
@@ -183,6 +215,7 @@ impl ActivityLedger {
         }
         self.activity_ids_by_run_and_idempotency_key
             .insert(key, id.clone());
+        self.activity_ids_by_run.entry(activity.facts().run_id.as_str().to_owned()).or_default().insert(id.clone());
         self.activities.insert(id, activity);
         Ok(())
     }
@@ -191,6 +224,10 @@ impl ActivityLedger {
         if let Some(activity) = self.activities.remove(id) {
             self.activity_ids_by_run_and_idempotency_key
                 .remove(&activity_key(activity.facts()));
+            if let Some(ids) = self.activity_ids_by_run.get_mut(activity.facts().run_id.as_str()) {
+                ids.remove(id);
+                if ids.is_empty() { self.activity_ids_by_run.remove(activity.facts().run_id.as_str()); }
+            }
             if let Some(undo) = &mut self.undo {
                 undo.entry(id.clone()).or_insert(Some(activity));
             }
@@ -215,16 +252,11 @@ impl ActivityLedger {
     }
 
     pub(crate) fn rollback_transaction(&mut self) {
-        for (id, previous) in self.undo.take().into_iter().flatten() {
-            if let Some(current) = self.activities.remove(&id) {
-                self.activity_ids_by_run_and_idempotency_key
-                    .remove(&activity_key(current.facts()));
-            }
-            if let Some(activity) = previous {
-                self.activity_ids_by_run_and_idempotency_key
-                    .insert(activity_key(activity.facts()), id.clone());
-                self.activities.insert(id, activity);
-            }
+        let Some(undo) = self.undo.take() else { return; };
+        // Remove all final identities before restoring keys reused inside the transaction.
+        for id in undo.keys() { self.remove_record(id); }
+        for activity in undo.into_values().flatten() {
+            self.restore_record(activity).expect("previous activity keys are unique");
         }
     }
 
@@ -232,19 +264,15 @@ impl ActivityLedger {
         self.activities.values()
     }
 
+    pub(crate) fn activities_for_run(&self, run_id: &str) -> impl Iterator<Item = &Activity> {
+        self.activity_ids_by_run.get(run_id).into_iter().flatten()
+            .map(|id| self.activities.get(id).expect("activity Run index references its activity"))
+    }
+
     pub fn retain_without_run(&mut self, run_id: &str) {
-        self.activities.retain(|id, activity| {
-            if activity.facts().run_id.as_str() != run_id {
-                return true;
-            }
-            if let Some(undo) = &mut self.undo {
-                undo.entry(id.clone())
-                    .or_insert_with(|| Some(activity.clone()));
-            }
-            false
-        });
-        self.activity_ids_by_run_and_idempotency_key
-            .retain(|_, activity_id| self.activities.contains_key(activity_id));
+        let ids = self.activities_for_run(run_id)
+            .map(|activity| activity.facts().activity_id.clone()).collect::<Vec<_>>();
+        for id in ids { self.remove_record(&id); }
     }
 }
 

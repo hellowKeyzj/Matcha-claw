@@ -62,6 +62,22 @@ impl AuditFailure for crate::application::task_board::MutationError {
     }
 }
 
+impl AuditFailure for crate::TeamPromptSettingsError {
+    fn outcome(&self) -> Outcome {
+        match self {
+            Self::Invalid(_) | Self::Conflict => Outcome::Rejected,
+            Self::Store(error) => error.outcome(),
+            Self::Unavailable => Outcome::Unavailable,
+        }
+    }
+}
+
+impl AuditOutcome for crate::prompts::TeamPromptSettings {
+    fn summarize(&self, detail: &mut OrganizationCallDetail) {
+        detail.set_outcome(Outcome::Read);
+    }
+}
+
 impl AuditFailure for TeamRuntimeStatus {
     fn outcome(&self) -> Outcome {
         match self {
@@ -151,6 +167,13 @@ impl<T: AuditOutcome, E: AuditFailure> AuditOutcome for Result<T, E> {
 }
 
 impl<T: AuditOutcome> AuditOutcome for (T, Option<crate::TeamCreationFailure>) {
+    fn summarize(&self, detail: &mut OrganizationCallDetail) {
+        self.0.summarize(detail);
+        if let Some(failure) = self.1 { detail.record_creation_failure(failure); }
+    }
+}
+
+impl<T: AuditOutcome, P> AuditOutcome for (T, Option<crate::TeamCreationFailure>, Option<P>) {
     fn summarize(&self, detail: &mut OrganizationCallDetail) {
         self.0.summarize(detail);
         if let Some(failure) = self.1 { detail.record_creation_failure(failure); }
@@ -328,7 +351,7 @@ impl AuditOutcome for crate::TeamTriggerFireOutcome {
     fn summarize(&self, detail: &mut OrganizationCallDetail) {
         detail.set_outcome(match self {
             Self::Recorded(_) | Self::Replayed(_) => Outcome::CommandCommitted,
-            Self::Conflicting { .. } | Self::NotFound | Self::Rejected => Outcome::Rejected,
+            Self::Conflicting { .. } | Self::NotFound | Self::Busy | Self::Rejected => Outcome::Rejected,
             Self::Unknown => Outcome::OutcomeUnknown,
         });
     }
@@ -443,6 +466,15 @@ impl AuditOutcome for TeamRunPublicSnapshotQueryOutcome {
     }
 }
 
+impl AuditOutcome for crate::run::public_projection::TeamNodeReviewHistoryResult {
+    fn summarize(&self, detail: &mut OrganizationCallDetail) {
+        match self {
+            Self::List { run_id, .. } | Self::Messages { run_id, .. } => detail.run_reference(run_id),
+        }
+        detail.set_outcome(Outcome::Read);
+    }
+}
+
 impl AuditOutcome for crate::TeamRunDiagnosticsQueryOutcome {
     fn summarize(&self, detail: &mut OrganizationCallDetail) {
         detail.set_outcome(match self {
@@ -546,7 +578,7 @@ impl AuditOutcome for crate::TeamRuntimeCommandOutcome {
             DependencyPlan(value) => value.summarize(detail),
             ProvisionAgents(value) => value.summarize(detail),
             Delete(value) => value.summarize(detail),
-            RunCreate { result, creation_failure } => {
+            RunCreate { result, creation_failure, .. } => {
                 result.summarize(detail);
                 if let Some(failure) = creation_failure { detail.record_creation_failure(*failure); }
             },
@@ -561,6 +593,7 @@ impl AuditOutcome for crate::TeamRuntimeCommandOutcome {
                 detail.set_outcome(Outcome::Rejected);
                 if let Some(failure) = creation_failure { detail.record_creation_failure(*failure); }
             },
+            NodeReviewHistory(value) => value.summarize(detail),
             GraphSave(value) | GraphPatch(value) | GraphImportYaml(value) => {
                 value.summarize(detail)
             }
@@ -569,6 +602,11 @@ impl AuditOutcome for crate::TeamRuntimeCommandOutcome {
             TriggerFire(value) => value.summarize(detail),
             RunStart(result) => detail.set_outcome(match result {
                 Ok(()) => Outcome::Started,
+                Err(error) => error.outcome(),
+            }),
+            RunReworkContinue(result) => detail.set_outcome(match result {
+                Ok(()) => Outcome::CommandCommitted,
+                Err(crate::StoreFault::RuntimeGraph(_) | crate::StoreFault::GraphReduce(_)) => Outcome::Rejected,
                 Err(error) => error.outcome(),
             }),
             NodePromptRetryDue(value) => value.summarize(detail),

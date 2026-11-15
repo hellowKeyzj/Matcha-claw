@@ -19,24 +19,37 @@ struct MessageGetParams<'a> {
     max_chars: u32,
 }
 
-struct CompleteText {
-    text: String,
-    sequence: u64,
+pub(super) struct CompleteText {
+    pub(super) text: String,
+    pub(super) sequence: u64,
+    pub(super) run_id: Option<String>,
+    pub(super) is_assistant: bool,
 }
 
 impl SessionOperation {
-    async fn message_text(&self, identity: &SessionIdentity, message_id: &str) -> Result<CompleteText, OperationError> {
+    pub(super) async fn message_text(&self, identity: &SessionIdentity, message_id: &str) -> Result<CompleteText, OperationError> {
+        let message = self.message_value(identity, message_id).await?;
+        let sequence = message.pointer("/__openclaw/seq").and_then(serde_json::Value::as_u64).ok_or(OperationError::Protocol)?;
+        let text = window::decode_complete_text(&message).map_err(|_| OperationError::Protocol)?;
+        Ok(CompleteText {
+            text, sequence,
+            run_id: message.pointer("/__openclaw/runId").and_then(serde_json::Value::as_str).map(str::to_owned),
+            is_assistant: message.get("role").and_then(serde_json::Value::as_str) == Some("assistant"),
+        })
+    }
+
+    pub(super) async fn message_value(&self, identity: &SessionIdentity, message_id: &str) -> Result<serde_json::Value, OperationError> {
         let id = next_request_id("chat-message-get")?;
         let request = request(&id, "chat.message.get", MessageGetParams {
             session_key: &identity.session_key, agent_id: &identity.agent_id, message_id, max_chars: 2_000_000,
         })?;
-        let result = payload(&id, self.gateway.rpc_query(request).await?)?;
+        let mut result = payload(&id, self.gateway.rpc_query(request).await?)?;
         if result.get("ok").and_then(serde_json::Value::as_bool) != Some(true) { return Err(OperationError::Rejected); }
-        let message = result.get("message").ok_or(OperationError::Protocol)?;
-        if message.pointer("/__openclaw/id").and_then(serde_json::Value::as_str) != Some(message_id) { return Err(OperationError::Protocol); }
-        let sequence = message.pointer("/__openclaw/seq").and_then(serde_json::Value::as_u64).filter(|seq| *seq > 0).ok_or(OperationError::Protocol)?;
-        let text = window::decode_complete_text(message).map_err(|_| OperationError::Protocol)?;
-        Ok(CompleteText { text, sequence })
+        let message = result.get_mut("message").map(serde_json::Value::take).ok_or(OperationError::Protocol)?;
+        if message.pointer("/__openclaw/id").and_then(serde_json::Value::as_str) != Some(message_id)
+            || !message.pointer("/__openclaw/seq").and_then(serde_json::Value::as_u64).is_some_and(|seq| seq > 0 && seq <= 9_007_199_254_740_991)
+        { return Err(OperationError::Protocol); }
+        Ok(message)
     }
 
     pub(crate) async fn hydrate_history(&self, identity: &SessionIdentity, window: &mut SessionWindow) -> Result<(), OperationError> {

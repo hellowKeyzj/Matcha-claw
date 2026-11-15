@@ -52,7 +52,7 @@ impl Sessions {
                     let (deadline, activity) = {
                         let mut execution = executing.data.lock().await;
                         let activity = execution.cli.as_ref().map(Cli::activity);
-                        (execution.idle_deadline(), activity)
+                        (execution.idle_deadline(&executing.record()), activity)
                     };
                     let sleep = tokio::select! {
                         _ = executing.stopped.cancelled() => break,
@@ -92,10 +92,10 @@ impl Sessions {
     }
 
     async fn advance(&self, session: Arc<Session>) -> rpc::Result<()> {
-        let agent_id = session.data.lock().await.record.agent_id.clone();
-        let admission = tokio::select! {
+        let agent_id = session.record().agent_id.clone();
+        let (admission, operation) = tokio::select! {
             _ = session.stopped.cancelled() => return Ok(()),
-            guard = self.agent_guard(&agent_id) => guard,
+            admission = self.session_admission(&session, &agent_id) => admission,
         };
         let config = self.0.config.snapshot().await;
         let mut execution = session.data.lock().await;
@@ -103,8 +103,10 @@ impl Sessions {
             || execution.idle.handing_off()
             || execution.launching
             || (execution.consuming && execution.cli.is_none())
-            || execution.record.status != record::Status::Open
-            || execution.record.native_cleanup_failed
+            || session.mutable().is_err()
+            || session.record().status != record::Status::Open
+            || execution.cleanup_failed
+            || session.record().native_cleanup_failed
             || execution.storage_fault.is_some()
             || execution.active.is_some()
             || execution.cancel_in_flight
@@ -145,7 +147,9 @@ impl Sessions {
             acknowledged: false,
             input_started: false,
             native_cycle_observed: false,
+            acknowledged_input_ids: Default::default(),
             tool_use_ids: Default::default(),
+            task_sources: Default::default(),
             idle_observed: false,
             interrupt_observed: false,
             ownership_ambiguous: execution
@@ -168,7 +172,7 @@ impl Sessions {
         let launch = if existing.is_none() {
             execution.launching = true;
             execution.launch_error = None;
-            match self.launch_spec(config, &execution) {
+            match self.launch_spec(config, &session.record()) {
                 Ok(spec) => Some(spec),
                 Err(error) => {
                     drop(execution);
@@ -182,6 +186,7 @@ impl Sessions {
             None
         };
         drop(execution);
+        drop(operation);
         drop(admission);
         let cli = match launch {
             Some(spec) => match self.start_instance(&session, spec).await {
@@ -263,7 +268,7 @@ impl Sessions {
         {
             if execution.active.as_ref().is_none_or(|active| active.record.run.run_id != run_id) {
                 // Active is cleared only after its terminal commit; replay it if begin raced that commit.
-                self.0.iab.finish_run(&execution.record.session_id, &run_id);
+                self.0.iab.finish_run(&session.record().session_id, &run_id);
             }
             execution.sending = false;
             session.changed.notify_waiters();
@@ -319,7 +324,7 @@ impl Sessions {
             .expect("nonterminal run retains submitted content");
         let native_execution = active.record.run.world_investigation.as_ref()
             .map(|world| world.frame(&active.record.run)).transpose()?;
-        let session_id = execution.record.session_id.clone();
+        let session_id = session.record().session_id.clone();
         drop(execution);
         let sent = cli
             .send_user(&session_id, &message_id, content, max_turns, native_execution)
@@ -370,10 +375,7 @@ impl Sessions {
                     Ok(()) => error,
                     Err(cleanup) => error.with_data(json!({ "cleanupFailure": cleanup })),
                 };
-                let context = {
-                    let execution = session.data.lock().await;
-                    failure_context(&execution, &failure)
-                };
+                let context = failure_context(&session.record(), &failure);
                 if self
                     .0
                     .diagnostics
@@ -394,11 +396,9 @@ impl Sessions {
         session: &Arc<Session>,
         stopping: &tokio_util::sync::CancellationToken,
     ) -> rpc::Result<()> {
-        let _closing = tokio::select! {
-            _ = stopping.cancelled() => return Ok(()),
-            _ = session.stopped.cancelled() => return Ok(()),
-            closing = session.close_guard.lock() => closing,
-        };
+        if stopping.is_cancelled() || session.stopped.is_cancelled() {
+            return Ok(());
+        }
         let mut execution = session.data.lock().await;
         let now = rpc::now_ms();
         let mut index = 0;
@@ -412,7 +412,8 @@ impl Sessions {
             } else { index += 1; }
         }
         let Some(active) = execution.active.as_ref().filter(|active| {
-            !active.budget_expired
+            !execution.closing
+                && !active.budget_expired
                 && active
                     .deadline
                     .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
@@ -436,6 +437,9 @@ impl Sessions {
         }
         session.changed.notify_waiters();
         drop(execution);
+        let Some(_closing) = self.close_admission(session, Some((&run_id, stopping))).await else {
+            return Ok(());
+        };
         let mut interrupted = false;
         let mut failures = Vec::new();
         loop {
@@ -521,7 +525,7 @@ impl Sessions {
         }
         session.changed.notify_waiters();
         session.wake.notify_one();
-        let context = failure_context(&execution, error);
+        let context = failure_context(&session.record(), error);
         drop(execution);
         if self
             .0
@@ -612,7 +616,7 @@ impl Sessions {
         execution.sending = false;
         execution.launching = false;
         execution.fault(error.clone());
-        let context = failure_context(&execution, &error);
+        let context = failure_context(&session.record(), &error);
         let cli = execution.cli.clone();
         drop(execution);
         session.changed.notify_waiters();
@@ -640,11 +644,12 @@ impl Sessions {
     ) {
         if let Err(error) = result {
             let mut execution = session.data.lock().await;
-            let session_id = execution.record.session_id.clone();
-            execution.record.native_cleanup_failed = true;
+            let session_id = session.record().session_id.clone();
+            execution.cleanup_failed = true;
             execution.fault(error.clone());
-            let failed = execution.record.clone();
-            if let Err(storage) = record::save_session(&self.0.database, &failed).await {
+            let mut failed = (*session.record()).clone();
+            failed.native_cleanup_failed = true;
+            if let Err(storage) = session.commit(&self.0.database, &mut execution, failed).await {
                 execution.fault(storage.with_data(json!({ "stage": "native_cleanup_write" })));
             }
             drop(execution);
@@ -657,13 +662,14 @@ impl Sessions {
         session: Arc<Session>,
         permanent: bool,
     ) -> rpc::Result<()> {
-        let _closing = session.close_guard.lock().await;
         let mut failures = Vec::new();
-        {
+        let mut closing = None;
+        // Persist intent before native close, then recheck the latest record and queue under the Session guard.
+        loop {
             let mut execution = session.data.lock().await;
-            if execution.record.status == record::Status::Deleting {
+            if session.deleting.load(Ordering::Acquire) {
                 if permanent {
-                    execution.record.mutable()?;
+                    session.mutable()?;
                 }
                 session.stopped.cancel();
                 session.wake.notify_one();
@@ -675,7 +681,7 @@ impl Sessions {
                 }
                 return Ok(());
             }
-            if execution.record.native_cleanup_failed {
+            if execution.cleanup_failed || session.record().native_cleanup_failed {
                 failures.push(
                     execution
                         .storage_fault
@@ -694,12 +700,12 @@ impl Sessions {
                 cli.revoke_iab();
             }
             session.changed.notify_waiters();
-            if permanent {
-                let mut closed = execution.record.clone();
+            if permanent && (closing.is_none() || session.record().status != record::Status::Closed) {
+                let mut closed = (*session.record()).clone();
                 closed.status = record::Status::Closed;
                 closed.updated_at_ms = rpc::now_ms();
-                match record::save_session(&self.0.database, &closed).await {
-                    Ok(()) => execution.record = closed,
+                match session.commit(&self.0.database, &mut execution, closed).await {
+                    Ok(()) => {}
                     Err(error) => {
                         execution.fault(error.clone());
                         failures.push(error.with_data(json!({ "stage": "session_close_write" })));
@@ -731,7 +737,13 @@ impl Sessions {
                     }
                 }
             }
+            drop(execution);
+            if closing.is_some() {
+                break;
+            }
+            closing = self.close_admission(&session, None).await;
         }
+        let _closing = closing.expect("Session close admission");
         // Keep the consumer live while close joins the bounded CLI reader.
         loop {
             let changed = session.changed.notified();
@@ -778,7 +790,7 @@ impl Sessions {
             execution.consuming = false;
             execution.closing = false;
             execution.idle = super::idle::Idle::Dormant;
-            if execution.record.native_cleanup_failed && failures.is_empty() {
+            if (execution.cleanup_failed || session.record().native_cleanup_failed) && failures.is_empty() {
                 failures.push(
                     execution
                         .storage_fault
@@ -793,6 +805,7 @@ impl Sessions {
                 );
             }
         }
+        drop(_closing);
         session.changed.notify_waiters();
         session.wake.notify_one();
         if self.0.shutdown.load(Ordering::Acquire)
@@ -805,9 +818,9 @@ impl Sessions {
     }
 }
 
-pub(super) fn failure_context(execution: &super::Execution, error: &rpc::Error) -> Value {
+pub(super) fn failure_context(record: &record::Record, error: &rpc::Error) -> Value {
     let mut context = json!({
-        "sessionId": execution.record.session_id, "agentId": execution.record.agent_id,
+        "sessionId": record.session_id, "agentId": record.agent_id,
         "causeCode": error.code,
     });
     if let Some(data) = error.data.as_ref().and_then(Value::as_object) {

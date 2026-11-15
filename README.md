@@ -111,6 +111,7 @@ Create and manage specialized subagents in a visual workspace. Built-in draft ge
 
 ### ✅ Session Task Center & Team Discussion Hub
 Plan and track persistent session tasks in `/tasks`, while Chat shows the current run's `TodoWrite` checklist as part of the same task snapshot pipeline. Agent task tools use `TaskCreate` / `TaskUpdate` / `TaskList` / `TaskGet` / `TodoWrite`; the Task Center manages only persistent tasks and keeps **Long Tasks** and **Scheduled Tasks** in one place.
+Create teams with **+** in Chat’s **Teams** sidebar tab. Teams use stacked member avatars; select a run to discuss with its agents and edit nodes, connections, and settings in the workspace run graph. YAML import/export and run controls are available there, without a separate Teams page.
 
 ### 📡 Multi-Channel Management
 Configure and monitor multiple AI channels simultaneously. Each channel operates independently, allowing you to run specialized agents for different tasks.

@@ -7,7 +7,7 @@ const root = resolve(__dirname, '..', '..');
 const builder = parseYaml(readFileSync(resolve(root, 'electron-builder.yml'), 'utf8')) as {
   win: {
     extraResources: Array<{ from: string; to: string; filter?: string[] }>;
-    target: Array<{ target: string; arch: string[] }>;
+    target: Array<{ target: string; arch?: string[] }>;
   };
 };
 const releaseWorkflow = readFileSync(resolve(root, '.github', 'workflows', 'release.yml'), 'utf8');
@@ -32,7 +32,7 @@ function expectEvery(source: string, fragments: readonly string[]): void {
 
 describe('Connector O-14 Windows x64 package proof boundary', () => {
   it('pins the Windows x64 package cell to the target-qualified Rust runtime host', () => {
-    expect(builder.win.target).toContainEqual({ target: 'nsis', arch: ['x64', 'arm64'] });
+    expect(builder.win.target).toEqual([{ target: 'nsis' }]);
     expect(builder.win.extraResources).toContainEqual(expect.objectContaining({
       from: 'runtime-host/dist/win32-${arch}',
       to: 'bin/win32-${arch}',

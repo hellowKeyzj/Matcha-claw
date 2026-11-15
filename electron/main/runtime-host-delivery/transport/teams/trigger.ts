@@ -4,6 +4,7 @@ import { hasExactKeys, isNonEmptyBoundedText, isRecord, sendLoopbackJson } from 
 const ROUTE_PATH = '/api/team/trigger';
 const UNAVAILABLE = { success: false, error: 'Team trigger is unavailable' } as const;
 const REJECTED = { success: false, error: 'Team trigger was rejected' } as const;
+const BUSY = { success: false, error: 'The trigger scope is busy; wait for its current batch to settle.', errorCode: 'scope_busy' } as const;
 
 export type TeamTrigger = Readonly<{
   teamId: string;
@@ -17,7 +18,8 @@ export type TeamTriggerTransportResponse = Readonly<{
   body: Readonly<{ success: true; triggers: readonly TeamTrigger[] }>
     | Readonly<{ success: true; runId: string }>
     | typeof UNAVAILABLE
-    | typeof REJECTED;
+    | typeof REJECTED
+    | typeof BUSY;
 }>;
 
 export interface TeamTriggerTransport {
@@ -58,7 +60,7 @@ async function send(
   });
   if (response?.status === 200 && isSuccess(response.body)) return { status: 200, body: response.body };
   if (response?.status === 404 && isUnavailable(response.body)) return { status: 404, body: response.body };
-  if (response?.status === 409 && isRejected(response.body)) return { status: 409, body: response.body };
+  if (response?.status === 409 && (isRejected(response.body) || isBusy(response.body))) return { status: 409, body: response.body };
   return { status: 503, body: UNAVAILABLE };
 }
 
@@ -82,6 +84,11 @@ function isTrigger(value: unknown): value is TeamTrigger {
 
 function isUnavailable(value: unknown): value is typeof UNAVAILABLE {
   return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false && value.error === UNAVAILABLE.error;
+}
+
+function isBusy(value: unknown): value is typeof BUSY {
+  return isRecord(value) && hasExactKeys(value, ['success', 'error', 'errorCode'])
+    && value.success === false && value.error === BUSY.error && value.errorCode === BUSY.errorCode;
 }
 
 function isRejected(value: unknown): value is typeof REJECTED {

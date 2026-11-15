@@ -145,18 +145,18 @@ impl OwnerSpec for ProviderOwner {
 
     async fn handle_global_query(
         _shared: Self::Shared,
-        state: &mut Self::GlobalState,
-        query: Self::Query,
+        _state: &mut Self::GlobalState,
+        _query: Self::Query,
     ) {
-        state.handle_provider_query(query).await;
+        unreachable!("provider queries use the direct route")
     }
 
     async fn handle_exclusive_query(
         _shared: Self::Shared,
-        state: &mut Self::GlobalState,
-        query: Self::Query,
+        _state: &mut Self::GlobalState,
+        _query: Self::Query,
     ) {
-        state.handle_provider_query(query).await;
+        unreachable!("provider queries use the direct route")
     }
 }
 
@@ -383,15 +383,19 @@ impl ProviderOwner {
                 ..
             } => {
                 let mut diagnostic = None;
-                let mut outcome = self
-                    .models
-                    .discover(
-                        self.runtime_directory.as_ref(),
-                        &mut self.cascade,
-                        &account_id,
-                        &mut diagnostic,
-                    )
-                    .await;
+                let mut outcome = if self.cascade.reload().is_ok() {
+                    self.update_snapshot();
+                    self.models
+                        .discover(
+                            self.runtime_directory.as_ref(),
+                            self.cascade.accounts(),
+                            &account_id,
+                            &mut diagnostic,
+                        )
+                        .await
+                } else {
+                    crate::ProviderModelDiscoverOutcome::Unavailable
+                };
                 if let (Some(call), Some(reason)) = (call.as_mut(), diagnostic) {
                     let (reason, code) = reason.diagnostic();
                     call.diagnostic(reason, code);
@@ -542,118 +546,6 @@ impl ProviderOwner {
         if let (Some(call), Err(error)) = (call.as_mut(), &outcome.private) {
             let (reason, code) = error.diagnostic();
             call.diagnostic(reason, code);
-        }
-    }
-
-    async fn handle_provider_query(&mut self, mut query: ProviderQuery) {
-        let mut call = query.take_call();
-        if ProviderCall::start(&mut call).await.is_err() {
-            ProviderCall::not_admitted(call).await;
-            return;
-        }
-        match query {
-            ProviderQuery::ListAccounts { reply, .. } => {
-                send_reply(
-                    call,
-                    reply,
-                    list_provider_accounts_for_snapshot(&self.snapshot),
-                )
-                .await;
-            }
-            ProviderQuery::GetAccount { id, reply, .. } => {
-                send_reply(
-                    call,
-                    reply,
-                    get_provider_account_for_snapshot(&self.snapshot, &id),
-                )
-                .await;
-            }
-            ProviderQuery::ListModels { reply, .. } => {
-                send_reply(
-                    call,
-                    reply,
-                    list_provider_models_for_snapshot(&self.snapshot),
-                )
-                .await;
-            }
-            ProviderQuery::SelectableModels {
-                capability, reply, ..
-            } => {
-                send_reply(
-                    call,
-                    reply,
-                    selectable_provider_models_for_snapshot(
-                        &self.snapshot,
-                        self.runtime_directory.as_ref(),
-                        capability,
-                    ),
-                )
-                .await;
-            }
-            ProviderQuery::ListRouting { reply, .. } => {
-                send_reply(
-                    call,
-                    reply,
-                    list_provider_routing_for_snapshot(&self.snapshot),
-                )
-                .await;
-            }
-            ProviderQuery::DiscoverModelDraft { .. }
-            | ProviderQuery::TextGenerationModelLimits { .. }
-            | ProviderQuery::GenerateText { .. }
-            | ProviderQuery::GenerateMedia { .. }
-            | ProviderQuery::ListMediaModels { .. }
-            | ProviderQuery::SubmitVideo { .. }
-            | ProviderQuery::QueryVideo { .. }
-            | ProviderQuery::CollectVideo { .. }
-            | ProviderQuery::PrepareGenerationBinding { .. }
-            | ProviderQuery::RestoreGenerationBinding { .. }
-            | ProviderQuery::CountBoundInput { .. }
-            | ProviderQuery::GenerateBound { .. } => {
-                unreachable!("text generation queries use the direct route")
-            }
-            ProviderQuery::SelectSessionModel {
-                endpoint,
-                session_key,
-                endpoint_session_id,
-                model_selection_id,
-                trace_id,
-                reply,
-                ..
-            } => {
-                let outcome = self.models.select_session_model(
-                    self.runtime_directory.as_ref(),
-                    &self.cascade,
-                    endpoint,
-                    session_key,
-                    endpoint_session_id,
-                    model_selection_id,
-                    trace_id,
-                );
-                send_reply(call, reply, outcome).await;
-            }
-            ProviderQuery::SelectMatchaSessionModelRuntime {
-                session_key,
-                endpoint_session_id,
-                model_id,
-                model_selection_id,
-                provider_fingerprint,
-                trace_id,
-                reply,
-                ..
-            } => {
-                let outcome = self.models.select_matcha_session_model_runtime(
-                    self.runtime_directory.as_ref(),
-                    &self.cascade,
-                    session_key,
-                    endpoint_session_id,
-                    model_id,
-                    model_selection_id,
-                    provider_fingerprint,
-                    trace_id,
-                );
-                send_reply(call, reply, outcome).await;
-            }
         }
     }
 
@@ -1076,14 +968,52 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                 send_reply(call, reply, outcome).await;
             }).await;
         }
-        ProviderQuery::SelectSessionModel { reply, .. }
-        | ProviderQuery::SelectMatchaSessionModelRuntime { reply, .. } => {
-            send_reply(
-                call,
-                reply,
-                crate::ProviderSessionModelSelectionOutcome::Unavailable,
-            )
-            .await;
+        ProviderQuery::SelectSessionModel {
+            endpoint,
+            session_key,
+            endpoint_session_id,
+            model_selection_id,
+            trace_id,
+            reply,
+            ..
+        } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = snapshot.models.select_session_model(
+                shared.runtime_directory.as_ref(),
+                &snapshot.accounts,
+                &snapshot.catalog,
+                endpoint,
+                session_key,
+                endpoint_session_id,
+                model_selection_id,
+                trace_id,
+            );
+            send_reply(call, reply, outcome).await;
+        }
+        ProviderQuery::SelectMatchaSessionModelRuntime {
+            session_key,
+            endpoint_session_id,
+            model_id,
+            model_selection_id,
+            provider_fingerprint,
+            trace_id,
+            reply,
+            ..
+        } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = snapshot.models.select_matcha_session_model_runtime(
+                shared.runtime_directory.as_ref(),
+                &snapshot.accounts,
+                &snapshot.catalog,
+                snapshot.routing.as_ref(),
+                session_key,
+                endpoint_session_id,
+                model_id,
+                model_selection_id,
+                provider_fingerprint,
+                trace_id,
+            );
+            send_reply(call, reply, outcome).await;
         }
     }
 }

@@ -108,10 +108,10 @@ pub(super) async fn project(
     // Infrequent control-plane writes share Agent admission with binding changes and CLI startup.
     let mut guards = Vec::new();
     for id in &guarded_agents {
-        guards.push(sessions.agent_guard(id).await);
+        guards.push(sessions.agent_scope(id).await);
     }
-    let (session_affected, session_active) = sessions.provider_agents(&provider_ids).await?;
-    let mut live_session_providers = BTreeSet::new();
+    let (session_affected, session_active, mut live_session_providers) =
+        sessions.provider_agents(&provider_ids).await?;
     for id in provider_ids
         .iter()
         .filter(|id| id.starts_with("host-session-"))

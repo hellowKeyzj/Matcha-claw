@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::run::graph::ExecutionFence;
 
 use super::{EvidenceId, EvidenceRecord, EvidenceReferenceKind};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct EvidenceLedger {
     records: BTreeMap<EvidenceId, EvidenceRecord>,
+    record_ids_by_run: BTreeMap<String, BTreeSet<EvidenceId>>,
     undo: Option<BTreeMap<EvidenceId, Option<EvidenceRecord>>>,
 }
 impl PartialEq for EvidenceLedger {
@@ -15,6 +16,15 @@ impl PartialEq for EvidenceLedger {
     }
 }
 impl Eq for EvidenceLedger {}
+
+impl std::fmt::Debug for EvidenceLedger {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("EvidenceLedger")
+            .field("records", &self.records)
+            .field("undo", &self.undo)
+            .finish()
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordOutcome {
@@ -39,7 +49,7 @@ impl EvidenceLedger {
                     record.evidence_id().clone(),
                 ));
             }
-            ledger.records.insert(record.evidence_id().clone(), record);
+            ledger.restore_record(record);
         }
         Ok(ledger)
     }
@@ -104,7 +114,7 @@ impl EvidenceLedger {
         run_id: &str,
         fence: &ExecutionFence,
     ) -> Option<&str> {
-        self.records.values().find_map(|record| {
+        self.records_for_run(run_id).find_map(|record| {
             (record.reference().kind() == EvidenceReferenceKind::Artifact
                 && record.matches_execution(run_id, fence))
             .then_some(record.reference().reference())
@@ -112,25 +122,27 @@ impl EvidenceLedger {
     }
 
     pub fn records_for_run(&self, run_id: &str) -> impl Iterator<Item = &EvidenceRecord> {
-        self.records
-            .values()
-            .filter(move |record| record.run_id() == run_id)
+        self.record_ids_by_run.get(run_id).into_iter().flatten()
+            .map(|id| self.records.get(id).expect("evidence Run index references its record"))
     }
 
     pub(crate) fn restore_record(&mut self, record: EvidenceRecord) {
         let id = record.evidence_id().clone();
+        self.remove_record(&id);
         if let Some(undo) = &mut self.undo {
-            undo.entry(id.clone())
-                .or_insert_with(|| self.records.get(&id).cloned());
+            undo.entry(id.clone()).or_insert(None);
         }
+        self.record_ids_by_run.entry(record.run_id().to_owned()).or_default().insert(id.clone());
         self.records.insert(id, record);
     }
 
     pub(crate) fn remove_record(&mut self, id: &EvidenceId) {
-        if let Some(record) = self.records.remove(id)
-            && let Some(undo) = &mut self.undo
-        {
-            undo.entry(id.clone()).or_insert(Some(record));
+        if let Some(record) = self.records.remove(id) {
+            if let Some(ids) = self.record_ids_by_run.get_mut(record.run_id()) {
+                ids.remove(id);
+                if ids.is_empty() { self.record_ids_by_run.remove(record.run_id()); }
+            }
+            if let Some(undo) = &mut self.undo { undo.entry(id.clone()).or_insert(Some(record)); }
         }
     }
 
@@ -148,25 +160,14 @@ impl EvidenceLedger {
     }
 
     pub(crate) fn rollback_transaction(&mut self) {
-        for (id, previous) in self.undo.take().into_iter().flatten() {
-            if let Some(record) = previous {
-                self.records.insert(id, record);
-            } else {
-                self.records.remove(&id);
-            }
-        }
+        let Some(undo) = self.undo.take() else { return; };
+        for id in undo.keys() { self.remove_record(id); }
+        for record in undo.into_values().flatten() { self.restore_record(record); }
     }
 
     pub(crate) fn retain_without_run(&mut self, run_id: &str) {
-        self.records.retain(|id, record| {
-            if record.run_id() != run_id {
-                return true;
-            }
-            if let Some(undo) = &mut self.undo {
-                undo.entry(id.clone())
-                    .or_insert_with(|| Some(record.clone()));
-            }
-            false
-        });
+        let ids = self.records_for_run(run_id)
+            .map(|record| record.evidence_id().clone()).collect::<Vec<_>>();
+        for id in ids { self.remove_record(&id); }
     }
 }

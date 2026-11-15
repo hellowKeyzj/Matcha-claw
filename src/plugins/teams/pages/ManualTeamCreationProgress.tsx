@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { AlertCircle, Check, Circle, Loader2, Minus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import { useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
+import { runtimeEndpointsEqual, type NativeRuntimeEndpointRef } from '@/types/desktop/runtime-address';
 import type { ManualTeamCreation, ManualTeamCreationPhase } from '@/plugins/teams/types/team-creation';
 
 const creationSteps = [
@@ -40,6 +42,9 @@ function CreationElapsed({ startedAt, endedAt }: { startedAt: number; endedAt: n
 
 export function ManualTeamCreationProgress({ creation }: { creation: ManualTeamCreation }) {
   const { t } = useTranslation('teams');
+  const endpoints = useRuntimeEndpointsStore((state) => state.endpoints);
+  const runtimeName = (endpoint: NativeRuntimeEndpointRef) => endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, endpoint))?.displayName
+    ?? `${endpoint.runtimeAdapterId} · ${endpoint.runtimeInstanceId}`;
   const members = creation.candidate.manualTeam.members.filter((member) => !member.isLeader);
   const memberStatuses = creation.progress?.members ?? [];
   const completedCount = memberStatuses.filter((status) => status === 'completed').length;
@@ -110,7 +115,7 @@ export function ManualTeamCreationProgress({ creation }: { creation: ManualTeamC
                 </div>
                 {stepFailure ? (
                   <div className={`ml-11 mt-1 space-y-1 text-xs leading-5 ${failureLocated ? 'text-destructive' : 'text-amber-800 dark:text-amber-200'}`}>
-                    {failureMember ? <p>{t('create.manualProgress.failureMember', { member: failureMember.agentName })}</p> : null}
+                    {failureMember ? <p>{t('create.manualProgress.failureMember', { member: `${failureMember.agentName} · ${runtimeName(failureMember.endpoint)}` })}</p> : null}
                     {stepFailure.file ? <p>{t('create.manualProgress.failureFile', { file: t(`create.manualProgress.files.${stepFailure.file}`) })}</p> : null}
                     <p>{t(`create.manualProgress.failureReasons.${stepFailure.reason}`)}</p>
                   </div>
@@ -146,6 +151,7 @@ export function ManualTeamCreationProgress({ creation }: { creation: ManualTeamC
                   <AgentAvatar agentId={member.agentId} agentName={member.agentName} alt="" className="h-8 w-8 border border-border" />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm text-foreground">{member.agentName}</div>
+                    <div className="truncate text-xs text-muted-foreground">{runtimeName(member.endpoint)}</div>
                     {creation.progress?.memberErrors?.[index] ? (
                       <p className="mt-1 break-words text-xs text-destructive">{t(`create.manualProgress.memberErrors.${creation.progress.memberErrors[index]}`)}</p>
                     ) : null}

@@ -3,7 +3,6 @@ pub(crate) mod design;
 pub(crate) mod design_prompt;
 pub(crate) mod member_introduction;
 pub mod projection;
-pub mod review;
 pub mod start_gate_control;
 pub mod task_board;
 pub(crate) mod team_mcp;

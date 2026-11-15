@@ -9,6 +9,10 @@ struct Row {
     execution: String,
     fence: Fence,
     role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producer_session_ref: Option<String>,
+    #[serde(default)]
+    files: Vec<String>,
     kind: String,
     title: Body,
     content_ref: String,
@@ -18,14 +22,25 @@ struct Row {
     idempotency: String,
     created_at: u64,
 }
-pub(super) fn encode(value: &ArtifactRecord, bodies: &Bodies<'_>) -> Result<Vec<u8>, StoreFault> {
-    serialize(&Row {
+pub(crate) fn encode(
+    team: &TeamId,
+    value: &ArtifactRecord,
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let bodies = Bodies {
+        contents,
+        team,
+        run: GraphRunId::new(value.run_id()),
+    };
+    let payload = serialize(&Row {
         id: value.artifact_id().as_str().to_owned(),
         run: value.run_id().to_owned(),
         node: value.node_id().to_owned(),
         execution: value.node_execution_id().to_owned(),
         fence: Fence::from_domain(value.fence()),
         role: value.role_id().to_owned(),
+        producer_session_ref: value.producer_session_ref().map(|session| session.as_str().to_owned()),
+        files: value.files().to_vec(),
         kind: value.kind().to_owned(),
         title: bodies.put(value.title())?,
         content_ref: value.content_ref().to_owned(),
@@ -43,6 +58,16 @@ pub(super) fn encode(value: &ArtifactRecord, bodies: &Bodies<'_>) -> Result<Vec<
         source_envelope: value.source_envelope_id().to_owned(),
         idempotency: value.idempotency_key().to_owned(),
         created_at: value.created_at(),
+    })?;
+    Ok(StoredRecord {
+        key: RecordKey {
+            kind: RecordKind::Artifact,
+            scope: String::new(),
+            id: value.artifact_id().as_str().to_owned(),
+        },
+        team_id: Some(team.as_str().to_owned()),
+        run_id: Some(value.run_id().to_owned()),
+        payload,
     })
 }
 pub(super) fn decode(bytes: &[u8], bodies: &Bodies<'_>) -> Result<ArtifactRecord, StoreFault> {
@@ -52,7 +77,7 @@ pub(super) fn decode(bytes: &[u8], bodies: &Bodies<'_>) -> Result<ArtifactRecord
         .into_iter()
         .map(|(id, kind)| valid(ArtifactEvidenceProvenance::new(id, kind)))
         .collect::<Result<Vec<_>, _>>()?;
-    valid(ArtifactRecord::new(
+    let record = valid(ArtifactRecord::new(
         valid(ArtifactId::new(row.id))?,
         row.run,
         row.node,
@@ -67,5 +92,9 @@ pub(super) fn decode(bytes: &[u8], bodies: &Bodies<'_>) -> Result<ArtifactRecord
         row.source_envelope,
         row.idempotency,
         row.created_at,
+    ))?;
+    valid(record.with_delivery_files(
+        row.producer_session_ref.map(crate::RoleSessionRef::try_new).map(valid).transpose()?,
+        row.files,
     ))
 }

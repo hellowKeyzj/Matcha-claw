@@ -1,9 +1,12 @@
-use std::{collections::{BTreeMap, BTreeSet}, num::NonZeroU32};
+use std::{collections::{BTreeMap, BTreeSet}, num::{NonZeroU32, NonZeroU64}};
 
 use crate::run::event::{MetadataValue, OpaqueId};
 use sha2::{Digest, Sha256};
 
-use super::definition::{EdgeAction, EdgeId, GraphDefinition, NodeId, NodeKind};
+use super::{
+    definition::{EdgeAction, EdgeId, GraphDefinition, NodeId, NodeKind},
+    execution_control::{BlockedRework, ExecutionControlSnapshot, ReworkCounterKey},
+};
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct AttemptId(String);
@@ -211,6 +214,7 @@ impl InputReceipt {
 pub struct NodeAttempt {
     fence: ExecutionFence,
     number: NonZeroU32,
+    batch_id: NonZeroU64,
     node_id: NodeId,
     node_kind: NodeKind,
     status: AttemptStatus,
@@ -226,6 +230,7 @@ pub struct NodeAttempt {
 pub(crate) struct NodeAttemptDurableInput {
     pub(crate) fence: ExecutionFence,
     pub(crate) number: NonZeroU32,
+    pub(crate) batch_id: NonZeroU64,
     pub(crate) node_id: NodeId,
     pub(crate) node_kind: NodeKind,
     pub(crate) status: AttemptStatus,
@@ -241,6 +246,7 @@ impl NodeAttempt {
         node_id: NodeId,
         node_kind: NodeKind,
         number: NonZeroU32,
+        batch_id: NonZeroU64,
         status: AttemptStatus,
         reason: AttemptReason,
         inputs: Vec<InputReceipt>,
@@ -251,6 +257,7 @@ impl NodeAttempt {
         Self {
             fence: ExecutionFence::new(attempt_id, node_execution_id),
             number,
+            batch_id,
             node_id,
             node_kind,
             status,
@@ -274,6 +281,7 @@ impl NodeAttempt {
         let NodeAttemptDurableInput {
             fence,
             number,
+            batch_id,
             node_id,
             node_kind,
             status,
@@ -286,6 +294,7 @@ impl NodeAttempt {
         Self {
             fence,
             number,
+            batch_id,
             node_id,
             node_kind,
             status,
@@ -303,6 +312,10 @@ impl NodeAttempt {
 
     pub fn number(&self) -> NonZeroU32 {
         self.number
+    }
+
+    pub fn batch_id(&self) -> NonZeroU64 {
+        self.batch_id
     }
 
     pub fn node_id(&self) -> &NodeId {
@@ -337,8 +350,18 @@ impl NodeAttempt {
         self.updated_at
     }
 
+    pub(super) fn assign_batch(&mut self, batch_id: NonZeroU64) {
+        self.batch_id = batch_id;
+    }
+
     pub(crate) fn transition_to(&mut self, status: AttemptStatus, now: u64) {
         self.status = status;
+        self.updated_at = now;
+    }
+
+    pub(super) fn record_gate_inputs(&mut self, inputs: Vec<InputReceipt>, now: u64) {
+        self.reason = AttemptReason::Edge(inputs[0].edge_id().clone());
+        self.inputs = inputs;
         self.updated_at = now;
     }
 
@@ -480,6 +503,7 @@ impl GraphLayout {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct GraphChanges {
     pub(crate) definition: bool,
+    pub(crate) execution_control: bool,
     pub(crate) metadata: BTreeSet<OpaqueId>,
     pub(crate) layout: BTreeSet<NodeId>,
     pub(crate) attempts: BTreeSet<(NodeId, u32)>,
@@ -491,6 +515,7 @@ pub(crate) struct GraphChanges {
 struct GraphMutation {
     changes: GraphChanges,
     definition: Option<GraphDefinition>,
+    execution_control: Option<ExecutionControlSnapshot>,
     metadata: BTreeMap<OpaqueId, Option<MetadataValue>>,
     layout: BTreeMap<NodeId, Option<NodePosition>>,
     attempts: BTreeMap<(NodeId, u32), Option<NodeAttempt>>,
@@ -505,6 +530,9 @@ pub struct GraphState {
     layout: GraphLayout,
     executions: BTreeMap<NodeId, NodeExecutionHistory>,
     ready_queue: Vec<ReadyQueueItem>,
+    next_batch_id: NonZeroU64,
+    rework_counts: BTreeMap<ReworkCounterKey, u32>,
+    blocked_reworks: BTreeMap<NodeId, BlockedRework>,
     mutation: Option<GraphMutation>,
 }
 
@@ -515,6 +543,9 @@ impl PartialEq for GraphState {
             && self.layout == other.layout
             && self.executions == other.executions
             && self.ready_queue == other.ready_queue
+            && self.next_batch_id == other.next_batch_id
+            && self.rework_counts == other.rework_counts
+            && self.blocked_reworks == other.blocked_reworks
     }
 }
 
@@ -543,6 +574,7 @@ impl GraphState {
                 node.id().clone(),
                 node.kind(),
                 NonZeroU32::MIN,
+                NonZeroU64::MIN,
                 status,
                 AttemptReason::Initial,
                 Vec::new(),
@@ -564,6 +596,9 @@ impl GraphState {
             layout,
             executions,
             ready_queue,
+            next_batch_id: NonZeroU64::new(2).expect("initial batch successor"),
+            rework_counts: BTreeMap::new(),
+            blocked_reworks: BTreeMap::new(),
             mutation: None,
         }
     }
@@ -611,6 +646,9 @@ impl GraphState {
         layout: GraphLayout,
         executions: BTreeMap<NodeId, NodeExecutionHistory>,
         ready_queue: Vec<ReadyQueueItem>,
+        next_batch_id: NonZeroU64,
+        rework_counts: BTreeMap<ReworkCounterKey, u32>,
+        blocked_reworks: BTreeMap<NodeId, BlockedRework>,
     ) -> Self {
         Self {
             definition,
@@ -618,8 +656,106 @@ impl GraphState {
             layout,
             executions,
             ready_queue,
+            next_batch_id,
+            rework_counts,
+            blocked_reworks,
             mutation: None,
         }
+    }
+
+    pub(crate) fn validate_execution_control(&self) -> Result<(), ()> {
+        super::execution_control::validate(self)
+    }
+
+    pub fn next_batch_id(&self) -> NonZeroU64 { self.next_batch_id }
+
+    pub fn rework_counts(&self) -> &BTreeMap<ReworkCounterKey, u32> { &self.rework_counts }
+
+    pub fn blocked_reworks(&self) -> &BTreeMap<NodeId, BlockedRework> { &self.blocked_reworks }
+
+    pub fn is_rework_blocked(&self, node_id: &NodeId) -> bool {
+        self.blocked_reworks.contains_key(node_id)
+            || self.blocked_reworks.values().any(|blocked| blocked.scope.binary_search(node_id).is_ok())
+    }
+
+    pub(crate) fn import_execution_control(
+        &mut self,
+        next_batch_id: NonZeroU64,
+        rework_counts: BTreeMap<ReworkCounterKey, u32>,
+        blocked_reworks: BTreeMap<NodeId, BlockedRework>,
+    ) {
+        self.next_batch_id = next_batch_id;
+        self.rework_counts = rework_counts;
+        self.blocked_reworks = blocked_reworks;
+    }
+
+    pub(super) fn remember_execution_control(&mut self) {
+        if let Some(mutation) = &mut self.mutation {
+            mutation.changes.execution_control = true;
+            mutation.execution_control.get_or_insert_with(|| ExecutionControlSnapshot {
+                next_batch_id: self.next_batch_id,
+                rework_counts: self.rework_counts.clone(),
+                blocked_reworks: self.blocked_reworks.clone(),
+            });
+        }
+    }
+
+    pub(super) fn allocate_batch(&mut self) -> Result<NonZeroU64, super::ReduceError> {
+        let next = self.next_batch_id.checked_add(1).ok_or(super::ReduceError::BatchNumberOverflow)?;
+        self.remember_execution_control();
+        let batch = self.next_batch_id;
+        self.next_batch_id = next;
+        Ok(batch)
+    }
+
+    pub(super) fn record_rework(&mut self, key: ReworkCounterKey, used: u32) {
+        self.remember_execution_control();
+        self.rework_counts.insert(key, used);
+    }
+
+    pub(super) fn block_rework(&mut self, blocked: BlockedRework) {
+        self.remember_execution_control();
+        self.blocked_reworks.insert(blocked.source_node_id.clone(), blocked);
+    }
+
+    pub(super) fn remove_blocked_rework(&mut self, source: &NodeId) {
+        if self.blocked_reworks.contains_key(source) {
+            self.remember_execution_control();
+            self.blocked_reworks.remove(source);
+        }
+    }
+
+    pub fn execution_scope(&self, node_id: &NodeId) -> Result<BTreeSet<NodeId>, super::ReduceError> {
+        if self.definition.node(node_id).is_none() {
+            return Err(super::ReduceError::UnknownNode(node_id.clone()));
+        }
+        let mut scope = self.definition.reachable_from(node_id);
+        scope.insert(node_id.clone());
+        Ok(scope)
+    }
+
+    pub fn trigger_scope(&self, start_node_id: &NodeId) -> Result<BTreeSet<NodeId>, super::ReduceError> {
+        let node = self.definition.node(start_node_id)
+            .ok_or_else(|| super::ReduceError::UnknownNode(start_node_id.clone()))?;
+        if !node.is_armed_start() {
+            return Err(super::ReduceError::TriggerNotArmed(start_node_id.clone()));
+        }
+        self.execution_scope(start_node_id)
+    }
+
+    pub fn trigger_busy_nodes(&self, start_node_id: &NodeId) -> Result<BTreeSet<NodeId>, super::ReduceError> {
+        let scope = self.trigger_scope(start_node_id)?;
+        let mut busy = BTreeSet::new();
+        for attempt in self.executions.values().map(NodeExecutionHistory::current).filter(|attempt| {
+            matches!(attempt.status(), AttemptStatus::Ready | AttemptStatus::Running | AttemptStatus::Waiting)
+        }) {
+            busy.extend(self.execution_scope(attempt.node_id())?.intersection(&scope).cloned());
+        }
+        for blocked in self.blocked_reworks.values() {
+            busy.extend(blocked.scope.iter().chain(std::iter::once(&blocked.source_node_id))
+                .filter(|id| scope.contains(*id)).cloned());
+        }
+        Ok(busy)
     }
 
     pub(crate) fn begin_mutation(&mut self) {
@@ -640,6 +776,11 @@ impl GraphState {
         let Some(mutation) = self.mutation.take() else { return };
         if let Some(definition) = mutation.definition {
             self.definition = definition;
+        }
+        if let Some(control) = mutation.execution_control {
+            self.next_batch_id = control.next_batch_id;
+            self.rework_counts = control.rework_counts;
+            self.blocked_reworks = control.blocked_reworks;
         }
         for (key, value) in mutation.metadata {
             match value {
@@ -774,6 +915,7 @@ impl GraphState {
     }
 
     pub(crate) fn replace_with(&mut self, replacement: GraphState) {
+        self.remember_execution_control();
         if let Some(mutation) = &mut self.mutation {
             mutation.changes.definition = true;
             mutation.definition.get_or_insert_with(|| self.definition.clone());
@@ -803,11 +945,17 @@ impl GraphState {
         self.layout = replacement.layout;
         self.executions = replacement.executions;
         self.ready_queue = replacement.ready_queue;
+        self.next_batch_id = replacement.next_batch_id;
+        self.rework_counts = replacement.rework_counts;
+        self.blocked_reworks = replacement.blocked_reworks;
     }
 
     pub(crate) fn validate_changes(&self) -> Result<(), ()> {
         let Some(mutation) = &self.mutation else { return Ok(()) };
         let changes = &mutation.changes;
+        if changes.execution_control || changes.definition || !changes.attempts.is_empty() {
+            super::execution_control::validate(self)?;
+        }
         if changes.definition {
             self.definition.validate_structure().map_err(|_| ())?;
             if self.definition.nodes().len() != self.executions.len()
@@ -820,7 +968,7 @@ impl GraphState {
             let definition = self.definition.node(node).ok_or(())?;
             let fence = AttemptId::for_node(node, attempt.number());
             if attempt.number().get() != *number || attempt.node_id() != node
-                || attempt.node_kind() != definition.kind() || attempt.number() > definition.max_attempts()
+                || attempt.node_kind() != definition.kind()
                 || attempt.fence().attempt_id() != &fence
                 || !attempt
                     .fence()
@@ -835,9 +983,7 @@ impl GraphState {
         }
         if changes.definition {
             for (node, history) in &self.executions {
-                let definition = self.definition.node(node).ok_or(())?;
                 for attempt in history.attempts() {
-                    if attempt.number() > definition.max_attempts() { return Err(()); }
                     super::durable::validate_attempt(self, node, attempt).map_err(|_| ())?;
                 }
             }

@@ -37,9 +37,10 @@ CLI exit   ─→ 进程退出事实 ─→ 所属 Run/Session 结算
 
 - 单个 Rust 进程共用 Tokio 异步运行时；不同 Session 可以独立并行，不为每个 CLI 配专用 OS 线程。
 - CLI 按执行需要启动，同一 Session 多轮复用；不是每个客户端连接或每条 prompt 启动一个新进程。客户端连接不拥有会话进程，断连不自动取消 Run；显式关闭/取消由对应模块处理。
-- 同一原生会话不同时灌入多个独立业务 prompt：原生 print 会合并排队输入。独立 Run 的归属与排队由 Server 保持。
+- 同一原生会话的独立业务 prompt 串行执行：Server 保持 Run 排队，CLI 原命令队列不再合并独立外部输入 UUID。一个外部 root 内可由结构 task-notification 驱动同一主 Agent 多次 ask，保各次实际输入 UUID，直到该 root 通知交接和后台 Agent／Workflow 收尾后只输出一个 result；其他 root 的迟到通知不续执行。[VERIFY: matcha-agent/src/cli/print.ts] [VERIFY: matcha-agent/src/QueryEngine.ts] [VERIFY: matcha-agent/src/query.ts]
 - 控制循环不能等待整次模型执行完才处理消息。审批答复、取消、退出观察与输出读取在执行期间持续可用。
 - 只串行化真正需要有序的会话状态/写入，不用全局业务锁串行全部会话；不持锁等待模型或长工具。
+- Agent 资源写准入由 crate 私有 `AgentScope` 绑定原 Sessions、Agent ID 与同一写租约；活跃检查和整 Agent Session 删除沿绑定执行，不另传裸 guard／Agent。`stable_agent_instances` 返回私有持有作用域与固定集合的 `AgentInstances`；遇 launching 先释放 Execution 与作用域，再等 changed 后重新固定。`skills.configure` 保留该值至配置提交、JoinSet 并发确认和借用 slice 构建收据完成，权限仍走 `Sessions::apply_instance_permissions`，不新增 Agent read、第二快照或实例重启。原 CONTROL_WINDOW、ACK／unconfirmed 和无实例仅保存语义不变。[VERIFY: matcha-agent/app-server/src/session/mod.rs:49] [VERIFY: matcha-agent/app-server/src/session/mod.rs:303] [VERIFY: matcha-agent/app-server/src/session/deletion.rs:252] [VERIFY: matcha-agent/app-server/src/session/instance.rs:13] [VERIFY: matcha-agent/app-server/src/skill.rs:224]
 - 目录扫描、历史解码、压缩/序列化等重计算与阻塞操作不得长期占用异步 I/O 执行线程。
 - 不默认每模块一个 actor/mailbox；并发结构由资源所有权和实际写入竞争决定。
 
@@ -92,6 +93,8 @@ Session → CLI 执行实例 → OS Child
 - 明确区分可回放事实与瞬时更新；若某类增量不能回放，协议必须给出恢复视图的实际方式，不承诺无条件 exactly-once。
 - replay、live subscribe 与客户端恢复点必须形成无漏事件的切换；准确 cursor、去重和过期语义在 events block 冻结。
 - 写盘失败、投影失败、连接发送失败分别处理，不把“写入成功但分发失败”返回成“操作未发生”。
+- SQLite `call` 仅串行写入／读改写；独立 `read` 使用最多两个按需只读连接，多 SELECT 的一致性由业务 owner 的短 Deferred 快照保证。两类访问均先异步取得连接租约，blocking 线程不排队等连接；WAL + FULL 不变。[VERIFY: matcha-agent/app-server/src/persistence/mod.rs]
+- Events 批次在写租约外编码，owned continuation 保全后续持久化；at_ms、persist、seq/head/rows 仍在原写事务，COMMIT 后同步唤醒 watch。replay／usage 等读取将 live/tombstone、head 与 payload 固定在同次快照，不从 watch 水位拼出持久事实。[VERIFY: matcha-agent/app-server/src/events.rs]
 
 ## 6. 背压与性能边界
 

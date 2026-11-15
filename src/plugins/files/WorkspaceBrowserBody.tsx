@@ -23,6 +23,7 @@ interface WorkspaceBrowserBodyProps {
   onPreviewModeChange?: (mode: FilePreviewMode) => void;
   previewHeaderTrailingAccessory?: ReactNode;
   recoveryAction?: ReactNode;
+  preparing?: boolean;
   className?: string;
   browseOnly?: boolean;
 }
@@ -299,6 +300,7 @@ export function WorkspaceBrowserBody({
   onPreviewModeChange,
   previewHeaderTrailingAccessory,
   recoveryAction,
+  preparing = false,
   className,
   browseOnly = false,
 }: WorkspaceBrowserBodyProps) {
@@ -314,7 +316,7 @@ export function WorkspaceBrowserBody({
   const treeVersionRef = useRef(0);
   const loadingPathsRef = useRef<Set<string>>(new Set());
   const effectiveRootPath = formatWorkspacePathForDisplay(rootPath?.trim() || '');
-  const workspaceAgentScope = workspaceContext?.agentScope;
+  const workspaceScope = workspaceContext?.scope;
   const workspaceRootLabel = t('artifacts.workspaceTab');
   const workspaceLayout = useMemo(() => {
     if (availableWidth < WORKSPACE_SPLIT_MIN_WIDTH) {
@@ -374,13 +376,12 @@ export function WorkspaceBrowserBody({
     });
 
     try {
-      if (!workspaceAgentScope) {
+      if (!workspaceScope) {
         return;
       }
       const result = await hostFileListDir(
         {
-          endpoint: workspaceAgentScope.endpoint,
-          agentId: workspaceAgentScope.agentId,
+          scope: workspaceScope,
           relativePath,
         },
         {
@@ -417,7 +418,7 @@ export function WorkspaceBrowserBody({
 
   useEffect(() => {
     setDirectoryError(null);
-    if (!workspaceAgentScope) {
+    if (!workspaceScope || preparing) {
       treeVersionRef.current += 1;
       treeRef.current = null;
       setTreeState({ status: 'idle' });
@@ -438,8 +439,7 @@ export function WorkspaceBrowserBody({
       try {
         const result = await hostFileListDir(
           {
-            endpoint: workspaceAgentScope.endpoint,
-            agentId: workspaceAgentScope.agentId,
+            scope: workspaceScope,
             relativePath: '',
           },
           {
@@ -479,7 +479,7 @@ export function WorkspaceBrowserBody({
       cancelled = true;
       treeVersionRef.current += 1;
     };
-  }, [effectiveRootPath, reloadToken, workspaceAgentScope, workspaceRootLabel]);
+  }, [effectiveRootPath, preparing, reloadToken, workspaceScope, workspaceRootLabel]);
 
   useEffect(() => {
     const workspaceRoot = effectiveRootPath;
@@ -639,7 +639,7 @@ export function WorkspaceBrowserBody({
                 size="icon"
                 className="h-7 w-7 rounded-md"
                 onClick={() => setReloadToken((current) => current + 1)}
-                disabled={!workspaceAgentScope || treeState.status === 'loading'}
+                disabled={!workspaceScope || preparing || treeState.status === 'loading'}
                 title={t('common:actions.refresh', { defaultValue: 'Refresh' })}
                 aria-label={t('common:actions.refresh', { defaultValue: 'Refresh' })}
               >
@@ -651,7 +651,7 @@ export function WorkspaceBrowserBody({
           <div className="min-h-0 flex-1 overflow-auto p-1.5">
             {treeState.status === 'idle' ? (
               <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-                {t('artifacts.workspaceEmpty')}
+                {preparing ? t('artifacts.workspacePreparing') : t('artifacts.workspaceEmpty')}
               </div>
             ) : null}
             {treeState.status === 'loading' ? (

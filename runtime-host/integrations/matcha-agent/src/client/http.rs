@@ -18,14 +18,25 @@ const UNKNOWN: u8 = 1;
 const RECEIVED: u8 = 2;
 
 impl Client {
-    pub async fn read_file(&self, agent_id: &str, path: &str) -> Result<Vec<u8>, Error> {
-        let target = file_target(agent_id, path)?;
+    pub async fn read_file(
+        &self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        path: &str,
+    ) -> Result<Vec<u8>, Error> {
+        let target = file_target(agent_id, session_id, path)?;
         self.http("GET", &target, &[], None, &CancellationToken::new())
             .await
     }
 
-    pub async fn write_file(&self, agent_id: &str, path: &str, bytes: &[u8]) -> Result<(), Error> {
-        let target = file_target(agent_id, path)?;
+    pub async fn write_file(
+        &self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        path: &str,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        let target = file_target(agent_id, session_id, path)?;
         self.http(
             "PUT",
             &target,
@@ -339,13 +350,18 @@ fn delivery(progress: &AtomicU8) -> Delivery {
     }
 }
 
-fn file_target(agent_id: &str, path: &str) -> Result<String, Error> {
+fn file_target(agent_id: &str, session_id: Option<&str>, path: &str) -> Result<String, Error> {
     let agent = segment(agent_id)?;
     if path.is_empty() {
         return Err(Error::local("invalid_params", Delivery::NotSent));
     }
     let path: Vec<_> = path.split('/').map(segment).collect::<Result<_, _>>()?;
-    Ok(format!("/files/{agent}/{}", path.join("/")))
+    let mut target = format!("/files/{agent}/{}", path.join("/"));
+    if let Some(session_id) = session_id {
+        target.push_str("?sessionId=");
+        target.push_str(&segment(session_id)?);
+    }
+    Ok(target)
 }
 
 fn segment(value: &str) -> Result<String, Error> {

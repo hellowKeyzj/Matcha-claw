@@ -12,7 +12,7 @@ pub fn describe(id: &str, scope: &Value) -> Option<Value> {
         return None;
     }
     match (id, scope.get("kind").and_then(Value::as_str)) {
-        ("workspace.file", Some("agent")) => Some(file_descriptor(scope.clone())),
+        ("workspace.file", Some("agent" | "team-run")) => Some(file_descriptor(scope.clone())),
         ("workspace.media", Some("session")) => Some(media_descriptor(scope.clone())),
         _ => None,
     }
@@ -134,7 +134,7 @@ fn runtime_identity_for_scope(
     scope: &Value,
 ) -> Option<runtime_directory::RuntimeDriverIdentity> {
     let endpoint = match (id, scope.get("kind").and_then(Value::as_str)) {
-        ("workspace.file", Some("agent")) => scope.get("endpoint")?,
+        ("workspace.file", Some("agent" | "team-run")) => scope.get("endpoint")?,
         ("workspace.media", Some("session")) => scope.get("identity")?.get("endpoint")?,
         _ => return None,
     };

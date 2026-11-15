@@ -44,7 +44,7 @@ export function ThinkingPart({ segment, itemKey, sessionIdentity, isStreaming, s
   );
 }
 
-export function ToolPart({ segment, toolSlot, collapseVersion, toolSessionIdentity, toolIsImmutable, disclosure, latestBrowserTools, onOpenToolSurface, onRuntimeSendMessage, onRuntimeOpenLink }: MessagePartProps) {
+export function ToolPart({ segment, toolSlot, collapseVersion, toolSessionIdentity, toolIsImmutable, disclosure, latestBrowserTools, onOpenToolSurface, onRuntimeSendMessage, onRuntimeOpenLink, onRefreshMediaTask }: MessagePartProps) {
   if (segment.kind !== 'tool') return null;
   const tool = segment.tool;
   const result = tool.result;
@@ -82,6 +82,7 @@ export function ToolPart({ segment, toolSlot, collapseVersion, toolSessionIdenti
           onOpenToolSurface={onOpenToolSurface}
           onRuntimeSendMessage={toolSessionIdentity ? onRuntimeSendMessage : undefined}
           onRuntimeOpenLink={toolSessionIdentity ? onRuntimeOpenLink : undefined}
+          onRefreshMediaTask={toolSessionIdentity ? onRefreshMediaTask : undefined}
         />
       ) : null}
     </div>

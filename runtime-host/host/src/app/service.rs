@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -22,175 +22,184 @@ pub struct AppInput<R, W> {
     pub control_output: W,
 }
 
-pub async fn run_app_service<R, W>(app: AppInput<R, W>) -> Result<(), ControlError>
+pub fn run_app_service<R, W>(
+    app: AppInput<R, W>,
+) -> Pin<Box<impl Future<Output = Result<(), ControlError>>>>
 where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin,
 {
-    let AppInput {
-        host: input,
-        verifier,
-        provider_credential_resolver,
-        webhook_token,
-        runtime_host_transport_port,
-        control_input,
-        mut control_output,
-    } = app;
-    let mcp = crate::mcp::Discovery::prepare(
-        &input.open_claw.runtime_host_mcp_state_dir,
-        runtime_host_transport_port,
-    )
-    .map_err(|_| ControlError::Transport("MCP discovery"))?;
-    crate::mcp::project_matcha(
-        &input.matcha.storage_root,
-        &input.open_claw.runtime_host_mcp_executable,
-        &input.open_claw.runtime_host_mcp_state_dir,
-    )
-    .map_err(|_| ControlError::Transport("Matcha MCP projection"))?;
-    let verifier = Arc::new(tokio::sync::Mutex::new(verifier));
-    let mut runtime = match runtime::start(input, Arc::clone(&verifier)).await {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            if matches!(
-                error,
-                ControlError::Construction(crate::ConstructionError::ProviderMigration(_))
-            ) {
-                let output = crate::control::wire::Output::StartupFailure(
-                    crate::control::wire::StartupFailure::provider_migration(),
-                );
-                if let Ok(bytes) = crate::control::wire::encode(&output) {
-                    let _ = crate::control::frame::encode(&mut control_output, &bytes).await;
-                }
-            }
-            return Err(error);
-        }
-    };
-
-    let provider_private_resolver =
-        provider_credential_resolver.unwrap_or_else(provider_module::Resolver::disabled);
-    if runtime
-        .handles
-        .provider
-        .configure_private_resolver(provider_private_resolver.clone())
-        .await
-        .is_err()
-    {
-        let _ = shutdown_runtime(&mut runtime).await;
-        return Err(ControlError::Transport("provider credential resolver"));
-    }
-    let provider_private_resolver = Arc::new(provider_private_resolver);
-    if runtime
-        .handles
-        .session
-        .clone()
-        .configure_private_resolver(provider_private_resolver.clone())
-        .await
-        .is_err()
-    {
-        let _ = shutdown_runtime(&mut runtime).await;
-        return Err(ControlError::Transport("session credential resolver"));
-    }
-    if runtime
-        .handles
-        .connector
-        .clone()
-        .configure_private_resolver(provider_private_resolver)
-        .await
-        .is_err()
-    {
-        let _ = shutdown_runtime(&mut runtime).await;
-        return Err(ControlError::Transport("connector credential resolver"));
-    }
-
-    if runtime.handles.security.recover_pending().await.is_err() {
-        let _ = shutdown_runtime(&mut runtime).await;
-        return Err(ControlError::Transport("security emergency recovery"));
-    }
-    let install_plan = prepare_module_install(InstallModulesInput {
-        handles: &runtime.handles,
-        verifier: Arc::clone(&verifier),
-        webhook_token,
-        mcp: mcp.descriptor(
-            runtime.handles.organization.clone(),
-            runtime.handles.runtime_directory.clone(),
-            runtime.handles.wiki.handle().clone(),
-            crate::composition::host::ports::maintenance::from_handles(&runtime.handles),
-        ),
-    });
-    let route_snapshot = install_plan.route_snapshot();
-    let router = crate::http::Router::new(route_snapshot.clone());
-    if let Err(error) = runtime
-        .host_mut()
-        .register_route_effects(&route_snapshot, router.clone())
-    {
-        let _ = shutdown_runtime(&mut runtime).await;
-        return Err(ControlError::ModuleInstall(error));
-    }
-    let private_control_catalog =
-        match install_plan.install(&runtime.host_mut().module_effect_registrations()) {
-            Ok(snapshot) => snapshot,
+    Box::pin(async move {
+        let AppInput {
+            host: input,
+            verifier,
+            provider_credential_resolver,
+            webhook_token,
+            runtime_host_transport_port,
+            control_input,
+            mut control_output,
+        } = app;
+        let mcp = crate::mcp::Discovery::prepare(
+            &input.open_claw.runtime_host_mcp_state_dir,
+            runtime_host_transport_port,
+        )
+        .map_err(|_| ControlError::Transport("MCP discovery"))?;
+        crate::mcp::project_matcha(
+            &input.matcha.storage_root,
+            &input.open_claw.runtime_host_mcp_executable,
+            &input.open_claw.runtime_host_mcp_state_dir,
+        )
+        .map_err(|_| ControlError::Transport("Matcha MCP projection"))?;
+        let verifier = Arc::new(tokio::sync::Mutex::new(verifier));
+        let mut runtime = match runtime::start(input, Arc::clone(&verifier)).await {
+            Ok(runtime) => runtime,
             Err(error) => {
-                let _ = shutdown_runtime(&mut runtime).await;
-                return Err(ControlError::ModuleInstall(error));
+                if matches!(
+                    error,
+                    ControlError::Construction(crate::ConstructionError::ProviderMigration(_))
+                ) {
+                    let output = crate::control::wire::Output::StartupFailure(
+                        crate::control::wire::StartupFailure::provider_migration(),
+                    );
+                    if let Ok(bytes) = crate::control::wire::encode(&output) {
+                        let _ = crate::control::frame::encode(&mut control_output, &bytes).await;
+                    }
+                }
+                return Err(error);
             }
         };
-    let private_control = PrivateControlRegistry::from_snapshot(
-        private_control_catalog,
-        runtime.handles.world.clone(),
-        runtime.handles.world_authority.clone(),
-        runtime.handles.world_storage.clone(),
-    );
-    let http_server = match crate::http::Server::bind(runtime_host_transport_port, router).await {
-        Ok(transport) => transport,
-        Err(_) => {
-            let _ = shutdown_runtime(&mut runtime).await;
-            return Err(ControlError::Transport("http server"));
-        }
-    };
-    if let Some(credentials) = runtime.handles.sealed_resource.matcha_reader_credentials() {
-        let source = match matcha_agent::sealed::ReaderSource::new(
-            format!("http://{}", http_server.local_addr()),
-            credentials.token().to_owned(),
-        ) {
-            Ok(source) => source,
-            Err(_) => {
-                let _ = shutdown_runtime(&mut runtime).await;
-                return Err(ControlError::Transport("sealed reader source"));
-            }
-        };
+
+        let provider_private_resolver =
+            provider_credential_resolver.unwrap_or_else(provider_module::Resolver::disabled);
         if runtime
             .handles
-            .matcha_agent
-            .set_sealed_reader_source(source)
+            .provider
+            .configure_private_resolver(provider_private_resolver.clone())
+            .await
             .is_err()
         {
             let _ = shutdown_runtime(&mut runtime).await;
-            return Err(ControlError::Transport("sealed reader source"));
+            return Err(ControlError::Transport("provider credential resolver"));
         }
-    }
-    runtime.spawn_owner();
-    if mcp.publish().is_err() {
-        let _ = shutdown_runtime(&mut runtime).await;
-        return Err(ControlError::Transport("MCP discovery"));
-    }
-    let (mut http_server, http_completion) = http_server.into_scoped_extension();
-    runtime.http_completion = Some(http_completion);
-    let result =
-        runtime::run_private_control(&mut runtime, private_control, control_input, control_output)
-            .await;
-    trace_service_result("control", &result);
-    http_server.dispose_all_lifo().await;
-    let http_result = match runtime.http_completion.take() {
-        Some(completion) => match completion.await {
-            Ok(Ok(())) => Ok(()),
-            _ => Err(ControlError::Transport("http server")),
-        },
-        None => Ok(()),
-    };
-    trace_service_result("http", &http_result);
-    let shutdown = shutdown_runtime(&mut runtime).await;
-    trace_service_result("shutdown", &shutdown);
-    result.and(http_result).and(shutdown)
+        let provider_private_resolver = Arc::new(provider_private_resolver);
+        if runtime
+            .handles
+            .session
+            .clone()
+            .configure_private_resolver(provider_private_resolver.clone())
+            .await
+            .is_err()
+        {
+            let _ = shutdown_runtime(&mut runtime).await;
+            return Err(ControlError::Transport("session credential resolver"));
+        }
+        if runtime
+            .handles
+            .connector
+            .clone()
+            .configure_private_resolver(provider_private_resolver)
+            .await
+            .is_err()
+        {
+            let _ = shutdown_runtime(&mut runtime).await;
+            return Err(ControlError::Transport("connector credential resolver"));
+        }
+
+        if runtime.handles.security.recover_pending().await.is_err() {
+            let _ = shutdown_runtime(&mut runtime).await;
+            return Err(ControlError::Transport("security emergency recovery"));
+        }
+        let install_plan = prepare_module_install(InstallModulesInput {
+            handles: &runtime.handles,
+            verifier: Arc::clone(&verifier),
+            webhook_token,
+            mcp: mcp.descriptor(
+                runtime.handles.organization.clone(),
+                runtime.handles.runtime_directory.clone(),
+                runtime.handles.wiki.handle().clone(),
+                crate::composition::host::ports::maintenance::from_handles(&runtime.handles),
+            ),
+        });
+        let route_snapshot = install_plan.route_snapshot();
+        let router = crate::http::Router::new(route_snapshot.clone());
+        if let Err(error) = runtime
+            .host_mut()
+            .register_route_effects(&route_snapshot, router.clone())
+        {
+            let _ = shutdown_runtime(&mut runtime).await;
+            return Err(ControlError::ModuleInstall(error));
+        }
+        let private_control_catalog =
+            match install_plan.install(&runtime.host_mut().module_effect_registrations()) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let _ = shutdown_runtime(&mut runtime).await;
+                    return Err(ControlError::ModuleInstall(error));
+                }
+            };
+        let private_control = PrivateControlRegistry::from_snapshot(
+            private_control_catalog,
+            runtime.handles.world.clone(),
+            runtime.handles.world_authority.clone(),
+            runtime.handles.world_storage.clone(),
+        );
+        let http_server = match crate::http::Server::bind(runtime_host_transport_port, router).await
+        {
+            Ok(transport) => transport,
+            Err(_) => {
+                let _ = shutdown_runtime(&mut runtime).await;
+                return Err(ControlError::Transport("http server"));
+            }
+        };
+        if let Some(credentials) = runtime.handles.sealed_resource.matcha_reader_credentials() {
+            let source = match matcha_agent::sealed::ReaderSource::new(
+                format!("http://{}", http_server.local_addr()),
+                credentials.token().to_owned(),
+            ) {
+                Ok(source) => source,
+                Err(_) => {
+                    let _ = shutdown_runtime(&mut runtime).await;
+                    return Err(ControlError::Transport("sealed reader source"));
+                }
+            };
+            if runtime
+                .handles
+                .matcha_agent
+                .set_sealed_reader_source(source)
+                .is_err()
+            {
+                let _ = shutdown_runtime(&mut runtime).await;
+                return Err(ControlError::Transport("sealed reader source"));
+            }
+        }
+        runtime.spawn_owner();
+        if mcp.publish().is_err() {
+            let _ = shutdown_runtime(&mut runtime).await;
+            return Err(ControlError::Transport("MCP discovery"));
+        }
+        let (mut http_server, http_completion) = http_server.into_scoped_extension();
+        runtime.http_completion = Some(http_completion);
+        let result = runtime::run_private_control(
+            &mut runtime,
+            private_control,
+            control_input,
+            control_output,
+        )
+        .await;
+        trace_service_result("control", &result);
+        http_server.dispose_all_lifo().await;
+        let http_result = match runtime.http_completion.take() {
+            Some(completion) => match completion.await {
+                Ok(Ok(())) => Ok(()),
+                _ => Err(ControlError::Transport("http server")),
+            },
+            None => Ok(()),
+        };
+        trace_service_result("http", &http_result);
+        let shutdown = shutdown_runtime(&mut runtime).await;
+        trace_service_result("shutdown", &shutdown);
+        result.and(http_result).and(shutdown)
+    })
 }
 
 fn trace_service_result(source: &'static str, result: &Result<(), ControlError>) {

@@ -1,3 +1,4 @@
+use futures_util::future::BoxFuture;
 use platform::capability::CapabilityDecisionVerifier;
 
 pub(crate) mod handler;
@@ -415,25 +416,29 @@ fn mutation_body(result: &crate::application::task_board::MutationResult) -> Val
     Value::Object(body)
 }
 
-pub(crate) async fn handle(owner: &OrganizationHandle, request: Request) -> Delivery {
+pub(crate) fn handle(owner: &OrganizationHandle, request: Request) -> BoxFuture<'_, Delivery> {
     match request {
-        Request::Read { team_id, run_id } => owner
-            .task_board_read(team_id.clone(), run_id.clone())
-            .await
-            .map(|facts| Delivery::Read(project(&facts, &team_id, &run_id)))
-            .unwrap_or(Delivery::Unavailable),
+        Request::Read { team_id, run_id } => Box::pin(async move {
+            owner
+                .task_board_read(team_id.clone(), run_id.clone())
+                .await
+                .map(|facts| Delivery::Read(project(&facts, &team_id, &run_id)))
+                .unwrap_or(Delivery::Unavailable)
+        }),
         Request::Mutate {
             team_id,
             run_id,
             operation,
-        } => match owner.task_board_mutate(team_id, run_id, operation).await {
-            Ok(Ok(result)) => Delivery::Mutated(result),
-            Ok(Err(crate::application::task_board::MutationError::Rejected)) => Delivery::Rejected,
-            Ok(Err(crate::application::task_board::MutationError::Store(
-                crate::StoreFault::CommitOutcomeUnknown(_) | crate::StoreFault::RecoveryRequired,
-            ))) => Delivery::OutcomeUnknown,
-            Ok(Err(crate::application::task_board::MutationError::Store(_))) | Err(_) => Delivery::Unavailable,
-        },
+        } => Box::pin(async move {
+            match owner.task_board_mutate(team_id, run_id, operation).await {
+                Ok(Ok(result)) => Delivery::Mutated(result),
+                Ok(Err(crate::application::task_board::MutationError::Rejected)) => Delivery::Rejected,
+                Ok(Err(crate::application::task_board::MutationError::Store(
+                    crate::StoreFault::CommitOutcomeUnknown(_) | crate::StoreFault::RecoveryRequired,
+                ))) => Delivery::OutcomeUnknown,
+                Ok(Err(crate::application::task_board::MutationError::Store(_))) | Err(_) => Delivery::Unavailable,
+            }
+        }),
     }
 }
 

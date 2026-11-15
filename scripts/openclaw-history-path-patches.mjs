@@ -63,6 +63,9 @@ export function patchHistoryPathReaders(source) {
     source = replace(source, '\t\tif (maxMessages === 0 || maxLines === 0) return {\n\t\t\tactiveLeafEntryId: projection.state.leafEventId,', '\t\tif (maxMessages === 0 || maxLines === 0) return {\n\t\t\thistoryPath,\n\t\t\tactiveLeafEntryId: projection.state.leafEventId,');
     source = replace(source, '\t\treturn {\n\t\t\tactiveLeafEntryId: projection.state.leafEventId,\n\t\t\t...deltaCursor', '\t\treturn {\n\t\t\thistoryPath,\n\t\t\tactiveLeafEntryId: projection.state.leafEventId,\n\t\t\t...deltaCursor');
     source = replace(source, '\t\t\tevents: readVisibleHistoryRange(projection, boundedStart, endExclusive, history),', '\t\t\thistoryPath: readHistoryPath(projection, options.historyAnchor),\n\t\t\tevents: readVisibleHistoryRange(projection, boundedStart, endExclusive, history),');
+    source = replace(source, '\t\tconst anchor = resolveHistoryEventById(projection, options.messageId, history);', '\t\tconst historyPath = readHistoryPath(projection, options.historyAnchor);\n\t\tconst anchor = resolveHistoryEventById(projection, options.messageId, history);');
+    source = replace(source, '\t\tif (!anchor) return {\n\t\t\tevents: [],', '\t\tif (!anchor) return {\n\t\t\thistoryPath,\n\t\t\tevents: [],');
+    source = replace(source, '\t\t\tevents: readVisibleHistoryRange(projection, readStart, endExclusive, history),', '\t\t\thistoryPath,\n\t\t\tevents: readVisibleHistoryRange(projection, readStart, endExclusive, history),');
     source = replace(source, '\tconst defaultMaxLines = maxMessages * 20 + 20;\n\treturn {', '\tconst defaultMaxLines = maxMessages * 20 + 20;\n\treturn {\n\t\thistoryAnchor: opts?.historyAnchor,');
     source = replace(source, '\t\t...page.deltaCursor ? { deltaCursor: page.deltaCursor } : {},', '\t\thistoryPath: page.historyPath,\n\t\t...page.deltaCursor ? { deltaCursor: page.deltaCursor } : {},');
     source = replace(source, 'const { activeLeafEntryId, deltaCursor, displaySource, messages, transcriptEvents, totalMessages } = await readRecentSqliteMessageRecords', 'const { activeLeafEntryId, deltaCursor, displaySource, historyPath, messages, transcriptEvents, totalMessages } = await readRecentSqliteMessageRecords');
@@ -75,8 +78,25 @@ export function patchHistoryPathReaders(source) {
 
 export function patchHistoryPathTail(source) {
   return sealedTransform(source, (source) => {
+    source = replace(source, '\treturn {\n\t\tfound: true,\n\t\tdisplaySource: page.displaySource,', '\treturn {\n\t\thistoryPath: page.historyPath,\n\t\tfound: true,\n\t\tdisplaySource: page.displaySource,');
+    source = replace(source, 'async function readAdjacentChatHistoryMessages(params) {', `function matchesChatHistoryAnchor(page, anchor) {
+	const current = page.historyPath?.anchor;
+	return anchor === void 0 || current !== void 0 && current.sessionId === anchor.sessionId && current.generation === anchor.generation && current.leafEntryId === anchor.leafEntryId;
+}
+async function readAdjacentChatHistoryMessages(params) {`);
+    source = replace(source, '\t\tmessageId: params.anchorId,', '\t\thistoryAnchor: params.historyAnchor,\n\t\tmessageId: params.anchorId,');
+    source = replace(source, 'if (!page.found || page.displaySource !== params.displaySource) throw new SessionTranscriptProjectionUnavailableError(params.readScope.sessionId);', 'if (!page.found || page.displaySource !== params.displaySource || !matchesChatHistoryAnchor(page, params.historyAnchor)) throw new SessionTranscriptProjectionUnavailableError(params.readScope.sessionId);');
+    source = replace(source, '\t\t\tanchorId,\n\t\t\tdirection: "newer",', '\t\t\thistoryAnchor: params.historyAnchor,\n\t\t\tanchorId,\n\t\t\tdirection: "newer",');
     source = replace(source, 'const readPage = offset === 0 ? await readRecentSessionMessagesWithStatsAsync(params.readScope, {', 'const readPage = offset === 0 ? await readRecentSessionMessagesWithStatsAsync(params.readScope, {\n\t\thistoryAnchor: params.historyAnchor,');
-    source = replace(source, 'if (page.displaySource !== readPage.displaySource) throw new SessionTranscriptProjectionUnavailableError(params.readScope.sessionId);', 'if (page.displaySource !== readPage.displaySource || offset === 0 && (page.historyPath?.anchor.sessionId !== readPage.historyPath?.anchor.sessionId || page.historyPath?.anchor.generation !== readPage.historyPath?.anchor.generation || page.historyPath?.anchor.leafEntryId !== readPage.historyPath?.anchor.leafEntryId)) throw new SessionTranscriptProjectionUnavailableError(params.readScope.sessionId);');
+    source = replace(source, '}) : await readSessionMessagesPageWithStatsAsync(params.readScope, {\n\t\toffset,', '}) : await readSessionMessagesPageWithStatsAsync(params.readScope, {\n\t\thistoryAnchor: params.historyAnchor,\n\t\toffset,');
+    source = replace(source, '\tconst sessionStartedAt = typeof params.entry?.sessionStartedAt', '\tconst historyAnchor = readPage.historyPath?.anchor;\n\tconst sessionStartedAt = typeof params.entry?.sessionStartedAt');
+    source = replace(source, 'recoveryContext = await readChatHistoryRecoveryContext({\n\t\t\tmessages:', 'recoveryContext = await readChatHistoryRecoveryContext({\n\t\t\thistoryAnchor,\n\t\t\tmessages:');
+    source = replace(source, 'messages: await readAdjacentChatHistoryMessages({\n\t\t\t\tanchorId:', 'messages: await readAdjacentChatHistoryMessages({\n\t\t\t\thistoryAnchor,\n\t\t\t\tanchorId:');
+    source = replace(source, '} : await readSessionMessagesPageWithStatsAsync(params.readScope, {\n\t\t\toffset: offset + rawPageMessages,', '} : await readSessionMessagesPageWithStatsAsync(params.readScope, {\n\t\t\thistoryAnchor,\n\t\t\toffset: offset + rawPageMessages,');
+    source = replace(source, [
+      'if (page.displaySource !== readPage.displaySource) throw new SessionTranscriptProjectionUnavailableError(params.readScope.sessionId);',
+      'if (page.displaySource !== readPage.displaySource || offset === 0 && (page.historyPath?.anchor.sessionId !== readPage.historyPath?.anchor.sessionId || page.historyPath?.anchor.generation !== readPage.historyPath?.anchor.generation || page.historyPath?.anchor.leafEntryId !== readPage.historyPath?.anchor.leafEntryId)) throw new SessionTranscriptProjectionUnavailableError(params.readScope.sessionId);',
+    ], 'if (page.displaySource !== readPage.displaySource || !matchesChatHistoryAnchor(page, historyAnchor)) throw new SessionTranscriptProjectionUnavailableError(params.readScope.sessionId);');
     return source;
   });
 }
@@ -89,7 +109,10 @@ export function patchHistoryPathChat(source) {
     source = replace(source, 'effectiveMaxChars, offset, messageId } = params;', 'effectiveMaxChars, offset, messageId, historyAnchor } = params;');
     source = replace(source, 'incrementalTail = await readIncrementalChatHistoryTail({\n\t\t\t\tentry,', 'incrementalTail = await readIncrementalChatHistoryTail({\n\t\t\t\thistoryAnchor,\n\t\t\t\tentry,');
     source = replace(source, 'const incrementalTail = await readIncrementalChatHistoryTail({\n\t\tentry,', 'const incrementalTail = await readIncrementalChatHistoryTail({\n\t\thistoryAnchor,\n\t\tentry,');
-    source = replace(source, '\t\t\t...isTailPage ? {\n\t\t\t\tactiveLeafEntryId:', '\t\t\t...isTailPage ? {\n\t\t\t\t...readPage.historyPath ? { historyPath: readPage.historyPath } : {},\n\t\t\t\tactiveLeafEntryId:');
+    source = replace(source, [
+      '\t\t\t...isTailPage ? {\n\t\t\t\tactiveLeafEntryId:',
+      '\t\t\t...isTailPage ? {\n\t\t\t\t...readPage.historyPath ? { historyPath: readPage.historyPath } : {},\n\t\t\t\tactiveLeafEntryId:',
+    ], '\t\t\t...readPage.historyPath ? { historyPath: readPage.historyPath } : {},\n\t\t\t...isTailPage ? {\n\t\t\t\tactiveLeafEntryId:');
     source = replace(source, '\treturn {\n\t\tactiveLeafEntryId,\n\t\t...readPage.transcriptSource', '\treturn {\n\t\tactiveLeafEntryId,\n\t\t...readPage.historyPath ? { historyPath: readPage.historyPath } : {},\n\t\t...readPage.transcriptSource');
     source = replace(source, 'maxChars, maxBytes, pendingBefore, inputRunIds } = params;', 'maxChars, maxBytes, pendingBefore, inputRunIds, historyAnchor } = params;');
     source = replace(source, '\t\t\tentry: historyEntry,\n\t\t\tprovider:', '\t\t\thistoryAnchor,\n\t\t\tentry: historyEntry,\n\t\t\tprovider:');
@@ -98,7 +121,8 @@ export function patchHistoryPathChat(source) {
     source = replace(source, [
       '\t\t} : {},\n\t\t...historyPage.deltaCursor ? { deltaCursor: historyPage.deltaCursor } : {},',
       '\t\t} : {},\n\t\t...historyPage.historyPath ? { historyPath: historyPage.historyPath } : {},\n\t\t...historyPage.deltaCursor ? { deltaCursor: historyPage.deltaCursor } : {},',
-    ], '\t\t} : {},\n\t\t...messageId === void 0 && (offset ?? 0) === 0 ? { historyPath: historyPage.historyPath ?? null } : {},\n\t\t...historyPage.deltaCursor ? { deltaCursor: historyPage.deltaCursor } : {},');
+      '\t\t} : {},\n\t\t...messageId === void 0 && (offset ?? 0) === 0 ? { historyPath: historyPage.historyPath ?? null } : {},\n\t\t...historyPage.deltaCursor ? { deltaCursor: historyPage.deltaCursor } : {},',
+    ], '\t\t} : {},\n\t\t...messageId === void 0 && ((offset ?? 0) === 0 || historyAnchor !== void 0) ? { historyPath: historyPage.historyPath ?? null } : {},\n\t\t...historyPage.deltaCursor ? { deltaCursor: historyPage.deltaCursor } : {},');
     return source;
   });
 }
@@ -121,20 +145,38 @@ export function patchHistoryPathWorker(source) {
     source = replace(source, 'if(Pn===0||Fn===0)return{activeLeafEntryId:Ot.state.leafEventId,', 'if(Pn===0||Fn===0)return{historyPath,activeLeafEntryId:Ot.state.leafEventId,');
     source = replace(source, 'Jn=resolveRecentHistoryStart(Ot,Math.max(0,_n.total-Fn),_n.total,_n,Ln,Pn);return{activeLeafEntryId:', 'Jn=resolveRecentHistoryStart(Ot,Math.max(0,_n.total-Fn),_n.total,_n,Ln,Pn);return{historyPath,activeLeafEntryId:');
     source = replace(source, 'events:readVisibleHistoryRange(Ot,Ln,Pn,_n),', 'historyPath:readHistoryPath(Ot,Zt.historyAnchor),events:readVisibleHistoryRange(Ot,Ln,Pn,_n),');
+    source = replace(source, 'Dn=resolveHistoryEventById(Ot,Zt.messageId,_n);if(!Dn)return{events:[],found:!1,', 'Dn=resolveHistoryEventById(Ot,Zt.messageId,_n),historyPath=readHistoryPath(Ot,Zt.historyAnchor);if(!Dn)return{historyPath,events:[],found:!1,');
+    source = replace(source, 'return{events:readVisibleHistoryRange(Ot,pr,cr,_n),found:!0,', 'return{historyPath,events:readVisibleHistoryRange(Ot,pr,cr,_n),found:!0,');
     source = replace(source, 'Dn=Zt*20+20;return{maxMessages:Zt,', 'Dn=Zt*20+20;return{historyAnchor:Ot?.historyAnchor,maxMessages:Zt,');
     source = replace(source, '...Dn.deltaCursor?{deltaCursor:Dn.deltaCursor}:{},displaySource:Dn.displaySource,messages:projectSqliteHistoryEvents(Dn.events)', 'historyPath:Dn.historyPath,...Dn.deltaCursor?{deltaCursor:Dn.deltaCursor}:{},displaySource:Dn.displaySource,messages:projectSqliteHistoryEvents(Dn.events)');
     source = replace(source, '{activeLeafEntryId:Dn,deltaCursor:kn,displaySource:Pn,messages:Fn,transcriptEvents:Ln,totalMessages:Jn}=await readRecentSqliteMessageRecords', '{activeLeafEntryId:Dn,deltaCursor:kn,displaySource:Pn,historyPath,messages:Fn,transcriptEvents:Ln,totalMessages:Jn}=await readRecentSqliteMessageRecords');
     source = replace(source, 'return Jn===0&&Fn.length===0&&Zt.allowResetArchiveFallback===!0?await archivedTranscriptReader(_n).readRecentWithStats({...Zt,resetArchiveOnly:!0}):{...Dn===void 0?{}:{activeLeafEntryId:Dn}', 'if(Jn===0&&Fn.length===0&&Zt.allowResetArchiveFallback===!0){const archived=await archivedTranscriptReader(_n).readRecentWithStats({...Zt,resetArchiveOnly:!0});if(archived.transcriptSource!==void 0)return archived;}return{historyPath,...Dn===void 0?{}:{activeLeafEntryId:Dn}');
     source = replace(source, '...Dn.olderOffset===void 0?{}:{olderOffset:Dn.olderOffset},', 'historyPath:Dn.historyPath,...Dn.olderOffset===void 0?{}:{olderOffset:Dn.olderOffset},');
+    source = replace(source, 'return kn.found?{found:!0,displaySource:kn.displaySource,', 'return kn.found?{historyPath:kn.historyPath,found:!0,displaySource:kn.displaySource,');
+    source = replace(source, 'async function readAdjacentChatHistoryMessages(Ot){', 'function matchesChatHistoryAnchor(page,anchor){const current=page.historyPath?.anchor;return anchor===void 0||current!==void 0&&current.sessionId===anchor.sessionId&&current.generation===anchor.generation&&current.leafEntryId===anchor.leafEntryId}async function readAdjacentChatHistoryMessages(Ot){');
+    source = replace(source, 'readSessionMessagesAroundIdWithStatsAsync(Ot.readScope,{messageId:Ot.anchorId,', 'readSessionMessagesAroundIdWithStatsAsync(Ot.readScope,{historyAnchor:Ot.historyAnchor,messageId:Ot.anchorId,');
+    source = replace(source, 'if(!Zt.found||Zt.displaySource!==Ot.displaySource)throw new SessionTranscriptProjectionUnavailableError(Ot.readScope.sessionId);', 'if(!Zt.found||Zt.displaySource!==Ot.displaySource||!matchesChatHistoryAnchor(Zt,Ot.historyAnchor))throw new SessionTranscriptProjectionUnavailableError(Ot.readScope.sessionId);');
+    source = replace(source, 'readAdjacentChatHistoryMessages({anchorId:_n,direction:`newer`,', 'readAdjacentChatHistoryMessages({historyAnchor:Ot.historyAnchor,anchorId:_n,direction:`newer`,');
     source = replace(source, 'kn=Zt===0?await readRecentSessionMessagesWithStatsAsync(Ot.readScope,{maxMessages:Dn+1,', 'kn=Zt===0?await readRecentSessionMessagesWithStatsAsync(Ot.readScope,{historyAnchor:Ot.historyAnchor,maxMessages:Dn+1,');
-    source = replace(source, 'if(pr.displaySource!==kn.displaySource)throw new SessionTranscriptProjectionUnavailableError(Ot.readScope.sessionId);', 'if(pr.displaySource!==kn.displaySource||Zt===0&&(pr.historyPath?.anchor.sessionId!==kn.historyPath?.anchor.sessionId||pr.historyPath?.anchor.generation!==kn.historyPath?.anchor.generation||pr.historyPath?.anchor.leafEntryId!==kn.historyPath?.anchor.leafEntryId))throw new SessionTranscriptProjectionUnavailableError(Ot.readScope.sessionId);');
+    source = replace(source, 'readSessionMessagesPageWithStatsAsync(Ot.readScope,{offset:Zt,', 'readSessionMessagesPageWithStatsAsync(Ot.readScope,{historyAnchor:Ot.historyAnchor,offset:Zt,');
+    source = replace(source, 'Pn=typeof Ot.entry?.sessionStartedAt==`number`', 'historyAnchor=kn.historyPath?.anchor,Pn=typeof Ot.entry?.sessionStartedAt==`number`');
+    source = replace(source, 'cr=await readChatHistoryRecoveryContext({messages:Zt.filteredRawMessages,', 'cr=await readChatHistoryRecoveryContext({historyAnchor,messages:Zt.filteredRawMessages,');
+    source = replace(source, 'readAdjacentChatHistoryMessages({anchorId:Pn,direction:`older`,', 'readAdjacentChatHistoryMessages({historyAnchor,anchorId:Pn,direction:`older`,');
+    source = replace(source, 'readSessionMessagesPageWithStatsAsync(Ot.readScope,{offset:Zt+Fn,', 'readSessionMessagesPageWithStatsAsync(Ot.readScope,{historyAnchor,offset:Zt+Fn,');
+    source = replace(source, [
+      'if(pr.displaySource!==kn.displaySource)throw new SessionTranscriptProjectionUnavailableError(Ot.readScope.sessionId);',
+      'if(pr.displaySource!==kn.displaySource||Zt===0&&(pr.historyPath?.anchor.sessionId!==kn.historyPath?.anchor.sessionId||pr.historyPath?.anchor.generation!==kn.historyPath?.anchor.generation||pr.historyPath?.anchor.leafEntryId!==kn.historyPath?.anchor.leafEntryId))throw new SessionTranscriptProjectionUnavailableError(Ot.readScope.sessionId);',
+    ], 'if(pr.displaySource!==kn.displaySource||!matchesChatHistoryAnchor(pr,historyAnchor))throw new SessionTranscriptProjectionUnavailableError(Ot.readScope.sessionId);');
     source = replace(source, '_n=readTranscriptDisplayDelta(Ot.scope,{cursor:Ot.cursor,', '_n=readTranscriptDisplayDelta(Ot.scope,{historyAnchor:Ot.historyAnchor,cursor:Ot.cursor,');
     source = replace(source, 'if(_n.kind!==`page`||_n.hasMore||containsTranscriptDiscontinuity(_n))return{kind:`reset`};', 'if(_n.kind!==`page`||_n.hasMore||containsTranscriptDiscontinuity(_n)||_n.historyPath?.relation===`reset`||_n.historyPath?.relation===`off-path`)return{kind:`reset`,..._n.historyPath?{historyPath:_n.historyPath}:{}};');
     source = replace(source, 'return{activeLeafEntryId:_n.activeLeafEntryId,deltaCursor:_n.cursor,kind:`delta`,', 'return{activeLeafEntryId:_n.activeLeafEntryId,historyPath:_n.historyPath,deltaCursor:_n.cursor,kind:`delta`,');
     source = replace(source, 'effectiveMaxChars:cr,offset:pr,messageId:xr}=Ot;', 'effectiveMaxChars:cr,offset:pr,messageId:xr,historyAnchor}=Ot;');
     source = replace(source, 'kn=await readIncrementalChatHistoryTail({entry:Zt,readScope:Mr,', 'kn=await readIncrementalChatHistoryTail({historyAnchor,entry:Zt,readScope:Mr,');
     source = replace(source, 'let Br=await readIncrementalChatHistoryTail({entry:Zt,readScope:Mr,', 'let Br=await readIncrementalChatHistoryTail({historyAnchor,entry:Zt,readScope:Mr,');
-    source = replace(source, '...Pn?{activeLeafEntryId:resolveChatHistoryActiveLeafEntryId(Dn),', '...Pn?{...Dn.historyPath?{historyPath:Dn.historyPath}:{},activeLeafEntryId:resolveChatHistoryActiveLeafEntryId(Dn),');
+    source = replace(source, [
+      '...Pn?{activeLeafEntryId:resolveChatHistoryActiveLeafEntryId(Dn),',
+      '...Pn?{...Dn.historyPath?{historyPath:Dn.historyPath}:{},activeLeafEntryId:resolveChatHistoryActiveLeafEntryId(Dn),',
+    ], '...Dn.historyPath?{historyPath:Dn.historyPath}:{},...Pn?{activeLeafEntryId:resolveChatHistoryActiveLeafEntryId(Dn),');
     source = replace(source, 'return{activeLeafEntryId:mi,...Hr.transcriptSource===`active`', 'return{activeLeafEntryId:mi,...Hr.historyPath?{historyPath:Hr.historyPath}:{},...Hr.transcriptSource===`active`');
     source = replace(source, 'maxChars:xr,maxBytes:Mr,pendingBefore:Pr,inputRunIds:Br}=Ot;', 'maxChars:xr,maxBytes:Mr,pendingBefore:Pr,inputRunIds:Br,historyAnchor}=Ot;');
     source = replace(source, '()=>readChatHistoryPage({entry:sa,provider:ca.provider,', '()=>readChatHistoryPage({historyAnchor,entry:sa,provider:ca.provider,');
@@ -143,7 +185,8 @@ export function patchHistoryPathWorker(source) {
     source = replace(source, [
       'inputConsumptions:ma}:{},...ha.deltaCursor?{deltaCursor:ha.deltaCursor}:{},',
       'inputConsumptions:ma}:{},...ha.historyPath?{historyPath:ha.historyPath}:{},...ha.deltaCursor?{deltaCursor:ha.deltaCursor}:{},',
-    ], 'inputConsumptions:ma}:{},...cr===void 0&&(Ln??0)===0?{historyPath:ha.historyPath??null}:{},...ha.deltaCursor?{deltaCursor:ha.deltaCursor}:{},');
+      'inputConsumptions:ma}:{},...cr===void 0&&(Ln??0)===0?{historyPath:ha.historyPath??null}:{},...ha.deltaCursor?{deltaCursor:ha.deltaCursor}:{},',
+    ], 'inputConsumptions:ma}:{},...cr===void 0&&((Ln??0)===0||historyAnchor!==void 0)?{historyPath:ha.historyPath??null}:{},...ha.deltaCursor?{deltaCursor:ha.deltaCursor}:{},');
     source = replace(source, [
       'ChatHistoryParamsSchema=closedObject$1({sessionKey:',
       'ChatHistoryParamsSchema=closedObject$1({historyAnchor:Optional$2(closedObject$1({sessionId:String$2(),generation:Union([String$2(),Null()]),leafEntryId:Union([String$2(),Null()])})),sessionKey:',

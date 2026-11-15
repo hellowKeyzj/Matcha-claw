@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::{cli::CliEvent, rpc};
 
-use super::{Session, Sessions, native, record, run};
+use super::{Session, Sessions, native, run};
 
 impl Sessions {
     pub(super) async fn consume(
@@ -64,10 +64,7 @@ impl Sessions {
                 .await
             {
                 if failure.is_none() {
-                    let context = {
-                        let execution = session.data.lock().await;
-                        super::execution::failure_context(&execution, &error)
-                    };
+                    let context = super::execution::failure_context(&session.record(), &error);
                     if self
                         .0
                         .diagnostics
@@ -118,7 +115,7 @@ impl Sessions {
         let session_id;
         {
             let mut execution = session.data.lock().await;
-            session_id = execution.record.session_id.clone();
+            session_id = session.record().session_id.clone();
             if let Some(error) = failure {
                 execution.fault(error);
             }
@@ -198,7 +195,7 @@ impl Sessions {
         {
             return Ok(());
         }
-        let session_id = execution.record.session_id.clone();
+        let session_id = session.record().session_id.clone();
         let mut items = Vec::new();
         for event in batch {
             let mut terminal = None;
@@ -218,8 +215,63 @@ impl Sessions {
                             "CLI emitted a different native session identity",
                         ));
                     }
+                    let task_event = message["type"] == "system"
+                        && matches!(message["subtype"].as_str(),
+                            Some("task_started" | "task_progress" | "task_notification"));
+                    let task_id = if task_event {
+                        message["task_id"].as_str()
+                    } else if message["type"] == "user" {
+                        message["source_task_id"].as_str()
+                    } else {
+                        None
+                    };
+                    let task = task_id.and_then(|id| execution.native.tasks.get(id));
+                    let request_message_id = message["request_message_id"].as_str();
+                    let foreign_task = task_event && execution.active.as_ref().is_some_and(|active| {
+                        request_message_id.or_else(|| task.and_then(|task| task["request_message_id"].as_str()))
+                            .is_some_and(|root| root != active.record.run.message_id)
+                    });
+                    let task_notification_owned = task_event
+                        && message["subtype"] == "task_notification"
+                        && request_message_id.is_none()
+                        && task_id.is_some_and(|task_id| {
+                            message["tool_use_id"].as_str().is_some_and(|id| {
+                                execution.active.as_ref().is_some_and(|active| {
+                                    active.owns_task(task_id, id, request_message_id, task)
+                                })
+                            })
+                        });
+                    let task_notification_recorded = task_event
+                        && message["subtype"] == "task_notification"
+                        && task_id.is_some_and(|task_id| {
+                            message["tool_use_id"].as_str().is_some_and(|id| {
+                                execution.active.as_ref().is_some_and(|active| {
+                                    active.input_started && active.acknowledged
+                                        && request_message_id == Some(active.record.run.message_id.as_str())
+                                        && active.task_sources.get(&(task_id.to_owned(), id.to_owned()))
+                                            .is_some_and(|parent| message.get("parent_tool_use_id").is_none_or(|id| {
+                                                if id.is_null() {
+                                                    parent.is_none()
+                                                } else {
+                                                    id.as_str().is_some_and(|id| parent.as_deref() == Some(id))
+                                                }
+                                            }))
+                                })
+                            })
+                        });
+                    let continuation_owned = message["type"] == "user"
+                        && request_message_id.is_some()
+                        && task_id.is_some_and(|task_id| {
+                            message["source_tool_use_id"].as_str().is_some_and(|id| {
+                                execution.active.as_ref().is_some_and(|active| {
+                                    active.owns_task(task_id, id, request_message_id, task)
+                                })
+                            })
+                        });
                     execution.native.observe(&message);
-                    if let Some(active) = execution.active.as_mut() {
+                    if let Some(active) = execution.active.as_mut().filter(|_| !foreign_task) {
+                        let root_matches = request_message_id
+                            .is_none_or(|root| root == active.record.run.message_id);
                         let tool_parent_observed =
                             message.get("parent_tool_use_id").is_none_or(|id| {
                                 id.is_null()
@@ -227,8 +279,38 @@ impl Sessions {
                                         .as_str()
                                         .is_some_and(|id| active.tool_use_ids.contains(id))
                             });
+                        if task_event
+                            && message["subtype"] == "task_started"
+                            && active.input_started
+                            && active.acknowledged
+                            && request_message_id == Some(active.record.run.message_id.as_str())
+                            && let (Some(task_id), Some(tool_use_id)) =
+                                (task_id, message["tool_use_id"].as_str())
+                            && !task_id.is_empty()
+                            && !tool_use_id.is_empty()
+                        {
+                            let parent = message["parent_tool_use_id"].as_str().map(str::to_owned);
+                            if message.get("parent_tool_use_id")
+                                .is_some_and(|id| !id.is_null() && !id.is_string())
+                            {
+                                active.ownership_ambiguous = true;
+                            } else {
+                                // Retain each Run-local registration before its tool/parent may reach stdout.
+                                match active.task_sources.entry((task_id.to_owned(), tool_use_id.to_owned())) {
+                                    std::collections::btree_map::Entry::Vacant(entry) => {
+                                        entry.insert(parent);
+                                    }
+                                    std::collections::btree_map::Entry::Occupied(entry) => {
+                                        if entry.get() != &parent {
+                                            active.ownership_ambiguous = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if active.input_started
                             && active.acknowledged
+                            && root_matches
                             && tool_parent_observed
                             && message["type"] == "assistant"
                             && let Some(blocks) = message
@@ -256,17 +338,32 @@ impl Sessions {
                             active.native_cycle_observed = true;
                         }
                         if message.get("type").and_then(Value::as_str) == Some("user") {
-                            if message.get("uuid").and_then(Value::as_str)
-                                == Some(active.record.run.message_id.as_str())
+                            if active.input_started
+                                && root_matches
+                                && message["source_task_id"].is_null()
+                                && message["source_tool_use_id"].is_null()
+                                && message.get("uuid").and_then(Value::as_str)
+                                    == Some(active.record.run.message_id.as_str())
                             {
                                 active.acknowledged = true;
-                            } else if !interrupted
-                                && !tool_result(&message)
-                                && !(tool_parent_observed
-                                    && message
-                                        .get("source_tool_use_id")
-                                        .and_then(Value::as_str)
-                                        .is_some_and(|id| active.tool_use_ids.contains(id)))
+                                active.acknowledged_input_ids.insert(active.record.run.message_id.clone());
+                            } else if continuation_owned && tool_parent_observed
+                                && let Some(id) = message["uuid"].as_str()
+                                    .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                            {
+                                active.acknowledged_input_ids.insert(id.to_owned());
+                            } else if message.get("source_task_id").is_some()
+                                || !root_matches
+                                || (!interrupted
+                                    && !tool_result(&message)
+                                    && !(request_message_id.is_none()
+                                        && active.input_started
+                                        && active.acknowledged
+                                        && tool_parent_observed
+                                        && message
+                                            .get("source_tool_use_id")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|id| active.tool_use_ids.contains(id))))
                             {
                                 active.ownership_ambiguous = true;
                             }
@@ -274,6 +371,8 @@ impl Sessions {
                         if message.get("type").and_then(Value::as_str) == Some("system")
                             && message.get("subtype").and_then(Value::as_str)
                                 == Some("task_notification")
+                            && !task_notification_recorded
+                            && !task_notification_owned
                         {
                             active.ownership_ambiguous = true;
                         }
@@ -300,7 +399,7 @@ impl Sessions {
                                     == Some(active.record.run.message_id.as_str())
                         })
                     {
-                        match self.accept_title_locked(&mut execution, &message).await {
+                        match self.accept_title_locked(session, &mut execution, &message).await {
                             Ok(Some(description)) => {
                                 let scope = execution.active.as_ref().and_then(|active|
                                     active.record.run.world_investigation.as_ref().map(|world| world.frame(&active.record.run))).transpose()?;
@@ -319,7 +418,7 @@ impl Sessions {
                             }
                             Ok(None) => {}
                             Err(error) => {
-                                self.title_failure(&execution.record, instance_id, &error)
+                                self.title_failure(&session.record(), instance_id, &error)
                                     .await;
                             }
                         }
@@ -342,15 +441,18 @@ impl Sessions {
                     }
                     if let Some(active) = execution.active.as_mut() {
                         active.result_count += 1;
-                        if !active.input_started
-                            || active.result_count > 1
-                            || result.get("input_message_id").is_some_and(|id| {
-                                id.as_str() != Some(active.record.run.message_id.as_str())
-                            })
-                            || (active.record.run.request_id.is_some()
-                                && result.get("input_message_id").and_then(Value::as_str)
-                                    != Some(active.record.run.message_id.as_str()))
-                        {
+                        let input_message_id = result["input_message_id"].as_str();
+                        let input_owned = match result["request_message_id"].as_str() {
+                            Some(root) => root == active.record.run.message_id
+                                && input_message_id.is_some_and(|id| active.acknowledged_input_ids.contains(id)),
+                            None => {
+                                !result.get("input_message_id").is_some_and(|id| {
+                                    id.as_str() != Some(active.record.run.message_id.as_str())
+                                }) && (active.record.run.request_id.is_none()
+                                    || input_message_id == Some(active.record.run.message_id.as_str()))
+                            }
+                        };
+                        if !active.input_started || active.result_count > 1 || !input_owned {
                             active.ownership_ambiguous = true;
                         }
                         active.result = Some(result.clone());
@@ -437,17 +539,16 @@ impl Sessions {
                     }
                 }
             }
-            if !execution.record.native_started
+            if !session.record().native_started
                 && execution
                     .active
                     .as_ref()
                     .is_some_and(|active| active.acknowledged)
             {
-                let mut started = execution.record.clone();
+                let mut started = (*session.record()).clone();
                 started.native_started = true;
                 started.updated_at_ms = rpc::now_ms();
-                record::save_session(&self.0.database, &started).await?;
-                execution.record = started;
+                session.commit(&self.0.database, &mut execution, started).await?;
             }
             if execution.active.as_ref().is_some_and(|active| {
                 active.budget_expired

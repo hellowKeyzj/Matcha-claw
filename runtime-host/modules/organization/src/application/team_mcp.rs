@@ -3,6 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use futures_util::future::BoxFuture;
 use platform::mcp::arguments;
 use serde_json::{Map, Value, json};
 
@@ -38,11 +39,21 @@ pub(crate) async fn execute(
     else {
         return Ok(rejected());
     };
+    dispatch(owner, name, args, resolver, now).await
+}
+
+fn dispatch<'a>(
+    owner: &'a OrganizationHandle,
+    name: &str,
+    args: &'a Map<String, Value>,
+    resolver: Arc<dyn RoleSessionIdentityResolver>,
+    now: u64,
+) -> BoxFuture<'a, Result<Value, RequestAdmissionClosed>> {
     match name {
         "team_graph_context" if args.get("view").and_then(Value::as_str) == Some("run_prompts") => {
-            runtime_graph_context(owner, args).await
+            crate::future::boxed(move || runtime_graph_context(owner, args))
         }
-        "team_graph_context" => graph_context(owner, args, resolver).await,
+        "team_graph_context" => crate::future::boxed(move || graph_context(owner, args, resolver)),
         "team_graph_patch"
             if args.get("operations").and_then(Value::as_array).is_some_and(|operations| {
                 operations.iter().any(|operation| {
@@ -50,14 +61,14 @@ pub(crate) async fn execute(
                 })
             }) =>
         {
-            runtime_graph_patch(owner, args, now).await
+            crate::future::boxed(move || runtime_graph_patch(owner, args, now))
         }
-        "team_graph_patch" => graph_patch(owner, args, resolver).await,
-        "team_node_event" => node_event(owner, args, now).await,
-        "team_approval_resolve" => approval_resolve(owner, args, now).await,
-        "team_run_decision_submit" => decision_submit(owner, args, now).await,
-        "team_evidence_record" => evidence_record(owner, args, now).await,
-        _ => Ok(invalid()),
+        "team_graph_patch" => graph_patch(owner, args, resolver),
+        "team_node_event" => crate::future::boxed(move || node_event(owner, args, now)),
+        "team_approval_resolve" => crate::future::boxed(move || approval_resolve(owner, args, now)),
+        "team_run_decision_submit" => crate::future::boxed(move || decision_submit(owner, args, now)),
+        "team_evidence_record" => crate::future::boxed(move || evidence_record(owner, args, now)),
+        _ => Box::pin(std::future::ready(Ok(invalid()))),
     }
 }
 
@@ -240,31 +251,45 @@ async fn graph_context(
         }
     })();
     let (design, query) = match parsed { Ok(value) => value, Err(error) => return Ok(error) };
-    if let Some(operation) = design {
-        return Ok(owner
-            .design_operation(operation, resolver)
-            .await?
-            .unwrap_or_else(design_rejected));
-    }
-    Ok(context_result(
-        owner
-            .graph_context(query.expect("running context has a query"))
-            .await?,
-    ))
+    let execution: BoxFuture<'_, Result<Value, RequestAdmissionClosed>> = if let Some(operation) = design {
+        Box::pin(async move {
+            Ok(owner
+                .design_operation(operation, resolver)
+                .await?
+                .unwrap_or_else(design_rejected))
+        })
+    } else {
+        Box::pin(async move {
+            Ok(context_result(
+                owner
+                    .graph_context(query.expect("running context has a query"))
+                    .await?,
+            ))
+        })
+    };
+    execution.await
 }
 
-async fn graph_patch(
-    owner: &OrganizationHandle,
-    args: &Map<String, Value>,
+fn graph_patch<'a>(
+    owner: &'a OrganizationHandle,
+    args: &'a Map<String, Value>,
     resolver: Arc<dyn RoleSessionIdentityResolver>,
-) -> Result<Value, RequestAdmissionClosed> {
+) -> BoxFuture<'a, Result<Value, RequestAdmissionClosed>> {
     if args.get("operations").and_then(Value::as_array).is_some_and(|operations| {
         operations.iter().any(|operation| {
             operation.get("op").and_then(Value::as_str) == Some("create_role_session")
         })
     }) {
-        return role_session_create(owner, args).await;
+        return Box::pin(role_session_create(owner, args));
     }
+    Box::pin(design_graph_patch(owner, args, resolver))
+}
+
+async fn design_graph_patch(
+    owner: &OrganizationHandle,
+    args: &Map<String, Value>,
+    resolver: Arc<dyn RoleSessionIdentityResolver>,
+) -> Result<Value, RequestAdmissionClosed> {
     let parsed = (|| {
         require_exact_keys(
             args,
@@ -421,6 +446,9 @@ async fn node_event(
                 "roleId",
                 "event",
                 "approvalAction",
+                "summary",
+                "risk",
+                "artifactIds",
             ],
         )?;
         let run_id = opaque(args, "runId")?;
@@ -442,10 +470,25 @@ async fn node_event(
                     "external_action" => crate::ApprovalAction::ExternalAction,
                     _ => return Err(invalid_field("approvalAction", "Use continue_node, execute_tool, publish_result, or external_action.")),
                 };
-                TeamNodeEvent::request_approval(node, role, action)
+                let artifact_ids = match args.get("artifactIds") {
+                    Some(value) => serde_json::from_value::<Vec<String>>(value.clone())
+                        .map_err(|_| invalid_field("artifactIds", "Provide artifact identifiers from this Run."))?,
+                    None => Vec::new(),
+                };
+                let submission = crate::run::approval::ApprovalSubmission::try_new(
+                    required_string(args, "summary")?.to_owned(),
+                    optional_string(args, "risk")?,
+                    artifact_ids,
+                ).ok_or_else(|| invalid_field("summary", "Provide a concrete nonblank approval request, optional nonblank risk, and unique artifactIds from this Run."))?;
+                TeamNodeEvent::request_approval(node, role, action).with_approval_submission(submission)
             }
             _ => return Err(invalid_field("event", "Use progress, request_input, or request_approval; terminal results use runtime receipts.")),
         };
+        if required_string(args, "event")? != "request_approval"
+            && ["summary", "risk", "artifactIds"].iter().any(|key| args.contains_key(*key))
+        {
+            return Err(invalid_field("event", "summary, risk and artifactIds belong only to request_approval."));
+        }
         TeamNodeEventProducer::non_terminal(run_id, command_id, idempotency_key, event, now)
             .map_err(|_| invalid_field("arguments", "For request_approval, provide roleId and a bounded idempotencyKey short enough for the generated approval identifier."))
     })();
@@ -479,11 +522,11 @@ async fn approval_resolve(
             GraphRunId::new(opaque(args, "runId")?.as_str()),
             opaque(args, "approvalId")?,
             decision,
-            optional_string(args, "note")?.map(|note| note.trim().to_owned()),
+            optional_string(args, "note")?,
             opaque(args, "idempotencyKey")?,
             now,
         )
-        .map_err(|_| invalid_field("note", "Omit note or provide nonblank text no longer than 256 bytes."))
+        .map_err(|_| invalid_field("note", "Omit note or provide nonblank text."))
     })();
     let command = match parsed { Ok(value) => value, Err(error) => return Ok(error) };
     Ok(match owner.approval_resolve(command).await? {
@@ -531,7 +574,7 @@ async fn decision_submit(
                 Error::InvalidDecisionId | Error::InvalidIdempotencyKey => invalid_field("idempotencyKey", "Use a bounded identifier short enough for the generated decision identifier."),
                 Error::InvalidRunId => invalid_field("runId", "Use a bounded run identifier from current context."),
                 Error::InvalidStageId => invalid_field("stageId", "Omit stageId or use a bounded stage identifier."),
-                Error::InvalidNote => invalid_field("note", "Omit note or provide nonblank text no longer than 256 bytes."),
+                Error::InvalidNote => invalid_field("note", "Omit note or provide nonblank text."),
             }
         })
     })();
@@ -634,6 +677,43 @@ fn invalid() -> Value {
 
 fn rejected() -> Value {
     json!({"success":false,"error":"Team tool request was rejected"})
+}
+
+pub(crate) fn rework_continue_rejected(fault: crate::StoreFault) -> Value {
+    use crate::{StoreFault, store::RuntimeGraphError};
+    let (code, message) = match &fault {
+        StoreFault::GraphReduce(reason) => return graph_reduce_rejected(reason),
+        StoreFault::RuntimeGraph(reason) => match reason {
+            RuntimeGraphError::UnknownRun | RuntimeGraphError::TeamMismatch => (
+                "rework_context_invalid", "The team and run identifiers do not match a known run; refresh the current run.",
+            ),
+            RuntimeGraphError::RunInactive => (
+                "run_not_active", "The run is not active and started; blocked rework cannot continue.",
+            ),
+            RuntimeGraphError::ExecutionInactive => (
+                "execution_expired", "The blocked source execution or batch changed; refresh the current run before continuing.",
+            ),
+            RuntimeGraphError::StaleGraphVersion => (
+                "graph_version_mismatch", "The graph changed; refresh the run and use its current graphVersion before continuing.",
+            ),
+            RuntimeGraphError::UnknownNode(_) | RuntimeGraphError::InvalidNode(_) | RuntimeGraphError::EmptyPrompt(_) => (
+                "invalid_rework_continuation", "The rework source is invalid; refresh the current run and select its blocked source.",
+            ),
+        },
+        StoreFault::EventLedger(crate::RecordCommandError::IdempotencyConflict) => (
+            "idempotency_conflict", "This idempotencyKey belongs to a different command; replay the exact original request or use fresh keys for a different request.",
+        ),
+        StoreFault::EventLedger(crate::RecordCommandError::CommandIdConflict) => (
+            "command_id_conflict", "This commandId is already used; use fresh commandId and idempotencyKey for a new request.",
+        ),
+        StoreFault::CommitOutcomeUnknown(_) | StoreFault::RecoveryRequired => (
+            "rework_outcome_unknown", "The continuation outcome is unknown; refresh the current run before retrying the exact original request.",
+        ),
+        _ => (
+            "rework_unavailable", "The blocked rework could not be continued; refresh the current run before retrying.",
+        ),
+    };
+    design_error(code, message, None, None)
 }
 
 pub(crate) fn design_rejected(fault: crate::StoreFault) -> Value {
@@ -841,9 +921,44 @@ fn graph_reduce_rejected(reason: &crate::ReduceError) -> Value {
             "The node execution state has changed; refresh this run before retrying.",
             Some(node_id.as_str()),
         ),
-        Error::AttemptLimitExceeded { node_id, .. } => (
-            "attempt_limit_exceeded",
-            "This node has exhausted its attempt budget; inspect its history and increase maxAttempts before requesting another attempt.",
+        Error::AttemptNumberOverflow { node_id } => (
+            "attempt_number_overflow",
+            "The node attempt number cannot advance further; stop this run and create a new run.",
+            Some(node_id.as_str()),
+        ),
+        Error::BatchNumberOverflow => (
+            "batch_number_overflow",
+            "The run batch number cannot advance further; stop this run and create a new run.",
+            None,
+        ),
+        Error::BatchMismatch { node_id } => (
+            "batch_mismatch",
+            "The node belongs to a different execution batch; refresh this run before continuing.",
+            Some(node_id.as_str()),
+        ),
+        Error::TriggerScopeBusy { node_id } => (
+            "scope_busy",
+            "The trigger scope is busy; wait for its current batch to settle.",
+            Some(node_id.as_str()),
+        ),
+        Error::InvalidReworkPort { node_id, .. } => (
+            "invalid_rework_port",
+            "Select a source port whose sourcePortActions include rework.",
+            Some(node_id.as_str()),
+        ),
+        Error::ReworkNotBlocked { node_id } => (
+            "rework_not_blocked",
+            "This source has no matching blocked rework; refresh the current run before continuing.",
+            Some(node_id.as_str()),
+        ),
+        Error::InvalidReworkContinuation { node_id } => (
+            "invalid_rework_continuation",
+            "The blocked rework identity or scope has changed; refresh its batch, source port and source execution before continuing.",
+            Some(node_id.as_str()),
+        ),
+        Error::ReworkLimitNotIncreased { node_id } => (
+            "rework_limit_not_increased",
+            "Increase the rework source port limit beyond its current limit and used count before continuing.",
             Some(node_id.as_str()),
         ),
         Error::StaleGraphIdentity => (
@@ -993,6 +1108,12 @@ fn definition_rejected(reason: &crate::run::graph::DefinitionError) -> Value {
             Some(node_id.as_str()),
             Some(edge_id.as_str()),
         ),
+        DefinitionError::InvalidReworkPort { node_id, .. } => (
+            "invalid_rework_port",
+            "Only source ports whose sourcePortActions include rework may have reworkLimits; use Review.rework, HumanDecision.rejected/aborted, or ScriptReview.failed.",
+            Some(node_id.as_str()),
+            None,
+        ),
         DefinitionError::MissingAssignmentRole(node) => (
             "missing_assignment_role",
             "Work and review nodes require roleId; choose it with config.sessionRef from the current run's context roles.",
@@ -1003,6 +1124,12 @@ fn definition_rejected(reason: &crate::run::graph::DefinitionError) -> Value {
             "missing_assignment_session",
             "Work and review nodes require config.sessionRef; copy the matching roleId/sessionRef pair from the current run's context roles.",
             Some(node.as_str()),
+            None,
+        ),
+        DefinitionError::IncompatibleTriggerBatches { node_id } => (
+            "incompatible_trigger_batches",
+            "These Gate inputs come from independent trigger batches and cannot merge; branch from one trigger entry or separate the merge paths.",
+            Some(node_id.as_str()),
             None,
         ),
         DefinitionError::JoinWithoutIncomingGate(node) => (
@@ -1088,26 +1215,34 @@ fn design_error(code: &str, message: &str, node: Option<&str>, edge: Option<&str
 
 fn context_result(outcome: TeamGraphContextResult) -> Value {
     match outcome {
-        TeamGraphContextResult::Available(context) => json!({
-            "outcome": "available", "teamId": context.team().as_str(), "runId": context.run().as_str(),
-            "graphStatus": graph_status(context.graph_status()),
-            "nodes": context.nodes().iter().map(|node| json!({
-                "nodeId": node.node_id(), "nodeExecutionId": node.node_execution_id(),
-                "status": attempt_status(node.status()), "outputPort": node.output_port(),
-            })).collect::<Vec<_>>(),
-            "edges": context.edges().iter().map(|edge| json!({
-                "edgeId": edge.edge_id(), "sourceNodeId": edge.source_node_id(), "targetNodeId": edge.target_node_id(),
-            })).collect::<Vec<_>>(),
-            "pendingApprovalIds": context.pending_approval_ids(),
-            "approvals": context.approvals().iter().map(context_approval_json).collect::<Vec<_>>(),
-            "recentEventIds": context.recent_event_ids(),
-        }),
+        TeamGraphContextResult::Available(context) => {
+            let mut result = graph_context_json(&context);
+            result["outcome"] = json!("available");
+            result
+        }
         TeamGraphContextResult::Unavailable => json!({"outcome":"unavailable"}),
         TeamGraphContextResult::OutcomeUnknown => json!({"outcome":"outcome_unknown"}),
     }
 }
 
-pub(crate) fn context_approval_json(approval: &crate::run::context::ContextApproval) -> Value {
+pub(crate) fn graph_context_json(context: &crate::TeamGraphContext) -> Value {
+    json!({
+        "teamId": context.team().as_str(), "runId": context.run().as_str(),
+        "graphStatus": graph_status(context.graph_status()),
+        "nodes": context.nodes().iter().map(|node| json!({
+            "nodeId": node.node_id(), "nodeExecutionId": node.node_execution_id(),
+            "status": attempt_status(node.status()), "outputPort": node.output_port(),
+        })).collect::<Vec<_>>(),
+        "edges": context.edges().iter().map(|edge| json!({
+            "edgeId": edge.edge_id(), "sourceNodeId": edge.source_node_id(), "targetNodeId": edge.target_node_id(),
+        })).collect::<Vec<_>>(),
+        "pendingApprovalIds": context.pending_approval_ids(),
+        "approvals": context.approvals().iter().map(context_approval_json).collect::<Vec<_>>(),
+        "recentEventIds": context.recent_event_ids(),
+    })
+}
+
+fn context_approval_json(approval: &crate::run::context::ContextApproval) -> Value {
     json!({
         "approvalId": approval.approval_id(),
         "subject": match approval.subject() {

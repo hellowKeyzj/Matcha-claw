@@ -410,6 +410,50 @@ pub(super) async fn remove(
         .map_err(|error| storage(error, "delete"))
 }
 
+#[derive(Debug)]
+pub(crate) enum RuntimeDirectoryError {
+    Rejected,
+    HomeResolve(io::Error),
+    Metadata(io::Error),
+    Resolve(io::Error),
+}
+
+// Runtime custody is Agent-scoped even when the Session executes in a shared directory.
+pub(crate) fn runtime_directory(
+    runtime: &Path,
+    agent_id: &str,
+) -> Result<Option<PathBuf>, RuntimeDirectoryError> {
+    let agent = runtime.parent().ok_or(RuntimeDirectoryError::Rejected)?;
+    let agents = agent.parent().ok_or(RuntimeDirectoryError::Rejected)?;
+    let home = agents.parent().ok_or(RuntimeDirectoryError::Rejected)?;
+    if !runtime.is_absolute()
+        || runtime.file_name().is_none_or(|name| name != "runtime")
+        || agent.file_name().is_none_or(|name| name != agent_id)
+        || agents.file_name().is_none_or(|name| name != "agents")
+    {
+        return Err(RuntimeDirectoryError::Rejected);
+    }
+    crate::config::validate_id(agent_id).map_err(|_| RuntimeDirectoryError::Rejected)?;
+    let mut path = std::fs::canonicalize(home).map_err(RuntimeDirectoryError::HomeResolve)?;
+    for name in ["agents", agent_id, "runtime"] {
+        path.push(name);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(RuntimeDirectoryError::Metadata(error)),
+        };
+        if linked(&metadata) {
+            return Err(RuntimeDirectoryError::Rejected);
+        }
+        let actual = std::fs::canonicalize(&path).map_err(RuntimeDirectoryError::Resolve)?;
+        if actual != path {
+            return Err(RuntimeDirectoryError::Rejected);
+        }
+        path = actual;
+    }
+    Ok(Some(path))
+}
+
 async fn checked_directory(path: &Path) -> rpc::Result<()> {
     let metadata = fs::symlink_metadata(path)
         .await

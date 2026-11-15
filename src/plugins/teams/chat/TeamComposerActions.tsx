@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useShallow } from 'zustand/react/shallow';
 import { ArrowUpRight, GitBranch, Loader2, Play } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -7,30 +8,34 @@ import type { ChatComposerContentProps } from '@/plugins/chat/extensions';
 import { isRuntimeEndpointReady, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { buildSessionIdentityKey, runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
 import type { TeamDesignTarget } from '@/types/team-design';
-import { resolveTeamRuntimeScope, useTeamsStore } from '../store';
+import { selectTeamRuntimeScope, useTeamsStore } from '../store';
 import { openTeamGraph } from './runtime-surface';
+import { useTeamRunStartEligibility } from './use-team-run-start-eligibility';
 
-export const TeamComposerActions = memo(function TeamComposerActions({ sessionIdentity, ownership, enabled, runActive, imageGenerationActive, approvalWaiting, canSend, focusComposer, children }: ChatComposerContentProps) {
+export const TeamComposerActions = memo(function TeamComposerActions({ sessionIdentity, ownership, enabled, runActive, imageGenerationActive, approvalWaiting, canSend, focusComposer }: ChatComposerContentProps) {
   const { t } = useTranslation('chat');
   const runtimeEndpoints = useRuntimeEndpointsStore((state) => state.endpoints);
   const teamGraphTeamId = ownership?.kind === 'team' ? ownership.teamId : null;
   const teamGraphRunId = ownership?.kind === 'team' ? ownership.teamRunId : null;
   const designTeamId = ownership?.kind === 'team' && ownership.roleId === 'leader' ? teamGraphTeamId : null;
   const designRunId = ownership?.kind === 'team' && ownership.roleId === 'leader' ? teamGraphRunId : null;
-  const designTeamKnown = useTeamsStore((state) => Boolean(designTeamId && state.teams.some((team) => team.id === designTeamId)));
-  const designRuntimeAvailable = designTeamKnown && designTeamId && designRunId
-    ? runtimeEndpoints.some((entry) => {
-        const scope = resolveTeamRuntimeScope(designTeamId, designRunId);
-        return 'endpoint' in scope && runtimeEndpointsEqual(entry.endpointRef, scope.endpoint)
-          && isRuntimeEndpointReady(entry) && supportsRuntimeEndpointCapabilityFamily(entry, 'team');
-      }) : false;
-  const designRecord = useTeamsStore((state) => designRunId ? state.designByRunId[designRunId] : undefined);
-  const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
-  const startDesign = useTeamsStore((state) => state.startDesign);
-  const startRun = useTeamsStore((state) => state.startRun);
-  const exitDesign = useTeamsStore((state) => state.exitDesign);
-  const designActionPending = Boolean(designRecord?.mutationPending);
-  const designSnapshot = designRecord?.snapshot && designRecord.snapshot.teamId === designTeamId && designRecord.snapshot.runId === designRunId ? designRecord.snapshot : null;
+  const { canStartRun, canStartRunNow } = useTeamRunStartEligibility(designTeamId, designRunId, sessionIdentity);
+  const { designTeamKnown, designRuntimeAvailable, designActionPending, teamDesignStatus, teamDesignError,
+    observeTeamDesign, startDesign, startRun, exitDesign } = useTeamsStore(useShallow((state) => {
+    const designTeamKnown = Boolean(designTeamId && state.teams.some((team) => team.id === designTeamId));
+    const scope = designTeamKnown && designTeamId && designRunId ? selectTeamRuntimeScope(state, designTeamId, designRunId) : null;
+    const record = designRunId ? state.designByRunId[designRunId] : undefined;
+    const snapshot = record?.snapshot;
+    return {
+      designTeamKnown,
+      designRuntimeAvailable: Boolean(scope && runtimeEndpoints.some((entry) => runtimeEndpointsEqual(entry.endpointRef, scope.endpoint)
+        && isRuntimeEndpointReady(entry) && supportsRuntimeEndpointCapabilityFamily(entry, 'team'))),
+      designActionPending: Boolean(record?.mutationPending),
+      teamDesignStatus: snapshot?.teamId === designTeamId && snapshot?.runId === designRunId ? snapshot.startGate.status : null,
+      teamDesignError: record?.error ?? null,
+      observeTeamDesign: state.observeTeamDesign, startDesign: state.startDesign, startRun: state.startRun, exitDesign: state.exitDesign,
+    };
+  }));
   const designContextKey = JSON.stringify([designTeamId, designRunId, sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null]);
   const [pendingDesignAction, setPendingDesignAction] = useState<{ contextKey: string; action: 'start' | 'exit' } | null>(null);
   const currentDesignContextRef = useRef<string | null>(designContextKey);
@@ -42,11 +47,11 @@ export const TeamComposerActions = memo(function TeamComposerActions({ sessionId
     if (!enabled || !designRuntimeAvailable || !designTeamKnown || !designTeamId || !designRunId) return;
     return observeTeamDesign({ teamId: designTeamId, runId: designRunId });
   }, [enabled, designRuntimeAvailable, designTeamKnown, designTeamId, designRunId, observeTeamDesign]);
-  const designActionDisabled = !designTeamKnown || !designSnapshot || designSnapshot.startGate.status === 'started'
-    || Boolean(designRecord?.loading) || designActionPending || !designRuntimeAvailable || !enabled
+  const designActionDisabled = !designTeamKnown || teamDesignStatus === null || teamDesignStatus === 'started'
+    || designActionPending || pendingDesignAction?.contextKey === designContextKey || !designRuntimeAvailable || !enabled
     || runActive || imageGenerationActive || approvalWaiting || !canSend;
   const runDesignAction = useCallback(async (action: (target: TeamDesignTarget) => Promise<void>, shouldFocusComposer = false): Promise<void> => {
-    if (!designTeamId || !designRunId || designActionDisabled) return;
+    if (!designTeamId || !designRunId || designActionDisabled || action === startRun && !canStartRunNow()) return;
     const contextKey = designContextKey;
     const pending: typeof pendingDesignAction = action === startRun ? { contextKey, action: 'start' }
       : action === exitDesign ? { contextKey, action: 'exit' } : null;
@@ -63,19 +68,17 @@ export const TeamComposerActions = memo(function TeamComposerActions({ sessionId
     } finally {
       if (pending) setPendingDesignAction((current) => current === pending ? null : current);
     }
-  }, [focusComposer, sessionIdentity, designActionDisabled, designContextKey, designRunId, designTeamId, exitDesign, startRun, t]);
-  const teamDesignStatus = designSnapshot?.startGate.status ?? null;
+  }, [focusComposer, sessionIdentity, designActionDisabled, canStartRunNow, designContextKey, designRunId, designTeamId, exitDesign, startRun, t]);
   const teamDesignStarting = designActionPending && pendingDesignAction?.contextKey === designContextKey && pendingDesignAction.action === 'start';
   const teamDesignExiting = designActionPending && pendingDesignAction?.contextKey === designContextKey && pendingDesignAction.action === 'exit';
-  const teamDesignError = designRecord?.error ?? null;
   const teamDesignExitWaiting = runActive || approvalWaiting || !canSend;
-  if (!teamGraphTeamId || !teamGraphRunId || !sessionIdentity) return children(null);
+  if (!teamGraphTeamId || !teamGraphRunId || !sessionIdentity) return null;
   const hasDesignActions = Boolean(designTeamId && designRunId);
   const canOpenTeamGraph = !hasDesignActions || teamDesignStatus === 'designing' || teamDesignStatus === 'started';
   const openGraph = () => {
     openTeamGraph({ kind: 'team-graph', sourceSessionIdentity: sessionIdentity, teamId: teamGraphTeamId, runId: teamGraphRunId });
   };
-  return children(<>
+  return <>
     <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-3 max-md:px-2.5 max-sm:px-2">
       <Button
         type="button"
@@ -115,7 +118,7 @@ export const TeamComposerActions = memo(function TeamComposerActions({ sessionId
             variant="outline"
             size="sm"
             className="h-8 gap-1.5 rounded-md px-3"
-            disabled={designActionDisabled}
+            disabled={designActionDisabled || !canStartRun}
             onClick={() => { void runDesignAction(startRun); }}
             aria-busy={teamDesignStarting}
           >
@@ -128,5 +131,5 @@ export const TeamComposerActions = memo(function TeamComposerActions({ sessionId
       ) : null}
     </div>
     {hasDesignActions && teamDesignError ? <p role="alert" className="mb-2 text-xs text-destructive">{teamDesignError}</p> : null}
-  </>);
+  </>;
 });

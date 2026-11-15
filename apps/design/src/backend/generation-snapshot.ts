@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import { isAppVideoTask, type AppVideoTask, type AppVideoTaskResult } from '@matcha/app-plugins-sdk';
-import type { Asset, GenerationEditing, GenerationRecord, GenerationRequest } from '../document';
+import { MAX_MEDIA_DURATION_SECONDS, type Asset, type GenerationEditing, type GenerationRecord, type GenerationRequest } from '../document';
 import { readJson } from './files';
 import { dimensions, generationActions, generationRequest, id, ids, invalid, number, object, text } from './validation';
 
@@ -45,7 +45,7 @@ function editing(value: unknown, request: GenerationRequest, sourceCount: number
   if (raw.size !== undefined) text(raw.size, 'editing size', 100);
   if (raw.durationSeconds !== undefined) {
     if (request.action !== 'video') invalid('Editing durationSeconds is only valid for video.');
-    number(raw.durationSeconds, 'editing durationSeconds', 1, 120);
+    number(raw.durationSeconds, 'editing durationSeconds', 1, MAX_MEDIA_DURATION_SECONDS);
   }
   let scenes: GenerationEditing['scenes'];
   if (raw.scenes !== undefined) {
@@ -53,7 +53,7 @@ function editing(value: unknown, request: GenerationRequest, sourceCount: number
     scenes = raw.scenes.map((value) => {
       const scene = object(value, ['prompt', 'durationSeconds']);
       return { prompt: text(scene.prompt, 'editing scene prompt', 20000),
-        ...(scene.durationSeconds === undefined ? {} : { durationSeconds: number(scene.durationSeconds, 'editing scene durationSeconds', 1, 120) }) };
+        ...(scene.durationSeconds === undefined ? {} : { durationSeconds: number(scene.durationSeconds, 'editing scene durationSeconds', 1, MAX_MEDIA_DURATION_SECONDS) }) };
     });
   }
   let referenceAssetIds: string[] | undefined;

@@ -1,24 +1,52 @@
-use std::time::Instant;
+use std::{future::Future, pin::Pin, sync::Arc, time::Instant};
 
-use organization::{CreateGraphRunOutcome, IdempotencyKey, MaterializationRecordOutcome, OrganizationStore, RuntimeEndpointReference, TeamId};
+use futures_util::{StreamExt, stream::FuturesUnordered};
+use organization::{CreateGraphRunOutcome, IdempotencyKey, MaterializationRecordOutcome, OrganizationStore, TeamId};
 use platform::trace::session_trace;
 use serde_json::json;
 
-use crate::{TeamCreationFailure, TeamCreationFailureReason, TeamCreationStage, ports::RuntimeReceiptOutcome};
+use crate::{TeamCreationFailure, TeamCreationFailureReason, TeamCreationStage, TeamProvisionObserver, TeamProvisionReporter, TeamProvisionStage, TeamProvisionUpdate, ports::RuntimeReceiptOutcome};
 
 use super::{
-    actor::{OrganizationShared, materialization_outcome_label, manual_materialization_outcome, manual_runtime_receipt_outcome, runtime_receipt_failure_reason, runtime_receipt_label, trace_store_result},
+    actor::{OrganizationShared, materialization_outcome_label, manual_runtime_receipt_outcome, runtime_receipt_failure_reason, runtime_receipt_label, trace_store_result},
     team_run::{ManualTeamCreateOutcome, ManualTeamMaterializationInput, TeamMaterializationCommandOutcome, TeamRunOwner, creation_store_failure, install_prepared_runtime_receipt, prepare_runtime_receipt},
 };
 
-pub(super) async fn begin_team_materialization<T>(
+struct MaterializationObserver {
+    observer: TeamProvisionObserver,
+    stages: Arc<tokio::sync::Mutex<Vec<TeamProvisionStage>>>,
+    group: usize,
+}
+
+impl TeamProvisionReporter for MaterializationObserver {
+    fn report(&self, update: TeamProvisionUpdate) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            if let TeamProvisionUpdate::Stage(stage) = update {
+                let mut stages = self.stages.lock().await;
+                stages[self.group] = stage;
+                let stage = stages.iter().copied().min_by_key(|stage| match stage {
+                    TeamProvisionStage::RollingBack => 0,
+                    TeamProvisionStage::ReadingProfiles => 1,
+                    TeamProvisionStage::GeneratingIntroductions => 2,
+                    TeamProvisionStage::ConfiguringTeam => 3,
+                    TeamProvisionStage::VerifyingTeam => 4,
+                    TeamProvisionStage::SavingTeam => 5,
+                }).expect("materialization progress has a group");
+                self.observer.report(TeamProvisionUpdate::Stage(stage)).await;
+            } else {
+                self.observer.report(update).await;
+            }
+        })
+    }
+}
+
+async fn begin_team_materialization<T>(
     store: &mut OrganizationStore,
     materialization: organization::TeamMaterialization,
     call: Option<&crate::call::CallReply<T>>,
-) -> Result<(TeamId, organization::TeamMaterializationRequest), TeamMaterializationCommandOutcome>
+) -> Result<(Vec<organization::TeamMaterializationRequest>, MaterializationRecordOutcome), TeamMaterializationCommandOutcome>
 {
-    let team = materialization.definition().team_id().clone();
-    let request = materialization.request().clone();
+    let requests = materialization.requests().to_vec();
     let started = platform::trace::enabled().then(Instant::now);
     session_trace("runtime.team.materialization.begin.start", || json!({}));
     let committed = store.create_team_materialization(materialization);
@@ -39,64 +67,111 @@ pub(super) async fn begin_team_materialization<T>(
         call.creation_failure(creation_store_failure(TeamCreationStage::Submitting, error)).await;
         call.materialization(None, Err(error)).await;
     }
-    match committed {
-        Ok(MaterializationRecordOutcome::Recorded) => Ok((team, request)),
-        Ok(MaterializationRecordOutcome::Replayed) => {
-            Err(TeamMaterializationCommandOutcome::OutcomeUnknown)
-        }
-        Err(_) => Err(TeamMaterializationCommandOutcome::Unavailable),
-    }
+    committed.map(|recorded| (requests, recorded))
+        .map_err(|_| TeamMaterializationCommandOutcome::Unavailable)
 }
 
-pub(super) async fn settle_team_materialization_outcome(
+pub(super) async fn materialize_team<T>(
     store: &mut OrganizationStore,
-    team: &TeamId,
-    managed_agent_count: usize,
-    outcome: organization::MaterializationOperationOutcome,
-    call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
+    shared: &OrganizationShared,
+    materialization: organization::TeamMaterialization,
+    observer: Option<crate::TeamProvisionObserver>,
+    cancellation: tokio_util::sync::CancellationToken,
+    call: Option<&crate::call::CallReply<T>>,
 ) -> TeamMaterializationCommandOutcome {
-    let started = platform::trace::enabled().then(Instant::now);
-    session_trace(
-        "runtime.team.materialization.settle.start",
-        || json!({"nativeOutcome": materialization_outcome_label(&outcome)}),
-    );
-    let committed = store.record_team_materialization_outcome(team, outcome.clone());
-    trace_store_result(
-        "runtime.team.materialization.settle.commit",
-        started,
-        &committed,
-    );
-    if let Some(call) = call {
-        if let Err(error) = &committed {
-            call.creation_failure(creation_store_failure(TeamCreationStage::SavingTeam, error)).await;
+    let team = materialization.definition().team_id().clone();
+    let managed_agent_count = materialization.requests().iter()
+        .map(|request| request.intent().agents().len()).sum();
+    let (requests, recorded) = match begin_team_materialization(store, materialization, call).await {
+        Ok(prepared) => prepared,
+        Err(outcome) => return outcome,
+    };
+    let readback = recorded == MaterializationRecordOutcome::Replayed;
+    let mut unknown = false;
+    let mut rejected = false;
+    let mut requests = requests.into_iter().filter(|request| {
+        if !readback { return true; }
+        match store.facts().materialization_lifecycle(&team, request.intent().endpoint()) {
+            Some(crate::TeamMaterializationLifecycle::Confirmed(_)) => false,
+            Some(crate::TeamMaterializationLifecycle::Rejected { .. }) => { rejected = true; false }
+            Some(crate::TeamMaterializationLifecycle::Requested(_) | crate::TeamMaterializationLifecycle::OutcomeUnknown(_)) => true,
+            _ => { unknown = true; false }
         }
-        let installed = match &outcome {
-            organization::MaterializationOperationOutcome::Confirmed { .. } => Some(true),
-            organization::MaterializationOperationOutcome::Rejected { .. } => Some(false),
-            organization::MaterializationOperationOutcome::Accepted { .. }
-            | organization::MaterializationOperationOutcome::OutcomeUnknown => None,
-        };
-        call.materialization(installed, committed.as_ref().map(|_| ()))
-            .await;
-    }
-    committed.map_or(
-        TeamMaterializationCommandOutcome::Unavailable,
-        |_| match outcome {
-            organization::MaterializationOperationOutcome::Confirmed { .. } => {
-                TeamMaterializationCommandOutcome::Materialized {
-                    team_id: team.clone(),
-                    managed_agent_count,
+    }).collect::<Vec<_>>().into_iter().enumerate();
+    let progress = observer.as_ref().map(|observer| (
+        Arc::clone(observer),
+        Arc::new(tokio::sync::Mutex::new(vec![TeamProvisionStage::ConfiguringTeam; requests.len()])),
+    ));
+    let mut active = FuturesUnordered::new();
+    let mut commit_error = None;
+    loop {
+        while active.len() < 4 {
+            let Some((group, request)) = requests.next() else { break; };
+            let observer = progress.as_ref().map(|(observer, stages)| Arc::new(MaterializationObserver {
+                observer: Arc::clone(observer), stages: Arc::clone(stages), group,
+            }) as TeamProvisionObserver);
+            let native = if readback {
+                match shared.team_runtime_for_endpoint(request.intent().endpoint()) {
+                    Some(runtime) if !cancellation.is_cancelled() => runtime.recover_team_materialization(request.clone()),
+                    _ => Box::pin(async { crate::MaterializationOperationOutcome::OutcomeUnknown }),
+                }
+            } else {
+                shared.team_materialize(request.clone(), observer.clone(), cancellation.clone())
+            };
+            active.push(async move { (request, native.await, observer) });
+        }
+        let Some((request, outcome, progress)) = active.next().await else { break; };
+        match &outcome {
+            crate::MaterializationOperationOutcome::Confirmed { .. } => {}
+            crate::MaterializationOperationOutcome::Rejected { .. } => rejected = true,
+            _ => unknown = true,
+        }
+        let confirmed = matches!(outcome, crate::MaterializationOperationOutcome::Confirmed { .. });
+        let started = platform::trace::enabled().then(Instant::now);
+        session_trace("runtime.team.materialization.settle.start", || json!({"nativeOutcome": materialization_outcome_label(&outcome)}));
+        let committed = match outcome {
+            crate::MaterializationOperationOutcome::Confirmed { receipt } if readback => {
+                if receipt.team() == request.intent().team() && receipt.endpoint() == request.intent().endpoint() {
+                    store.confirm_team_materialization(receipt)
+                } else {
+                    Err(crate::StoreFault::InvalidFacts)
                 }
             }
-            organization::MaterializationOperationOutcome::Rejected { .. } => {
-                TeamMaterializationCommandOutcome::Rejected
+            crate::MaterializationOperationOutcome::Accepted { .. } | crate::MaterializationOperationOutcome::OutcomeUnknown if readback => Ok(MaterializationRecordOutcome::Replayed),
+            outcome => store.record_team_materialization_outcome(&team, request.intent().endpoint(), outcome),
+        };
+        trace_store_result("runtime.team.materialization.settle.commit", started, &committed);
+        if let Err(error) = committed {
+            if let Some(call) = call {
+                call.creation_failure(creation_store_failure(TeamCreationStage::SavingTeam, &error)).await;
             }
-            organization::MaterializationOperationOutcome::Accepted { .. }
-            | organization::MaterializationOperationOutcome::OutcomeUnknown => {
-                TeamMaterializationCommandOutcome::OutcomeUnknown
+            if commit_error.is_none() { commit_error = Some(error); }
+        } else if confirmed {
+            if let Some(progress) = progress {
+                progress.report(TeamProvisionUpdate::Stage(TeamProvisionStage::SavingTeam)).await;
             }
-        },
-    )
+        }
+    }
+    let native = if unknown { None } else { Some(!rejected) };
+    if native == Some(true) {
+        if let Some(observer) = &observer {
+            observer.report(crate::TeamProvisionUpdate::Stage(crate::TeamProvisionStage::SavingTeam)).await;
+        }
+    }
+    if let Some(call) = call {
+        call.materialization(native, commit_error.as_ref().map_or(Ok(()), Err)).await;
+    }
+    if commit_error.is_some() {
+        TeamMaterializationCommandOutcome::Unavailable
+    } else if store.facts().materialization(&team).is_some() {
+        TeamMaterializationCommandOutcome::Materialized { team_id: team, managed_agent_count }
+    } else if unknown {
+        TeamMaterializationCommandOutcome::OutcomeUnknown
+    } else if rejected {
+        TeamMaterializationCommandOutcome::Rejected
+    } else {
+        TeamMaterializationCommandOutcome::OutcomeUnknown
+    }
 }
 
 pub(super) async fn manual_team_materialize(
@@ -104,7 +179,6 @@ pub(super) async fn manual_team_materialize(
     shared: &OrganizationShared,
     team_id: TeamId,
     team_name: String,
-    endpoint: RuntimeEndpointReference,
     roles: Vec<organization::ManualTeamRoleBinding>,
     idempotency_key: IdempotencyKey,
     call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
@@ -117,7 +191,6 @@ pub(super) async fn manual_team_materialize(
     let compiled = organization::compile_manual_team_materialization(
         team_id,
         team_name,
-        endpoint,
         roles,
         idempotency_key,
     );
@@ -146,8 +219,7 @@ pub(super) async fn manual_team_materialize(
     let materialization = match super::member_introduction::prepare_manual_team(
         materialization,
         store.facts(),
-        shared.runtime_directory.as_ref(),
-        shared.member_introductions.as_ref(),
+        shared,
         observer.as_ref(),
         cancellation.clone(),
     )
@@ -163,28 +235,7 @@ pub(super) async fn manual_team_materialize(
             return TeamMaterializationCommandOutcome::Unavailable;
         }
     };
-    let team_id = materialization.definition().team_id().clone();
-    let managed_agent_count = materialization.request().intent().agents().len();
-    let request = match begin_team_materialization(store, materialization, call).await {
-        Ok((_, request)) => request,
-        Err(outcome) => return outcome,
-    };
-    let outcome = shared
-        .team_materialize(
-            request,
-            observer.clone(),
-            cancellation,
-        )
-        .await;
-    if matches!(outcome, organization::MaterializationOperationOutcome::Confirmed { .. }) {
-        if let Some(observer) = &observer {
-            observer.report(crate::TeamProvisionUpdate::Stage(
-                crate::TeamProvisionStage::SavingTeam,
-            )).await;
-        }
-    }
-    settle_team_materialization_outcome(store, &team_id, managed_agent_count, outcome, call)
-        .await
+    materialize_team(store, shared, materialization, observer, cancellation, call).await
 }
 
 pub(super) async fn prepare_manual_team_run(
@@ -196,7 +247,6 @@ pub(super) async fn prepare_manual_team_run(
     let ManualTeamMaterializationInput {
         team_id,
         team_name,
-        endpoint,
         roles,
         materialization_idempotency_key,
         run,
@@ -210,7 +260,6 @@ pub(super) async fn prepare_manual_team_run(
     let compiled = organization::compile_manual_team_materialization(
         team_id,
         team_name,
-        endpoint,
         roles,
         materialization_idempotency_key,
     );
@@ -233,8 +282,7 @@ pub(super) async fn prepare_manual_team_run(
     let materialization = match super::member_introduction::prepare_manual_team(
         materialization,
         store.facts(),
-        shared.runtime_directory.as_ref(),
-        shared.member_introductions.as_ref(),
+        shared,
         None,
         call.cancellation(),
     )
@@ -251,66 +299,22 @@ pub(super) async fn prepare_manual_team_run(
         }
     };
     let team_id = materialization.definition().team_id().clone();
-    let request = match begin_team_materialization(store, materialization, Some(call))
-        .await
-    {
-        Ok((_, request)) => request,
-        Err(TeamMaterializationCommandOutcome::Rejected) => {
-            return Err(ManualTeamCreateOutcome::Rejected);
-        }
-        Err(TeamMaterializationCommandOutcome::OutcomeUnknown) => {
-            return Err(ManualTeamCreateOutcome::OutcomeUnknown);
-        }
-        Err(TeamMaterializationCommandOutcome::Unavailable) => {
-            return Err(ManualTeamCreateOutcome::Unavailable);
-        }
-        Err(TeamMaterializationCommandOutcome::Materialized { .. }) => {
-            return Err(ManualTeamCreateOutcome::OutcomeUnknown);
-        }
-    };
-    let outcome = shared
-        .team_materialize(request, observer, call.cancellation())
-        .await;
-    let started = platform::trace::enabled().then(Instant::now);
-    session_trace(
-        "runtime.team.materialization.settle.start",
-        || json!({"nativeOutcome": materialization_outcome_label(&outcome)}),
-    );
-    let committed = store.record_team_materialization_outcome(&team_id, outcome.clone());
-    trace_store_result(
-        "runtime.team.materialization.settle.commit",
-        started,
-        &committed,
-    );
-    let native = match &outcome {
-        organization::MaterializationOperationOutcome::Confirmed { .. } => Some(true),
-        organization::MaterializationOperationOutcome::Rejected { .. } => Some(false),
-        _ => None,
-    };
-    call.materialization(native, committed.as_ref().map(|_| ()))
-        .await;
-    if let Err(error) = &committed {
-        call.creation_failure(creation_store_failure(TeamCreationStage::SavingTeam, error)).await;
-        return Err(ManualTeamCreateOutcome::Unavailable);
+    match materialize_team(store, shared, materialization, observer, call.cancellation(), Some(call)).await {
+        TeamMaterializationCommandOutcome::Materialized { .. } => Ok((team_id, run, run_idempotency_key)),
+        TeamMaterializationCommandOutcome::Rejected => Err(ManualTeamCreateOutcome::Rejected),
+        TeamMaterializationCommandOutcome::OutcomeUnknown => Err(ManualTeamCreateOutcome::OutcomeUnknown),
+        TeamMaterializationCommandOutcome::Unavailable => Err(ManualTeamCreateOutcome::Unavailable),
     }
-    if !matches!(
-        outcome,
-        organization::MaterializationOperationOutcome::Confirmed { .. }
-    ) {
-        return Err(manual_materialization_outcome(outcome));
-    }
-    Ok((team_id, run, run_idempotency_key))
 }
 
-pub(super) async fn create_manual_team_run(
+pub(super) async fn prepare_run(
     store: &mut OrganizationStore,
     team_run: &TeamRunOwner,
-    shared: &OrganizationShared,
     team_id: TeamId,
     run: organization::GraphRunFacts,
     run_idempotency_key: String,
     call: &crate::call::CallReply<ManualTeamCreateOutcome>,
-) -> ManualTeamCreateOutcome {
+) -> Result<(CreateGraphRunOutcome, crate::RunRuntimeReceipt), ManualTeamCreateOutcome> {
     let run_id = run.run_id().clone();
     let started = platform::trace::enabled().then(Instant::now);
     session_trace("runtime.team.run_create.start", || json!({}));
@@ -332,13 +336,13 @@ pub(super) async fn create_manual_team_run(
     }
     let created = match committed {
         Ok(created) => created,
-        Err(_) => return ManualTeamCreateOutcome::Unavailable,
+        Err(_) => return Err(ManualTeamCreateOutcome::Unavailable),
     };
     if matches!(created, CreateGraphRunOutcome::ConflictingIdempotency) {
         call.creation_failure(TeamCreationFailure::new(
             TeamCreationStage::InitializingSessions, TeamCreationFailureReason::StoreConflict,
         )).await;
-        return ManualTeamCreateOutcome::Unavailable;
+        return Err(ManualTeamCreateOutcome::Unavailable);
     }
     call.creation(None, Ok(())).await;
     let started = platform::trace::enabled().then(Instant::now);
@@ -361,12 +365,20 @@ pub(super) async fn create_manual_team_run(
                 Ok(()),
             )
             .await;
-            return manual_runtime_receipt_outcome(outcome);
+            return Err(manual_runtime_receipt_outcome(outcome));
         }
     };
-    let (outcome, creation_failure) = shared
-        .team_confirm_receipt(receipt.clone(), call.cancellation())
-        .await;
+    Ok((created, receipt))
+}
+
+pub(super) async fn settle_run(
+    store: &mut OrganizationStore,
+    created: CreateGraphRunOutcome,
+    receipt: crate::RunRuntimeReceipt,
+    outcome: RuntimeReceiptOutcome,
+    creation_failure: Option<TeamCreationFailure>,
+    call: &crate::call::CallReply<ManualTeamCreateOutcome>,
+) -> ManualTeamCreateOutcome {
     match outcome {
         RuntimeReceiptOutcome::Installed => {
             let started = platform::trace::enabled().then(Instant::now);
@@ -378,7 +390,7 @@ pub(super) async fn create_manual_team_run(
             }
             call.creation(Some(true), committed.as_ref().map(|_| ()))
                 .await;
-            committed.map_or(ManualTeamCreateOutcome::Unavailable, |_| {
+            committed.map_or(ManualTeamCreateOutcome::OutcomeUnknown, |_| {
                 ManualTeamCreateOutcome::Created(created)
             })
         }

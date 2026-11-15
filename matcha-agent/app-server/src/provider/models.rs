@@ -97,7 +97,7 @@ pub(super) async fn thinking(
             ));
         }
     }
-    let guard = sessions.agent_guard(&input.agent_id).await;
+    let guard = sessions.agent_scope(&input.agent_id).await;
     let mut snapshot = config.checked_snapshot().await?;
     let agent = snapshot
         .agents
@@ -116,7 +116,7 @@ pub(super) async fn thinking(
     .await?;
     drop(guard);
     let capabilities = effort::inspect(&launch).await?;
-    let _guard = sessions.agent_guard(&input.agent_id).await;
+    let _guard = sessions.agent_scope(&input.agent_id).await;
     let mut current = config.checked_snapshot().await?;
     let agent = current
         .agents

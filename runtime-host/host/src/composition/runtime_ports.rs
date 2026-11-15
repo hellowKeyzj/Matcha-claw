@@ -265,8 +265,8 @@ impl organization::OrganizationRuntimeDirectory for RuntimeDriverDirectory {
         &self,
         endpoint: &organization::RuntimeEndpointReference,
     ) -> Option<Arc<dyn organization::OrganizationNativeRuntime>> {
-        let identity = RuntimeDriverIdentity::from_reference(endpoint.as_str())?;
-        self.lookup(&identity.endpoint())
+        let endpoint = runtime_directory::endpoint_from_reference(endpoint.as_str())?;
+        self.lookup(&endpoint)
             .map(|driver| driver as Arc<dyn organization::OrganizationNativeRuntime>)
     }
 
@@ -278,8 +278,8 @@ impl organization::OrganizationRuntimeDirectory for RuntimeDriverDirectory {
 
 impl organization::RoleSessionIdentityResolver for RuntimeDriverDirectory {
     fn session_key(&self, session: &organization::RoleSessionReceipt) -> Option<String> {
-        let identity = RuntimeDriverIdentity::from_reference(session.endpoint().as_str())?;
-        let driver = self.lookup(&identity.endpoint())?;
+        let endpoint = runtime_directory::endpoint_from_reference(session.endpoint().as_str())?;
+        let driver = self.lookup(&endpoint)?;
         let session_ops = driver.session_ops()?;
         session_ops.agent_scoped_session_key(
             session.agent().as_str(),
@@ -291,23 +291,25 @@ impl organization::RoleSessionIdentityResolver for RuntimeDriverDirectory {
         &self,
         receipt: &organization::RoleSessionReceipt,
     ) -> Option<(RuntimeEndpoint, Option<String>, String)> {
-        let runtime = RuntimeDriverIdentity::from_reference(receipt.endpoint().as_str())?;
-        Some(if runtime == RuntimeDriverIdentity::matcha_agent() {
-            matcha_agent::session::projection::session_ownership_key(
-                runtime.endpoint(),
+        let endpoint = runtime_directory::endpoint_from_reference(receipt.endpoint().as_str())?;
+        match endpoint.runtime_adapter_id() {
+            "matcha-agent" => Some(matcha_agent::session::projection::session_ownership_key(
+                endpoint,
                 receipt.agent().as_str(),
                 "",
                 receipt.endpoint_session_id().as_str(),
-            )
-        } else {
-            let session_key = self.session_key(receipt)?;
-            openclaw::session::session_ownership_key(
-                runtime.endpoint(),
-                receipt.agent().as_str(),
-                &session_key,
-                receipt.endpoint_session_id().as_str(),
-            )
-        })
+            )),
+            "openclaw" => {
+                let session_key = self.session_key(receipt)?;
+                Some(openclaw::session::session_ownership_key(
+                    endpoint,
+                    receipt.agent().as_str(),
+                    &session_key,
+                    receipt.endpoint_session_id().as_str(),
+                ))
+            }
+            _ => None,
+        }
     }
 
     fn ownership_query_key(
@@ -315,7 +317,7 @@ impl organization::RoleSessionIdentityResolver for RuntimeDriverDirectory {
         identity: &SessionIdentity,
         endpoint_session_id: &str,
     ) -> (RuntimeEndpoint, Option<String>, String) {
-        if identity.endpoint() == &RuntimeDriverIdentity::matcha_agent().endpoint() {
+        if identity.endpoint().runtime_adapter_id() == "matcha-agent" {
             matcha_agent::session::projection::session_ownership_key(
                 identity.endpoint().clone(),
                 identity.agent_id(),

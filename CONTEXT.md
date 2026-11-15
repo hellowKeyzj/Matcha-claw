@@ -77,7 +77,7 @@ _Avoid_: environment
 _Avoid_: TeamRun, team execution
 
 **TeamRun**:
-由 Organization 中的 Team 定义创建的一次执行聚合，拥有 graph instance、attempt、调度、delivery、trigger 与 execution evidence；不预设独立执行目录。
+由 Organization 中的 Team 定义创建的一次执行聚合，拥有 graph instance、attempt、调度、delivery、trigger 与 execution evidence；新 Run 同时拥有冻结的独立共享执行目录，历史缺目录的 Run 保持原行为。[VERIFY: runtime-host/modules/organization/src/store/facts/workspace.rs:8] [VERIFY: runtime-host/modules/organization/src/store/records/run/header.rs:18]
 _Avoid_: Organization, Team template
 
 **Session**:
@@ -114,7 +114,7 @@ _Avoid_: Workspace
 
 **Evidence Reference**:
 TeamRun 对执行证据的引用，可指向路径、URI、artifact identity 或 inline text；引用不代表 TeamRun 拥有底层目录，也不代表内容已纳入 Workspace。
-_Avoid_: TeamRun workspace, published artifact
+_Avoid_: published artifact, content snapshot
 
 **OpenClaw plugins**:
 通过 OpenClaw plugin interface 接入的 plugin packages。

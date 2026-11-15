@@ -31,8 +31,16 @@ impl OrganizationStore {
         let run_id = draft.run_id.clone();
         let mut replayed = false;
         let result = self.transact(|facts| {
-            crate::application::design::guard(facts, team_id, &run_id, epoch, generation, None)?;
-            let run = facts.run(&run_id).ok_or(StoreFault::InvalidFacts)?;
+            let run = facts
+                .run(&run_id)
+                .ok_or(StoreFault::Design(super::DesignError::UnknownRun))?;
+            if run.team() != team_id {
+                return Err(StoreFault::Design(super::DesignError::TeamMismatch));
+            }
+            // MCP generation authorizes graph access, including replay.
+            if generation.is_some() {
+                crate::application::design::guard(facts, team_id, &run_id, epoch, generation, None)?;
+            }
             let command = draft.command(run.graph().definition())?;
             let existing = facts
                 .events()

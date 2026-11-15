@@ -33,6 +33,7 @@ export interface SettingsContribution {
   component: ComponentType<SettingsSectionProps>;
   layout?: 'document' | 'workspace';
   keepMounted?: boolean;
+  developerOnly?: boolean;
 }
 
 export interface ApplicationLifecycleProps {

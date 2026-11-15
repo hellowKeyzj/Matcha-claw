@@ -14,6 +14,7 @@ fn request(approval_id: &str) -> ApprovalRequest {
         reason: "A deployment requires review.".to_owned(),
         requested_action: "Deploy release candidate".to_owned(),
         risk_summary: "Production traffic may be affected.".to_owned(),
+        content: None,
         idempotency_key: "command-01".to_owned(),
         requested_at: 1_000,
         subject: ApprovalSubject::Stage {

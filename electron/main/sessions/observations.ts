@@ -5,12 +5,14 @@ import { randomBytes } from 'node:crypto';
 import type { WebContents } from 'electron';
 import type { SessionObservationResult } from '../../../src/types/session/snapshot';
 import { logger } from '../../utils/logger';
+import { hasControlCharacter, isIdentifier } from './request-validation';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '../runtime-host-delivery/transport/sessions/trace';
 import {
   isSessionIdentity,
   sameSessionIdentity,
   type SessionDelta,
   type SessionIdentity,
+  type SessionView,
 } from '../runtime-host-delivery/transport/sessions/session-contract';
 
 export const SESSION_PAGE_HEADER = 'X-MatchaClaw-Session-Page';
@@ -18,6 +20,7 @@ export type SessionPage = Readonly<{ token: string; contents: WebContents }>;
 type ObservationLease = {
   page: SessionPage;
   identity: SessionIdentity;
+  endpointSessionId?: string;
   leaseId: string;
   nativeLeaseId: string;
   pending: number;
@@ -27,6 +30,7 @@ type ObservationLease = {
 };
 type Observation = {
   lease: ObservationLease;
+  endpointSessionId?: string;
   nativeLeaseId: string;
   settled: boolean;
   settle: () => void;
@@ -34,10 +38,14 @@ type Observation = {
 type SendDemand = {
   page: SessionPage;
   identity: SessionIdentity;
+  endpointSessionId?: string;
+  requestedEndpointSessionId?: string;
   runId?: string;
   terminalRuns: Set<string>;
   goalOutcomeUnknown?: true;
 };
+type ResyncObserver = (identity: SessionIdentity, leaseId: string, endpointSessionId?: string) => Promise<SessionObservationResult<SessionView> | null>;
+type ResyncRequest = { next?: { observe: ResyncObserver; acquisitions: readonly Promise<void>[] } };
 
 export class RendererSessionObservationRegistry {
   private readonly pages = new Map<string, SessionPage>();
@@ -46,7 +54,8 @@ export class RendererSessionObservationRegistry {
   private readonly sends = new Set<SendDemand>();
   private releaseNative?: (identity: SessionIdentity, leaseId: string) => Promise<unknown>;
   private readonly operations = new Set<Promise<unknown>>();
-  private readonly acquisitions = new Set<Promise<void>>();
+  private readonly acquisitions = new Map<Promise<void>, ObservationLease>();
+  private readonly resyncs = new Map<string, { request: ResyncRequest; pending: Promise<void> }>();
   private readonly releases = new Set<Promise<void>>();
   private closed = false;
   private closing?: Promise<void>;
@@ -83,28 +92,30 @@ export class RendererSessionObservationRegistry {
     this.releaseNative = release;
   }
 
-  beginObservation(page: SessionPage | undefined, identity: SessionIdentity, leaseId: string): Observation {
+  beginObservation(page: SessionPage | undefined, identity: SessionIdentity, leaseId: string, endpointSessionId?: string): Observation {
     this.requirePage(page, identity);
     let lease = [...this.observations].find((entry) => entry.leaseId === leaseId);
-    if (lease) {
-      if (lease.page !== page || !sameSessionIdentity(lease.identity, identity) || lease.revoked) {
-        throw new Error('Session observation lease is not authorized');
-      }
-    } else {
+    if (lease && (lease.page !== page || !sameSessionIdentity(lease.identity, identity) || lease.revoked)) {
+      throw new Error('Session observation lease is not authorized');
+    }
+    endpointSessionId ??= this.knownEndpointSessionId(identity);
+    if (!lease) {
       lease = { page, identity, leaseId, nativeLeaseId: randomBytes(24).toString('base64url'), pending: 0, acquired: false, revoked: false };
       this.observations.add(lease);
     }
     lease.pending += 1;
     let settle!: () => void;
     const pending = new Promise<void>((resolve) => { settle = resolve; });
-    this.acquisitions.add(pending);
-    return { lease, nativeLeaseId: lease.nativeLeaseId, settled: false,
+    this.acquisitions.set(pending, lease);
+    return { lease, endpointSessionId, nativeLeaseId: lease.nativeLeaseId, settled: false,
       settle: () => { this.acquisitions.delete(pending); settle(); } };
   }
 
-  completeObservation(entry: Observation, nativeLeaseId: string): boolean {
+  completeObservation(entry: Observation, nativeLeaseId: string, view: SessionView): boolean {
     const { lease } = entry;
-    if (entry.settled || nativeLeaseId !== entry.nativeLeaseId || lease.revoked || !this.observations.has(lease) || !this.isCurrent(lease.page)) return false;
+    if (entry.settled || nativeLeaseId !== entry.nativeLeaseId || lease.revoked || !this.observations.has(lease)
+      || !this.isCurrent(lease.page) || !sameSessionIdentity(lease.identity, view.identity)) return false;
+    lease.endpointSessionId = this.commitEndpointSessionId(lease.identity, view.endpointSessionId ?? undefined, entry.endpointSessionId) ?? lease.endpointSessionId;
     entry.settled = true;
     lease.pending -= 1;
     lease.acquired = true;
@@ -140,15 +151,16 @@ export class RendererSessionObservationRegistry {
     try { return await pending; } finally { this.operations.delete(pending); }
   }
 
-  beginSend(page: SessionPage | undefined, identity: SessionIdentity, runId?: string): SendDemand {
+  beginSend(page: SessionPage | undefined, identity: SessionIdentity, runId?: string, endpointSessionId?: string): SendDemand {
     this.requirePage(page, identity);
-    const entry = { page, identity, runId, terminalRuns: new Set<string>() };
+    const entry = { page, identity, endpointSessionId: this.knownEndpointSessionId(identity), requestedEndpointSessionId: endpointSessionId, runId, terminalRuns: new Set<string>() };
     this.sends.add(entry);
     return entry;
   }
 
   bindSend(entry: SendDemand, runId: string): void {
     if (!this.sends.has(entry)) return;
+    entry.endpointSessionId = this.commitEndpointSessionId(entry.identity, entry.requestedEndpointSessionId) ?? entry.endpointSessionId;
     entry.runId = runId;
     if (entry.terminalRuns.has(runId)) this.sends.delete(entry);
     entry.terminalRuns.clear();
@@ -217,80 +229,122 @@ export class RendererSessionObservationRegistry {
   active(): readonly Readonly<{ page: SessionPage; identity: SessionIdentity }>[] {
     const entries = new Map<string, { page: SessionPage; identity: SessionIdentity }>();
     for (const { page, identity } of [...[...this.observations].filter((lease) => !lease.revoked), ...this.sends]) {
-      if (this.isCurrent(page)) entries.set(JSON.stringify([page.token, identity.endpoint.kind, identity.endpoint.runtimeAdapterId,
-        identity.endpoint.runtimeInstanceId, identity.agentId, identity.sessionKey]), { page, identity });
+      if (this.isCurrent(page)) entries.set(sessionReceiverKey(page, identity), { page, identity });
     }
     return [...entries.values()];
   }
 
-  async resync(observe: (identity: SessionIdentity, leaseId: string) => Promise<SessionObservationResult<{ epoch: number; seq: number; runtime: unknown }> | null>): Promise<void> {
-    if (this.closed) return;
-    // Snapshot only already-started acquires, never resync operations or future requests.
-    await Promise.allSettled([...this.acquisitions]);
+  async resync(observe: ResyncObserver): Promise<void> {
     if (this.closed) return;
     for (const lease of this.observations) {
       if (lease.revoked) void this.releaseObservationLease(lease).catch(() => undefined);
     }
-    await this.trackOperation(() => Promise.allSettled(this.active().map(async ({ page, identity }) => {
-      const entry = [...this.observations].find((candidate) => !candidate.revoked && candidate.page === page && sameSessionIdentity(candidate.identity, identity));
-      if (entry && !entry.acquired) {
-        if (isSessionTraceEnabled()) logSessionTrace('electron.session.route.resync.drop', 'session-route-boundary', {
-          identity: summarizeSessionIdentity(identity), pageHash: summarizeIdentifier(page.token).hash, reason: 'observation-pending',
-        });
+    const acquisitions = new Map<string, Promise<void>[]>();
+    for (const [pending, lease] of this.acquisitions) {
+      if (lease.revoked) continue;
+      const key = sessionReceiverKey(lease.page, lease.identity);
+      const waiting = acquisitions.get(key) ?? [];
+      waiting.push(pending);
+      acquisitions.set(key, waiting);
+    }
+    await Promise.allSettled(this.active().map(({ page, identity }) => {
+      const key = sessionReceiverKey(page, identity);
+      const next = { observe, acquisitions: acquisitions.get(key) ?? [] };
+      const current = this.resyncs.get(key);
+      if (current) {
+        current.request.next = next;
+        return current.pending;
+      }
+      const request: ResyncRequest = { next };
+      const pending = this.trackOperation(async () => {
+        try {
+          while (request.next && !this.closed && this.isCurrent(page)) {
+            const { observe, acquisitions } = request.next;
+            request.next = undefined;
+            // Only this receiver's acquires predating the connection; never absorb our own recovery.
+            await Promise.allSettled(acquisitions);
+            if (this.closed || !this.isCurrent(page)) return;
+            await this.resyncObservation(page, identity, observe).catch(() => undefined);
+          }
+        } finally {
+          this.resyncs.delete(key);
+        }
+      });
+      this.resyncs.set(key, { request, pending });
+      return pending;
+    }));
+  }
+
+  private async resyncObservation(page: SessionPage, identity: SessionIdentity, observe: ResyncObserver): Promise<void> {
+    const entry = [...this.observations].find((candidate) => !candidate.revoked && candidate.acquired
+      && candidate.page === page && sameSessionIdentity(candidate.identity, identity));
+    const demands = [...this.sends].filter((candidate) => candidate.page === page && sameSessionIdentity(candidate.identity, identity));
+    if (!entry && demands.length === 0) return;
+    let endpointSessionId = this.knownEndpointSessionId(identity);
+    if (identity.endpoint.runtimeAdapterId === 'matcha-agent' && endpointSessionId === undefined) {
+      for (const demand of demands) {
+        if (demand.requestedEndpointSessionId === undefined) continue;
+        if (endpointSessionId !== undefined && endpointSessionId !== demand.requestedEndpointSessionId) {
+          throw new Error('Session endpoint ID conflicts with pending demand');
+        }
+        endpointSessionId = demand.requestedEndpointSessionId;
+      }
+    }
+    const attempt = entry ? this.beginObservation(page, identity, entry.leaseId, endpointSessionId) : undefined;
+    const leaseId = attempt?.nativeLeaseId ?? randomBytes(24).toString('base64url');
+    const trace = (stage: string, extra?: () => Record<string, unknown>) => {
+      if (isSessionTraceEnabled()) logSessionTrace(stage, 'session-route-boundary', {
+        identity: summarizeSessionIdentity(identity), pageHash: summarizeIdentifier(page.token).hash,
+        leaseHash: summarizeIdentifier(leaseId).hash, ...extra?.(),
+      });
+    };
+    let completed = false;
+    try {
+      trace('electron.session.route.resync.request');
+      const result = await observe(identity, leaseId, endpointSessionId).catch((error) => {
+        trace('electron.session.route.resync.failed', () => ({ error: summarizeIdentifier(error instanceof Error ? error.message : String(error)) }));
+        return null;
+      });
+      if (!result || result.leaseId !== leaseId || !this.isCurrent(page)) {
+        trace('electron.session.route.resync.drop', () => ({ reason: !result ? 'observe-unavailable' : result.leaseId !== leaseId ? 'lease-mismatch' : 'page-not-current',
+          epoch: result && 'view' in result ? result.view.epoch : null, seq: result && 'view' in result ? result.view.seq : null }));
         return;
       }
-      const attempt = entry ? this.beginObservation(page, identity, entry.leaseId) : undefined;
-      const leaseId = attempt?.nativeLeaseId ?? randomBytes(24).toString('base64url');
-      const trace = (stage: string, extra?: () => Record<string, unknown>) => {
-        if (isSessionTraceEnabled()) logSessionTrace(stage, 'session-route-boundary', {
-          identity: summarizeSessionIdentity(identity), pageHash: summarizeIdentifier(page.token).hash,
-          leaseHash: summarizeIdentifier(leaseId).hash, ...extra?.(),
-        });
-      };
-      let completed = false;
-      try {
-        trace('electron.session.route.resync.request');
-        const result = await observe(identity, leaseId).catch((error) => {
-          trace('electron.session.route.resync.failed', () => ({ error: summarizeIdentifier(error instanceof Error ? error.message : String(error)) }));
-          return null;
-        });
-        if (!result || result.leaseId !== leaseId || !this.isCurrent(page)) {
-          trace('electron.session.route.resync.drop', () => ({ reason: !result ? 'observe-unavailable' : result.leaseId !== leaseId ? 'lease-mismatch' : 'page-not-current',
-            epoch: result && 'view' in result ? result.view.epoch : null, seq: result && 'view' in result ? result.view.seq : null }));
-          return;
-        }
-        if ('outcome' in result) {
-          trace('electron.session.route.resync.drop', () => ({ reason: 'observation-released' }));
-          return;
-        }
-        trace('electron.session.route.resync.response', () => ({ epoch: result.view.epoch, seq: result.view.seq }));
-        if (attempt && !(completed = this.completeObservation(attempt, result.leaseId))) {
-          trace('electron.session.route.resync.drop', () => ({ reason: 'observation-not-current', epoch: result.view.epoch, seq: result.view.seq }));
-          return;
-        }
-        if (typeof result.view.runtime === 'object' && result.view.runtime !== null) {
-          const runtime = result.view.runtime as { phase?: unknown; activeRunId?: unknown };
-          if (typeof runtime.phase === 'string' && isTerminal(runtime.phase) && typeof runtime.activeRunId === 'string') {
-            this.terminalRun(identity, runtime.activeRunId);
-          }
-        }
-        if (this.active().some((candidate) => candidate.page === page && sameSessionIdentity(candidate.identity, identity))) {
-          try {
-            page.contents.send('host:event', { eventName: 'session.resync', payload: { identity, epoch: result.view.epoch, seq: result.view.seq } });
-            trace('electron.session.route.resync.delivered', () => ({ epoch: result.view.epoch, seq: result.view.seq }));
-          } catch (error) {
-            trace('electron.session.route.resync.failed', () => ({ epoch: result.view.epoch, seq: result.view.seq,
-              error: summarizeIdentifier(error instanceof Error ? error.message : String(error)) }));
-            throw error;
-          }
-        } else trace('electron.session.route.resync.drop', () => ({ epoch: result.view.epoch, seq: result.view.seq, reason: 'no-active-demand' }));
-      } finally {
-        if (!attempt) {
-          const lease = { page, identity, leaseId, nativeLeaseId: leaseId, pending: 0, acquired: false, revoked: true };
-          await this.releaseObservationLease(lease);
-        } else if (!completed) await this.rollbackObservation(attempt);
+      if ('outcome' in result) {
+        trace('electron.session.route.resync.drop', () => ({ reason: 'observation-released' }));
+        return;
       }
-    }))).then(() => undefined);
+      trace('electron.session.route.resync.response', () => ({ epoch: result.view.epoch, seq: result.view.seq }));
+      if (attempt && !(completed = this.completeObservation(attempt, result.leaseId, result.view))) {
+        trace('electron.session.route.resync.drop', () => ({ reason: 'observation-not-current', epoch: result.view.epoch, seq: result.view.seq }));
+        return;
+      }
+      if (!attempt) {
+        if (!demands.some((demand) => this.sends.has(demand)) || !sameSessionIdentity(identity, result.view.identity)) return;
+        this.commitEndpointSessionId(identity, result.view.endpointSessionId ?? undefined, endpointSessionId);
+      }
+      if (typeof result.view.runtime === 'object' && result.view.runtime !== null) {
+        const runtime = result.view.runtime as { phase?: unknown; activeRunId?: unknown };
+        if (typeof runtime.phase === 'string' && isTerminal(runtime.phase) && typeof runtime.activeRunId === 'string') {
+          this.terminalRun(identity, runtime.activeRunId);
+        }
+      }
+      if (this.active().some((candidate) => candidate.page === page && sameSessionIdentity(candidate.identity, identity))) {
+        try {
+          page.contents.send('host:event', { eventName: 'session.resync', payload: { identity, epoch: result.view.epoch, seq: result.view.seq } });
+          trace('electron.session.route.resync.delivered', () => ({ epoch: result.view.epoch, seq: result.view.seq }));
+        } catch (error) {
+          trace('electron.session.route.resync.failed', () => ({ epoch: result.view.epoch, seq: result.view.seq,
+            error: summarizeIdentifier(error instanceof Error ? error.message : String(error)) }));
+          throw error;
+        }
+      } else trace('electron.session.route.resync.drop', () => ({ epoch: result.view.epoch, seq: result.view.seq, reason: 'no-active-demand' }));
+    } finally {
+      if (!attempt) {
+        const lease = { page, identity, leaseId, nativeLeaseId: leaseId, pending: 0, acquired: false, revoked: true };
+        await this.releaseObservationLease(lease);
+      } else if (!completed) await this.rollbackObservation(attempt);
+    }
   }
 
   close(): Promise<void> {
@@ -312,6 +366,37 @@ export class RendererSessionObservationRegistry {
       if (demand.runId === runId) this.sends.delete(demand);
       else demand.terminalRuns.add(runId);
     }
+  }
+
+  private knownEndpointSessionId(identity: SessionIdentity, endpointSessionId?: string): string | undefined {
+    if (identity.endpoint.runtimeAdapterId !== 'matcha-agent') return endpointSessionId;
+    const entries = [...[...this.observations].filter((lease) => !lease.revoked), ...this.sends];
+    for (const entry of entries) {
+      if (!sameSessionIdentity(entry.identity, identity) || entry.endpointSessionId === undefined) continue;
+      if (endpointSessionId !== undefined && endpointSessionId !== entry.endpointSessionId) {
+        throw new Error('Session endpoint ID conflicts with active demand');
+      }
+      endpointSessionId = entry.endpointSessionId;
+    }
+    return endpointSessionId;
+  }
+
+  private commitEndpointSessionId(identity: SessionIdentity, endpointSessionId?: string, requestedEndpointSessionId?: string): string | undefined {
+    if (identity.endpoint.runtimeAdapterId !== 'matcha-agent') return endpointSessionId;
+    if (endpointSessionId !== undefined && (!isIdentifier(endpointSessionId)
+      || endpointSessionId.trim() !== endpointSessionId || hasControlCharacter(endpointSessionId))) {
+      throw new Error('Session endpoint ID is invalid');
+    }
+    if (endpointSessionId !== undefined && requestedEndpointSessionId !== undefined && endpointSessionId !== requestedEndpointSessionId) {
+      throw new Error('Session endpoint ID conflicts with observation request');
+    }
+    endpointSessionId = this.knownEndpointSessionId(identity, endpointSessionId);
+    if (endpointSessionId !== undefined) {
+      for (const entry of [...[...this.observations].filter((lease) => !lease.revoked), ...this.sends]) {
+        if (entry.endpointSessionId === undefined && sameSessionIdentity(entry.identity, identity)) entry.endpointSessionId = endpointSessionId;
+      }
+    }
+    return endpointSessionId;
   }
 
   private requirePage(page: SessionPage | undefined, identity: SessionIdentity): asserts page is SessionPage {
@@ -360,6 +445,11 @@ export class RendererSessionObservationRegistry {
   }
 }
 
+function sessionReceiverKey(page: SessionPage, identity: SessionIdentity): string {
+  return JSON.stringify([page.token, identity.endpoint.kind, identity.endpoint.runtimeAdapterId,
+    identity.endpoint.runtimeInstanceId, identity.agentId, identity.sessionKey]);
+}
+
 function sessionEventWatermark(payload: unknown) {
   const value = payload as { epoch?: number; seq?: number; cursor?: number } | null;
   return { epoch: value?.epoch ?? null, seq: value?.seq ?? null, cursor: value?.cursor ?? null };
@@ -385,7 +475,7 @@ export async function dispatchSessionObservation(
       if (!isSessionObservationRequest(body, operation) || !deps.sessionObservers.isCurrent(page)) {
         return { status: 400, body: { success: false, error: 'Session observation request is invalid' } };
       }
-      const { sessionIdentity: identity, leaseId, limit, inputIds } = body.input;
+      const { sessionIdentity: identity, endpointSessionId, leaseId, limit, inputIds } = body.input;
       if (operation === 'sessions.release') {
         const released = await deps.sessionObservers.releaseObservation(page, identity, leaseId);
         return { status: 200, body: { outcome: released ? 'released' : 'not-found' } };
@@ -393,7 +483,7 @@ export async function dispatchSessionObservation(
       if (signal?.aborted) return unavailable;
       let entry: ReturnType<RendererSessionObservationRegistry['beginObservation']>;
       try {
-        entry = deps.sessionObservers.beginObservation(page, identity, leaseId);
+        entry = deps.sessionObservers.beginObservation(page, identity, leaseId, endpointSessionId);
       } catch {
         return { status: 400, body: { success: false, error: 'Session observation request is invalid' } };
       }
@@ -404,7 +494,7 @@ export async function dispatchSessionObservation(
       signal?.addEventListener('abort', cancel, { once: true });
       try {
         const response = await deps.runtimeHostTransports.sessionObservationTransport.observe(
-          observationRequest(identity, entry.nativeLeaseId, 'sessions.observe', limit, inputIds), traceId);
+          observationRequest(identity, entry.nativeLeaseId, 'sessions.observe', limit, inputIds, entry.endpointSessionId), traceId);
         if (signal?.aborted) {
           await deps.sessionObservers.rollbackObservation(entry);
           return unavailable;
@@ -414,7 +504,7 @@ export async function dispatchSessionObservation(
             await deps.sessionObservers.rollbackObservation(entry);
             return { status: 200, body: { leaseId, outcome: response.body.outcome } };
           }
-          if (deps.sessionObservers.completeObservation(entry, response.body.leaseId)) {
+          if (deps.sessionObservers.completeObservation(entry, response.body.leaseId, response.body.view)) {
             return { status: 200, body: { leaseId, view: response.body.view } };
           }
           await deps.sessionObservers.rollbackObservation(entry);

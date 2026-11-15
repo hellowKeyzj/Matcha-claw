@@ -73,28 +73,44 @@ impl RoleSessionReceipt {
         endpoint: RuntimeEndpointReference,
     ) -> Self {
         let mut binding = Self::new(team, run, role, session_ref, agent, endpoint);
-        if binding.endpoint().as_str()
-            == runtime_directory::RuntimeDriverIdentity::matcha_agent().runtime_endpoint_reference()
-        {
-            use sha2::{Digest, Sha256};
-            let mut digest = Sha256::new();
-            digest.update(b"matcha-team-role-session-v1");
-            for part in [
-                binding.endpoint().as_str(), binding.team_run().as_str(),
-                binding.role().as_str(), binding.session_ref().as_str(),
-            ] {
-                digest.update((part.len() as u64).to_be_bytes());
-                digest.update(part.as_bytes());
-            }
-            let hash = digest.finalize();
+        let Some(endpoint) = runtime_directory::endpoint_from_reference(binding.endpoint().as_str()) else {
+            return binding;
+        };
+        let matcha = match endpoint.runtime_adapter_id() {
+            "matcha-agent" => true,
+            "openclaw"
+                if endpoint != runtime_directory::RuntimeDriverIdentity::open_claw().endpoint() => false,
+            _ => return binding,
+        };
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(if matcha {
+            b"matcha-team-role-session-v1".as_slice()
+        } else {
+            b"openclaw-team-role-session-v1".as_slice()
+        });
+        let endpoint_reference = runtime_directory::endpoint_reference(&endpoint);
+        for part in [
+            endpoint_reference.as_str(), binding.team_run().as_str(),
+            binding.role().as_str(), binding.session_ref().as_str(),
+        ] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        let hash = digest.finalize();
+        let session_id = if matcha {
             let mut bytes: [u8; 16] = hash[..16].try_into().expect("SHA-256 contains 16 bytes");
             bytes[6] = (bytes[6] & 0x0f) | 0x80;
             bytes[8] = (bytes[8] & 0x3f) | 0x80;
             let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-            binding.endpoint_session_id = EndpointSessionId::try_new(format!(
+            format!(
                 "{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..],
-            )).expect("derived UUID is a valid endpoint session identity");
-        }
+            )
+        } else {
+            format!("tr-{hash:x}")
+        };
+        binding.endpoint_session_id = EndpointSessionId::try_new(session_id)
+            .expect("derived endpoint session identity is valid");
         binding
     }
 

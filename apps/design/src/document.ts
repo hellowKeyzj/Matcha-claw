@@ -113,6 +113,8 @@ export interface ExportResult {
 export const anglePresets = ['front', 'back', 'god', 'side', 'three-quarter-left', 'three-quarter-right', 'low-angle', 'face-closeup', 'environment'] as const;
 export type AnglePreset = typeof anglePresets[number];
 
+export const MAX_MEDIA_DURATION_SECONDS = 0xffff_ffff;
+
 export type GenerationAction = 'image' | 'edit' | 'remove-background' | 'upscale' | 'erase'
   | 'product-scene' | 'recolor' | 'model-display' | 'logo' | 'video' | 'storyboard'
   | 'white' | 'watermark' | 'resize' | 'translate' | 'edit-text' | 'angle' | 'erase-text';

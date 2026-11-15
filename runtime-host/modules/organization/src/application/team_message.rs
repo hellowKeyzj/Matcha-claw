@@ -10,6 +10,7 @@ pub const MAX_REPAIR_ATTEMPTS: usize = 3;
 enum TeamMessageError {
     Output(TeamNodeOutputError),
     ConflictingOutputs,
+    RepairRefused,
 }
 
 impl TeamMessageError {
@@ -19,11 +20,13 @@ impl TeamMessageError {
             Self::Output(TeamNodeOutputError::InvalidEnvelope) => "exactly one <team_message> envelope must end the final reply".to_owned(),
             Self::Output(TeamNodeOutputError::InvalidJson) => "invalid JSON".to_owned(),
             Self::Output(TeamNodeOutputError::MissingField(field)) => format!("missing required field `{field}`"),
-            Self::Output(TeamNodeOutputError::UnexpectedField(_)) => "only summary and decision fields are allowed".to_owned(),
+            Self::Output(TeamNodeOutputError::UnexpectedField(_)) => "only summary, decision and files fields are allowed".to_owned(),
+            Self::Output(TeamNodeOutputError::InvalidField("files")) => "files must be an array of concrete relative file paths, each at most 4096 UTF-8 bytes; no URL, absolute path, traversal, wildcard or directory".to_owned(),
             Self::Output(TeamNodeOutputError::InvalidField(field)) => format!("invalid field `{field}`"),
-            Self::Output(TeamNodeOutputError::InvalidSummary) => "summary must be non-empty, at most 512 UTF-8 bytes, without control characters".to_owned(),
+            Self::Output(TeamNodeOutputError::InvalidSummary) => "summary must be non-empty and contain no control characters other than line breaks or tabs".to_owned(),
             Self::Output(TeamNodeOutputError::UnsafeDecision | TeamNodeOutputError::DecisionNotAllowed) => "decision must be one of the current node's allowed output ports".to_owned(),
             Self::ConflictingOutputs => "conflicting valid team_message outputs; provide one unambiguous result".to_owned(),
+            Self::RepairRefused => "repair cannot truthfully declare a permitted result".to_owned(),
         }
     }
 }
@@ -102,22 +105,82 @@ pub enum TeamMessageTerminalObservation {
     Repair(TeamMessageRepairDispatch),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TeamMessageRepairBasis {
+    MissingDeclaration,
+    Declared { decision: String, files: Vec<String> },
+    UnreadableDeclaration,
+}
+
+impl TeamMessageRepairBasis {
+    pub(crate) fn from_assistant_texts(texts: &[String]) -> Self {
+        let mut selected = Self::MissingDeclaration;
+        for text in texts {
+            if !text.contains("<team_message>") && !text.contains("</team_message>") {
+                continue;
+            }
+            let Some((decision, files)) = TeamNodeOutput::declared_result(text) else {
+                return Self::UnreadableDeclaration;
+            };
+            let next = Self::Declared { decision, files };
+            if selected != Self::MissingDeclaration && selected != next {
+                return Self::UnreadableDeclaration;
+            }
+            selected = next;
+        }
+        selected
+    }
+
+    pub(crate) fn validate_output(&self, output: &TeamNodeOutput) -> Result<(), TeamMessageFailure> {
+        match self {
+            Self::MissingDeclaration => Ok(()),
+            Self::Declared { decision, .. } if decision != output.decision() => Err(TeamMessageFailure::InvalidOutput),
+            Self::Declared { files, .. } if files != output.files() => Err(TeamMessageFailure::InvalidFiles),
+            Self::Declared { .. } => Ok(()),
+            Self::UnreadableDeclaration => Err(TeamMessageFailure::InvalidOutput),
+        }
+    }
+}
+
 pub fn plan_team_message_terminal(
     context: &TeamMessageTerminalContext,
     attempt: usize,
     assistant_texts: Vec<String>,
     graph: &GraphState,
     node_id: &NodeId,
+    prompts: &crate::prompts::TeamPromptSettings,
 ) -> TeamMessageTerminalPlan {
-    let plan = match select_team_message(&assistant_texts, graph, node_id) {
+    plan_team_message_terminal_with_repair_basis(context, attempt, assistant_texts, graph, node_id, None, prompts)
+        .unwrap_or(TeamMessageTerminalPlan::Failed)
+}
+
+pub(crate) fn plan_team_message_terminal_with_repair_basis(
+    context: &TeamMessageTerminalContext,
+    attempt: usize,
+    assistant_texts: Vec<String>,
+    graph: &GraphState,
+    node_id: &NodeId,
+    repair_basis: Option<&TeamMessageRepairBasis>,
+    prompts: &crate::prompts::TeamPromptSettings,
+) -> Result<TeamMessageTerminalPlan, TeamMessageFailure> {
+    let plan = match select_team_message(&assistant_texts, graph, node_id, attempt > 0) {
         Ok(output) => TeamMessageTerminalPlan::Settle { output },
+        Err(TeamMessageError::RepairRefused) => return Err(TeamMessageFailure::InvalidOutput),
         Err(error) if attempt < MAX_REPAIR_ATTEMPTS => {
             let next_attempt = attempt + 1;
+            let original_basis;
+            let repair_basis = match repair_basis {
+                Some(basis) => basis,
+                None => {
+                    original_basis = TeamMessageRepairBasis::from_assistant_texts(&assistant_texts);
+                    &original_basis
+                }
+            };
             TeamMessageTerminalPlan::Repair(TeamMessageRepairDispatch {
                 attempt: next_attempt,
                 requested_run_id: team_message_repair_run_id(context.delivery_id(), next_attempt),
                 endpoint_session_id: context.endpoint_session_id().clone(),
-                prompt: build_team_message_repair_prompt(&assistant_texts.join("\n\n"), &error, graph, node_id),
+                prompt: build_team_message_repair_prompt(&assistant_texts.join("\n\n"), &error, graph, node_id, repair_basis, prompts),
             })
         }
         Err(_) => TeamMessageTerminalPlan::Failed,
@@ -142,15 +205,17 @@ pub fn plan_team_message_terminal(
             _ => None,
         },
     }));
-    plan
+    Ok(plan)
 }
 
 fn select_team_message(
     assistant_texts: &[String],
     graph: &GraphState,
     node_id: &NodeId,
+    repairing: bool,
 ) -> Result<TeamNodeOutput, TeamMessageError> {
     let mut selected: Option<TeamNodeOutput> = None;
+    let mut conflicting = false;
     let mut error = TeamMessageError::Output(TeamNodeOutputError::MissingEnvelope);
     for (index, text) in assistant_texts.iter().enumerate() {
         let candidate = TeamNodeOutput::parse(text.clone()).and_then(|output| {
@@ -184,22 +249,31 @@ fn select_team_message(
                     (Err(_), _) => "invalid",
                     (Ok(_), None) => "selected",
                     (Ok(output), Some(existing)) if existing.summary() == output.summary()
-                        && existing.decision() == output.decision() => "equivalent_duplicate",
+                        && existing.decision() == output.decision()
+                        && existing.files() == output.files() => "equivalent_duplicate",
                     _ => "conflicting",
                 },
             }));
         }
         match candidate {
+            Err(TeamNodeOutputError::UnsafeDecision) if repairing
+                && TeamNodeOutput::declared_result(text).is_some_and(|(decision, files)| decision.is_empty() && files.is_empty()) => {
+                return Err(TeamMessageError::RepairRefused);
+            }
             Ok(output) => match &selected {
                 Some(existing) if existing.summary() != output.summary()
-                    || existing.decision() != output.decision() => {
+                    || existing.decision() != output.decision()
+                    || existing.files() != output.files() => {
                     runtime_trace("runtime.team_run.terminal.selection", || json!({
                         "runHash": identifier_hash(graph.definition().run_id().as_str()),
                         "nodeHash": identifier_hash(node_id.as_str()),
                         "outcome": "conflicting", "index": index,
                         "processed": index + 1, "total": assistant_texts.len(),
                     }));
-                    return Err(TeamMessageError::ConflictingOutputs);
+                    if !repairing {
+                        return Err(TeamMessageError::ConflictingOutputs);
+                    }
+                    conflicting = true;
                 }
                 Some(_) => {}
                 None => selected = Some(output),
@@ -210,10 +284,10 @@ fn select_team_message(
     runtime_trace("runtime.team_run.terminal.selection", || json!({
         "runHash": identifier_hash(graph.definition().run_id().as_str()),
         "nodeHash": identifier_hash(node_id.as_str()),
-        "outcome": if selected.is_some() { "unique" } else { "no_valid_output" },
+        "outcome": if conflicting { "conflicting" } else if selected.is_some() { "unique" } else { "no_valid_output" },
         "total": assistant_texts.len(), "truncated": assistant_texts.len() > 16,
     }));
-    selected.ok_or(error)
+    if conflicting { Err(TeamMessageError::ConflictingOutputs) } else { selected.ok_or(error) }
 }
 
 fn team_message_repair_run_id(delivery_id: &organization::DeliveryId, attempt: usize) -> String {
@@ -229,59 +303,98 @@ fn build_team_message_repair_prompt(
     error: &TeamMessageError,
     graph: &GraphState,
     node_id: &NodeId,
+    repair_basis: &TeamMessageRepairBasis,
+    prompts: &crate::prompts::TeamPromptSettings,
 ) -> String {
     let decisions = graph.definition().node(node_id).into_iter()
         .flat_map(|node| node.kind().source_ports())
         .map(|port| port.as_str())
         .collect::<Vec<_>>().join(" / ");
-    let correct_format = r#"<team_message>{"summary":"中文交付摘要","decision":"completed"}</team_message>"#;
-    let prompt = format!(
-        "<teamrun_message_repair>\n\
-你正在修复 TeamRun 节点最终回复中的 `<team_message>` 控制块。\n\n\
-只做格式修复，不重新执行任务，不调用工具，不输出解释。\n\
-最终回复必须只包含一个 `<team_message>...</team_message>`，其中内容必须是合法 JSON。\n\n\
-原始输出：\n{original_output}\n\n\
-校验错误：\n{}\n\n\
-目标结构：\n{correct_format}\n\n\
-修复规则：\n\
-- 只输出一个完整控制块，不用 Markdown 代码围栏包裹；结束标签后不再输出内容，字段值中不写控制块标签\n\
-- 块内直接写一个 JSON 对象，不写数组或把整个对象编码成字符串；只含 `summary`、`decision`，各出现一次，值均为非空字符串，不用 null、数字、布尔值或嵌套对象代替\n\
-- JSON 结构使用英文双引号、冒号和逗号；不用单引号或中文标点代替，不写注释、省略号或尾逗号\n\
-- `summary`：用中文概括原始输出里的完成内容、关键结论、产物/改动、风险、下游必要上下文；非空，不超过 512 UTF-8 字节，不含控制字符\n\
-- 摘要引用优先用中文引号，如“不可核实”；字符串值内部的英文双引号写为 `\\\"`，反斜杠写为 `\\\\`，不要用 HTML 实体代替 JSON 转义\n\
-- 摘要写成单段，用空格或分号分隔，不含换行、制表符等控制字符，即使写成 JSON 转义也不允许；超长时精简内容，不截断 JSON\n\
-- `decision`：保留原始输出表达的后续流向，只能选择当前节点允许的值：{decisions}；不得把失败或返工改为成功，也不翻译、不加空格或解释\n\
-- 提交前检查对象与字符串闭合、转义和字段类型\n\
-</teamrun_message_repair>",
-        error.repair_error()
-    );
-    prompt
+    compose_repair_prompt(original_output, &error.repair_error(), &decisions, repair_basis, prompts)
+}
+
+pub(crate) fn compose_repair_prompt(
+    original_output: &str,
+    error: &str,
+    decisions: &str,
+    repair_basis: &TeamMessageRepairBasis,
+    prompts: &crate::prompts::TeamPromptSettings,
+) -> String {
+    let (repair_rules, correct_format) = match repair_basis {
+        TeamMessageRepairBasis::MissingDeclaration => (
+            prompts.text("repair.missing.body").to_owned(),
+            message_structure(prompts.text("repair.missing.targetSummary"), prompts.text("repair.missing.targetDecision"), &[]),
+        ),
+        TeamMessageRepairBasis::Declared { decision, files } => (
+            prompts.render("repair.declared.body", &[
+                ("原流向", &json!(decision).to_string()),
+                ("原文件列表", &json!(files).to_string()),
+            ]),
+            format!("<team_message>{}</team_message>", json!({"summary": prompts.text("repair.declared.targetSummary"), "decision": decision, "files": files})),
+        ),
+        TeamMessageRepairBasis::UnreadableDeclaration => (
+            prompts.text("repair.unreadable.body").to_owned(),
+            message_structure(prompts.text("repair.unreadable.targetSummary"), "", &[]),
+        ),
+    };
+    let refusal = message_structure(prompts.text("repair.fallback.targetSummary"), "", &[]);
+    let fallback = prompts.render("repair.fallback.body", &[("拒绝结算结构", &refusal)]);
+    let common = prompts.render("repair.common.body", &[
+        ("本轮边界", &repair_rules),
+        ("原始输出", original_output),
+        ("校验错误", error),
+        ("目标结构", &correct_format),
+        ("无法结算答复", &fallback),
+        ("允许流向", decisions),
+    ]);
+    format!("<teamrun_message_repair>\n{common}\n</teamrun_message_repair>")
+}
+
+fn message_structure(summary: &str, decision: &str, files: &[String]) -> String {
+    #[derive(serde::Serialize)]
+    struct Fields<'a> {
+        summary: &'a str,
+        decision: &'a str,
+        files: &'a [String],
+    }
+    let fields = serde_json::to_string(&Fields { summary, decision, files })
+        .expect("team message example fields serialize");
+    format!("<team_message>{fields}</team_message>")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TeamMessageFailure {
+    ResultReadFailed,
     RepairExhausted,
     RepairRejected,
     RepairFailed,
     InvalidOutput,
+    InvalidFiles,
+    FileUnavailable,
 }
 
 impl TeamMessageFailure {
     pub(crate) const fn code(self) -> &'static str {
         match self {
+            Self::ResultReadFailed => "team_message_result_read_failed",
             Self::RepairExhausted => "team_message_repair_exhausted",
             Self::RepairRejected => "team_message_repair_rejected",
             Self::RepairFailed => "team_message_repair_failed",
             Self::InvalidOutput => "team_message_invalid_output",
+            Self::InvalidFiles => "team_message_files_invalid",
+            Self::FileUnavailable => "team_message_files_unavailable",
         }
     }
 
     pub(crate) const fn message(self) -> &'static str {
         match self {
+            Self::ResultReadFailed => "节点最终回复读取失败，无法确认任务结果；请检查对应会话后重试。",
             Self::RepairExhausted => "节点最终回复仍不符合完成协议，三次补答已耗尽。",
             Self::RepairRejected => "节点最终回复不符合完成协议，补答发送被拒绝。",
             Self::RepairFailed => "节点最终回复不符合完成协议，补答未成功完成。",
             Self::InvalidOutput => "节点最终回复不符合完成协议，无法结算为成功。",
+            Self::InvalidFiles => "交付文件路径无效或文件不存在，未登记产物；请检查本节点的交付文件。",
+            Self::FileUnavailable => "暂时无法核验交付文件，未登记产物；请检查工作区是否可访问。",
         }
     }
 
@@ -331,7 +444,7 @@ pub(crate) fn terminal_failure(
         if resolution.outcome() != crate::AuthorizedGraphOutcome::Failed || resolution.output_port() != "failed" {
             return None;
         }
-        let failure = [TeamMessageFailure::RepairExhausted, TeamMessageFailure::RepairRejected, TeamMessageFailure::RepairFailed, TeamMessageFailure::InvalidOutput]
+        let failure = [TeamMessageFailure::ResultReadFailed, TeamMessageFailure::RepairExhausted, TeamMessageFailure::RepairRejected, TeamMessageFailure::RepairFailed, TeamMessageFailure::InvalidOutput, TeamMessageFailure::InvalidFiles, TeamMessageFailure::FileUnavailable]
             .into_iter().find(|failure| &failure.receipt(&delivery.facts().delivery_id) == resolution.receipt())?;
         let evidence_id = TeamMessageFailure::evidence_id(observation.delivery_id());
         facts.evidence_records().find(|record| record.evidence_id() == &evidence_id
@@ -429,7 +542,7 @@ mod tests {
         assert_eq!(MAX_REPAIR_ATTEMPTS, 3);
         for attempt in 0..3 {
             let TeamMessageTerminalPlan::Repair(repair) = plan_team_message_terminal(
-                &context, attempt, vec![original_output.to_owned()], &graph, &node_id,
+                &context, attempt, vec![original_output.to_owned()], &graph, &node_id, &crate::prompts::TeamPromptSettings::default(),
             ) else {
                 panic!("invalid output must request repair within the three-attempt budget");
             };
@@ -444,7 +557,7 @@ mod tests {
         }
         assert_eq!(
             plan_team_message_terminal(
-                &context, 3, vec![original_output.to_owned()], &graph, &node_id,
+                &context, 3, vec![original_output.to_owned()], &graph, &node_id, &crate::prompts::TeamPromptSettings::default(),
             ),
             TeamMessageTerminalPlan::Failed
         );

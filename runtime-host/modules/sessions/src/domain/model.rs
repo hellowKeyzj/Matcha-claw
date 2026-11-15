@@ -312,10 +312,20 @@ pub enum SessionContent {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalRead {
+    Pending,
+    Retried,
+    Complete,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PendingTerminal {
     pub(crate) snapshot: crate::terminal_hook::SessionRunTerminalSnapshot,
     pub(crate) bodies: TerminalBodies,
+    pub(crate) read: TerminalRead,
+    pub(crate) permit: crate::owner::terminal::TerminalPermit,
+    pub(crate) completion_custody: std::sync::Weak<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -664,6 +674,7 @@ pub struct SessionView {
     /// Targeted native read results, independent of the transcript window and Host watermark.
     /// Not retained in SessionState; absence is not evidence that an input was rejected.
     pub input_receipts: Option<Vec<SessionInputReceipt>>,
+    pub request_pending: bool,
     pub goal: SessionGoalView,
     pub identity: SessionIdentity,
     pub epoch: u64,
@@ -692,6 +703,7 @@ impl Serialize for SessionView {
             model_state: Option<&'a SessionModelState>,
             #[serde(skip_serializing_if = "Option::is_none")]
             input_receipts: Option<&'a Vec<SessionInputReceipt>>,
+            request_pending: bool,
             goal: &'a SessionGoalView,
             identity: &'a SessionIdentity,
             epoch: u64,
@@ -713,6 +725,7 @@ impl Serialize for SessionView {
             ownership: self.ownership.as_ref(),
             model_state: self.model_state.as_ref(),
             input_receipts: self.input_receipts.as_ref(),
+            request_pending: self.request_pending,
             goal: &self.goal,
             identity: &self.identity,
             epoch: self.epoch,
@@ -743,6 +756,7 @@ impl<'de> Deserialize<'de> for SessionView {
             ownership: Option<SessionSourceBinding>,
             model_state: Option<SessionModelState>,
             input_receipts: Option<Vec<SessionInputReceipt>>,
+            request_pending: bool,
             goal: SessionGoalView,
             identity: SessionIdentity,
             epoch: u64,
@@ -765,6 +779,7 @@ impl<'de> Deserialize<'de> for SessionView {
             ownership: wire.ownership,
             model_state: wire.model_state,
             input_receipts: wire.input_receipts,
+            request_pending: wire.request_pending,
             goal: wire.goal,
             identity: wire.identity,
             epoch: wire.epoch,
@@ -884,6 +899,9 @@ pub enum SessionChange {
     },
     GoalChanged {
         goal: SessionGoalView,
+    },
+    RequestPendingChanged {
+        pending: bool,
     },
     RuntimeChanged {
         runtime: RuntimeView,
@@ -1072,6 +1090,7 @@ fn public_delta_change(change: &SessionChange) -> SessionChange {
         | SessionChange::MessageDelta { .. }
         | SessionChange::ApprovalUpdated { .. }
         | SessionChange::GoalChanged { .. }
+        | SessionChange::RequestPendingChanged { .. }
         | SessionChange::WindowChanged { .. }
         | SessionChange::RecoveryRequired { .. } => change.clone(),
     }
@@ -1258,11 +1277,12 @@ struct AcceptedEventIdentity {
 }
 
 fn canonical_change_fingerprint(changes: &[SessionChange]) -> u64 {
+    native_event_fingerprint(changes, None)
+}
+
+fn native_event_fingerprint(changes: &[SessionChange], work_pending: Option<bool>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    // SessionChange is the canonical internal identity when the wire DTO has no
-    // eventId. Serialization is deterministic for this closed enum and avoids
-    // manufacturing an event identifier for the public contract.
-    if let Ok(encoded) = serde_json::to_vec(changes) {
+    if let Ok(encoded) = serde_json::to_vec(&(changes, work_pending)) {
         encoded.hash(&mut hasher);
     }
     hasher.finish()
@@ -1275,6 +1295,7 @@ pub struct SessionEventBinding {
     source_epoch: Option<u64>,
     source_cursor_contiguous: bool,
     replay: bool,
+    resumed_run_id: Option<String>,
 }
 
 impl SessionEventBinding {
@@ -1311,6 +1332,7 @@ impl SessionEventBinding {
             source_epoch,
             source_cursor_contiguous,
             replay: false,
+            resumed_run_id: None,
         })
     }
 
@@ -1328,6 +1350,13 @@ impl SessionEventBinding {
     }
     pub const fn source_cursor_contiguous(&self) -> bool {
         self.source_cursor_contiguous
+    }
+
+    /// The runtime has verified that a diagnostic-only failure resumed.
+    pub fn with_resumed_run(mut self, run_id: String) -> Option<Self> {
+        if !valid_id(&run_id) { return None; }
+        self.resumed_run_id = Some(run_id);
+        Some(self)
     }
 
     /// Set only for events returned by the native replay operation.
@@ -1490,10 +1519,11 @@ pub struct SessionState {
     window: SessionFact<SessionWindow>,
     completeness: SessionCompleteness,
     terminal_run_ids: HashSet<String>,
+    resumed_run_ids: HashSet<String>,
+    work_pending: bool,
     pub(crate) run_delivery_contexts: HashMap<String, SessionDeliveryContext>,
     pub(crate) run_execution_contexts: HashMap<String, (String, crate::execution::SessionExecutionContext)>,
     pub(crate) pending_terminals: Vec<PendingTerminal>,
-    pub(crate) terminal_permit: Option<crate::owner::terminal::TerminalPermit>,
     host_source_epoch: Option<u64>,
     native_source_epoch: Option<u64>,
     source_branch: Option<String>,
@@ -1551,10 +1581,11 @@ impl SessionState {
             window: facts.window,
             completeness: facts.completeness,
             terminal_run_ids,
+            resumed_run_ids: HashSet::new(),
+            work_pending: false,
             run_delivery_contexts: HashMap::new(),
             run_execution_contexts: HashMap::new(),
             pending_terminals: Vec::new(),
-            terminal_permit: None,
             host_source_epoch: None,
             native_source_epoch: None,
             source_branch: None,
@@ -1602,8 +1633,9 @@ impl SessionState {
         SyncTerminalChanges::between(before, self)
     }
 
-    pub(crate) fn advance_sync_terminal_baseline(&mut self, changes: &SyncTerminalChanges) {
+    pub(crate) fn advance_sync_terminal_baseline(&mut self, changes: &SyncTerminalChanges, before_seq: u64, after_seq: u64) {
         changes.apply(&mut self.items, &mut self.runtime);
+        if self.seq == before_seq { self.seq = after_seq; }
     }
 
     pub fn final_assistant_texts_by_run(&self) -> Vec<(String, String)> {
@@ -1636,6 +1668,18 @@ impl SessionState {
             return true;
         }
         false
+    }
+
+    pub(crate) fn bind_endpoint_session_id(&mut self, session_id: &str) -> Result<(), SessionStateError> {
+        if !valid_id_with_limit(session_id, MAX_SESSION_KEY_BYTES)
+            || self.native_session_id().is_some_and(|existing| existing != session_id)
+        {
+            return Err(SessionStateError::InvalidIdentity);
+        }
+        if self.endpoint_session_id.is_none() {
+            self.endpoint_session_id = Some(session_id.to_owned());
+        }
+        Ok(())
     }
 
     pub fn with_endpoint_session_id(
@@ -1683,6 +1727,7 @@ impl SessionState {
             ownership: None,
             model_state: None,
             input_receipts: None,
+            request_pending: self.request_pending(),
             goal: self.goal.clone(),
             identity: self.identity.clone(),
             epoch: self.epoch,
@@ -1702,6 +1747,57 @@ impl SessionState {
         self.terminal_run_ids.contains(run_id)
     }
 
+    fn run_projection_closed(&self, run_id: &str) -> bool {
+        self.terminal_run_ids.contains(run_id) && !self.resumed_run_ids.contains(run_id)
+    }
+
+    pub(crate) fn work_pending(&self) -> bool {
+        self.work_pending
+    }
+
+    pub(crate) fn set_work_pending(&mut self, pending: bool) -> Result<Option<SessionDelta>, SessionStateError> {
+        if self.work_pending == pending { return Ok(None); }
+        let before = self.request_pending();
+        let after = self.identity.provider() == SessionProvider::OpenClaw && self.is_team_source()
+            && (pending || !self.pending_terminals.is_empty());
+        let delta = if before != after {
+            let seq = self.seq.checked_add(1).filter(|seq| *seq <= MAX_SAFE_INTEGER)
+                .ok_or(SessionStateError::InvalidCursor)?;
+            let cursor = self.cursor.checked_add(1).filter(|cursor| *cursor <= MAX_SAFE_INTEGER)
+                .ok_or(SessionStateError::InvalidCursor)?;
+            self.seq = seq;
+            self.cursor = cursor;
+            Some(SessionDelta {
+                session_key: self.identity.session_key.clone(), identity: self.identity.clone(),
+                epoch: self.epoch, seq, cursor, run_id: None,
+                changes: vec![SessionChange::RequestPendingChanged { pending: after }],
+            })
+        } else { None };
+        self.work_pending = pending;
+        Ok(delta)
+    }
+
+    pub(crate) fn request_pending(&self) -> bool {
+        self.identity.provider() == SessionProvider::OpenClaw
+            && self.is_team_source()
+            && (self.work_pending || !self.pending_terminals.is_empty())
+    }
+
+    pub(crate) fn project_request_pending(&self, before: bool, delta: &mut SessionDelta) -> bool {
+        let pending = self.request_pending();
+        let mut projected = false;
+        for change in &mut delta.changes {
+            if let SessionChange::RequestPendingChanged { pending: value } = change {
+                *value = pending;
+                projected = true;
+            }
+        }
+        if !projected && before != pending {
+            delta.changes.push(SessionChange::RequestPendingChanged { pending });
+        }
+        delta.validate().is_ok()
+    }
+
     pub fn observation_changes(
         &self,
         binding: &SessionEventBinding,
@@ -1714,7 +1810,7 @@ impl SessionState {
                 || matches!(change, SessionChange::ApprovalUpdated { approval }
                     if approval.phase == ApprovalPhase::Resolved)
                 || !change_run_id(change).or(run_id)
-                    .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+                    .is_some_and(|run_id| self.run_projection_closed(run_id))
         }).cloned().collect()
     }
 
@@ -1852,12 +1948,12 @@ impl SessionState {
 
     fn evictable_observation_item(&self, item: &SessionItem) -> bool {
         terminal_item(item)
-            && item.run_id().is_none_or(|run_id| self.terminal_run_ids.contains(run_id))
+            && item.run_id().is_none_or(|run_id| self.run_projection_closed(run_id))
     }
 
     fn evictable_observation_tool(&self, tool: &ToolView, items: &[SessionItem]) -> bool {
         matches!(tool.phase, ToolPhase::Completed | ToolPhase::Failed)
-            && tool.run_id.as_deref().is_none_or(|run_id| self.terminal_run_ids.contains(run_id))
+            && tool.run_id.as_deref().is_none_or(|run_id| self.run_projection_closed(run_id))
             && !items.iter().any(|item| match item {
                 SessionItem::AssistantTurn { segments, .. } => segments.iter().any(|segment|
                     tool_segment_call_id(segment) == Some(tool.tool_call_id.as_str())
@@ -1882,6 +1978,9 @@ impl SessionState {
             || sync.source_epoch.is_some_and(|epoch| !valid_epoch(epoch))
             || (self.native_source_epoch != baseline.native_source_epoch
                 && self.native_source_epoch != sync.source_epoch)
+            || (self.identity.provider() == SessionProvider::OpenClaw
+                && self.endpoint_session_id != baseline.endpoint_session_id
+                && self.endpoint_session_id != sync.view.endpoint_session_id)
             || [
                 (&sync.retired_item_ids, MAX_ITEMS),
                 (&sync.retired_tool_ids, MAX_TOOLS),
@@ -2005,6 +2104,7 @@ impl SessionState {
             .or_else(|| self.endpoint_session_id.clone());
         for run in &sync.terminal_runs {
             next.terminal_run_ids.insert(run.run_id.clone());
+            next.resumed_run_ids.remove(&run.run_id);
             update_assistant_turn_status_for_run(
                 &mut next.items,
                 &run.run_id,
@@ -2014,7 +2114,7 @@ impl SessionState {
         if let SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. } =
             &mut next.runtime
             && let Some(run_id) = runtime.active_run_id.as_ref()
-            && next.terminal_run_ids.contains(run_id)
+            && next.terminal_run_ids.contains(run_id) && !next.resumed_run_ids.contains(run_id)
         {
             if let Some(terminal) = sync
                 .terminal_runs
@@ -2039,7 +2139,7 @@ impl SessionState {
                     status,
                     ..
                 } = item
-                    && next.terminal_run_ids.contains(run_id)
+                    && next.terminal_run_ids.contains(run_id) && !next.resumed_run_ids.contains(run_id)
                     && !matches!(
                         status,
                         ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted
@@ -2110,6 +2210,11 @@ impl SessionState {
                 next.native_source_epoch = sync.source_epoch;
                 next.native_recovery_cursor = None;
             }
+        }
+        if self.work_pending == baseline.work_pending
+            && (sync.work_pending != Some(false) || self.seq == baseline.seq)
+            && let Some(pending) = sync.work_pending {
+            next.work_pending = pending;
         }
         next.seq = self
             .seq
@@ -2237,7 +2342,7 @@ impl SessionState {
                 };
             }
             let Some(projected) =
-                project_delta_changes(std::slice::from_ref(change), &next, run_id.as_deref())
+                project_delta_changes(std::slice::from_ref(change), &next, run_id.as_deref(), None)
             else {
                 return SessionApplyResult::Rejected {
                     reason: SessionApplyRejection::InvalidChange,
@@ -2290,6 +2395,17 @@ impl SessionState {
         native_cursor: Option<u64>,
         changes: Vec<SessionChange>,
     ) -> SessionApplyResult {
+        self.apply_native_bound_with_work(binding, run_id, native_cursor, changes, None)
+    }
+
+    pub(crate) fn apply_native_bound_with_work(
+        &mut self,
+        binding: SessionEventBinding,
+        run_id: Option<String>,
+        native_cursor: Option<u64>,
+        changes: Vec<SessionChange>,
+        work_pending: Option<bool>,
+    ) -> SessionApplyResult {
         let run_id = run_id.or_else(|| sole_change_run_id(&changes).map(str::to_owned));
         if binding.identity() != &self.identity || self.native_source_epoch_changed(&binding) {
             // A changed or newly discovered native epoch is a source boundary,
@@ -2310,7 +2426,7 @@ impl SessionState {
             };
         }
 
-        let change_fingerprint = canonical_change_fingerprint(&changes);
+        let change_fingerprint = native_event_fingerprint(&changes, work_pending);
         if let Some(native_cursor) = native_cursor {
             let event_identity = AcceptedEventIdentity {
                 source: AcceptedEventSource::Native,
@@ -2364,32 +2480,38 @@ impl SessionState {
             }
         }
 
-        let changes = if binding.replay {
+        let mut next = self.clone();
+        if let Some(run_id) = binding.resumed_run_id.as_deref() { next.resumed_run_ids.insert(run_id.to_owned()); }
+        let mut changes = if binding.replay {
             self.observation_changes(&binding, run_id.as_deref(), &changes)
         } else {
             changes
         };
+        if let Some(pending) = work_pending.filter(|pending| *pending != self.work_pending) {
+            changes.push(SessionChange::RequestPendingChanged { pending });
+        }
         if changes.is_empty() {
             let Some(cursor) = native_cursor else {
                 return SessionApplyResult::Rejected {
                     reason: SessionApplyRejection::InvalidInput,
                 };
             };
-            self.native_cursor = Some(cursor);
-            self.native_source_epoch = binding.source_epoch();
+            next.native_cursor = Some(cursor);
+            next.native_source_epoch = binding.source_epoch();
             let identity = AcceptedEventIdentity {
                 source: AcceptedEventSource::Native,
                 source_epoch: binding.source_epoch(),
                 source_cursor: cursor,
                 change_fingerprint,
             };
-            self.accepted_event_identities.insert(identity.clone());
-            self.accepted_event_identity_order.push_back(identity);
-            while self.accepted_event_identity_order.len() > MAX_ACCEPTED_EVENT_IDENTITIES {
-                if let Some(evicted) = self.accepted_event_identity_order.pop_front() {
-                    self.accepted_event_identities.remove(&evicted);
+            next.accepted_event_identities.insert(identity.clone());
+            next.accepted_event_identity_order.push_back(identity);
+            while next.accepted_event_identity_order.len() > MAX_ACCEPTED_EVENT_IDENTITIES {
+                if let Some(evicted) = next.accepted_event_identity_order.pop_front() {
+                    next.accepted_event_identities.remove(&evicted);
                 }
             }
+            *self = next;
             return SessionApplyResult::Consumed { cursor };
         }
 
@@ -2410,7 +2532,6 @@ impl SessionState {
         }
 
         let foreign_terminal = foreign_terminal_run(&self.runtime, &changes);
-        let mut next = self.clone();
         let mut delta_changes = Vec::with_capacity(changes.len());
         for change in &changes {
             if foreign_terminal && matches!(change, SessionChange::RuntimeChanged { runtime }
@@ -2423,7 +2544,7 @@ impl SessionState {
                 };
             }
             let Some(projected) =
-                project_delta_changes(std::slice::from_ref(change), &next, run_id.as_deref())
+                project_delta_changes(std::slice::from_ref(change), &next, run_id.as_deref(), Some(&self.terminal_run_ids))
             else {
                 return SessionApplyResult::Rejected {
                     reason: SessionApplyRejection::InvalidChange,
@@ -2567,7 +2688,7 @@ impl SessionState {
                 true
             }
             SessionChange::RunPhaseChanged { run_id, phase } => {
-                if self.terminal_run_ids.contains(run_id) {
+                if self.run_projection_closed(run_id) {
                     return false;
                 }
                 update_runtime_phase(&mut self.runtime, run_id, *phase);
@@ -2581,6 +2702,7 @@ impl SessionState {
                     }
                     if terminal_run_phase(*phase) {
                         self.terminal_run_ids.insert(run_id.clone());
+                        self.resumed_run_ids.remove(run_id);
                     }
                 }
                 true
@@ -2595,7 +2717,7 @@ impl SessionState {
             } => {
                 if run_id
                     .as_deref()
-                    .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+                    .is_some_and(|run_id| self.run_projection_closed(run_id))
                 {
                     return false;
                 }
@@ -2616,7 +2738,7 @@ impl SessionState {
             SessionChange::MessageUpdated { item } => {
                 if item
                     .run_id()
-                    .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+                    .is_some_and(|run_id| self.run_projection_closed(run_id))
                 {
                     return false;
                 }
@@ -2625,7 +2747,7 @@ impl SessionState {
             SessionChange::MessageReplaced { item } => {
                 if item
                     .run_id()
-                    .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+                    .is_some_and(|run_id| self.run_projection_closed(run_id))
                 {
                     return false;
                 }
@@ -2640,7 +2762,7 @@ impl SessionState {
                 // facts or clears the terminal fence for ordinary streaming changes.
                 if items.iter().any(|item| {
                     item.run_id()
-                        .is_some_and(|id| self.terminal_run_ids.contains(id))
+                        .is_some_and(|id| self.run_projection_closed(id))
                         && !terminal_item(item)
                 }) {
                     return false;
@@ -2652,7 +2774,7 @@ impl SessionState {
                 if tool
                     .run_id
                     .as_deref()
-                    .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+                    .is_some_and(|run_id| self.run_projection_closed(run_id))
                     && !tools_fact_slice(&self.tools).is_some_and(|tools| tools.iter().any(|existing| {
                         let mut updated = existing.clone();
                         updated.details = tool.details.clone();
@@ -2668,7 +2790,7 @@ impl SessionState {
                     && approval
                         .run_id
                         .as_deref()
-                        .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+                        .is_some_and(|run_id| self.run_projection_closed(run_id))
                 {
                     return false;
                 }
@@ -2679,16 +2801,21 @@ impl SessionState {
                 self.goal = goal.clone();
                 true
             }
+            SessionChange::RequestPendingChanged { pending } => {
+                self.work_pending = *pending;
+                true
+            }
             SessionChange::RuntimeChanged { runtime } => {
                 if !valid_runtime(runtime) {
                     return false;
                 }
                 let mut runtime = runtime.clone();
                 if let Some(run_id) = runtime.active_run_id.clone() {
-                    if self.terminal_run_ids.contains(&run_id) {
+                    if self.run_projection_closed(&run_id) {
                         return false;
                     }
                     if terminal_run_phase(runtime.phase) {
+                        self.resumed_run_ids.remove(&run_id);
                         self.terminal_run_ids.insert(run_id);
                         runtime.active_run_id = None;
                     }
@@ -2699,7 +2826,7 @@ impl SessionState {
                 true
             }
             SessionChange::RuntimeNoticeUpdated { notice } => {
-                if self.terminal_run_ids.contains(&notice.run_id) {
+                if self.run_projection_closed(&notice.run_id) {
                     return false;
                 }
                 valid_runtime_notice(notice)
@@ -3502,6 +3629,7 @@ fn project_delta_changes(
     changes: &[SessionChange],
     state: &SessionState,
     outer_run_id: Option<&str>,
+    accepted_native_terminals: Option<&HashSet<String>>,
 ) -> Option<Vec<SessionChange>> {
     let mut projected = Vec::with_capacity(changes.len());
     for change in changes {
@@ -3551,7 +3679,12 @@ fn project_delta_changes(
                 projected.push(SessionChange::ToolUpdated { tool });
             }
             SessionChange::RunPhaseChanged { run_id, phase } => {
-                projected.push(change.clone());
+                if terminal_run_phase(*phase) && accepted_native_terminals.is_some_and(|runs| runs.contains(run_id))
+                    && let SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. } = &state.runtime
+                {
+                    // Resumed display closes without delivering the same native terminal twice.
+                    projected.push(SessionChange::RuntimeChanged { runtime: runtime.clone() });
+                } else { projected.push(change.clone()); }
                 if (terminal_run_phase(*phase) || *phase == RunPhase::Yielded)
                     && let Some(item) = assistant_turn_for_run_id(&state.items, run_id)
                 {
@@ -3559,6 +3692,7 @@ fn project_delta_changes(
                 }
             }
             SessionChange::GoalChanged { .. } => projected.push(SessionChange::GoalChanged { goal: state.goal.clone() }),
+            SessionChange::RequestPendingChanged { .. } => projected.push(SessionChange::RequestPendingChanged { pending: state.request_pending() }),
             SessionChange::ItemsReplaced { .. }
             | SessionChange::ApprovalUpdated { .. }
             | SessionChange::RuntimeChanged { .. }
@@ -4253,6 +4387,7 @@ fn change_run_id(change: &SessionChange) -> Option<&str> {
         SessionChange::RuntimeNoticeUpdated { notice } => Some(notice.run_id.as_str()),
         SessionChange::ItemsReplaced { .. }
         | SessionChange::GoalChanged { .. }
+        | SessionChange::RequestPendingChanged { .. }
         | SessionChange::WindowChanged { .. }
         | SessionChange::RecoveryRequired { .. } => None,
     }
@@ -4300,6 +4435,7 @@ fn valid_change(change: &SessionChange, outer_run_id: Option<&str>) -> bool {
                 && valid_runtime(runtime)
         }
         SessionChange::RuntimeNoticeUpdated { notice } => valid_runtime_notice(notice),
+        SessionChange::RequestPendingChanged { .. } => true,
         SessionChange::GoalChanged { goal } => goal.validate().is_ok(),
         SessionChange::WindowChanged { window } => valid_window(window),
         SessionChange::RecoveryRequired { .. } => true,

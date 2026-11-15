@@ -19,7 +19,7 @@ type TeamGraphBaseNode = Readonly<{
   id: string;
   kind: TeamGraphNodeKind;
   title: string;
-  maxAttempts: number;
+  reworkLimits: Readonly<Record<string, number>>;
 }>;
 
 type TeamGraphStartNode = TeamGraphBaseNode & Readonly<{
@@ -49,11 +49,16 @@ type TeamGraphScriptReviewNode = TeamGraphBaseNode & Readonly<{
   scriptReview: Readonly<{ rule: 'pass_through' | 'assert_all_upstream_completed' | 'assert_no_blocking_gate' | 'assert_artifact_exists' }>;
 }>;
 
-type TeamGraphControlNode = TeamGraphBaseNode & Readonly<{
-  kind: 'humanDecision' | 'join' | 'end';
+type TeamGraphHumanDecisionNode = TeamGraphBaseNode & Readonly<{
+  kind: 'humanDecision';
+  prompt?: string;
 }>;
 
-export type TeamGraphNode = TeamGraphStartNode | TeamGraphWorkNode | TeamGraphReviewNode | TeamGraphScriptReviewNode | TeamGraphControlNode;
+type TeamGraphControlNode = TeamGraphBaseNode & Readonly<{
+  kind: 'join' | 'end';
+}>;
+
+export type TeamGraphNode = TeamGraphStartNode | TeamGraphWorkNode | TeamGraphReviewNode | TeamGraphScriptReviewNode | TeamGraphHumanDecisionNode | TeamGraphControlNode;
 
 export type TeamGraphDefinition = Readonly<{
   graphId: string;
@@ -167,7 +172,7 @@ export function isGraphDefinition(value: unknown): value is TeamGraphDefinition 
     || !isIdentifier(value.graphId)
     || !isIdentifier(value.workflowPlanId)
     || !isIdentifier(value.runId)
-    || !isIdentifier(value.title)
+    || !isContent(value.title)
     || !Array.isArray(value.nodes)
     || !value.nodes.every(isGraphNode)
     || !Array.isArray(value.edges)) return false;
@@ -178,19 +183,19 @@ export function isGraphDefinition(value: unknown): value is TeamGraphDefinition 
 function isGraphNode(value: unknown): value is TeamGraphNode {
   if (!isRecord(value)
     || !isIdentifier(value.id)
-    || !isIdentifier(value.title)
-    || !isPositiveUint(value.maxAttempts)) {
+    || !isContent(value.title)
+    || !isReworkLimits(value.reworkLimits, value.kind)) {
     return false;
   }
   if (value.kind === 'start') {
-    const expected = value.trigger === undefined ? ['id', 'kind', 'title', 'maxAttempts'] : ['id', 'kind', 'title', 'maxAttempts', 'trigger'];
+    const expected = value.trigger === undefined ? ['id', 'kind', 'title', 'reworkLimits'] : ['id', 'kind', 'title', 'reworkLimits', 'trigger'];
     return hasExactKeys(value, expected) && isTrigger(value.trigger);
   }
   if (value.kind === 'work') {
-    return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts', 'work']) && isWork(value.work);
+    return hasExactKeys(value, ['id', 'kind', 'title', 'reworkLimits', 'work']) && isWork(value.work);
   }
   if (value.kind === 'review') {
-    return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts', 'review'])
+    return hasExactKeys(value, ['id', 'kind', 'title', 'reworkLimits', 'review'])
       && isRecord(value.review)
       && hasExactKeys(value.review, ['roleId', 'sessionRef', 'prompt'])
       && isIdentifier(value.review.roleId)
@@ -198,7 +203,7 @@ function isGraphNode(value: unknown): value is TeamGraphNode {
       && typeof value.review.prompt === 'string';
   }
   if (value.kind === 'scriptReview') {
-    return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts', 'scriptReview'])
+    return hasExactKeys(value, ['id', 'kind', 'title', 'reworkLimits', 'scriptReview'])
       && isRecord(value.scriptReview)
       && hasExactKeys(value.scriptReview, ['rule'])
       && (value.scriptReview.rule === 'pass_through'
@@ -206,8 +211,12 @@ function isGraphNode(value: unknown): value is TeamGraphNode {
         || value.scriptReview.rule === 'assert_no_blocking_gate'
         || value.scriptReview.rule === 'assert_artifact_exists');
   }
-  return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts'])
-    && (value.kind === 'humanDecision' || value.kind === 'join' || value.kind === 'end');
+  if (value.kind === 'humanDecision') {
+    return hasExactKeys(value, Object.hasOwn(value, 'prompt') ? ['id', 'kind', 'title', 'reworkLimits', 'prompt'] : ['id', 'kind', 'title', 'reworkLimits'])
+      && (!Object.hasOwn(value, 'prompt') || typeof value.prompt === 'string');
+  }
+  return hasExactKeys(value, ['id', 'kind', 'title', 'reworkLimits'])
+    && (value.kind === 'join' || value.kind === 'end');
 }
 
 function isTrigger(value: unknown): boolean {
@@ -222,7 +231,7 @@ function isWork(value: unknown): boolean {
     || !isIdentifier(value.sessionRef) || !/^rs[0-9]+$/.test(value.sessionRef)) return false;
   if (!hasOnlyKeys(value, ['taskId', 'roleId', 'sessionRef', 'prompt', 'executor', 'outputArtifactKind'])) return false;
   return (value.prompt === undefined || typeof value.prompt === 'string')
-    && (value.outputArtifactKind === undefined || isIdentifier(value.outputArtifactKind))
+    && (value.outputArtifactKind === undefined || isContent(value.outputArtifactKind))
     && (value.executor === undefined || (isRecord(value.executor)
       && hasExactKeys(value.executor, ['kind', 'roleId'])
       && value.executor.kind === 'team-role'
@@ -253,16 +262,21 @@ function isEdgeAction(value: unknown): value is TeamGraphEdgeAction {
   return value === 'activate' || value === 'rework' || value === 'gate' || value === 'finish';
 }
 
-function isYaml(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 256 * 1024 && !value.includes('\0');
+export function isYaml(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && new TextEncoder().encode(value).length <= 1024 * 1024 && !value.includes('\0');
 }
 
 function isOpaqueId(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
 }
 
-function isPositiveUint(value: unknown): value is number {
-  return isSafeNonNegativeInteger(value) && value > 0;
+export function isReworkLimits(value: unknown, kind: unknown): value is Readonly<Record<string, number>> {
+  if (!isRecord(value)) return false;
+  const ports = kind === 'review' ? ['rework']
+    : kind === 'humanDecision' || kind === 'human_decision' ? ['rejected', 'aborted']
+      : kind === 'scriptReview' || kind === 'script_review' ? ['failed'] : [];
+  return Object.entries(value).every(([port, limit]) => ports.includes(port)
+    && isSafeNonNegativeInteger(limit) && limit <= 0xffff_ffff);
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -284,6 +298,10 @@ function isUnavailable(value: unknown): value is typeof UNAVAILABLE {
 
 function isRejected(value: unknown): value is typeof REJECTED {
   return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false && value.error === REJECTED.error;
+}
+
+function isContent(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && !/\p{Cc}/u.test(value);
 }
 
 function isIdentifier(value: unknown): value is string {

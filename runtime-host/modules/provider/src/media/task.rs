@@ -140,7 +140,15 @@ impl Protocol {
                 openrouter::submit_video(client, endpoint, credential, model, request).await
             }
             Self::DashScope => {
-                dashscope::submit_video(client, endpoint, credential, model, request).await
+                dashscope::submit_video(
+                    client,
+                    endpoint,
+                    credential,
+                    model,
+                    request,
+                    self.endpoint_validates_options(endpoint),
+                )
+                .await
             }
             Self::Ark => ark::submit_video(client, endpoint, credential, model, request).await,
         }
@@ -200,8 +208,12 @@ pub(crate) async fn submit_video(
         request.selection_id.as_deref(),
     )?;
     let protocol = super::protocol(account)?;
-    protocol.validate(model, &request)?;
     let endpoint = super::endpoint(account, protocol)?;
+    protocol.validate(
+        model,
+        &request,
+        protocol.endpoint_validates_options(&endpoint),
+    )?;
     let client = client.ok_or(Failure::ProviderUnavailable)?;
     let execution = async {
         let credential = super::credential(account, resolver).await?;

@@ -10,6 +10,7 @@ import { enqueueSdkEvent } from '../sdkEventQueue.js'
 export function emitTaskProgress(params: {
   taskId: string
   toolUseId: string | undefined
+  requestMessageId?: string
   description: string
   startTime: number
   totalTokens: number
@@ -23,6 +24,7 @@ export function emitTaskProgress(params: {
     subtype: 'task_progress',
     task_id: params.taskId,
     tool_use_id: params.toolUseId,
+    request_message_id: params.requestMessageId,
     description: params.description,
     usage: {
       total_tokens: params.totalTokens,

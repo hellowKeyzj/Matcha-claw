@@ -1,43 +1,16 @@
 import { build } from 'esbuild';
-import { execFileSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildHtml } from '../../sdk/app-plugins/tooling/build.mjs';
 import { assertDesignNative } from './native.mjs';
+import { signAppPluginNative } from '../../scripts/lib/sign-app-plugin-native.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const id = 'matcha.design';
 const arm64Runtime = ['msvcp140.dll', 'vcruntime140.dll'];
-
-async function signDesignNative(directory, packager) {
-  if (!packager) return;
-  const builderRequire = createRequire(require.resolve('electron-builder/package.json'));
-  const { findIdentity, isSignAllowed } = builderRequire('app-builder-lib/out/codeSign/macCodeSign');
-  const options = packager.platformSpecificBuildOptions;
-  if (!isSignAllowed() || options.identity === null || options.identity === '-' || options.type === 'development') {
-    if (packager.forceCodeSigning) throw new Error('Bundled Design release binaries require Developer ID signing.');
-    return;
-  }
-  const { keychainFile } = await packager.codeSigningInfo.value;
-  const identity = await findIdentity('Developer ID Application', options.identity, keychainFile);
-  if (!identity?.name.startsWith('Developer ID Application:')) {
-    if (packager.forceCodeSigning) throw new Error('No Developer ID Application identity for bundled Design binaries.');
-    return;
-  }
-  // App signing cannot reach Mach-O members inside the plugin ZIP.
-  for (const binary of ['vendor/skia.node', 'bin/ffmpeg']) {
-    const file = join(directory, binary);
-    execFileSync('/usr/bin/codesign', ['--force', '--sign', identity.hash || identity.name,
-      '--timestamp', '--options', 'runtime', ...(keychainFile ? ['--keychain', keychainFile] : []), file],
-    { stdio: 'inherit', timeout: 120_000 });
-    execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--all-architectures', '--test-requirement',
-      '=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists', file],
-    { stdio: 'inherit', timeout: 120_000 });
-  }
-}
 
 export function validatePlugin(contents, platform, arch) {
   if (contents.manifest.id !== id) throw new Error(`Bundled Design package must declare ${id}.`);
@@ -142,7 +115,7 @@ export async function buildPlugin({ platform = process.platform, arch = process.
       notices.push(`${name}\n${await readFile(join(directory, 'LICENSE'), 'utf8')}`);
     }
     await writeFile(join(output, 'THIRD-PARTY-NOTICES.txt'), notices.join('\n\n---\n\n'));
-    if (platform === 'darwin') await signDesignNative(output, packager);
+    if (platform === 'darwin') await signAppPluginNative(output, packager, 'Design', ['vendor/skia.node', 'bin/ffmpeg']);
     // Replace the destination only after every component has built successfully.
     await rm(outputDirectory, { recursive: true, force: true });
     await rename(output, outputDirectory);

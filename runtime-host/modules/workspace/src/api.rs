@@ -6,7 +6,7 @@ use platform::{
 use tokio::sync::oneshot;
 
 use crate::{
-    application::commands::{WorkspaceCommand, WorkspaceOperation, WorkspaceOwnerKey, WorkspaceQuery},
+    application::commands::{WorkspaceCommand, WorkspaceFileSelection, WorkspaceOperation, WorkspaceOwnerKey, WorkspaceQuery},
     owner::actor::WorkspaceShared,
     session_images::{SessionImageData, SessionImageFailure, SessionImagePage},
     call::{self, Detail, Operation, Outcome, RecordedCall},
@@ -46,14 +46,14 @@ impl WorkspaceHandle {
     pub(crate) async fn read_text(
         &self,
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         limit: usize,
     ) -> Result<Result<WorkspaceTextReceipt, WorkspaceReadFailure>, ()> {
         self.request_command(Operation::ReadText, 1, |reply| {
             WorkspaceOperation::ReadText {
                 endpoint,
-                agent_id,
+                selection,
                 relative_path,
                 limit,
                 reply,
@@ -65,14 +65,14 @@ impl WorkspaceHandle {
     pub(crate) async fn read_binary(
         &self,
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         limit: usize,
     ) -> Result<Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure>, ()> {
         self.request_command(Operation::ReadBinary, 1, |reply| {
             WorkspaceOperation::ReadBinary {
                 endpoint,
-                agent_id,
+                selection,
                 relative_path,
                 limit,
                 reply,
@@ -84,13 +84,13 @@ impl WorkspaceHandle {
     pub(crate) async fn stat_file(
         &self,
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
     ) -> Result<Result<WorkspaceStatReceipt, WorkspaceStatFailure>, ()> {
         self.request_command(Operation::StatFile, 1, |reply| {
             WorkspaceOperation::StatFile {
                 endpoint,
-                agent_id,
+                selection,
                 relative_path,
                 reply,
             }
@@ -101,14 +101,14 @@ impl WorkspaceHandle {
     pub(crate) async fn list_directory(
         &self,
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         include_hidden: bool,
     ) -> Result<Result<WorkspaceDirectoryReceipt, WorkspaceListFailure>, ()> {
         self.request_command(Operation::ListDirectory, 1, |reply| {
             WorkspaceOperation::ListDirectory {
                 endpoint,
-                agent_id,
+                selection,
                 relative_path,
                 include_hidden,
                 reply,
@@ -120,14 +120,14 @@ impl WorkspaceHandle {
     pub(crate) async fn write_text(
         &self,
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         content: String,
     ) -> Result<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>, ()> {
         self.request_command(Operation::WriteText, 1, |reply| {
             WorkspaceOperation::WriteText {
                 endpoint,
-                agent_id,
+                selection,
                 relative_path,
                 content,
                 reply,
@@ -139,14 +139,14 @@ impl WorkspaceHandle {
     pub(crate) async fn write_binary(
         &self,
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         content: Vec<u8>,
     ) -> Result<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>, ()> {
         self.request_command(Operation::WriteBinary, 1, |reply| {
             WorkspaceOperation::WriteBinary {
                 endpoint,
-                agent_id,
+                selection,
                 relative_path,
                 content,
                 reply,

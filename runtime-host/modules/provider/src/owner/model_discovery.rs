@@ -9,7 +9,7 @@ use super::models::{
 };
 use crate::{
     ProviderAccount, ProviderAccountAuthMode, ProviderAccountDraft, ProviderAccountKind,
-    ProviderApiProtocol, ProviderCascade, ProviderMediaApiProtocol, ProviderModelCapability,
+    ProviderApiProtocol, ProviderMediaApiProtocol, ProviderModelCapability,
     ProviderModelDiscoverOutcome, ProviderModelDiscoveryView, ProviderModelDraft,
     ProviderTextGenerationUnavailableReason,
     application::model_reference,
@@ -45,14 +45,11 @@ impl ProviderModelOwner {
     pub(crate) async fn discover(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &mut ProviderCascade,
+        accounts: &[ProviderAccount],
         account_id: &crate::ProviderAccountId,
         diagnostic: &mut Option<ProviderTextGenerationUnavailableReason>,
     ) -> ProviderModelDiscoverOutcome {
-        if cascade.reload().is_err() {
-            return ProviderModelDiscoverOutcome::Unavailable;
-        }
-        let Some(account) = cascade.account(account_id) else {
+        let Some(account) = accounts.iter().find(|account| account.id() == account_id) else {
             return ProviderModelDiscoverOutcome::Rejected;
         };
         match tokio::time::timeout(
@@ -555,9 +552,7 @@ fn known_capabilities(id: &str) -> Vec<ProviderModelCapability> {
         | "gpt-image-1-mini"
         | "gpt-image-1.5"
         | "chatgpt-image-latest"
-        | "gpt-image-2"
         | "gpt-image-2-2026-04-21"
-        | "gpt-image-2.5-sunburst"
         | "gpt-image-2.5-sunburst-2026-09-08"
         | "gpt-image-2.5-flare"
         | "gpt-image-2.5-flare-2026-09-08"
@@ -565,12 +560,9 @@ fn known_capabilities(id: &str) -> Vec<ProviderModelCapability> {
         | "gemini-2.5-flash-image-preview"
         | "gemini-3-pro-image-preview"
         | "gemini-3-pro-image"
-        | "gemini-3.1-flash-image"
-        | "gemini-3.1-flash-image-preview" => vec![ImageGenerate],
-        "gemini-nano-banana-2.1" | "gemini-3.1-flash-lite-image" => vec![ImageGenerate],
-        "gemini-omni-1.1-flash" => vec![VideoGenerate],
-        "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts" => vec![TextToSpeech],
-        "lyria-3.5" => vec![MusicGenerate],
+        | "gemini-3.1-flash-image" => vec![ImageGenerate],
+        "gemini-3.1-flash-lite-image" => vec![ImageGenerate],
+        "gemini-3.8-flash-lite-tts" => vec![TextToSpeech],
         "sora-2"
         | "sora-2-pro"
         | "sora-2-2025-10-06"

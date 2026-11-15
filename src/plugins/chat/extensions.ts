@@ -1,4 +1,4 @@
-import type { ComponentType, ReactNode, RefObject } from 'react';
+import type { ComponentType, RefObject } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { defineExtensionPoint } from '@/plugin-host/core';
@@ -61,7 +61,6 @@ export interface ChatComposerContentProps {
   approvalWaiting: boolean;
   canSend: boolean;
   focusComposer: () => void;
-  children: (content: ReactNode) => ReactNode;
 }
 
 export interface ChatWorkspaceContentProps {

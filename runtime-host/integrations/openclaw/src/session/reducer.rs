@@ -253,6 +253,7 @@ impl CanonicalChangeDebugSummary {
                 }
             }
             CanonicalSessionChange::RuntimeActivity { .. }
+            | CanonicalSessionChange::RunErrorUpdated { .. }
             | CanonicalSessionChange::RuntimeActivityCleared { .. }
             | CanonicalSessionChange::RuntimeFallback { .. }
             | CanonicalSessionChange::RuntimeFallbackCleared { .. }
@@ -476,8 +477,8 @@ impl SessionReducerActor {
             if changes.is_empty() { return Ok(None); }
             return Ok(produce_changes_debugged("keyed_commentary", event, source_epoch, changes));
         }
-        if event.run_id.as_ref().is_some_and(|run| self.body.terminal.iter().any(|(id, _)| id == run.as_str()))
-            && !event.chat.as_ref().is_some_and(|chat| chat.state == ChatState::Final && chat.final_message.is_some())
+        if event.chat.as_ref().is_none_or(|chat| chat.state == ChatState::Status)
+            && event.run_id.as_ref().is_some_and(|run| self.body.terminal.iter().any(|(id, _)| id == run.as_str()))
         {
             if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                 "reason": "terminal_fence", "runHash": event.run_id.as_ref().map(|run| sessions_module::trace::fingerprint(run.as_str())),
@@ -503,8 +504,13 @@ impl SessionReducerActor {
         let mut committed = false;
         let result = (|| {
             let chat = event.chat.clone();
+            let mut body = self.body.clone();
+            body.begin_update();
+            let previous_items = body.items.clone();
+            let transition = chat.as_ref().filter(|chat| chat.state != ChatState::Status)
+                .map(|chat| body.update_run(chat).ok_or(())).transpose()?;
             let Some(mut result) = (match event.kind {
-                SessionEventKind::Chat => self.reduce_chat(event, source_epoch),
+                SessionEventKind::Chat => self.reduce_chat(event, source_epoch, transition.as_ref()),
                 SessionEventKind::Message => {
                     self.reduce_message_activity(event, source_epoch)
                 }
@@ -522,7 +528,7 @@ impl SessionReducerActor {
             };
             if let CanonicalIngressResult::Produced(delta) = &mut result {
                 let mut cache = self.cache.clone();
-                if let Some(message) = chat.as_ref().and_then(|chat| chat.final_message.as_ref()) {
+                if let Some(message) = chat.as_ref().filter(|chat| transition.as_ref().is_none_or(|transition| !transition.ignores_body(chat))).and_then(|chat| chat.final_message.as_ref()) {
                     cache.prepare_transcript_tools(&[message]);
                 }
                 let mut canonical = delta.changes().to_vec();
@@ -531,14 +537,12 @@ impl SessionReducerActor {
                         *change = cache.apply_tool_observation(change).ok_or(())?;
                     }
                 }
-                let mut body = self.body.clone();
-                body.begin_update();
-                let replacement = body.observe(&canonical, chat.as_ref(), &cache).or_else(|| {
+                let replacement = body.observe(&canonical, chat.as_ref(), transition.as_ref(), &cache, previous_items).or_else(|| {
                     if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                         "reason": "body_observe_candidate", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                     None
                 }).ok_or(())?;
-                if let Some(message) = chat.as_ref().filter(|chat| chat.state == ChatState::Final)
+                if let Some(message) = chat.as_ref().filter(|chat| chat.state == ChatState::Final && transition.as_ref().is_none_or(|transition| !transition.ignores_body(chat)))
                     .and_then(|chat| chat.final_message.as_ref())
                 {
                     canonical.push(CanonicalSessionChange::TranscriptMessage { message: message.clone() });
@@ -566,13 +570,19 @@ impl SessionReducerActor {
         result
     }
 
-    pub(crate) fn image_task_tools(&self) -> &[sessions_module::state::ToolView] {
+    pub(crate) fn media_task_tools(&self) -> &[sessions_module::state::ToolView] {
         &self.cache.tools
     }
 
-    pub(crate) fn update_image_task(&mut self, task: &super::image_tasks::ImageTask) -> Vec<sessions_module::state::ToolView> {
+    pub(crate) fn update_media_task(&mut self, task: &super::media_tasks::MediaGenerationTask) -> Vec<sessions_module::state::ToolView> {
         self.cache.tools.iter_mut().filter_map(|tool|
-            super::image_tasks::update_tool(tool, task).then(|| tool.clone())
+            super::media_tasks::update_tool(tool, task).then(|| tool.clone())
+        ).collect()
+    }
+
+    pub(crate) fn delete_media_task(&mut self, task_id: &str) -> Vec<sessions_module::state::ToolView> {
+        self.cache.tools.iter_mut().filter_map(|tool|
+            super::media_tasks::delete_tool(tool, task_id).then(|| tool.clone())
         ).collect()
     }
 
@@ -774,8 +784,7 @@ impl SessionReducerActor {
                     | super::window::RunState::Failed | super::window::RunState::Interrupted)
                 && window.state().active_run_ids().is_none_or(|ids| ids.iter().any(|id| id == run.run_id()))
                 && !body.terminal.iter().any(|(id, _)| id == run.run_id())
-                && body.live_run().or(cache.runtime.active_run_id.as_deref())
-                    .is_none_or(|current| current == run.run_id()));
+                && body.live_run().is_none_or(|current| current == run.run_id()));
         let in_flight = in_flight_run
             .map(|run| RunId::try_new(run.run_id().to_owned()).map_err(|_| Failure::Unknown)).transpose()?;
         // Body's existing per-message/reconcile traces are inside this interval; it is not pure merge CPU.
@@ -921,7 +930,7 @@ impl SessionReducerActor {
         let identity = SessionIdentity::new(key.as_str().to_owned(), SessionProvider::OpenClaw, agent.to_owned()).ok_or(Failure::TargetRejected)?;
         let view = SessionView {
             session_key: identity.session_key.clone(), endpoint_session_id: self.native_session_id.clone(), ownership: None, model_state: None, input_receipts: None, goal: self.goal.clone(), identity,
-            epoch, seq: 0, cursor: 0,
+            epoch, seq: 0, cursor: 0, request_pending: false,
             items: SessionFact::Incomplete { facts: body.items.clone(), gaps: vec![MissingFact::BoundedHistory] },
             tools: SessionFact::Incomplete { facts: cache.tools.clone(), gaps: vec![MissingFact::BoundedHistory] },
             approvals: if self.approvals_known { SessionFact::Complete(cache.approvals.clone()) }
@@ -1036,46 +1045,57 @@ impl SessionReducerActor {
         &mut self,
         event: SessionEventEnvelope,
         source_epoch: Option<GatewayEpoch>,
-
+        transition: Option<&super::body::run::Transition>,
     ) -> Option<CanonicalIngressResult> {
         let chat = event.chat.as_ref()?;
         if event.run_id.as_ref() != Some(&chat.run_id) || event.session_key != chat.session_key {
             return None;
         }
-
+        if transition.is_some_and(|transition| transition.previous.is_some_and(super::body::run::Status::terminal)
+            && transition.current.terminal())
+        {
+            let changes = if matches!(chat.state, ChatState::Error | ChatState::Aborted)
+                && transition.is_some_and(|transition| transition.error_changed)
+                && self.body.live_run().or(self.body.last_terminal_run())
+                    .is_some_and(|run| run == chat.run_id.as_str())
+            {
+                vec![CanonicalSessionChange::RunErrorUpdated {
+                    run_id: chat.run_id.clone(), phase: self.body.terminal.iter().find(|(run, _)| run == chat.run_id.as_str())
+                        .map_or(sessions_module::state::RunPhase::Yielded, |(_, phase)| *phase),
+                    error_kind: chat.error_kind, error_message: chat.error_message.clone(),
+                    stop_reason: chat.stop_reason.clone(), error_detail: chat.error_detail.clone(),
+                }]
+            } else { Vec::new() };
+            return produce_changes_debugged("chat_terminal_update", event, source_epoch, changes);
+        }
         if self.body.live_run().is_some_and(|run| run != chat.run_id.as_str()) {
-            if chat.state != ChatState::Final { return None; }
-            let changes = chat.final_message.as_ref().filter(|message| !message.hidden_control_reply())
-                .map(|message| vec![CanonicalSessionChange::TranscriptMessage { message: message.clone() }]).unwrap_or_default();
-            return produce_changes_debugged("chat_foreign_final", event, source_epoch, changes);
+            return produce_changes_debugged("chat_foreign_run", event, source_epoch, Vec::new());
         }
         match chat.state {
             ChatState::Status => self.reduce_chat_status(event, source_epoch),
-            ChatState::Delta => self.reduce_chat_delta(event, source_epoch),
-            _ => {
+            ChatState::Delta => {
                 let run_id = chat.run_id.clone();
-                if chat.is_yielded() {
-                    self.clear_active_run(&run_id);
-                    return produce_changes_debugged("chat_yielded", event, source_epoch, vec![CanonicalSessionChange::RunYielded { run_id }]);
-                }
-                let assistant_changes = self.assistant_snapshot_changes(
+                let adopting = self.body.live_run().is_none();
+                let resumed = (adopting && self.body.terminal.iter().any(|(run, _)| run == run_id.as_str()))
+                    .then(|| run_id.clone());
+                let mut changes = self.assistant_snapshot_changes(
                     run_id.clone(), None, chat.message_text.as_deref(), chat.message_thinking.as_deref(),
                 );
-
-                let result = chat.terminal_outcome().and_then(|_| {
-                    let mut changes = Vec::with_capacity(assistant_changes.len() + 1);
-                    changes.extend(assistant_changes);
-                    changes.push(terminal_change(&event)?);
-                    produce_changes_debugged(
-                        "chat_terminal",
-                        event,
-                        source_epoch,
-
-                        changes,
-                    )
-                });
+                if adopting {
+                    self.active_run_for(run_id.clone());
+                    changes.insert(0, CanonicalSessionChange::RunStarted { run_id });
+                }
+                let mut result = produce_changes_debugged("chat_snapshot", event, source_epoch, changes)?;
+                if let Some(run_id) = resumed && let CanonicalIngressResult::Produced(delta) = &mut result { delta.resume_run(run_id); }
+                Some(result)
+            }
+            _ => {
+                let run_id = chat.run_id.clone();
+                let changes = if chat.is_yielded() {
+                    vec![CanonicalSessionChange::RunYielded { run_id: run_id.clone() }]
+                } else { vec![terminal_change(&event)?] };
                 self.clear_active_run(&run_id);
-                result
+                produce_changes_debugged("chat_terminal", event, source_epoch, changes)
             }
         }
     }
@@ -1105,19 +1125,6 @@ impl SessionReducerActor {
 
             vec![CanonicalSessionChange::RunProgress { run_id, progress }],
         )
-    }
-
-    fn reduce_chat_delta(
-        &mut self,
-        event: SessionEventEnvelope,
-        source_epoch: Option<GatewayEpoch>,
-
-    ) -> Option<CanonicalIngressResult> {
-        let chat = event.chat.as_ref()?;
-        let changes = self.assistant_snapshot_changes(
-            chat.run_id.clone(), None, chat.message_text.as_deref(), chat.message_thinking.as_deref(),
-        );
-        produce_changes_debugged("chat_snapshot", event, source_epoch, changes)
     }
 
     fn reduce_message_activity(

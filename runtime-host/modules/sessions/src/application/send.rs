@@ -6,7 +6,7 @@ use crate::goal::{SessionGoalReceipt, SessionSendIntent};
 
 pub use super::endpoint::NativeEndpoint;
 
-const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_PROVENANCE_RECEIPT_BYTES: usize = 64 * 1024;
 const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 const MAX_RUN_ID_BYTES: usize = 4096;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
@@ -60,6 +60,8 @@ pub struct SessionSendCommand {
     pub delivery_context: Option<SessionDeliveryContext>,
     /// Immutable Organization context; native request identity remains the delivery key.
     pub execution_context: Option<crate::execution::SessionExecutionContext>,
+    /// Expected native execution directory; never serialized as a request to change cwd.
+    pub expected_workspace: Option<std::path::PathBuf>,
 }
 
 impl SessionSendCommand {
@@ -78,7 +80,6 @@ impl SessionSendCommand {
                 endpoint_session_id.as_deref(),
                 MAX_ENDPOINT_SESSION_ID_BYTES,
             )
-            || message.len() > MAX_MESSAGE_BYTES
             || !valid_optional_identity(run_id.as_deref(), MAX_RUN_ID_BYTES)
             || !valid_optional_identity(idempotency_key.as_deref(), MAX_IDEMPOTENCY_KEY_BYTES)
             || attachments.len() > MAX_ATTACHMENTS
@@ -109,6 +110,7 @@ impl SessionSendCommand {
             source_binding: SessionSourceBinding::ordinary(),
             delivery_context: None,
             execution_context: None,
+            expected_workspace: None,
         })
     }
 
@@ -151,7 +153,7 @@ impl SessionSendCommand {
         mut self,
         receipt: String,
     ) -> Result<Self, InvalidCommand> {
-        if self.intent.is_some() || receipt.is_empty() || receipt.len() > MAX_MESSAGE_BYTES {
+        if self.intent.is_some() || receipt.is_empty() || receipt.len() > MAX_PROVENANCE_RECEIPT_BYTES {
             return Err(InvalidCommand);
         }
         self.system_provenance_receipt = Some(receipt);
@@ -170,6 +172,11 @@ impl SessionSendCommand {
 
     pub fn with_execution_context(mut self, context: crate::execution::SessionExecutionContext) -> Self {
         self.execution_context = Some(context);
+        self
+    }
+
+    pub fn with_expected_workspace(mut self, root: std::path::PathBuf) -> Self {
+        self.expected_workspace = Some(root);
         self
     }
 

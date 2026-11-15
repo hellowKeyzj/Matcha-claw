@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use platform::trace::{identifier_hash, session_trace};
-use runtime_directory::RuntimeDriverIdentity;
+use platform::{
+    endpoint::runtime_address::RuntimeEndpoint,
+    trace::{identifier_hash, session_trace},
+};
 use serde_json::json;
 
 use crate::{
@@ -39,15 +41,8 @@ impl StartGateSendHook {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StartGateNativeEndpoint {
-    OpenClawLocal,
-    MatchaAgentLocal,
-    Unsupported,
-}
-
 pub struct StartGateSendRequest {
-    endpoint: StartGateNativeEndpoint,
+    endpoint: RuntimeEndpoint,
     session_key: String,
     agent_id: String,
     endpoint_session_id: Option<String>,
@@ -56,7 +51,7 @@ pub struct StartGateSendRequest {
 
 impl StartGateSendRequest {
     pub fn new(
-        endpoint: StartGateNativeEndpoint,
+        endpoint: RuntimeEndpoint,
         session_key: String,
         agent_id: String,
         endpoint_session_id: Option<String>,
@@ -73,12 +68,17 @@ impl StartGateSendRequest {
 }
 
 pub struct PreparedStartGateSend {
-    system_provenance_receipt: String,
+    system_provenance_receipt: Option<String>,
+    workspace: Option<crate::RunWorkspace>,
 }
 
 impl PreparedStartGateSend {
-    pub fn system_provenance_receipt(&self) -> &str {
-        &self.system_provenance_receipt
+    pub fn system_provenance_receipt(&self) -> Option<&str> {
+        self.system_provenance_receipt.as_deref()
+    }
+
+    pub fn workspace(&self) -> Option<&crate::RunWorkspace> {
+        self.workspace.as_ref()
     }
 }
 
@@ -88,20 +88,14 @@ async fn prepare_start_gate_send(
     request: StartGateSendRequest,
 ) -> Result<Option<PreparedStartGateSend>, ()> {
     session_trace("runtime.start-gate.input", || json!({
-        "identityKind": match request.endpoint {
-            StartGateNativeEndpoint::OpenClawLocal => "agent_scoped",
-            StartGateNativeEndpoint::MatchaAgentLocal => "native_session",
-            StartGateNativeEndpoint::Unsupported => "unsupported",
+        "identityKind": match request.endpoint.runtime_adapter_id() {
+            "openclaw" => "agent_scoped",
+            "matcha-agent" => "native_session",
+            _ => "unsupported",
         },
         "sessionKeyHash": identifier_hash(&request.session_key),
         "endpointSessionIdHash": request.endpoint_session_id.as_deref().map(identifier_hash),
     }));
-    if request.has_delivery_context {
-        session_trace("runtime.start-gate.prompt", || json!({
-            "outcome": "skipped", "reason": "delivery_context",
-        }));
-        return Ok(None);
-    }
     let Some(lookup) = start_gate_lookup(&request) else {
         session_trace("runtime.start-gate.prompt", || json!({
             "outcome": "skipped", "reason": "unsupported_or_invalid_identity",
@@ -109,7 +103,7 @@ async fn prepare_start_gate_send(
         return Ok(None);
     };
     let Some(plan) = organization
-        .start_gate_prompt_plan(lookup, resolver)
+        .start_gate_prompt_plan(lookup, resolver, !request.has_delivery_context)
         .await
         .map_err(|_| {
             eprintln!("[organization] phase=start-gate-prompt error=owner-request-failed");
@@ -117,36 +111,29 @@ async fn prepare_start_gate_send(
     else {
         return Ok(None);
     };
-    let system_provenance_receipt = plan.system_provenance_receipt().to_owned();
     Ok(Some(PreparedStartGateSend {
-        system_provenance_receipt,
+        system_provenance_receipt: plan.system_provenance_receipt().map(str::to_owned),
+        workspace: plan.workspace().cloned(),
     }))
 }
 
 fn start_gate_lookup(request: &StartGateSendRequest) -> Option<StartGateRuntimeBindingLookup> {
-    let endpoint = endpoint_reference(request.endpoint)?;
-    match request.endpoint {
-        StartGateNativeEndpoint::OpenClawLocal => Some(StartGateRuntimeBindingLookup::AgentScoped {
+    let endpoint = RuntimeEndpointReference::try_new(
+        runtime_directory::endpoint_reference(&request.endpoint),
+    ).ok()?;
+    match request.endpoint.runtime_adapter_id() {
+        "openclaw" => Some(StartGateRuntimeBindingLookup::AgentScoped {
             endpoint,
             agent: ManagedAgentReference::try_new(request.agent_id.clone()).ok()?,
             session_key: request.session_key.clone(),
         }),
-        StartGateNativeEndpoint::MatchaAgentLocal => {
+        "matcha-agent" => {
             Some(StartGateRuntimeBindingLookup::NativeSession {
                 endpoint,
                 endpoint_session_id: EndpointSessionId::try_new(request.endpoint_session_id.clone()?)
                     .ok()?,
             })
         }
-        StartGateNativeEndpoint::Unsupported => None,
+        _ => None,
     }
-}
-
-fn endpoint_reference(endpoint: StartGateNativeEndpoint) -> Option<RuntimeEndpointReference> {
-    let endpoint = match endpoint {
-        StartGateNativeEndpoint::OpenClawLocal => RuntimeDriverIdentity::open_claw(),
-        StartGateNativeEndpoint::MatchaAgentLocal => RuntimeDriverIdentity::matcha_agent(),
-        StartGateNativeEndpoint::Unsupported => return None,
-    };
-    RuntimeEndpointReference::try_new(endpoint.runtime_endpoint_reference()).ok()
 }

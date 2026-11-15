@@ -32,6 +32,15 @@ impl Block {
             _ => true,
         }
     }
+    fn covered_by(&self, segment: &SessionContent) -> bool {
+        match segment {
+            SessionContent::Text { text } if self.body["type"] == "text" =>
+                self.body["text"].as_str() == Some(text.as_str()),
+            SessionContent::Thinking { text } if self.body["type"] == "thinking" =>
+                self.body["thinking"].as_str() == Some(text.as_str()),
+            _ => false,
+        }
+    }
     fn project(&self, native: &Event, status: ItemStatus) -> Result<Message, Failure> {
         let row = json!({"type":"assistant","uuid":self.item_id,"message":{"content":[self.body.as_ref()]}});
         let mut message = message_with_event(&row, status, Some(native))?
@@ -64,16 +73,24 @@ impl Stream {
             };
             segments.extend(content);
         }
-        if segments.len() != self.blocks.len() || self.blocks.values().any(|block| block.open) {
+        if segments.len() != self.blocks.len() {
             return false;
         }
-        self.blocks.values().zip(segments).all(|(block, segment)| match segment {
-            SessionContent::Text { text } if block.body["type"] == "text" =>
-                block.body["text"].as_str() == Some(text.as_str()),
-            SessionContent::Thinking { text } if block.body["type"] == "thinking" =>
-                block.body["thinking"].as_str() == Some(text.as_str()),
-            _ => false,
-        })
+        self.blocks.values().zip(segments).all(|(block, segment)| block.covered_by(segment))
+    }
+    fn replacement_index(&self, block: &Block) -> Option<usize> {
+        let mut matching = self.finals.iter().enumerate().filter_map(|(index, message)| {
+            let SessionItem::AssistantTurn { segments, .. } = &message.item else {
+                return None;
+            };
+            segments.iter().any(|segment| block.covered_by(segment)).then_some((index, segments))
+        });
+        let (index, segments) = matching.next()?;
+        // No raw-index -> SDK-UUID correspondence exists; ambiguous occurrences stay visible.
+        (segments.len() == 1
+            && matching.next().is_none()
+            && self.blocks.values().filter(|candidate| candidate.covered_by(&segments[0])).count() == 1)
+            .then_some(index)
     }
     fn trace_state(&self) -> Value {
         json!({
@@ -188,8 +205,12 @@ impl Streaming {
         abnormal: Option<ItemStatus>,
     ) -> Result<StreamMessage, Failure> {
         let stream = &self.streams[index];
+        let replacement_complete =
+            (abnormal.is_some() || stream.rebuilding) && stream.replacement_complete();
         if stream.rebuilding
-            && (abnormal.is_some() || !stream.replacement_complete())
+            && (abnormal.is_some()
+                || stream.blocks.values().any(|block| block.open)
+                || !replacement_complete)
         {
             return Err(self.rejected(native, "stream.replacement_incomplete"));
         }
@@ -198,20 +219,27 @@ impl Streaming {
         let mut messages = Vec::new();
         let mut retired = Vec::new();
         let mut indices = 0u64;
+        let mut next_final = 0;
         for (index, block) in &stream.blocks {
             indices |= 1u64 << index;
             if block.published {
                 retired.push(block.item_id.clone());
             }
-            // No raw-index -> SDK-UUID correspondence exists. On abnormal close
-            // retain all seen previews, including closed blocks, alongside finals.
+            // SDK finals can precede block_stop. Partial takeover keeps the preview's slot
+            // and never passes an earlier final; uncertain placement retains the preview.
             if let Some(status) = abnormal
                 && block.meaningful()
+                && !replacement_complete
             {
-                messages.push(block.project(native, status)?);
+                if stream.replacement_index(block) == Some(next_final) {
+                    messages.push(stream.finals[next_final].as_ref().clone());
+                    next_final += 1;
+                } else {
+                    messages.push(block.project(native, status)?);
+                }
             }
         }
-        messages.extend(stream.finals.iter().map(|message| message.as_ref().clone()));
+        messages.extend(stream.finals[next_final..].iter().map(|message| message.as_ref().clone()));
         if abnormal.is_none() {
             let stopped = Arc::make_mut(&mut self.stopped);
             if stopped.len() == MAX_TOOLS {

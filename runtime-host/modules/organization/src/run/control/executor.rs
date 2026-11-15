@@ -78,6 +78,15 @@ pub fn plan_ready_control_execution(
     evidence: &EvidenceLedger,
     now: u64,
 ) -> Result<ControlExecutionPlan, ControlExecutionError> {
+    plan_ready_control_execution_state(definition, graph, evidence, now).map(|(plan, _)| plan)
+}
+
+pub(crate) fn plan_ready_control_execution_state(
+    definition: &GraphDefinition,
+    graph: &GraphState,
+    evidence: &EvidenceLedger,
+    now: u64,
+) -> Result<(ControlExecutionPlan, GraphState), ControlExecutionError> {
     if definition != graph.definition() {
         return Err(ControlExecutionError::GraphDefinitionMismatch);
     }
@@ -99,7 +108,7 @@ pub fn plan_ready_control_execution(
         }));
         steps.push(step);
     }
-    Ok(ControlExecutionPlan { steps })
+    Ok((ControlExecutionPlan { steps }, state))
 }
 
 fn next_ready_control_step(
@@ -116,6 +125,9 @@ fn next_ready_control_step(
             return Err(ControlExecutionError::StaleReadyQueue(
                 item.node_id().clone(),
             ));
+        }
+        if graph.is_rework_blocked(item.node_id()) {
+            continue;
         }
         let node = definition
             .node(item.node_id())
@@ -207,6 +219,7 @@ fn graph_event_node_id(event: &GraphEvent) -> &NodeId {
         | GraphEvent::NodeCancelled { node_id, .. }
         | GraphEvent::ReworkRequested { node_id, .. }
         | GraphEvent::TriggerFired { node_id, .. } => node_id,
+        GraphEvent::ContinueRework { source_node_id, .. } => source_node_id,
         GraphEvent::GraphPatched { .. } => {
             unreachable!("control execution never emits graph patches")
         }
@@ -220,6 +233,7 @@ fn graph_event_fence(event: &GraphEvent) -> Option<&ExecutionFence> {
         | GraphEvent::NodeCompleted { fence, .. }
         | GraphEvent::NodeFailed { fence, .. }
         | GraphEvent::NodeCancelled { fence, .. } => Some(fence),
+        GraphEvent::ContinueRework { source_fence, .. } => Some(source_fence),
         GraphEvent::ReworkRequested { .. }
         | GraphEvent::TriggerFired { .. }
         | GraphEvent::GraphPatched { .. } => None,
@@ -234,12 +248,13 @@ fn graph_event_at(event: &GraphEvent) -> u64 {
         GraphEvent::NodeFailed { failed_at, .. } => *failed_at,
         GraphEvent::NodeCancelled { cancelled_at, .. } => *cancelled_at,
         GraphEvent::ReworkRequested { requested_at, .. } => *requested_at,
+        GraphEvent::ContinueRework { continued_at, .. } => *continued_at,
         GraphEvent::TriggerFired { fired_at, .. } => *fired_at,
         GraphEvent::GraphPatched { patched_at, .. } => *patched_at,
     }
 }
 
-pub(crate) fn graph_event_for_step(step: &ControlExecutionStep) -> GraphEvent {
+fn graph_event_for_step(step: &ControlExecutionStep) -> GraphEvent {
     match step {
         ControlExecutionStep::GraphEvent(event) => event.clone(),
         ControlExecutionStep::HumanDecisionApproval { node_id, fence, requested_at } => {
@@ -249,20 +264,7 @@ pub(crate) fn graph_event_for_step(step: &ControlExecutionStep) -> GraphEvent {
                 waiting_at: *requested_at,
             }
         }
-        ControlExecutionStep::ControlResolution(resolution) => match resolution.outcome() {
-            crate::AuthorizedGraphOutcome::Completed => GraphEvent::NodeCompleted {
-                node_id: resolution.node_id().clone(),
-                fence: resolution.fence().clone(),
-                output_port: resolution.output_port().to_owned(),
-                completed_at: resolution.resolved_at(),
-            },
-            crate::AuthorizedGraphOutcome::Failed => GraphEvent::NodeFailed {
-                node_id: resolution.node_id().clone(),
-                fence: resolution.fence().clone(),
-                output_port: resolution.output_port().to_owned(),
-                failed_at: resolution.resolved_at(),
-            },
-        },
+        ControlExecutionStep::ControlResolution(resolution) => resolution.graph_event(),
     }
 }
 

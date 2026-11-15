@@ -268,9 +268,12 @@ function enqueueRemoteNotification(
   toolUseId?: string,
 ): void {
   // Atomically check and set notified flag to prevent duplicate notifications.
-  if (!markTaskNotified(taskId, setAppState)) return;
+  const task = markTaskNotified(taskId, setAppState);
+  if (!task) return;
+  toolUseId = task.toolUseId;
 
   const statusText = status === 'completed' ? 'completed successfully' : status === 'failed' ? 'failed' : 'was stopped';
+  const summary = `Remote task "${title}" ${statusText}`;
 
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
 
@@ -280,10 +283,20 @@ function enqueueRemoteNotification(
 <${TASK_TYPE_TAG}>remote_agent</${TASK_TYPE_TAG}>
 <${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
 <${STATUS_TAG}>${status}</${STATUS_TAG}>
-<${SUMMARY_TAG}>Remote task "${title}" ${statusText}</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>`;
 
-  enqueuePendingNotification({ value: message, mode: 'task-notification' });
+  emitTaskTerminatedSdk(taskId, status === 'killed' ? 'stopped' : status, {
+    toolUseId: task.toolUseId,
+    requestMessageId: task.requestMessageId,
+    summary,
+    outputFile: outputPath,
+  });
+  enqueuePendingNotification({
+    value: message,
+    mode: 'task-notification',
+    taskNotification: { taskId, toolUseId: task.toolUseId, requestMessageId: task.requestMessageId },
+  });
 }
 
 /**
@@ -301,9 +314,12 @@ function enqueueRichRemoteNotification(
   setAppState: SetAppState,
   toolUseId?: string,
 ): void {
-  if (!markTaskNotified(taskId, setAppState)) return;
+  const task = markTaskNotified(taskId, setAppState);
+  if (!task) return;
+  toolUseId = task.toolUseId;
 
   const statusText = status === 'completed' ? 'completed successfully' : status === 'failed' ? 'failed' : 'was stopped';
+  const summary = `Remote task "${title}" ${statusText}`;
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
   const outputPath = getTaskOutputPath(taskId);
 
@@ -312,29 +328,39 @@ function enqueueRichRemoteNotification(
 <${TASK_TYPE_TAG}>remote_agent</${TASK_TYPE_TAG}>
 <${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
 <${STATUS_TAG}>${status}</${STATUS_TAG}>
-<${SUMMARY_TAG}>Remote task "${title}" ${statusText}</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>
 The remote agent produced the following structured outcome. Summarize the key changes for the user:
 
 ${richContent}`;
 
-  enqueuePendingNotification({ value: message, mode: 'task-notification' });
+  emitTaskTerminatedSdk(taskId, status === 'killed' ? 'stopped' : status, {
+    toolUseId: task.toolUseId,
+    requestMessageId: task.requestMessageId,
+    summary,
+    outputFile: outputPath,
+  });
+  enqueuePendingNotification({
+    value: message,
+    mode: 'task-notification',
+    taskNotification: { taskId, toolUseId: task.toolUseId, requestMessageId: task.requestMessageId },
+  });
 }
 
 /**
- * Atomically mark a task as notified. Returns true if this call flipped the
- * flag (caller should enqueue), false if already notified (caller should skip).
+ * Atomically mark a task as notified. Returns the task if this call flipped
+ * the flag (caller should enqueue), undefined if already notified.
  */
-function markTaskNotified(taskId: string, setAppState: SetAppState): boolean {
-  let shouldEnqueue = false;
-  updateTaskState(taskId, setAppState, task => {
+function markTaskNotified(taskId: string, setAppState: SetAppState): RemoteAgentTaskState | undefined {
+  let notifiedTask: RemoteAgentTaskState | undefined;
+  updateTaskState<RemoteAgentTaskState>(taskId, setAppState, task => {
     if (task.notified) {
       return task;
     }
-    shouldEnqueue = true;
+    notifiedTask = task;
     return { ...task, notified: true };
   });
-  return shouldEnqueue;
+  return notifiedTask;
 }
 
 /**
@@ -369,18 +395,29 @@ export function enqueueUltraplanFailureNotification(
   reason: string,
   setAppState: SetAppState,
 ): void {
-  if (!markTaskNotified(taskId, setAppState)) return;
+  const task = markTaskNotified(taskId, setAppState);
+  if (!task) return;
 
   const sessionUrl = getRemoteTaskSessionUrl(sessionId);
+  const summary = `Ultraplan failed: ${reason}`;
   const message = `<${TASK_NOTIFICATION_TAG}>
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>
 <${TASK_TYPE_TAG}>remote_agent</${TASK_TYPE_TAG}>
 <${STATUS_TAG}>failed</${STATUS_TAG}>
-<${SUMMARY_TAG}>Ultraplan failed: ${reason}</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>
 The remote Ultraplan session did not produce a plan (${reason}). Inspect the session at ${sessionUrl} and tell the user to retry locally with plan mode.`;
 
-  enqueuePendingNotification({ value: message, mode: 'task-notification' });
+  emitTaskTerminatedSdk(taskId, 'failed', {
+    toolUseId: task.toolUseId,
+    requestMessageId: task.requestMessageId,
+    summary,
+  });
+  enqueuePendingNotification({
+    value: message,
+    mode: 'task-notification',
+    taskNotification: { taskId, toolUseId: task.toolUseId, requestMessageId: task.requestMessageId },
+  });
 }
 
 /**
@@ -500,36 +537,58 @@ function extractReviewTagFromLog(log: SDKMessage[]): string | null {
  * claude.ai URL stays a durable record the user can revisit; TTL handles cleanup.
  */
 function enqueueRemoteReviewNotification(taskId: string, reviewContent: string, setAppState: SetAppState): void {
-  if (!markTaskNotified(taskId, setAppState)) return;
+  const task = markTaskNotified(taskId, setAppState);
+  if (!task) return;
+  const summary = 'Remote review completed';
 
   const message = `<${TASK_NOTIFICATION_TAG}>
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>
 <${TASK_TYPE_TAG}>remote_agent</${TASK_TYPE_TAG}>
 <${STATUS_TAG}>completed</${STATUS_TAG}>
-<${SUMMARY_TAG}>Remote review completed</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>
 The remote review produced the following findings:
 
 ${reviewContent}`;
 
-  enqueuePendingNotification({ value: message, mode: 'task-notification' });
+  emitTaskTerminatedSdk(taskId, 'completed', {
+    toolUseId: task.toolUseId,
+    requestMessageId: task.requestMessageId,
+    summary,
+  });
+  enqueuePendingNotification({
+    value: message,
+    mode: 'task-notification',
+    taskNotification: { taskId, toolUseId: task.toolUseId, requestMessageId: task.requestMessageId },
+  });
 }
 
 /**
  * Enqueue a remote-review failure notification.
  */
 function enqueueRemoteReviewFailureNotification(taskId: string, reason: string, setAppState: SetAppState): void {
-  if (!markTaskNotified(taskId, setAppState)) return;
+  const task = markTaskNotified(taskId, setAppState);
+  if (!task) return;
+  const summary = `Remote review failed: ${reason}`;
 
   const message = `<${TASK_NOTIFICATION_TAG}>
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>
 <${TASK_TYPE_TAG}>remote_agent</${TASK_TYPE_TAG}>
 <${STATUS_TAG}>failed</${STATUS_TAG}>
-<${SUMMARY_TAG}>Remote review failed: ${reason}</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>
 Remote review did not produce output (${reason}). Tell the user to retry /ultrareview, or use /review for a local review instead.`;
 
-  enqueuePendingNotification({ value: message, mode: 'task-notification' });
+  emitTaskTerminatedSdk(taskId, 'failed', {
+    toolUseId: task.toolUseId,
+    requestMessageId: task.requestMessageId,
+    summary,
+  });
+  enqueuePendingNotification({
+    value: message,
+    mode: 'task-notification',
+    taskNotification: { taskId, toolUseId: task.toolUseId, requestMessageId: task.requestMessageId },
+  });
 }
 
 /**
@@ -1086,6 +1145,7 @@ export const RemoteAgentTask: Task = {
   type: 'remote_agent',
   async kill(taskId, setAppState) {
     let toolUseId: string | undefined;
+    let requestMessageId: string | undefined;
     let description: string | undefined;
     let sessionId: string | undefined;
     let killed = false;
@@ -1094,6 +1154,7 @@ export const RemoteAgentTask: Task = {
         return task;
       }
       toolUseId = task.toolUseId;
+      requestMessageId = task.requestMessageId;
       description = task.description;
       sessionId = task.sessionId;
       killed = true;
@@ -1110,6 +1171,7 @@ export const RemoteAgentTask: Task = {
     if (killed) {
       emitTaskTerminatedSdk(taskId, 'stopped', {
         toolUseId,
+        requestMessageId,
         summary: description,
       });
       // Archive the remote session so it stops consuming cloud resources.

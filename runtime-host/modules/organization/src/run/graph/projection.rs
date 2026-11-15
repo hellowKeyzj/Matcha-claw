@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
+
 use super::{
-    definition::{EdgeId, NodeId},
+    definition::{EdgeId, NodeId, NodeKind},
     state::{AttemptReason, AttemptStatus, ExecutionFence, GraphState},
 };
 
@@ -24,6 +26,7 @@ pub enum EdgeStatus {
 pub struct AttemptProjection {
     pub fence: ExecutionFence,
     pub number: u32,
+    pub batch_id: u64,
     pub status: AttemptStatus,
     pub reason: AttemptReason,
     pub output_port: Option<String>,
@@ -50,6 +53,33 @@ pub struct InputProjection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReworkCounterProjection {
+    pub batch_id: u64,
+    pub source_node_id: String,
+    pub source_port: String,
+    pub used: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockedReworkProjection {
+    pub batch_id: u64,
+    pub source_node_id: String,
+    pub source_port: String,
+    pub source_node_execution_id: String,
+    pub used: u32,
+    pub max_reworks: u32,
+    pub blocked_at: u64,
+    pub scope_node_ids: Vec<String>,
+    pub edge_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReworkProjection {
+    pub counters: Vec<ReworkCounterProjection>,
+    pub blocked: Vec<BlockedReworkProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphProjection {
     pub graph_id: String,
     pub run_id: String,
@@ -58,6 +88,7 @@ pub struct GraphProjection {
     pub nodes: Vec<NodeProjection>,
     pub edges: Vec<EdgeProjection>,
     pub inputs: Vec<InputProjection>,
+    pub rework: ReworkProjection,
 }
 
 pub fn project(state: &GraphState) -> GraphProjection {
@@ -74,6 +105,7 @@ pub fn project(state: &GraphState) -> GraphProjection {
                 current: AttemptProjection {
                     fence: attempt.fence().clone(),
                     number: attempt.number().get(),
+                    batch_id: attempt.batch_id().get(),
                     status: attempt.status(),
                     reason: attempt.reason().clone(),
                     output_port: attempt.output_port().map(ToOwned::to_owned),
@@ -129,26 +161,26 @@ pub fn project(state: &GraphState) -> GraphProjection {
         nodes,
         edges,
         inputs,
+        rework: ReworkProjection {
+            counters: state.rework_counts().iter().map(|(key, used)| ReworkCounterProjection {
+                batch_id: key.batch_id.get(), source_node_id: key.source_node_id.as_str().to_owned(),
+                source_port: key.source_port.clone(), used: *used,
+            }).collect(),
+            blocked: state.blocked_reworks().values().map(|blocked| BlockedReworkProjection {
+                batch_id: blocked.batch_id.get(), source_node_id: blocked.source_node_id.as_str().to_owned(),
+                source_port: blocked.source_port.clone(),
+                source_node_execution_id: blocked.source_fence.node_execution_id().as_str().to_owned(),
+                used: blocked.used, max_reworks: blocked.max_reworks, blocked_at: blocked.blocked_at,
+                scope_node_ids: blocked.scope.iter().map(|id| id.as_str().to_owned()).collect(),
+                edge_ids: blocked.edge_ids.iter().map(|id| id.as_str().to_owned()).collect(),
+            }).collect(),
+        },
     }
 }
 
-fn graph_status(state: &GraphState) -> GraphStatus {
+pub(crate) fn graph_status(state: &GraphState) -> GraphStatus {
     let attempts = state.executions().values().map(|history| history.current());
     let statuses = attempts.map(|attempt| attempt.status()).collect::<Vec<_>>();
-    let end_nodes = state
-        .definition()
-        .nodes()
-        .iter()
-        .filter(|node| node.kind() == super::definition::NodeKind::End)
-        .collect::<Vec<_>>();
-    let all_end_nodes_completed = !end_nodes.is_empty()
-        && end_nodes.iter().all(|node| {
-            state
-                .current_attempt(node.id())
-                .expect("definition nodes always have an execution history")
-                .status()
-                == AttemptStatus::Completed
-        });
     if statuses.contains(&AttemptStatus::Cancelled) {
         return GraphStatus::Cancelled;
     }
@@ -158,23 +190,54 @@ fn graph_status(state: &GraphState) -> GraphStatus {
     if statuses.contains(&AttemptStatus::Running) {
         return GraphStatus::Running;
     }
-    if statuses.contains(&AttemptStatus::Waiting) {
+    if statuses.contains(&AttemptStatus::Waiting) || !state.blocked_reworks().is_empty() {
         return GraphStatus::Waiting;
     }
     if !state.ready_queue().is_empty() {
         return GraphStatus::Ready;
     }
-    if all_end_nodes_completed
-        || statuses
-            .iter()
-            .all(|status| *status == AttemptStatus::Completed)
+    if statuses
+        .iter()
+        .all(|status| *status == AttemptStatus::Completed)
     {
+        return GraphStatus::Completed;
+    }
+    if state.executions().values().any(|history| {
+        let current = history.current();
+        // Activate/Finish enqueue immediately; an incomplete Gate keeps its exact receipts.
+        current.status() == AttemptStatus::Pending && !current.inputs().is_empty()
+    }) {
+        return GraphStatus::Pending;
+    }
+    let mut unfinished_batches = state
+        .executions()
+        .values()
+        .map(|history| history.current())
+        .filter(|attempt| attempt.status() == AttemptStatus::Completed)
+        .map(|attempt| attempt.batch_id())
+        .collect::<BTreeSet<_>>();
+    let has_completed_batch = !unfinished_batches.is_empty();
+    for history in state.executions().values() {
+        if history.current().node_kind() != NodeKind::End {
+            continue;
+        }
+        let mut seen_batches = BTreeSet::new();
+        // Another trigger may replace this End's current batch; rework stays in the same batch.
+        for attempt in history.attempts().iter().rev() {
+            if seen_batches.insert(attempt.batch_id())
+                && attempt.status() == AttemptStatus::Completed
+            {
+                unfinished_batches.remove(&attempt.batch_id());
+            }
+        }
+    }
+    if has_completed_batch && unfinished_batches.is_empty() {
         return GraphStatus::Completed;
     }
     GraphStatus::Pending
 }
 
-fn edge_satisfied(state: &GraphState, edge: &super::definition::EdgeDefinition) -> bool {
+pub(crate) fn edge_satisfied(state: &GraphState, edge: &super::definition::EdgeDefinition) -> bool {
     let Some(source) = state.current_attempt(edge.source_node_id()) else {
         return false;
     };

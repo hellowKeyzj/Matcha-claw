@@ -1,9 +1,10 @@
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
 import type { SessionRenderItem, SessionRenderUserMessageItem } from '@/types/session/render-item';
-import type { SessionInputReceipt, SessionWireItem } from '@/types/session/snapshot';
+import type { SessionInputReceipt, SessionRunTiming, SessionWireItem } from '@/types/session/snapshot';
 import * as openclaw from '@/plugins/chat/store/openclaw-session';
 import * as matcha from '@/plugins/chat/store/matcha-session';
 import { reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
+import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
 import type { ChatSendAttachment, ChatSessionAbortState, ChatSessionPending, ChatSessionRecord, ChatSessionRuntimeState, ChatSessionSendAdmission, ChatSessionSendState } from '@/plugins/chat/store/types';
 
 export type SessionMessageState = Pick<ChatSessionRecord, 'items' | 'runtime'> & {
@@ -14,14 +15,25 @@ export interface SessionMessageProjection {
   identityKey: string;
   runtime: ChatSessionRuntimeState | null;
   terminalRunIds: readonly string[];
+  failedRunIds: readonly string[];
   terminatedRunIds: readonly string[];
   retiredItemIds: ReadonlySet<string>;
+  runTimings: readonly SessionRunTiming[];
   send: ChatSessionSendState | null;
 }
 
 export interface SessionTextModel {
   user(text: string): string;
   assistant(text: string): string;
+}
+
+export interface SessionReceiptProjection {
+  runtime: ChatSessionRuntimeState | null;
+  terminalRunIds: readonly string[];
+  failedRunIds: readonly string[];
+  runTimings: readonly SessionRunTiming[];
+  inputReceipts: readonly SessionInputReceipt[];
+  sourceItems: readonly SessionWireItem[];
 }
 
 export interface SessionMessageModel {
@@ -40,7 +52,7 @@ export interface SessionMessageModel {
   deriveRuntime(record: ChatSessionRecord): ChatSessionRuntimeState;
   resolveAbortRunId(record: ChatSessionRecord): string | undefined;
   terminalRunIds(exactRunIds: readonly string[], observedRunIds: readonly string[]): readonly string[];
-  settleReceipts(record: ChatSessionRecord): ChatSessionRecord;
+  settleReceipts(record: ChatSessionRecord, projection?: SessionReceiptProjection): ChatSessionRecord;
   createPending(record: ChatSessionRecord, sessionKey: string): ChatSessionPending | null;
 }
 
@@ -129,6 +141,11 @@ export function projectSessionMessages(record: ChatSessionRecord, items: Session
   return messageModel(record).projectMessages(record, items, projection);
 }
 
+export function isSessionAbortPending(record: ChatSessionRecord): boolean {
+  return record.abort?.phase === 'stopping' && record.meta.sessionIdentity !== null
+    && record.abort.identityKey === buildSessionIdentityKey(record.meta.sessionIdentity);
+}
+
 export function startSessionAbort(record: ChatSessionRecord, abort: ChatSessionAbortState): ChatSessionRuntimeState {
   return messageModel(record).startAbort(record, abort);
 }
@@ -171,14 +188,14 @@ export function sessionTerminalRunIds(record: ChatSessionRecord, exactRunIds: re
   return record.meta.sessionIdentity ? messageModel(record).terminalRunIds(exactRunIds, observedRunIds) : exactRunIds;
 }
 
-export function settleSessionReceipts(record: ChatSessionRecord): ChatSessionRecord {
-  return record.meta.sessionIdentity ? messageModel(record).settleReceipts(record) : record;
+export function settleSessionReceipts(record: ChatSessionRecord, projection?: SessionReceiptProjection): ChatSessionRecord {
+  return record.meta.sessionIdentity ? messageModel(record).settleReceipts(record, projection) : record;
 }
 
 export function resolveSessionAbortRunId(record: ChatSessionRecord): string | undefined {
   return record.meta.sessionIdentity ? messageModel(record).resolveAbortRunId(record) : undefined;
 }
 
-export function createSessionPending(record: ChatSessionRecord, sessionKey: string): ChatSessionPending | null {
-  return record.meta.sessionIdentity ? messageModel(record).createPending(record, sessionKey) : null;
+export function createSessionPending(record: ChatSessionRecord): ChatSessionPending | null {
+  return record.meta.sessionIdentity ? messageModel(record).createPending(record, record.meta.sessionIdentity.sessionKey) : null;
 }

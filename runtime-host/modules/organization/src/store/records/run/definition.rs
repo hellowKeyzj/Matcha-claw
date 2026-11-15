@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,7 @@ use crate::{
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Definition {
+pub(super) struct Definition {
     graph: String,
     workflow_plan: String,
     run: String,
@@ -23,36 +23,32 @@ struct Definition {
     edges: Vec<Edge>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Body {
-    sha256: [u8; 32],
-    byte_len: u64,
+struct HistoricalDefinition {
+    graph: String,
+    workflow_plan: String,
+    run: String,
+    title: String,
+    nodes: Vec<HistoricalNode>,
+    edges: Vec<Edge>,
 }
 
-impl Body {
-    fn put(
-        scope: ContentScope<'_>,
-        text: &str,
-        contents: &ContentStore,
-    ) -> Result<Self, StoreFault> {
-        let reference = contents.put(scope, text.as_bytes())?;
-        Ok(Self {
-            sha256: reference.sha256,
-            byte_len: reference.byte_len,
-        })
-    }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoricalNode {
+    id: String,
+    title: String,
+    max_attempts: u32,
+    configuration: Configuration,
+}
 
-    fn read(self, scope: ContentScope<'_>, contents: &ContentStore) -> Result<String, StoreFault> {
-        String::from_utf8(contents.read(
-            scope,
-            &ContentRef {
-                sha256: self.sha256,
-                byte_len: self.byte_len,
-            },
-        )?)
-        .map_err(|_| StoreFault::CorruptRecord)
-    }
+fn read_text(
+    scope: ContentScope<'_>,
+    reference: &ContentRef,
+    contents: &ContentStore,
+) -> Result<String, StoreFault> {
+    String::from_utf8(contents.read(scope, reference)?).map_err(|_| StoreFault::CorruptRecord)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,8 +56,10 @@ impl Body {
 struct Node {
     id: String,
     title: String,
-    max_attempts: u32,
+    rework_limits: BTreeMap<String, u32>,
     configuration: Configuration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval_prompt: Option<ContentRef>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -71,13 +69,13 @@ enum Configuration {
         task: String,
         role: String,
         session: String,
-        prompt: Body,
+        prompt: ContentRef,
         artifact_kind: Option<String>,
     },
     Review {
         role: String,
         session: String,
-        prompt: Body,
+        prompt: ContentRef,
     },
     Join,
     Control(Kind),
@@ -135,6 +133,16 @@ pub(crate) fn encode_definition(
     definition: &GraphDefinition,
     contents: &ContentStore,
 ) -> Result<Vec<u8>, StoreFault> {
+    serde_json::to_vec(&build_definition(team, scope_run, definition, contents)?)
+        .map_err(|_| StoreFault::InvalidFacts)
+}
+
+pub(super) fn build_definition(
+    team: &TeamId,
+    scope_run: &GraphRunId,
+    definition: &GraphDefinition,
+    contents: &ContentStore,
+) -> Result<Definition, StoreFault> {
     let scope = ContentScope::Run {
         team,
         run: scope_run,
@@ -176,7 +184,7 @@ pub(crate) fn encode_definition(
                             task: work.task_id().to_owned(),
                             role: work.role_id().to_owned(),
                             session: work.session_ref().as_str().to_owned(),
-                            prompt: Body::put(scope, work.prompt(), contents)?,
+                            prompt: contents.put(scope, work.prompt().as_bytes())?,
                             artifact_kind: work.output_artifact_kind().map(str::to_owned),
                         }
                     }
@@ -185,7 +193,7 @@ pub(crate) fn encode_definition(
                         Configuration::Review {
                             role: review.role_id().to_owned(),
                             session: review.session_ref().as_str().to_owned(),
-                            prompt: Body::put(scope, review.prompt(), contents)?,
+                            prompt: contents.put(scope, review.prompt().as_bytes())?,
                         }
                     }
                     NodeKind::Join => Configuration::Join,
@@ -195,8 +203,10 @@ pub(crate) fn encode_definition(
             Ok(Node {
                 id: node.id().as_str().to_owned(),
                 title: node.title().to_owned(),
-                max_attempts: node.max_attempts().get(),
+                rework_limits: node.rework_limits().clone(),
                 configuration,
+                approval_prompt: node.approval_prompt()
+                    .map(|prompt| contents.put(scope, prompt.as_bytes())).transpose()?,
             })
         })
         .collect::<Result<Vec<_>, StoreFault>>()?;
@@ -224,7 +234,7 @@ pub(crate) fn encode_definition(
             }),
         })
         .collect();
-    serde_json::to_vec(&Definition {
+    Ok(Definition {
         graph: definition.graph_id().to_owned(),
         workflow_plan: definition.workflow_plan_id().to_owned(),
         run: definition.run_id().as_str().to_owned(),
@@ -232,7 +242,6 @@ pub(crate) fn encode_definition(
         nodes,
         edges,
     })
-    .map_err(|_| StoreFault::InvalidFacts)
 }
 
 pub(crate) fn decode_definition(
@@ -242,6 +251,76 @@ pub(crate) fn decode_definition(
     contents: &ContentStore,
 ) -> Result<GraphDefinition, StoreFault> {
     let row: Definition = serde_json::from_slice(bytes).map_err(|_| StoreFault::CorruptRecord)?;
+    restore_definition(row, team, scope_run, contents)
+}
+
+// This is an audit-only reader, never a canonical graph fallback.
+pub(super) fn decode_historical_sqlite_definition(
+    team: &TeamId,
+    scope_run: &GraphRunId,
+    bytes: &[u8],
+    contents: &ContentStore,
+) -> Result<GraphDefinition, StoreFault> {
+    let row: HistoricalDefinition =
+        serde_json::from_slice(bytes).map_err(|_| StoreFault::CorruptRecord)?;
+    let nodes = row
+        .nodes
+        .into_iter()
+        .map(|node| {
+            if node.max_attempts == 0 {
+                return Err(StoreFault::InvalidFacts);
+            }
+            let kind = match &node.configuration {
+                Configuration::Start(_) => NodeKind::Start,
+                Configuration::Work { .. } => NodeKind::Work,
+                Configuration::Review { .. } => NodeKind::Review,
+                Configuration::Join => NodeKind::Join,
+                Configuration::ScriptReview(_) => NodeKind::ScriptReview,
+                Configuration::Control(kind) => match kind {
+                    Kind::Start => NodeKind::Start,
+                    Kind::Review => NodeKind::Review,
+                    Kind::HumanDecision => NodeKind::HumanDecision,
+                    Kind::ScriptReview => NodeKind::ScriptReview,
+                    Kind::Join => NodeKind::Join,
+                    Kind::End => NodeKind::End,
+                },
+            };
+            let rework_limits = kind
+                .source_ports()
+                .iter()
+                .filter(|port| kind.accepts_edge_action(port.as_str(), EdgeAction::Rework))
+                .map(|port| (port.as_str().to_owned(), 3))
+                .collect();
+            Ok(Node {
+                id: node.id,
+                title: node.title,
+                rework_limits,
+                configuration: node.configuration,
+                approval_prompt: None,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreFault>>()?;
+    restore_definition(
+        Definition {
+            graph: row.graph,
+            workflow_plan: row.workflow_plan,
+            run: row.run,
+            title: row.title,
+            nodes,
+            edges: row.edges,
+        },
+        team,
+        scope_run,
+        contents,
+    )
+}
+
+pub(super) fn restore_definition(
+    row: Definition,
+    team: &TeamId,
+    scope_run: &GraphRunId,
+    contents: &ContentStore,
+) -> Result<GraphDefinition, StoreFault> {
     let scope = ContentScope::Run {
         team,
         run: scope_run,
@@ -251,12 +330,17 @@ pub(crate) fn decode_definition(
         .into_iter()
         .map(|node| {
             let id = NodeId::new(node.id);
-            let attempts = NonZeroU32::new(node.max_attempts).ok_or(StoreFault::InvalidFacts)?;
-            Ok(match node.configuration {
+            let approval_prompt = match (&node.configuration, node.approval_prompt) {
+                (Configuration::Control(Kind::HumanDecision), Some(reference)) => {
+                    Some(read_text(scope, &reference, contents)?)
+                }
+                (_, None) => None,
+                _ => return Err(StoreFault::InvalidFacts),
+            };
+            let definition = match node.configuration {
                 Configuration::Start(trigger) => NodeDefinition::start(
                     id,
                     node.title,
-                    attempts,
                     trigger.map(|value| match value {
                         Trigger::Webhook(path) => StartTrigger::Webhook { path },
                         Trigger::Cron(expression) => StartTrigger::Cron { expression },
@@ -271,10 +355,9 @@ pub(crate) fn decode_definition(
                 } => NodeDefinition::work(
                     id,
                     node.title,
-                    attempts,
                     WorkAssignment::typed(
                         task,
-                        prompt.read(scope, contents)?,
+                        read_text(scope, &prompt, contents)?,
                         executor(role, session)?,
                         artifact_kind,
                     ),
@@ -286,13 +369,15 @@ pub(crate) fn decode_definition(
                 } => NodeDefinition::review(
                     id,
                     node.title,
-                    attempts,
                     ReviewAssignment::with_executor(
                         executor(role, session)?,
-                        prompt.read(scope, contents)?,
+                        read_text(scope, &prompt, contents)?,
                     ),
                 ),
-                Configuration::Join => NodeDefinition::join(id, node.title, attempts),
+                Configuration::Join => NodeDefinition::join(id, node.title),
+                Configuration::Control(Kind::HumanDecision) => {
+                    NodeDefinition::human_decision(id, node.title, approval_prompt)
+                }
                 Configuration::Control(kind) => NodeDefinition::control(
                     id,
                     match kind {
@@ -304,12 +389,10 @@ pub(crate) fn decode_definition(
                         Kind::End => NodeKind::End,
                     },
                     node.title,
-                    attempts,
                 ),
                 Configuration::ScriptReview(rule) => NodeDefinition::script_review(
                     id,
                     node.title,
-                    attempts,
                     match rule {
                         Rule::PassThrough => ScriptReviewRule::PassThrough,
                         Rule::AssertAllUpstreamCompleted => {
@@ -319,7 +402,15 @@ pub(crate) fn decode_definition(
                         Rule::AssertArtifactExists => ScriptReviewRule::AssertArtifactExists,
                     },
                 ),
-            })
+            };
+            if definition
+                .rework_limits()
+                .keys()
+                .ne(node.rework_limits.keys())
+            {
+                return Err(StoreFault::InvalidFacts);
+            }
+            Ok(definition.with_rework_limits(node.rework_limits))
         })
         .collect::<Result<Vec<_>, StoreFault>>()?;
     let edges = row

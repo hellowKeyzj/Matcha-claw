@@ -23,7 +23,6 @@ type Observation = {
   requestSequence: number;
   request?: Promise<SessionView | null>;
   historyTask?: Promise<void>;
-  historyInputIds?: readonly string[];
   refreshRequested?: boolean;
   watermark?: { epoch: number; seq: number };
 };
@@ -41,7 +40,6 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     const observation = observations.get(buildSessionIdentityKey(identity));
     if (!observation) return Promise.resolve(null);
     if (observation.request) return observation.request;
-    observation.historyInputIds = inputIds;
     const key = buildSessionIdentityKey(identity);
     const recordKey = findSessionRecordKey(get(), identity);
     const generation = recordKey ? getSendGeneration(recordKey) : null;
@@ -53,8 +51,10 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
         requestSequence, generation, limit: CHAT_HISTORY_FULL_LIMIT,
       }));
       let result: Awaited<ReturnType<typeof observeChatSession>>;
+      const endpointSessionId = recordKey ? getSessionMeta(get(), recordKey).endpointSessionId : undefined;
       try {
         result = await observeChatSession({ sessionIdentity: identity, leaseId: observation.leaseId, limit: CHAT_HISTORY_FULL_LIMIT,
+          ...(endpointSessionId ? { endpointSessionId } : {}),
           ...(inputIds.length ? { inputIds } : {}),
         }, options);
       } catch (error) {
@@ -86,7 +86,7 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     return task;
   };
 
-  const refreshObservation = async (identity: SessionIdentity, leaseId: string, cause: 'observe' | 'resync' = 'observe', watermark?: { epoch: number; seq: number }) => {
+  const refreshObservation = async (identity: SessionIdentity, leaseId: string, cause: 'observe' | 'resync' = 'observe', watermark?: { epoch: number; seq: number }): Promise<SessionView | null> => {
     const tracing = isSessionTraceEnabled();
     let requestElapsedMs: number | null = null;
     const trace = (stage: string, extra: Record<string, unknown> = {}) => {
@@ -96,10 +96,10 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     };
     const identityKey = buildSessionIdentityKey(identity);
     const observation = observations.get(identityKey);
-    if (!observation || observation.leaseId !== leaseId) { trace('session.observe.drop', { reason: 'lease-not-current' }); return; }
+    if (!observation || observation.leaseId !== leaseId) { trace('session.observe.drop', { reason: 'lease-not-current' }); return null; }
     const requestSequence = ++observation.requestSequence;
     const recordKey = findSessionRecordKey(get(), identity);
-    if (!recordKey) { trace('session.observe.drop', { reason: 'record-not-found', requestSequence }); return; }
+    if (!recordKey) { trace('session.observe.drop', { reason: 'record-not-found', requestSequence }); return null; }
     const generation = getSendGeneration(recordKey);
     const recordIdentity = get().loadedSessions[recordKey]?.meta.sessionIdentity;
     const isCurrent = () => observations.get(identityKey) === observation
@@ -112,20 +112,21 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     if (isSessionTraceEnabled()) trace('session.observe.request', { requestSequence, generation, recordKey: summarizeIdentifier(recordKey) });
     const requestStartedAt = tracing ? performance.now() : 0;
     try {
-      const observationResult = await observeChatSession({ sessionIdentity: identity, leaseId });
+      const endpointSessionId = getSessionMeta(get(), recordKey).endpointSessionId;
+      const observationResult = await observeChatSession({ sessionIdentity: identity, leaseId, ...(endpointSessionId ? { endpointSessionId } : {}) });
       requestElapsedMs = tracing ? performance.now() - requestStartedAt : null;
       if ('outcome' in observationResult) {
         trace('session.observe.drop', { requestSequence, generation, reason: 'observation-released' });
-        return;
+        return null;
       }
       const { view } = observationResult;
       trace('session.observe.response', { requestSequence, generation, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
       if (observations.get(identityKey) !== observation) {
         trace('session.observe.drop', { requestSequence, reason: 'observation-replaced', epoch: view.epoch, seq: view.seq, cursor: view.cursor });
         await releaseChatSession({ sessionIdentity: identity, leaseId });
-        return;
+        return null;
       }
-      if (!isCurrent()) { trace('session.observe.drop', { requestSequence, reason: dropReason(), epoch: view.epoch, seq: view.seq, cursor: view.cursor }); return; }
+      if (!isCurrent()) { trace('session.observe.drop', { requestSequence, reason: dropReason(), epoch: view.epoch, seq: view.seq, cursor: view.cursor }); return null; }
       const applyStartedAt = tracing ? performance.now() : 0;
       const result = applySessionView({ set, get }, view);
       const applyElapsedMs = tracing ? performance.now() - applyStartedAt : null;
@@ -134,10 +135,11 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
         && view.items !== 'unknown' && view.items !== 'unavailable') {
         set((state) => ({ loadedSessions: patchSessionMeta(state, recordKey, { historyStatus: 'ready' }) }));
       }
+      return isCurrent() && (result.status === 'applied' || result.status === 'duplicate') ? view : null;
     } catch (error) {
       if (tracing && requestElapsedMs === null) requestElapsedMs = performance.now() - requestStartedAt;
       if (isSessionTraceEnabled()) trace('session.observe.error', { requestSequence, current: isCurrent(), reason: isCurrent() ? null : dropReason(), ...summarizeError(error) });
-      if (!isCurrent()) return;
+      if (!isCurrent()) return null;
       if (get().currentSessionKey === recordKey) {
         set({ error: error instanceof Error ? error.message : String(error) });
       }
@@ -157,12 +159,11 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     if (isOpenClaw && !observation && request.reason === 'same_session_refresh') return Promise.resolve();
     const inputIds = getSessionInputIds(get().loadedSessions[normalizedSessionKey]);
     if (observation?.historyTask) {
-      if (request.reason === 'send_receipt' && inputIds.some((id) => !observation.historyInputIds?.includes(id))) {
+      if (request.reason === 'send_receipt' && inputIds.length > 0) {
         observation.refreshRequested = true;
       }
       return observation.historyTask;
     }
-    if (observation) observation.historyInputIds = inputIds;
     const task = executeHistoryLoad({
       set,
       get,
@@ -190,12 +191,10 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
         if (observation.historyTask !== task) return;
         observation.historyTask = undefined;
         const refresh = observation.refreshRequested;
-        const queriedInputIds = observation.historyInputIds ?? inputIds;
-        observation.historyInputIds = undefined;
         observation.refreshRequested = false;
         if (refresh && observations.get(buildSessionIdentityKey(recordIdentity!)) === observation
           && get().loadedSessions[normalizedSessionKey]?.meta.sessionIdentity === recordIdentity
-          && getSessionInputIds(get().loadedSessions[normalizedSessionKey]).some((id) => !queriedInputIds.includes(id))) {
+          && getSessionInputIds(get().loadedSessions[normalizedSessionKey]).length > 0) {
           void loadHistory({ sessionKey: normalizedSessionKey, mode: 'quiet', scope: 'background', reason: 'send_receipt' });
         }
       }).catch(() => undefined);
@@ -220,7 +219,7 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
   return {
     observeSession: (identity, leaseId = crypto.randomUUID()) => {
       observations.set(buildSessionIdentityKey(identity), { identity, leaseId, requestSequence: 0 });
-      if (identity.endpoint.kind !== 'native-runtime' || identity.endpoint.runtimeAdapterId !== 'openclaw') return { leaseId, ready: refreshObservation(identity, leaseId) };
+      if (identity.endpoint.kind !== 'native-runtime' || identity.endpoint.runtimeAdapterId !== 'openclaw') return { leaseId, ready: refreshObservation(identity, leaseId).then(() => undefined) };
       const recordKey = findSessionRecordKey(get(), identity);
       return { leaseId, ready: recordKey ? get().loadHistory({
         sessionKey: recordKey,
@@ -232,16 +231,16 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     releaseSession,
     resyncSession: async (event) => {
       const drop = (reason: string) => { if (isSessionTraceEnabled()) logSessionTrace('session.resync.drop', 'session-resync-boundary', () => ({ reason })); };
-      if (!event || typeof event !== 'object' || Array.isArray(event)) { drop('invalid-event-shape'); return; }
+      if (!event || typeof event !== 'object' || Array.isArray(event)) { drop('invalid-event-shape'); return null; }
       const value = event as Record<string, unknown>;
       if (Object.keys(value).length !== 3
         || !Number.isSafeInteger(value.epoch) || (value.epoch as number) < 1
-        || !Number.isSafeInteger(value.seq) || (value.seq as number) < 0) { drop('invalid-watermark'); return; }
+        || !Number.isSafeInteger(value.seq) || (value.seq as number) < 0) { drop('invalid-watermark'); return null; }
       try {
         assertSessionIdentity(value.identity);
       } catch {
         drop('invalid-identity');
-        return;
+        return null;
       }
       const identity = value.identity;
       const observation = observations.get(buildSessionIdentityKey(identity));
@@ -253,18 +252,19 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
         const key = buildSessionIdentityKey(observation.identity);
         const covered = () => observation.watermark && (observation.watermark.epoch > (value.epoch as number)
           || observation.watermark.epoch === value.epoch && observation.watermark.seq >= (value.seq as number));
-        if (observations.get(key) !== observation || covered()) return;
+        if (observations.get(key) !== observation || covered()) return null;
         const recordKey = findSessionRecordKey(get(), observation.identity);
-        if (!recordKey) return;
+        if (!recordKey) return null;
         // Let the existing history apply finish before a later frontier supersedes it.
         while (observation.historyTask) {
           await observation.historyTask;
-          if (observations.get(key) !== observation || covered()) return;
+          if (observations.get(key) !== observation || covered()) return null;
         }
-        if (observations.get(key) !== observation || covered()) return;
+        if (observations.get(key) !== observation || covered()) return null;
         await get().loadHistory({ sessionKey: recordKey, mode: 'quiet',
           scope: get().currentSessionKey === recordKey ? 'foreground' : 'background', reason: 'session_resync' });
-      } else if (observation) await refreshObservation(observation.identity, observation.leaseId, 'resync', { epoch: value.epoch as number, seq: value.seq as number });
+      } else if (observation) return refreshObservation(observation.identity, observation.leaseId, 'resync', { epoch: value.epoch as number, seq: value.seq as number });
+      return null;
     },
     loadHistory,
   };

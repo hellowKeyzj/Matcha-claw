@@ -1,3 +1,4 @@
+use futures_util::future::BoxFuture;
 use platform::capability::CapabilityDecisionVerifier;
 
 use serde_json::{Value, json};
@@ -29,7 +30,7 @@ pub(crate) enum Request {
         team_id: organization::TeamId,
         command_id: organization::run::event::OpaqueId,
         idempotency_key: organization::run::event::OpaqueId,
-        yaml: String,
+        definition: Result<Box<organization::GraphDefinition>, organization::GraphYamlError>,
     },
 }
 
@@ -105,9 +106,9 @@ impl Delivery {
     }
 }
 
-pub(crate) async fn handle(owner: &OrganizationHandle, request: Request) -> Delivery {
+pub(crate) fn handle(owner: &OrganizationHandle, request: Request) -> BoxFuture<'_, Delivery> {
     match request {
-        Request::Export { team_id, run_id } => {
+        Request::Export { team_id, run_id } => crate::future::boxed(move || async move {
             match owner.graph_definition(team_id, run_id.clone()).await {
                 Ok(Some(definition)) => Delivery::Exported {
                     run_id: run_id.as_str().to_owned(),
@@ -115,20 +116,20 @@ pub(crate) async fn handle(owner: &OrganizationHandle, request: Request) -> Deli
                 },
                 Ok(None) | Err(_) => Delivery::Unavailable,
             }
-        }
+        }),
         Request::Replace {
             team_id,
             command,
             definition,
-        } => replace(owner, team_id, *command, *definition).await,
+        } => crate::future::boxed(move || replace(owner, team_id, *command, *definition)),
         Request::Import {
             team_id,
             command_id,
             idempotency_key,
-            yaml,
-        } => {
-            let definition = match organization::import_yaml(&yaml) {
-                Ok(definition) => definition,
+            definition,
+        } => crate::future::boxed(move || async move {
+            let definition = match definition {
+                Ok(definition) => *definition,
                 Err(_) => return Delivery::Rejected,
             };
             let command = organization::RunCommand::new(
@@ -142,7 +143,7 @@ pub(crate) async fn handle(owner: &OrganizationHandle, request: Request) -> Deli
                 now_millis(),
             );
             replace(owner, team_id, command, definition).await
-        }
+        }),
     }
 }
 
@@ -166,9 +167,11 @@ async fn replace(
         Ok(None) | Err(_) => return Delivery::Unavailable,
     }
     match owner.graph_save(command, definition).await {
-        Ok(Ok(_)) => Delivery::Replaced {
+        Ok(Ok(organization::TeamRunCommandOutcome::Available(_))) => Delivery::Replaced {
             run_id: run_id.as_str().to_owned(),
         },
+        // The fixed protocol has no readiness-unknown result; do not report an available replacement.
+        Ok(Ok(organization::TeamRunCommandOutcome::Unavailable | organization::TeamRunCommandOutcome::OutcomeUnknown)) => Delivery::Unavailable,
         Ok(Err(_)) => Delivery::Rejected,
         Err(_) => Delivery::Unavailable,
     }
@@ -217,14 +220,15 @@ fn decode_import(body: &serde_json::Map<String, Value>) -> Result<Request, Decod
     let Some(Value::String(yaml)) = body.get("yaml") else {
         return Err(DecodeError::Invalid);
     };
-    if yaml.is_empty() || yaml.len() > 256 * 1024 || yaml.contains('\0') {
+    if yaml.is_empty() || yaml.len() > 1024 * 1024 || yaml.contains('\0') {
         return Err(DecodeError::Invalid);
     }
     Ok(Request::Import {
         team_id: team_id(body)?,
         command_id: opaque(body, "commandId")?,
         idempotency_key: opaque(body, "idempotencyKey")?,
-        yaml: yaml.clone(),
+        // Keep YAML failures as workflow rejections, not envelope decode errors.
+        definition: organization::import_yaml(yaml).map(Box::new),
     })
 }
 
@@ -263,7 +267,7 @@ fn decode_definition(value: &Value) -> Result<organization::GraphDefinition, Dec
     let graph_id = text(graph, "graphId")?;
     let workflow_plan_id = text(graph, "workflowPlanId")?;
     let run_id = organization::GraphRunId::new(text(graph, "runId")?);
-    let title = text(graph, "title")?;
+    let title = content(graph, "title")?;
     let nodes = decode_nodes(graph.get("nodes").ok_or(DecodeError::Invalid)?)?;
     let edges = decode_edges(graph.get("edges").ok_or(DecodeError::Invalid)?, &nodes)?;
     organization::GraphDefinition::new(graph_id, workflow_plan_id, run_id, title, nodes, edges)
@@ -293,13 +297,7 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
         return Err(DecodeError::Invalid);
     };
     let id = organization::NodeId::new(text(node, "id")?);
-    let title = text(node, "title")?;
-    let max_attempts = node
-        .get("maxAttempts")
-        .and_then(Value::as_u64)
-        .and_then(|value| value.try_into().ok())
-        .and_then(std::num::NonZeroU32::new)
-        .ok_or(DecodeError::Invalid)?;
+    let title = content(node, "title")?;
     let kind = match text(node, "kind")?.as_str() {
         "start" => organization::NodeKind::Start,
         "work" => organization::NodeKind::Work,
@@ -310,9 +308,10 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
         "end" => organization::NodeKind::End,
         _ => return Err(DecodeError::Invalid),
     };
-    match kind {
+    let rework_limits = decode_rework_limits(node, kind)?;
+    let definition: Result<organization::NodeDefinition, DecodeError> = match kind {
         organization::NodeKind::Start => {
-            reject_keys(node, &["id", "kind", "title", "maxAttempts", "trigger"])?;
+            reject_keys(node, &["id", "kind", "title", "reworkLimits", "trigger"])?;
             let trigger = match node.get("trigger") {
                 Some(Value::Null) | None => None,
                 Some(Value::Object(trigger)) => match text(trigger, "kind")?.as_str() {
@@ -332,18 +331,13 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
                 },
                 _ => return Err(DecodeError::Invalid),
             };
-            Ok(organization::NodeDefinition::start(
-                id,
-                title,
-                max_attempts,
-                trigger,
-            ))
+            Ok(organization::NodeDefinition::start(id, title, trigger))
         }
         organization::NodeKind::Work => {
             let Some(Value::Object(work)) = node.get("work") else {
                 return Err(DecodeError::Invalid);
             };
-            reject_keys(node, &["id", "kind", "title", "maxAttempts", "work"])?;
+            reject_keys(node, &["id", "kind", "title", "reworkLimits", "work"])?;
             let task_id = text(work, "taskId")?;
             let role_id = text(work, "roleId")?;
             let session_ref = organization::RoleSessionRef::try_new(text(work, "sessionRef")?)
@@ -381,7 +375,6 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
             Ok(organization::NodeDefinition::work(
                 id,
                 title,
-                max_attempts,
                 organization::WorkAssignment::typed(
                     task_id,
                     prompt,
@@ -391,7 +384,7 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
             ))
         }
         organization::NodeKind::Review => {
-            reject_keys(node, &["id", "kind", "title", "maxAttempts", "review"])?;
+            reject_keys(node, &["id", "kind", "title", "reworkLimits", "review"])?;
             let Some(Value::Object(review)) = node.get("review") else {
                 return Err(DecodeError::Invalid);
             };
@@ -404,7 +397,6 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
             Ok(organization::NodeDefinition::review(
                 id,
                 title,
-                max_attempts,
                 organization::ReviewAssignment::with_executor(
                     organization::ExecutorPolicy::team_role_session(role_id, session_ref),
                     prompt,
@@ -412,7 +404,7 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
             ))
         }
         organization::NodeKind::ScriptReview => {
-            reject_keys(node, &["id", "kind", "title", "maxAttempts", "scriptReview"])?;
+            reject_keys(node, &["id", "kind", "title", "reworkLimits", "scriptReview"])?;
             let Some(Value::Object(review)) = node.get("scriptReview") else {
                 return Err(DecodeError::Invalid);
             };
@@ -424,22 +416,42 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
                 "assert_artifact_exists" => organization::ScriptReviewRule::AssertArtifactExists,
                 _ => return Err(DecodeError::Invalid),
             };
-            Ok(organization::NodeDefinition::script_review(id, title, max_attempts, rule))
+            Ok(organization::NodeDefinition::script_review(id, title, rule))
+        }
+        organization::NodeKind::HumanDecision => {
+            reject_keys(node, &["id", "kind", "title", "reworkLimits", "prompt"])?;
+            let prompt = node.get("prompt").map(|value| {
+                value.as_str().map(str::to_owned).ok_or(DecodeError::Invalid)
+            }).transpose()?;
+            Ok(organization::NodeDefinition::human_decision(id, title, prompt))
         }
         organization::NodeKind::Join => {
-            reject_keys(node, &["id", "kind", "title", "maxAttempts"])?;
-            Ok(organization::NodeDefinition::join(id, title, max_attempts))
+            reject_keys(node, &["id", "kind", "title", "reworkLimits"])?;
+            Ok(organization::NodeDefinition::join(id, title))
         }
         _ => {
-            reject_keys(node, &["id", "kind", "title", "maxAttempts"])?;
-            Ok(organization::NodeDefinition::control(
-                id,
-                kind,
-                title,
-                max_attempts,
-            ))
+            reject_keys(node, &["id", "kind", "title", "reworkLimits"])?;
+            Ok(organization::NodeDefinition::control(id, kind, title))
         }
-    }
+    };
+    Ok(definition?.with_rework_limits(rework_limits))
+}
+
+fn decode_rework_limits(
+    node: &serde_json::Map<String, Value>,
+    kind: organization::NodeKind,
+) -> Result<std::collections::BTreeMap<String, u32>, DecodeError> {
+    let Some(Value::Object(limits)) = node.get("reworkLimits") else {
+        return Err(DecodeError::Invalid);
+    };
+    limits.iter().map(|(port, value)| {
+        if !kind.source_port_actions(port).contains(&organization::EdgeAction::Rework) {
+            return Err(DecodeError::Invalid);
+        }
+        let limit = value.as_u64().and_then(|value| u32::try_from(value).ok())
+            .ok_or(DecodeError::Invalid)?;
+        Ok((port.clone(), limit))
+    }).collect()
 }
 
 fn decode_edges(
@@ -516,6 +528,12 @@ fn decode_edge(
         return Err(DecodeError::Invalid);
     }
     Ok(definition)
+}
+
+fn content(object: &serde_json::Map<String, Value>, field: &str) -> Result<String, DecodeError> {
+    object.get(field).and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_control))
+        .map(str::to_owned).ok_or(DecodeError::Invalid)
 }
 
 fn text(object: &serde_json::Map<String, Value>, field: &str) -> Result<String, DecodeError> {

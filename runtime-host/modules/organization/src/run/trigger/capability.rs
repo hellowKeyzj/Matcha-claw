@@ -54,6 +54,7 @@ pub enum TeamTriggerFireOutcome {
     Conflicting { idempotency_key: String },
     NotFound,
     Unknown,
+    Busy,
     Rejected,
 }
 

@@ -138,15 +138,22 @@ node apps/office/scripts/sync.mjs
 
 ### Native 资源与插件
 
-xlsx sidecar 的构建输出必须放在 `genoffice/` 外；如已有匹配二进制，直接复用，避免重复 Rust 构建。
+先按目标平台／架构构建原生依赖；所有产物位于根 `build/office-native/<platform>-<arch>/`，不写入 `genoffice/`。Cargo 显式指定 target、锁文件和 Windows 静态 CRT 配置，缓存由 Cargo 增量复用。
 
-```powershell
-$env:XLSX_SIDECAR_BIN='E:\code\Matcha-claw\apps\office\.build\xlsx-target\release\xlsx-sidecar.exe'
-$env:OFFICE_OCR_HELPER_BIN='E:\path\to\win-ocr.exe'
-node apps/office/build.mjs
+```sh
+node apps/office/build-native.mjs --platform win32 --arch x64
+node apps/office/build-native.mjs --platform win32 --arch arm64
+node apps/office/build-native.mjs --platform darwin --arch arm64
+node apps/office/build-native.mjs --platform linux --arch x64
 ```
 
-Windows OCR helper 由原上游 C# 源码及系统 WinRT 引用编译；`OFFICE_OCR_HELPER_BIN` 可指定预编译结果。不得用空 helper 替代。
+命令须在对应平台工具链环境执行；两种架构均支持，Windows ARM64 交叉构建须使用 MSVC `x64_arm64` 环境，Linux 跨架构须自行提供目标 linker。Linux 仍不发布安装包，不额外引入 OCR 引擎；Windows／macOS 分别构建现有系统 OCR helper。Windows helper 是显式 AnyCPU 纯 IL，由 CLR 选择运行架构，不是误带的 x86 原生依赖。
+
+插件构建只从目标目录取产物，不回退宿主 `target/release`。显式 `XLSX_SIDECAR_BIN`／`OFFICE_OCR_HELPER_BIN` 覆盖仍可用于独立构建，但必须通过同一目标架构校验。
+
+macOS 正式打包在插件 ZIP 压缩前，用 electron-builder 的 Developer ID 身份签名并验证全部 Mach-O（sidecar、Vision OCR、Sharp addon 和 libvips 库）；JS、WASM、字体等普通资源不逐件签名。强制签名的发布构建缺少身份即失败，不回写原生产物。ZIP 解包后由 Office 激活恢复 Unix sidecar／Vision OCR 执行权限，Host 通用解包仍保持 `0600`。
+
+本次接入已实际验证 Windows x64／Linux x64 sidecar 编译、真实 XLSX 公式结果42、Windows 系统 OCR 样本，以及使用新 x64 原生产物的完整 Office 构建／ZIP 读回验包；Mac 真机签名、公证及全部平台安装包验收未在本机执行。精确源码指纹、工件与失败记录见 [原生交付验证](../../.scratch/office-native-delivery-20261112/validation.md)。
 
 构建成功后 `dist/` 包含 CJS activate facade、后台 ESM 分块、六个 HTML、`renderer/` 共享 ESM／字体／worker、PDF.js 资源、xlsx sidecar、HarfBuzz、PDFium、HWP、OCR、Sharp native 闭包、jsdom 与许可文件。不能只复制 HTML 或依赖根仓 node_modules。构建强制遵守 SDK 的 4096 文件／512 MiB 内容限制（ZIP ≤256 MiB、单文件 ≤384 MiB），失败清理临时产物，不裁字体、不设 Office 特例。
 

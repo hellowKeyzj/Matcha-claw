@@ -218,6 +218,7 @@ impl SessionShared {
         if !state.is_team_source() {
             return Vec::new();
         }
+        let openclaw = state.identity().provider() == SessionProvider::OpenClaw;
         delta
             .changes
             .iter()
@@ -225,7 +226,8 @@ impl SessionShared {
                 let SessionChange::RunPhaseChanged { run_id, phase } = change else {
                     return None;
                 };
-                if !crate::state::terminal_run_phase(*phase) {
+                if !crate::state::terminal_run_phase(*phase)
+                    || (openclaw && state.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id != *run_id)) {
                     return None;
                 }
                 let snapshot = SessionRunTerminalSnapshot {
@@ -238,18 +240,19 @@ impl SessionShared {
                     native_message_id: None,
                     measurement: crate::execution::SessionRunMeasurement::Unavailable,
                     phase: *phase,
-                    assistant_texts: assistant_texts(run_id),
+                    assistant_texts: Ok(assistant_texts(run_id)),
                 };
                 crate::trace::log_unscoped("sessions.terminal.snapshot", || serde_json::json!({
                     "identity": crate::trace::identity_shape(state.identity()),
                     "nativeRunIdHash": crate::trace::fingerprint(run_id), "phase": phase,
                     "epoch": delta.epoch, "seq": delta.seq, "cursor": delta.cursor,
-                    "candidateCount": snapshot.assistant_texts.len(),
-                    "candidates": snapshot.assistant_texts.iter().map(|text| crate::trace::text_shape(text)).collect::<Vec<_>>(),
+                    "candidateCount": snapshot.assistant_texts.as_ref().map_or(0, Vec::len),
+                    "candidates": snapshot.assistant_texts.as_ref().map(|texts| texts.iter().map(|text| crate::trace::text_shape(text)).collect::<Vec<_>>()),
                     "hasDeliveryContext": snapshot.delivery_context.is_some(),
                 }));
                 Some(snapshot)
             })
+            .take(if openclaw { 1 } else { usize::MAX })
             .collect()
     }
 
@@ -267,8 +270,8 @@ impl SessionShared {
                     "nativeRunIdHash": crate::trace::fingerprint(&terminal.native_run_id),
                     "phase": terminal.phase, "hookPresent": self.terminal_hook.is_some(),
                     "hasDeliveryContext": terminal.delivery_context.is_some(),
-                    "candidateCount": terminal.assistant_texts.len(),
-                    "candidates": terminal.assistant_texts.iter().map(|text| crate::trace::text_shape(text)).collect::<Vec<_>>(),
+                    "candidateCount": terminal.assistant_texts.as_ref().map_or(0, Vec::len),
+                    "candidates": terminal.assistant_texts.as_ref().map(|texts| texts.iter().map(|text| crate::trace::text_shape(text)).collect::<Vec<_>>()),
                 }));
             }
         }
@@ -339,9 +342,74 @@ impl SessionShared {
         }
     }
 
+    pub(super) fn resolve_matcha_session_id(
+        &self,
+        identity: &SessionIdentity,
+        endpoint_session_id: Option<&str>,
+        resident: Option<&SessionState>,
+    ) -> Result<String, timeline::UnavailableReason> {
+        use timeline::UnavailableReason::{MatchaIdentityInvalid, MatchaMissingNativeSessionId};
+        if identity.validate().is_err() || identity.endpoint.kind != "native-runtime"
+            || identity.provider() != SessionProvider::MatchaAgent
+            || resident.is_some_and(|state| state.identity() != identity)
+        {
+            return Err(MatchaIdentityInvalid);
+        }
+        let snapshot = self.snapshot.load();
+        let stored = snapshot.states.get(&session_identity_lane_key(identity));
+        if stored.is_some_and(|state| state.identity() != identity) {
+            return Err(MatchaIdentityInvalid);
+        }
+        let resident_id = resident.and_then(SessionState::native_session_id);
+        let stored_id = stored.and_then(SessionState::native_session_id);
+        let session_id = endpoint_session_id.or(resident_id).or(stored_id)
+            .ok_or(MatchaMissingNativeSessionId)?;
+        if resident_id.is_some_and(|id| id != session_id) || stored_id.is_some_and(|id| id != session_id) {
+            return Err(MatchaIdentityInvalid);
+        }
+        let endpoint = identity_endpoint(identity).ok_or(MatchaIdentityInvalid)?;
+        let driver = self.runtime_directory.lookup(&endpoint).ok_or(MatchaIdentityInvalid)?;
+        let ops = driver.session_ops().ok_or(MatchaIdentityInvalid)?;
+        if ops.agent_scoped_session_key(&identity.agent_id, session_id).as_deref() != Some(identity.session_key()) {
+            return Err(MatchaIdentityInvalid);
+        }
+        Ok(session_id.to_owned())
+    }
+
+    fn bind_matcha_model_selection_command(
+        &self,
+        command: crate::model_selection::SessionModelSelectionCommand,
+    ) -> Result<crate::model_selection::SessionModelSelectionCommand, SessionModelSelectionOutcome>
+    {
+        if command.endpoint != NativeEndpoint::MatchaAgentLocal {
+            return Ok(command);
+        }
+        // The key supplies only the agent address; the native ID comes from the request or snapshot.
+        let session_id = command.session_key.strip_prefix("matcha-agent:")
+            .and_then(|key| key.split_once(':'))
+            .and_then(|(agent, _)| SessionIdentity::new(&command.session_key, command.endpoint.provider(), agent.to_owned()))
+            .and_then(|identity| self.resolve_matcha_session_id(&identity, command.endpoint_session_id.as_deref(), None).ok())
+            .ok_or_else(|| SessionModelSelectionOutcome::target_rejected(
+                SessionModelSelectionRejection::InvalidSessionKey,
+            ))?;
+        command.with_endpoint_session_id(session_id).map_err(|_| {
+            SessionModelSelectionOutcome::target_rejected(
+                SessionModelSelectionRejection::InvalidSessionKey,
+            )
+        })
+    }
+
     pub(super) async fn handle_read_run(
         &self,
+        command: crate::execution::SessionRunReadCommand,
+    ) -> crate::execution::SessionRunReadOutcome {
+        self.read_run(command, false).await
+    }
+
+    pub(super) async fn read_run(
+        &self,
         mut command: crate::execution::SessionRunReadCommand,
+        complete_terminal_body: bool,
     ) -> crate::execution::SessionRunReadOutcome {
         use crate::execution::{SessionRunReadOutcome, SessionRunSelector};
         if !command.valid() { return SessionRunReadOutcome::Rejected; }
@@ -372,7 +440,10 @@ impl SessionShared {
             if !exact || !valid_id(&record.run_id) || !valid_id(&record.message_id)
                 || record.request_id.as_deref().is_some_and(|id| !valid_id(id) || id.len() > 256)
                 || record.assistant_texts.len() > crate::state::MAX_ITEMS
-                || record.assistant_texts.iter().any(|text| text.len() > crate::state::MAX_TEXT_BYTES || text.contains('\0'))
+                || record.assistant_texts.iter().any(|text| text.contains('\0')
+                    || (!complete_terminal_body && text.len() > crate::state::MAX_TEXT_BYTES))
+                || (complete_terminal_body && record.assistant_texts.iter().map(String::len).sum::<usize>()
+                    > crate::state::MAX_ITEMS * crate::state::MAX_TEXT_BYTES)
             { return SessionRunReadOutcome::Unknown; }
         }
         outcome
@@ -720,21 +791,31 @@ impl SessionLane {
         match command {
             Ensure {
                 identity,
+                endpoint_session_id,
                 source_binding,
                 reply,
             } => {
                 let outcome = self
-                    .handle_ensure(shared, &key, identity, source_binding)
+                    .handle_ensure(shared, &key, identity, endpoint_session_id, source_binding)
                     .await;
                 let _ = reply.send(outcome);
             }
-            Ingest {
-                identity,
-                event,
-                reply,
-            } => {
+            Ingest { identity, event, permit, reply } => {
+                let current = event.binding.identity() == &identity
+                    && event.binding.generation().is_none_or(|generation| shared.observation_generation(&identity) == Some(generation));
+                if current && event.changes.len() <= crate::state::MAX_CHANGE_COUNT {
+                    if let Err(count) = self.admit_terminals(shared, &identity, event.changes.iter().filter_map(|change| match change {
+                        SessionChange::RunPhaseChanged { run_id, phase } if crate::state::terminal_run_phase(*phase) => Some(run_id.as_str()),
+                        _ => None,
+                    }), permit) {
+                        let _ = reply.send(Err((event, count)));
+                        return;
+                    }
+                } else { drop(permit); }
                 let outcome = self.handle_ingest(shared, &key, identity, event).await;
-                let _ = reply.send(outcome);
+                self.terminal_permit.take();
+                shared.terminal_delivery.notify();
+                let _ = reply.send(Ok(outcome));
             }
             SendCompleted { command, goal_demand, receive_demand_added, outcome, reply, call } => {
                 let outcome = super::goal::validate_start_outcome(&command, outcome);
@@ -753,20 +834,31 @@ impl SessionLane {
                 self.complete_send(shared, command, goal_demand, receive_demand_added, &outcome).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
-            TerminalIngest { identity, event, permit, reply } => {
-                self.terminal_permit = Some(permit);
-                let outcome = self.handle_ingest(shared, &key, identity, event).await;
-                self.terminal_permit.take();
-                let _ = reply.send(outcome);
-            }
             SyncTerminals { identity, generation, terminals, publish, permit, reply } => {
-                self.terminal_permit = Some(permit);
+                if shared.observation_generation(&identity) == Some(generation) {
+                    if let Err(count) = self.admit_terminals(shared, &identity,
+                        terminals.iter().map(|(terminal, _)| terminal.run_id.as_str()), permit) {
+                        let _ = reply.send(Err((terminals, count)));
+                        return;
+                    }
+                } else { drop(permit); }
                 let accepted = self.sync_terminals(shared, &identity, generation, terminals, publish).await;
                 self.terminal_permit.take();
+                shared.terminal_delivery.notify();
+                let _ = reply.send(Ok(accepted));
+            }
+            RecoverTerminalRead { identity, run_id, permit, reply } => {
+                self.recover_terminal_read(shared, identity, &run_id, permit, reply).await;
+            }
+            TerminalReadCompleted { identity, run_id, permit, result, reply } => {
+                let accepted = self.complete_terminal_read(shared, &identity, &run_id, &permit, result).await;
                 let _ = reply.send(accepted);
             }
-            TerminalDelivered { identity, run_id, request_id, reply } => {
-                let delivered = self.terminal_delivered(shared, identity, run_id, request_id).await;
+            TerminalDelivered { identity, run_id, request_id, permit, reply } => {
+                let current = self.state.as_ref().is_some_and(|state| state.identity() == &identity
+                    && state.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id == run_id
+                        && Arc::ptr_eq(&pending.permit, &permit)));
+                let delivered = current && self.terminal_delivered(shared, identity, run_id, request_id).await;
                 let _ = reply.send(delivered);
             }
             Goal { command, reply } => self.start_goal(shared, command, reply, call).await,
@@ -780,6 +872,13 @@ impl SessionLane {
             }
             ObserveReplyCompleted { identity, generation, waiter_id, acquired } => {
                 self.observe_reply_completed(shared, identity, generation, waiter_id, acquired).await;
+            }
+            WorkCheckReady { identity, generation, check_id, reply } => {
+                let _ = reply.send(self.work_check_ready(shared, &identity, generation, check_id));
+            }
+            WorkCheckCompleted { identity, generation, check_id, result, permit, reply } => {
+                let result = self.work_check_completed(shared, identity, generation, check_id, result, permit).await;
+                let _ = reply.send(result);
             }
             SyncCompleted { identity, generation, result } => self.sync_completed(shared, identity, generation, result).await,
             ObservationClosed { identity, generation, restarted } => self.observation_closed(shared, identity, generation, restarted).await,
@@ -849,48 +948,47 @@ impl SessionLane {
         shared: &SessionShared,
         key: &str,
         identity: SessionIdentity,
+        endpoint_session_id: Option<String>,
         source_binding: SessionSourceBinding,
     ) -> SessionEnsureOutcome {
-        let expected_key = session_identity_lane_key(&identity);
-        if expected_key != key {
+        if session_identity_lane_key(&identity) != key {
             return SessionEnsureOutcome::Failed;
         }
-
-        if let Some(existing) = &mut self.state {
-            if !existing.bind_source(source_binding) {
+        if self.state.is_none() {
+            self.state = shared.snapshot.load().states.get(key).cloned();
+        }
+        let existing = self.state.is_some();
+        let mut state = if let Some(state) = &self.state {
+            state.clone()
+        } else {
+            let Some(endpoint) = identity_endpoint(&identity) else {
+                return SessionEnsureOutcome::RuntimeNotFound;
+            };
+            let Some(runtime) = shared.runtime_directory.lookup(&endpoint) else {
+                return SessionEnsureOutcome::RuntimeNotFound;
+            };
+            if runtime.session_ops().is_none() {
+                return SessionEnsureOutcome::RuntimeNoSessionSupport;
+            }
+            let Ok(state) = SessionState::new(identity.clone(), shared.epoch) else {
+                return SessionEnsureOutcome::Failed;
+            };
+            state
+        };
+        if state.identity() != &identity || !state.bind_source(source_binding) {
+            return SessionEnsureOutcome::Failed;
+        }
+        if let (SessionProvider::MatchaAgent, Some(session_id)) = (identity.provider(), endpoint_session_id.as_deref()) {
+            let Ok(session_id) = shared.resolve_matcha_session_id(&identity, Some(session_id), self.state.as_ref()) else {
+                return SessionEnsureOutcome::Failed;
+            };
+            if state.bind_endpoint_session_id(&session_id).is_err() {
                 return SessionEnsureOutcome::Failed;
             }
-            let existing = existing.clone();
-            shared.store_snapshot_state(existing.clone()).await;
-            return SessionEnsureOutcome::Existing(existing);
         }
-
-        let endpoint = RuntimeEndpoint::try_new(
-            adapter_id_str(&identity.endpoint.runtime_adapter_id),
-            &identity.endpoint.runtime_instance_id,
-        );
-
-        let Some(endpoint) = endpoint.ok() else {
-            return SessionEnsureOutcome::RuntimeNotFound;
-        };
-
-        let Some(runtime) = shared.runtime_directory.lookup(&endpoint) else {
-            return SessionEnsureOutcome::RuntimeNotFound;
-        };
-
-        let Some(_session_ops) = runtime.session_ops() else {
-            return SessionEnsureOutcome::RuntimeNoSessionSupport;
-        };
-
-        let state = match SessionState::new(identity, shared.epoch) {
-            Ok(state) => state.with_source_binding(source_binding),
-            Err(_) => return SessionEnsureOutcome::Failed,
-        };
-
         self.state = Some(state.clone());
         shared.store_snapshot_state(state.clone()).await;
-
-        SessionEnsureOutcome::Created(state)
+        if existing { SessionEnsureOutcome::Existing(state) } else { SessionEnsureOutcome::Created(state) }
     }
 
     async fn handle_ingest(
@@ -930,6 +1028,7 @@ impl SessionLane {
         let provider = identity.endpoint.provider();
         let history_refresh = event.history_refresh;
         let receive_changes = event.changes.clone();
+        let work_pending = self.effective_work_pending(shared, event.work_pending, &event.changes, None);
 
         if let Some(state) = &self.state {
             if state.identity().provider() != provider {
@@ -942,6 +1041,12 @@ impl SessionLane {
                     reason: "Provider mismatch".to_owned(),
                 };
             }
+        }
+
+        if history_refresh && event.binding.generation().is_some() && event.cursor.is_none()
+            && event.changes.is_empty() && work_pending.is_none() {
+            self.sync_after_terminal(shared, &identity, true);
+            return SessionIngestOutcome::Consumed { cursor: self.state.as_ref().map_or(0, SessionState::cursor) };
         }
 
         if let [SessionChange::RecoveryRequired { reason }] = event.changes.as_slice() {
@@ -1006,12 +1111,16 @@ impl SessionLane {
                 event.cursor,
                 event.changes,
                 None,
+                work_pending,
             )
             .await;
         match &result {
             crate::state::SessionApplyResult::Applied(_) | crate::state::SessionApplyResult::Consumed { .. } => {
                 shared.receive_event(&identity, &receive_changes);
-                let refresh = history_refresh || receive_changes.iter().any(|change| matches!(change, SessionChange::RunPhaseChanged { phase, .. } if crate::state::terminal_run_phase(*phase)));
+                if let Some(state) = &self.state { shared.receive_state(state, work_pending); }
+                shared.terminal_delivery.retry_pending();
+                let refresh = history_refresh || work_pending == Some(true)
+                    || receive_changes.iter().any(|change| matches!(change, SessionChange::RunPhaseChanged { phase, .. } if crate::state::terminal_run_phase(*phase)));
                 if let Some((generation, source_epoch, native_cursor)) = trace_source.filter(|_| refresh) {
                     crate::trace::log_unscoped("sessions.ingest.history_refresh", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "historyRefresh": history_refresh,
@@ -1020,9 +1129,7 @@ impl SessionLane {
                         "syncRequested": refresh,
                     }));
                 }
-                if refresh {
-                    self.sync_after_terminal(shared, &identity, history_refresh);
-                }
+                self.sync_after_terminal(shared, &identity, history_refresh);
             }
             crate::state::SessionApplyResult::Gap { .. } | crate::state::SessionApplyResult::Rejected { .. } => self.recover_observation(shared, &identity),
             _ => {}
@@ -1042,6 +1149,7 @@ impl SessionLane {
         native_cursor: Option<u64>,
         changes: Vec<SessionChange>,
         delivery_context: Option<SessionDeliveryContext>,
+        work_pending: Option<bool>,
     ) -> crate::state::SessionApplyResult {
         let state = match self.event_state(shared, session_key, provider, identity, source_binding)
         {
@@ -1049,6 +1157,7 @@ impl SessionLane {
             Err(result) => return result,
         };
 
+        let request_pending = state.request_pending();
         let mut next = state;
         let evicted = if binding.generation().is_some() {
             let observation_changes = next.observation_changes(&binding, run_id.as_deref(), &changes);
@@ -1060,12 +1169,13 @@ impl SessionLane {
         if let (Some(run_id), Some(context)) = (&run_id, delivery_context) {
             next.run_delivery_contexts.insert(run_id.clone(), context);
         }
-        let result = next.apply_native_bound(binding, run_id, native_cursor, changes);
+        let mut result = next.apply_native_bound_with_work(binding, run_id, native_cursor, changes, work_pending);
 
-        match &result {
+        match &mut result {
             crate::state::SessionApplyResult::Applied(delta) => {
                 let terminals = SessionShared::terminal_snapshots(delta, &next, |run_id| next.assistant_texts_for_run_id(run_id));
-                if !self.retain_terminals(shared, &mut next, &terminals) {
+                if !self.retain_terminals(shared, &mut next, &terminals)
+                    || !next.project_request_pending(request_pending, delta) {
                     return crate::state::SessionApplyResult::Rejected { reason: crate::state::SessionApplyRejection::InvalidInput };
                 }
                 self.state = Some(next.clone());
@@ -1224,6 +1334,7 @@ impl SessionLane {
         shared: &SessionShared,
         session_key: String,
     ) -> SessionEvictOutcome {
+        if let Some(state) = &self.state { self.retire_deleted_receive(shared, state.identity()); }
         let had_lane_state = self.state.take().is_some();
         let had_snapshot_state = shared.clear_snapshot_state(&session_key).await;
         if had_lane_state || had_snapshot_state {
@@ -1233,40 +1344,28 @@ impl SessionLane {
         }
     }
 
-    fn matcha_native_session_id(
+    pub(super) async fn bind_matcha_session(
         &mut self,
         shared: &SessionShared,
-        session_key: &str,
-    ) -> Option<String> {
-        if let Some(session_id) = self
-            .state
-            .as_ref()
-            .filter(|state| {
-                state.identity().provider() == SessionProvider::MatchaAgent
-                    && state.identity().session_key() == session_key
-            })
-            .and_then(SessionState::native_session_id)
-        {
-            return Some(session_id.to_owned());
-        }
-
-        let snapshot = shared.snapshot.load();
-        let mut matching = snapshot.states.values().filter(|state| state.identity().provider() == SessionProvider::MatchaAgent && state.identity().session_key() == session_key);
-        let state = matching.next()?.clone();
-        if matching.next().is_some() { return None; }
-        let session_id = state.native_session_id()?.to_owned();
-        self.state = Some(state);
-        Some(session_id)
-    }
-
-    fn identity_native_session_id(&mut self, shared: &SessionShared, identity: &SessionIdentity) -> Option<String> {
-        if self.state.as_ref().is_none_or(|state| state.identity() != identity) {
+        identity: &SessionIdentity,
+        endpoint_session_id: Option<&str>,
+    ) -> Result<String, timeline::UnavailableReason> {
+        let session_id = shared.resolve_matcha_session_id(identity, endpoint_session_id, self.state.as_ref())?;
+        if self.state.is_none() {
             self.state = shared.snapshot.load().states.get(&session_identity_lane_key(identity)).cloned();
         }
-        self.state.as_ref().and_then(SessionState::native_session_id).map(str::to_owned)
+        if self.state.is_none() {
+            self.state = SessionState::new(identity.clone(), shared.epoch).ok();
+        }
+        let state = self.state.as_mut().ok_or(timeline::UnavailableReason::MatchaIdentityInvalid)?;
+        if state.native_session_id().is_none() {
+            state.bind_endpoint_session_id(&session_id).map_err(|_| timeline::UnavailableReason::MatchaIdentityInvalid)?;
+            shared.store_snapshot_state(state.clone()).await;
+        }
+        Ok(session_id)
     }
 
-    fn bind_matcha_send_command(
+    async fn bind_matcha_send_command(
         &mut self,
         shared: &SessionShared,
         command: crate::send::SessionSendCommand,
@@ -1274,36 +1373,14 @@ impl SessionLane {
         if command.identity.provider() != SessionProvider::MatchaAgent {
             return Ok(command);
         }
-        let Some(session_id) = self.identity_native_session_id(shared, &command.identity) else {
-            return Err(SessionSendOutcome::Rejected);
-        };
+        let session_id = self.bind_matcha_session(shared, &command.identity, command.endpoint_session_id.as_deref())
+            .await.map_err(|_| SessionSendOutcome::Rejected)?;
         command
             .with_endpoint_session_id(session_id)
             .map_err(|_| SessionSendOutcome::Rejected)
     }
 
-    fn bind_matcha_model_selection_command(
-        &mut self,
-        shared: &SessionShared,
-        command: crate::model_selection::SessionModelSelectionCommand,
-    ) -> Result<crate::model_selection::SessionModelSelectionCommand, SessionModelSelectionOutcome>
-    {
-        if command.endpoint != crate::model_selection::NativeEndpoint::MatchaAgentLocal {
-            return Ok(command);
-        }
-        let Some(session_id) = self.matcha_native_session_id(shared, &command.session_key) else {
-            return Err(SessionModelSelectionOutcome::target_rejected(
-                SessionModelSelectionRejection::InvalidSessionKey,
-            ));
-        };
-        command.with_endpoint_session_id(session_id).map_err(|_| {
-            SessionModelSelectionOutcome::target_rejected(
-                SessionModelSelectionRejection::InvalidSessionKey,
-            )
-        })
-    }
-
-    fn bind_matcha_timeline_command(
+    async fn bind_matcha_timeline_command(
         &mut self,
         shared: &SessionShared,
         command: timeline::Command,
@@ -1311,19 +1388,14 @@ impl SessionLane {
         if command.provider() != timeline::Provider::Matcha {
             return Ok(command);
         }
-        let session_id = self
-            .identity_native_session_id(shared, command.identity())
-            .ok_or_else(|| {
-                timeline::Outcome::unavailable(
-                    timeline::UnavailableReason::MatchaMissingNativeSessionId,
-                )
-            })?;
+        let session_id = self.bind_matcha_session(shared, command.identity(), command.endpoint_session_id())
+            .await.map_err(timeline::Outcome::unavailable)?;
         command.with_endpoint_session_id(session_id).ok_or_else(|| {
             timeline::Outcome::unavailable(timeline::UnavailableReason::MatchaIdentityInvalid)
         })
     }
 
-    fn bind_matcha_content_command(
+    async fn bind_matcha_content_command(
         &mut self,
         shared: &SessionShared,
         command: ContentCommand,
@@ -1331,13 +1403,8 @@ impl SessionLane {
         if command.provider() != timeline::Provider::Matcha {
             return Ok(command);
         }
-        let session_id = self
-            .identity_native_session_id(shared, command.identity())
-            .ok_or_else(|| {
-                ContentOutcome::unavailable(
-                    timeline::UnavailableReason::MatchaMissingNativeSessionId,
-                )
-            })?;
+        let session_id = self.bind_matcha_session(shared, command.identity(), command.endpoint_session_id())
+            .await.map_err(ContentOutcome::unavailable)?;
         command.with_endpoint_session_id(session_id).ok_or_else(|| {
             ContentOutcome::unavailable(timeline::UnavailableReason::MatchaIdentityInvalid)
         })
@@ -1385,6 +1452,15 @@ impl SessionLane {
         }
     }
 
+    pub(super) async fn publish_work_pending(&mut self, shared: &SessionShared, pending: bool) -> bool {
+        let Some(state) = &mut self.state else { return false; };
+        if state.work_pending() == pending { return true; }
+        let Ok(delta) = state.set_work_pending(pending) else { return false; };
+        shared.store_snapshot_state(state.clone()).await;
+        if let Some(delta) = delta { shared.emit_session_delta(&delta, Vec::new()); }
+        true
+    }
+
     pub(super) async fn resume_send(
         &mut self,
         shared: &SessionShared,
@@ -1399,6 +1475,10 @@ impl SessionLane {
         }
         if cancellation.is_cancelled() {
             crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+            return;
+        }
+        if command.identity.provider() == SessionProvider::OpenClaw && !self.request_send_allowed(shared, &command) {
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
             return;
         }
         if command.execution_context.as_ref().is_some_and(|context| {
@@ -1435,7 +1515,7 @@ impl SessionLane {
         let failure_run_id = if provider == SessionProvider::MatchaAgent { requested_run_id.clone() } else { None };
         let identity = Some(command.identity.clone());
         let binding = SessionEventBinding::new(command.identity.clone(), None);
-        let command = match self.bind_matcha_send_command(shared, command) {
+        let command = match self.bind_matcha_send_command(shared, command).await {
             Ok(command) => command,
             Err(outcome) => {
                 self.apply_send_outcome(
@@ -1498,24 +1578,29 @@ impl SessionLane {
                 return;
             }
         };
-        if let (Some(run_id), Some(context)) = (&requested_run_id, &command.delivery_context) {
-            if !next.has_terminal_run(run_id) {
-                next.run_delivery_contexts.entry(run_id.clone()).or_insert_with(|| context.clone());
-            }
+        let retain_context = requested_run_id.as_deref().is_none_or(|run_id|
+            !next.has_terminal_run(run_id)
+                || next.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id == run_id));
+        if retain_context && let (Some(run_id), Some(context)) = (&requested_run_id, &command.delivery_context) {
+            next.run_delivery_contexts.entry(run_id.clone()).or_insert_with(|| context.clone());
         }
-        if let (Some(request_id), Some(context)) = (&requested_run_id, &command.execution_context) {
-            if !next.has_terminal_run(request_id) {
-                if next.run_execution_contexts.get(request_id).is_some_and(|(_, existing)| existing != context) {
-                    self.send_receive_outcome(shared, &receive_identity, Some(request_id), receive_demand_added, &SessionSendOutcome::Rejected);
-                    self.close_if_idle(shared, &receive_identity);
-                    crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
-                    return;
-                }
-                next.run_execution_contexts.insert(request_id.clone(), (request_id.clone(), context.clone()));
+        if retain_context && let (Some(request_id), Some(context)) = (&requested_run_id, &command.execution_context) {
+            if next.run_execution_contexts.get(request_id).is_some_and(|(_, existing)| existing != context) {
+                self.send_receive_outcome(shared, &receive_identity, Some(request_id), receive_demand_added, &SessionSendOutcome::Rejected);
+                self.close_if_idle(shared, &receive_identity);
+                crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
+                return;
             }
+            next.run_execution_contexts.insert(request_id.clone(), (request_id.clone(), context.clone()));
         }
         self.state = Some(next.clone());
         shared.store_snapshot_state(next).await;
+        if provider == SessionProvider::OpenClaw && receive_demand_added
+            && !self.publish_work_pending(shared, true).await {
+            self.complete_send(shared, command, goal_demand, receive_demand_added, &SessionSendOutcome::Rejected).await;
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
+            return;
+        }
         let producer = match self.completion_producer(shared) {
             Ok(producer) => producer,
             Err(()) => {
@@ -1568,16 +1653,26 @@ impl SessionLane {
     async fn complete_send(&mut self, shared: &SessionShared, command: SessionSendCommand, goal_demand: Option<(String, Option<String>)>, receive_demand_added: bool, outcome: &SessionSendOutcome) {
         let identity = command.identity.clone();
         let requested = command.request_run_identity().map(str::to_owned);
-        if let (Some(context), SessionSendOutcome::Queued { run_id } | SessionSendOutcome::Succeeded { run_id, .. }) = (&command.execution_context, outcome) {
+        if let SessionSendOutcome::Queued { run_id } | SessionSendOutcome::Succeeded { run_id, .. } = outcome {
             if let Some(state) = &mut self.state {
-                if !state.has_terminal_run(run_id) || state.pending_terminals.iter().any(|pending| &pending.snapshot.native_run_id == run_id) {
-                    if let Some(requested) = &requested {
+                let retain_context = !state.has_terminal_run(run_id)
+                    || state.pending_terminals.iter().any(|pending| &pending.snapshot.native_run_id == run_id);
+                if retain_context {
+                    if let Some(context) = &command.delivery_context {
+                        state.run_delivery_contexts.entry(run_id.clone()).or_insert_with(|| context.clone());
+                    }
+                    if let (Some(requested), Some(context)) = (&requested, &command.execution_context) {
                         state.run_execution_contexts.insert(run_id.clone(), (requested.clone(), context.clone()));
                     }
                     for pending in &mut state.pending_terminals {
                         if &pending.snapshot.native_run_id == run_id {
-                            pending.snapshot.execution_context = Some(context.clone());
+                            if pending.snapshot.delivery_context.is_none() {
+                                pending.snapshot.delivery_context = state.run_delivery_contexts.get(run_id).cloned();
+                            }
                             pending.snapshot.native_request_id = requested.clone();
+                            if let Some(context) = &command.execution_context {
+                                pending.snapshot.execution_context = Some(context.clone());
+                            }
                         }
                     }
                     shared.store_snapshot_state(state.clone()).await;
@@ -1586,7 +1681,9 @@ impl SessionLane {
         }
         if let Some(requested) = &requested {
             let remove = receive_demand_added
-                && !self.state.as_ref().is_some_and(|state| state.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id == *requested))
+                && !self.state.as_ref().is_some_and(|state| state.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id == *requested)
+                    || (identity.provider() == SessionProvider::OpenClaw
+                        && matches!(outcome, SessionSendOutcome::Queued { run_id } | SessionSendOutcome::Succeeded { run_id, .. } if run_id == requested)))
                 && !matches!(outcome, SessionSendOutcome::Unknown)
                 && self.send_receive_run(&identity, outcome) != Some(requested.as_str())
                 && self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested.as_str());
@@ -1605,6 +1702,7 @@ impl SessionLane {
         } else {
             self.send_receive_outcome(shared, &identity, requested.as_deref(), receive_demand_added, receive_outcome);
         }
+        if let Some(state) = &self.state { shared.receive_state(state, None); }
         if crate::trace::enabled() {
             crate::trace::log_unscoped("sessions.send.completed", || serde_json::json!({
                 "identity": crate::trace::identity_shape(&identity), "traceIdHash": command.trace_id().map(crate::trace::fingerprint),
@@ -1622,12 +1720,24 @@ impl SessionLane {
             }));
         }
         if !replayed_goal {
-            self.apply_send_outcome(shared, identity.session_key(), identity.provider(), Some(identity.clone()), &command.source_binding,
-                SessionEventBinding::new(identity.clone(), None), outcome,
-                if identity.provider() == SessionProvider::MatchaAgent { requested } else { None }, command.delivery_context).await;
+            let other_execution = identity.provider() == SessionProvider::OpenClaw
+                && self.state.as_ref().is_some_and(|state|
+                    state.active_run_id().is_some_and(|run_id| Some(run_id) != requested.as_deref()));
+            if !other_execution {
+                self.apply_send_outcome(shared, identity.session_key(), identity.provider(), Some(identity.clone()), &command.source_binding,
+                    SessionEventBinding::new(identity.clone(), None), outcome,
+                    if identity.provider() == SessionProvider::MatchaAgent { requested } else { None }, command.delivery_context).await;
+            }
+        }
+        if identity.provider() == SessionProvider::OpenClaw && receive_demand_added
+            && matches!(outcome, SessionSendOutcome::Rejected | SessionSendOutcome::Unsupported)
+            && !shared.session_execution_pending(&identity) {
+            self.publish_work_pending(shared, false).await;
         }
         if command.intent.is_some() && matches!(outcome, SessionSendOutcome::Succeeded { .. } | SessionSendOutcome::Unknown) {
             self.refresh_goal(shared, &identity);
+        } else if identity.provider() == SessionProvider::OpenClaw {
+            self.sync_after_terminal(shared, &identity, false);
         } else {
             self.close_if_idle(shared, &identity);
         }
@@ -1687,6 +1797,7 @@ impl SessionLane {
                 None,
                 vec![SessionChange::RuntimeChanged { runtime }],
                 delivery_context,
+                None,
             )
             .await;
     }
@@ -1828,7 +1939,7 @@ impl SessionLane {
             });
         };
         trace("runtime.matcha.model-selection.bind.start", "binding");
-        let command = match self.bind_matcha_model_selection_command(shared, command) {
+        let command = match shared.bind_matcha_model_selection_command(command) {
             Ok(command) => command,
             Err(outcome) => {
                 trace_outcome("runtime.matcha.model-selection.bind.failed", &outcome);
@@ -1931,7 +2042,7 @@ impl SessionLane {
             }
             SessionQuery::Observe { command, reply } => self.observe(shared, command, reply, call).await,
             SessionQuery::Timeline { command, reply } => {
-                let command = match self.bind_matcha_timeline_command(shared, command) {
+                let command = match self.bind_matcha_timeline_command(shared, command).await {
                     Ok(command) => command,
                     Err(outcome) => { crate::call::reply(call.as_ref(), reply, outcome).await; return; }
                 };
@@ -1960,7 +2071,7 @@ impl SessionLane {
                 }
             }
             SessionQuery::Content { command, reply } => {
-                let outcome = match self.bind_matcha_content_command(shared, command) {
+                let outcome = match self.bind_matcha_content_command(shared, command).await {
                     Ok(command) => shared.handle_content(command).await,
                     Err(outcome) => outcome,
                 };
@@ -2392,10 +2503,6 @@ fn timeline_driver_failure(failure: RuntimeOperationFailure) -> timeline::Unavai
         }
         RuntimeOperationFailure::Unknown => timeline::UnavailableReason::RuntimeUnknown,
     }
-}
-
-fn adapter_id_str(provider: &SessionProvider) -> &'static str {
-    provider.as_str()
 }
 
 fn identity_endpoint(identity: &SessionIdentity) -> Option<RuntimeEndpoint> {

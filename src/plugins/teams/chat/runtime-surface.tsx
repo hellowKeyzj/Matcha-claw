@@ -31,6 +31,7 @@ export function buildTeamGraphPageRequest(surface: TeamGraphSurface): WorkspaceP
         return ownership?.kind === 'team' && ownership.teamId === surface.teamId && ownership.teamRunId === surface.runId;
       },
       providerId: 'teams',
+      initialPane: 'side',
       title: surface.title || i18n.t('teams:run.graph'),
       icon: Workflow,
       render: () => <Suspense fallback={<div role="status" className="flex min-h-0 flex-1 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>}>

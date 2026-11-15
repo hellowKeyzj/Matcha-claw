@@ -51,21 +51,16 @@ impl Sessions {
     }
 
     async fn change_model(&self, session: Arc<Session>, input: Model) -> rpc::Result<Value> {
-        let agent_id = session.data.lock().await.record.agent_id.clone();
-        let _agent = self.agent_guard(&agent_id).await;
+        let agent_id = session.record().agent_id.clone();
+        let (_agent, _closing) = self.session_admission(&session, &agent_id).await;
         self.accepting()?;
-        let _closing = session.close_guard.try_lock().map_err(|_| {
-            super::not_sent(rpc::Error::conflict(
-                "session_transition_in_progress",
-                "Wait for Session cleanup or handoff before selecting a model",
-            ))
-        })?;
         let snapshot = self.0.config.checked_snapshot().await?;
-        let (cli, spec, replay_state) = {
+        let (cli, spec, replay_state, level) = {
             let mut execution = session.data.lock().await;
-            writable(&execution)?;
-            let mut spec = self.launch_spec(snapshot, &execution)?;
-            let replay_state = replay_state(&execution, &spec)?;
+            writable(&session, &execution)?;
+            let record = session.record();
+            let mut spec = self.launch_spec(snapshot, &record)?;
+            let replay_state = replay_state(&record, &spec)?;
             spec.agent.model = Some(input.model.clone());
             if let Some(provider) = &input.provider_id {
                 spec.agent.provider = Some(provider.clone());
@@ -78,17 +73,26 @@ impl Sessions {
             {
                 return Err(super::not_sent(rpc::Error::not_found("Provider")));
             }
-            self.validate_model_thinking(&execution, &spec).await?;
             let cli = execution.cli.clone();
-            if cli.is_some() {
-                execution.idle = Idle::Handoff;
-            }
-            (cli, spec, replay_state)
+            let level = record.effort;
+            execution.selecting_provider = spec.agent.provider.clone();
+            (cli, spec, replay_state, level)
         };
-        let result = self
-            .apply_model(&session, &input, cli, spec, replay_state)
-            .await;
+        drop(_agent);
+        let result = async {
+            self.validate_model_thinking(cli.as_ref(), level, &spec).await?;
+            {
+                let mut execution = session.data.lock().await;
+                writable(&session, &execution)?;
+                if cli.is_some() {
+                    execution.idle = Idle::Handoff;
+                }
+            }
+            self.apply_model(&session, &input, cli, spec, replay_state).await
+        }
+        .await;
         let mut execution = session.data.lock().await;
+        execution.selecting_provider = None;
         execution.launching = false;
         execution.launch_error = result.as_ref().err().cloned();
         execution.idle = Idle::Dormant;
@@ -156,16 +160,19 @@ impl Sessions {
                 // Offline desired state remains separate from native application.
                 None
             };
+            self.accepting()?;
             let mut execution = session.data.lock().await;
-            execution.record.mutable()?;
-            if execution.cli.as_ref().map(Cli::instance_id) != current.as_ref().map(Cli::instance_id) {
+            session.mutable()?;
+            if execution.closing
+                || execution.cli.as_ref().map(Cli::instance_id) != current.as_ref().map(Cli::instance_id)
+            {
                 return Err(rpc::Error::new(-32006, "selection_instance_changed", "The acknowledged CLI instance is no longer current")
                     .with_data(json!({"nativeAcknowledged":response.is_some(),"persisted":false})));
             }
             if let Some(error) = &execution.storage_fault {
                 return Err(error.clone());
             }
-            let mut updated = execution.record.clone();
+            let mut updated = (*session.record()).clone();
             updated.model = Some(input.model.clone());
             if let Some(provider) = &input.provider_id {
                 if updated.provider_id.as_ref() != Some(provider) {
@@ -181,13 +188,12 @@ impl Sessions {
                 updated.provider_fingerprint = Some(fingerprint.clone());
             }
             updated.updated_at_ms = rpc::now_ms();
-            if let Err(error) = record::save_session(&self.0.database, &updated).await {
+            if let Err(error) = session.commit(&self.0.database, &mut execution, updated).await {
                 execution.fault(error.clone());
                 let persisted = if error.code == -32006 { Value::Null } else { Value::Bool(false) };
                 return Err(error.with_data(json!({"nativeAcknowledged":response.is_some(),"persisted":persisted})));
             }
-            execution.record = updated;
-            Ok(json!({"session":execution.record.view(),"applied":response.is_some(),"response":response}))
+            Ok(json!({"session":session.record().view(),"applied":response.is_some(),"response":response}))
         }.await;
         if let Err(error) = &result {
             let mut error = error.clone();
@@ -248,9 +254,8 @@ async fn confirm(cli: &Cli, spec: &LaunchSpec) -> rpc::Result<Value> {
     cli.confirm_selection(model, provider).await
 }
 
-pub(super) fn replay_state(execution: &Execution, spec: &LaunchSpec) -> rpc::Result<Option<Value>> {
-    let model = execution
-        .record
+pub(super) fn replay_state(record: &record::Record, spec: &LaunchSpec) -> rpc::Result<Option<Value>> {
+    let model = record
         .model
         .clone()
         .or_else(|| spec.agent.model.clone())
@@ -260,8 +265,7 @@ pub(super) fn replay_state(execution: &Execution, spec: &LaunchSpec) -> rpc::Res
                 .ok()?
                 .model
         });
-    let mode = execution
-        .record
+    let mode = record
         .mode
         .as_deref()
         .or_else(|| {
@@ -272,7 +276,7 @@ pub(super) fn replay_state(execution: &Execution, spec: &LaunchSpec) -> rpc::Res
         })
         .unwrap_or("default");
     let mut replay = json!({
-        "model":model,"permissionMode":mode,"effort":execution.record.effort,
+        "model":model,"permissionMode":mode,"effort":record.effort,
         "permissions":crate::cli::permissions::project(
             spec.agent.settings.get("permissions").cloned().unwrap_or_else(|| json!({})),
             &spec.agent.skill_states,
@@ -291,8 +295,8 @@ pub(super) fn replay_state(execution: &Execution, spec: &LaunchSpec) -> rpc::Res
     Ok(Some(replay))
 }
 
-fn writable(execution: &Execution) -> rpc::Result<()> {
-    execution.record.mutable()?;
+fn writable(session: &Session, execution: &Execution) -> rpc::Result<()> {
+    session.mutable()?;
     if execution.closing
         || execution.idle.handing_off()
         || execution.launching
@@ -303,7 +307,7 @@ fn writable(execution: &Execution) -> rpc::Result<()> {
             "Wait for native Session startup or cleanup before selecting a model",
         )));
     }
-    if execution.record.native_cleanup_failed {
+    if execution.cleanup_failed || session.record().native_cleanup_failed {
         return Err(super::not_sent(rpc::Error::conflict(
             "native_cleanup_unconfirmed",
             "The previous CLI instance cleanup was not confirmed",

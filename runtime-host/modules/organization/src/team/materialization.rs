@@ -12,11 +12,11 @@ use super::{
 };
 
 /// The closed Organization facts compiled from either authorized TeamSkill input or a Manual
-/// selected-agent team. The definition and request are recorded together so they cannot diverge.
+/// selected-agent team. The definition and endpoint requests are recorded together.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamMaterialization {
     definition: TeamDefinition,
-    request: TeamMaterializationRequest,
+    requests: Vec<TeamMaterializationRequest>,
 }
 
 impl TeamMaterialization {
@@ -24,15 +24,17 @@ impl TeamMaterialization {
         &self.definition
     }
 
-    pub fn request(&self) -> &TeamMaterializationRequest {
-        &self.request
+    pub fn requests(&self) -> &[TeamMaterializationRequest] {
+        &self.requests
     }
 
     pub fn with_source_agent(mut self, source: Option<ManagedAgentReference>) -> Self {
-        self.request = TeamMaterializationRequest::new(
-            self.request.intent().clone().with_source_agent(source),
-            self.request.idempotency_key().clone(),
-        );
+        for request in &mut self.requests {
+            *request = TeamMaterializationRequest::new(
+                request.intent().clone().with_source_agent(source.clone()),
+                request.idempotency_key().clone(),
+            );
+        }
         self
     }
 
@@ -40,7 +42,10 @@ impl TeamMaterialization {
         mut self,
         markdown: impl Into<String>,
     ) -> Result<Self, TeamMaterializationError> {
-        let intent = self.request.intent();
+        let request = self.requests.iter_mut().find(|request| {
+            request.intent().agents().iter().any(|agent| agent.role().as_str() == LEADER_ROLE_ID)
+        }).ok_or(TeamMaterializationError::Invalid)?;
+        let intent = request.intent();
         if intent.source() != MaterializationSource::Manual {
             return Err(TeamMaterializationError::Invalid);
         }
@@ -56,15 +61,16 @@ impl TeamMaterialization {
                 }
             })
             .collect();
-        self.request = TeamMaterializationRequest::new(
+        *request = TeamMaterializationRequest::new(
             TeamMaterializationIntent::try_new(
                 intent.team().clone(),
                 intent.endpoint().clone(),
                 intent.source(),
                 agents,
             )
-            .map_err(|_| TeamMaterializationError::Invalid)?,
-            self.request.idempotency_key().clone(),
+            .map_err(|_| TeamMaterializationError::Invalid)?
+            .with_source_agent(intent.source_agent().cloned()),
+            request.idempotency_key().clone(),
         );
         Ok(self)
     }
@@ -90,6 +96,7 @@ pub struct ManualTeamRoleBinding {
     role: RoleId,
     member_name: String,
     agent: ManagedAgentReference,
+    endpoint: RuntimeEndpointReference,
     leader: bool,
     tools: Vec<String>,
 }
@@ -99,6 +106,7 @@ impl ManualTeamRoleBinding {
         role: RoleId,
         member_name: impl Into<String>,
         agent: ManagedAgentReference,
+        endpoint: RuntimeEndpointReference,
         leader: bool,
     ) -> Result<Self, TeamMaterializationError> {
         let member_name = member_name.into();
@@ -109,6 +117,7 @@ impl ManualTeamRoleBinding {
             role,
             member_name,
             agent,
+            endpoint,
             leader,
             tools: Vec::new(),
         })
@@ -162,9 +171,9 @@ pub fn compile_team_skill_materialization(
         let agent = RoleAgentMaterialization::managed(role.clone(), package_role.id())
             .map_err(|_| TeamMaterializationError::Invalid)?
             .with_tools(package_role.tools().to_vec());
-        agents.push(if endpoint.as_str()
-            == runtime_directory::RuntimeDriverIdentity::matcha_agent().runtime_endpoint_reference()
-        {
+        agents.push(if runtime_directory::endpoint_from_reference(endpoint.as_str()).is_some_and(|endpoint| {
+            endpoint.runtime_adapter_id() == runtime_directory::RuntimeDriverIdentity::matcha_agent().runtime_adapter_id()
+        }) {
             agent.with_agents_markdown(package_role.agents_markdown()).with_skills(package_role.skills().to_vec())
         } else {
             agent
@@ -186,16 +195,15 @@ pub fn compile_team_skill_materialization(
     .map_err(|_| TeamMaterializationError::Invalid)?;
     Ok(TeamMaterialization {
         definition,
-        request: TeamMaterializationRequest::new(intent, idempotency_key),
+        requests: vec![TeamMaterializationRequest::new(intent, idempotency_key)],
     })
 }
 
-/// Compiles explicitly selected existing agents into a Manual Team request without accepting
+/// Compiles selected existing agents into one request per endpoint without accepting
 /// workspace paths. The integration resolves each selected agent's native workspace.
 pub fn compile_manual_team_materialization(
     team_id: TeamId,
     team_name: impl Into<String>,
-    endpoint: RuntimeEndpointReference,
     roles: Vec<ManualTeamRoleBinding>,
     idempotency_key: IdempotencyKey,
 ) -> Result<TeamMaterialization, TeamMaterializationError> {
@@ -205,7 +213,8 @@ pub fn compile_manual_team_materialization(
     let mut role_ids = BTreeSet::new();
     let mut agent_ids = BTreeSet::new();
     if roles.iter().any(|binding| {
-        !role_ids.insert(binding.role.as_str()) || !agent_ids.insert(binding.agent.as_str())
+        !role_ids.insert(binding.role.as_str())
+            || !agent_ids.insert((binding.endpoint.as_str(), binding.agent.as_str()))
     }) {
         return Err(TeamMaterializationError::Invalid);
     }
@@ -213,7 +222,7 @@ pub fn compile_manual_team_materialization(
     let mut members = Vec::with_capacity(roles.len());
     let mut team_roles = Vec::with_capacity(roles.len());
     let mut assignments = Vec::with_capacity(roles.len());
-    let mut agents = Vec::with_capacity(roles.len());
+    let mut groups: Vec<(RuntimeEndpointReference, Vec<RoleAgentMaterialization>)> = Vec::new();
     for binding in roles {
         let member_id = MemberId::try_new(format!("member:{}", binding.role.as_str()))
             .map_err(|_| TeamMaterializationError::Invalid)?;
@@ -230,10 +239,13 @@ pub fn compile_manual_team_materialization(
             member.member_id().clone(),
             binding.role.clone(),
         ));
-        agents.push(
-            RoleAgentMaterialization::external(binding.role, binding.agent)
-                .with_tools(binding.tools),
-        );
+        let agent = RoleAgentMaterialization::external(binding.role, binding.agent)
+            .with_tools(binding.tools);
+        if let Some((_, agents)) = groups.iter_mut().find(|(endpoint, _)| endpoint == &binding.endpoint) {
+            agents.push(agent);
+        } else {
+            groups.push((binding.endpoint, vec![agent]));
+        }
         members.push(member);
         team_roles.push(team_role);
     }
@@ -241,17 +253,34 @@ pub fn compile_manual_team_materialization(
     let definition =
         TeamDefinition::try_new(team_id.clone(), team_name, members, team_roles, assignments)
             .map_err(|_| TeamMaterializationError::Invalid)?;
-    let intent = TeamMaterializationIntent::try_new(
-        team_id,
-        endpoint,
-        MaterializationSource::Manual,
-        agents,
-    )
-    .map_err(|_| TeamMaterializationError::Invalid)?;
-    Ok(TeamMaterialization {
-        definition,
-        request: TeamMaterializationRequest::new(intent, idempotency_key),
-    })
+    let grouped = groups.len() > 1;
+    let requests = groups.into_iter().map(|(endpoint, agents)| {
+        let key = if grouped {
+            endpoint_idempotency_key(&idempotency_key, &endpoint)
+        } else {
+            idempotency_key.clone()
+        };
+        let intent = TeamMaterializationIntent::try_new(
+            team_id.clone(), endpoint, MaterializationSource::Manual, agents,
+        ).map_err(|_| TeamMaterializationError::Invalid)?;
+        Ok(TeamMaterializationRequest::new(intent, key))
+    }).collect::<Result<Vec<_>, TeamMaterializationError>>()?;
+    Ok(TeamMaterialization { definition, requests })
+}
+
+pub(crate) fn endpoint_idempotency_key(
+    key: &IdempotencyKey,
+    endpoint: &RuntimeEndpointReference,
+) -> IdempotencyKey {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"team-materialization-endpoint-v1");
+    for part in [key.as_str(), endpoint.as_str()] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    IdempotencyKey::try_new(format!("team-group:{:x}", digest.finalize()))
+        .expect("a SHA-256 group key is a nonblank native-safe reference")
 }
 
 #[cfg(test)]
@@ -292,12 +321,12 @@ mod tests {
         assert_eq!(materialization.definition().members().len(), 3);
         assert_eq!(materialization.definition().roles().len(), 3);
         assert_eq!(
-            materialization.request().intent().source(),
+            materialization.requests()[0].intent().source(),
             MaterializationSource::TeamSkill
         );
-        assert_eq!(materialization.request().intent().agents().len(), 3);
+        assert_eq!(materialization.requests()[0].intent().agents().len(), 3);
         assert_eq!(
-            materialization.request().intent().agents()[1]
+            materialization.requests()[0].intent().agents()[1]
                 .role()
                 .as_str(),
             "researcher"
@@ -309,12 +338,12 @@ mod tests {
         let materialization = compile_manual_team_materialization(
             TeamId::try_new("team:manual").unwrap(),
             "Selected Team",
-            RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
             vec![
                 ManualTeamRoleBinding::try_new(
                     RoleId::try_new("leader").unwrap(),
                     "Lead",
                     ManagedAgentReference::try_new("existing-lead").unwrap(),
+                    RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                     true,
                 )
                 .unwrap(),
@@ -322,6 +351,7 @@ mod tests {
                     RoleId::try_new("reviewer").unwrap(),
                     "Reviewer",
                     ManagedAgentReference::try_new("existing-reviewer").unwrap(),
+                    RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                     false,
                 )
                 .unwrap(),
@@ -332,12 +362,12 @@ mod tests {
 
         assert_eq!(materialization.definition().roles().len(), 2);
         assert_eq!(
-            materialization.request().intent().source(),
+            materialization.requests()[0].intent().source(),
             MaterializationSource::Manual
         );
         assert!(
             materialization
-                .request()
+                .requests()[0]
                 .intent()
                 .agents()
                 .iter()
@@ -356,6 +386,7 @@ mod tests {
                 RoleId::try_new("leader").unwrap(),
                 "Lead",
                 ManagedAgentReference::try_new("existing-agent").unwrap(),
+                RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                 true,
             )
             .unwrap()
@@ -364,7 +395,6 @@ mod tests {
             compile_manual_team_materialization(
                 TeamId::try_new("team:manual").unwrap(),
                 "Selected Team",
-                RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                 vec![],
                 IdempotencyKey::try_new("materialize:manual").unwrap(),
             ),
@@ -374,13 +404,13 @@ mod tests {
             compile_manual_team_materialization(
                 TeamId::try_new("team:manual").unwrap(),
                 "Selected Team",
-                RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                 vec![
                     leader(),
                     ManualTeamRoleBinding::try_new(
                         RoleId::try_new("reviewer").unwrap(),
                         "Reviewer",
                         ManagedAgentReference::try_new("existing-agent").unwrap(),
+                        RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                         false,
                     )
                     .unwrap(),

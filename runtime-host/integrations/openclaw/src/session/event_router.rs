@@ -57,30 +57,41 @@ impl EventRouter {
         actor.pending_approvals()
     }
 
-    pub(crate) fn image_task_tools(&self, identity: &SessionIdentity, generation: u64) -> Vec<sessions_module::state::ToolView> {
+    pub(crate) fn media_task_tools(&self, identity: &SessionIdentity, generation: u64) -> Vec<sessions_module::state::ToolView> {
         self.actors.get(&(identity_key(identity), generation)).map(|actor|
-            actor.image_task_tools().iter().filter(|tool| super::image_tasks::task_id(tool).is_some()).cloned().collect()
+            actor.media_task_tools().iter().filter(|tool| super::media_tasks::task_id(tool).is_some()).cloned().collect()
         ).unwrap_or_default()
     }
 
-    pub(crate) async fn image_task(&mut self, identity: &SessionIdentity, generation: u64, task: &super::image_tasks::ImageTask, epoch: GatewayEpoch, cursor: Option<u64>, observations: &crate::gateway::observation::Observations) -> Result<Vec<sessions_module::state::ToolView>, RuntimeOperationFailure> {
+    pub(crate) async fn media_task(&mut self, identity: &SessionIdentity, generation: u64, task: &super::media_tasks::MediaGenerationTask, epoch: GatewayEpoch, cursor: Option<u64>, observations: &crate::gateway::observation::Observations) -> Result<Vec<sessions_module::state::ToolView>, RuntimeOperationFailure> {
         if !task.matches(identity) { return Err(RuntimeOperationFailure::Unknown); }
-        let changes = self.actor(identity, generation).update_image_task(task).into_iter()
-            .map(|tool| sessions_module::state::SessionChange::ToolUpdated { tool }).collect::<Vec<_>>();
-        if !changes.is_empty() {
+        let tools = self.actor(identity, generation).update_media_task(task);
+        self.send_task_changes(identity, generation, tools, epoch, cursor, observations).await?;
+        Ok(self.actor(identity, generation).media_task_tools().iter()
+            .filter(|tool| super::media_tasks::task_id(tool) == Some(task.task_id.as_str())).cloned().collect())
+    }
+
+    pub(crate) async fn delete_media_task(&mut self, identity: &SessionIdentity, generation: u64, task_id: &str, epoch: GatewayEpoch, cursor: Option<u64>, observations: &crate::gateway::observation::Observations) -> Result<(), RuntimeOperationFailure> {
+        let tools = self.actor(identity, generation).delete_media_task(task_id);
+        self.send_task_changes(identity, generation, tools, epoch, cursor, observations).await
+    }
+
+    async fn send_task_changes(&self, identity: &SessionIdentity, generation: u64, tools: Vec<sessions_module::state::ToolView>, epoch: GatewayEpoch, cursor: Option<u64>, observations: &crate::gateway::observation::Observations) -> Result<(), RuntimeOperationFailure> {
+        if !tools.is_empty() {
+            let changes = tools.into_iter().map(|tool| sessions_module::state::SessionChange::ToolUpdated { tool }).collect();
             let binding = SessionEventBinding::observed(identity.clone(), generation, Some(epoch.as_u64()), false).ok_or(RuntimeOperationFailure::Unknown)?;
             observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent {
-                binding, run_id: None, cursor, history_refresh: false, changes,
+                binding, run_id: None, cursor, history_refresh: false, changes, work_pending: None,
             })).await?;
         }
-        Ok(self.image_task_tools(identity, generation))
+        Ok(())
     }
 
     pub(crate) async fn task_refresh(&self, identity: &SessionIdentity, generation: u64, epoch: GatewayEpoch, observations: &crate::gateway::observation::Observations) {
-        if self.image_task_tools(identity, generation).is_empty() { return; }
+        if self.media_task_tools(identity, generation).is_empty() { return; }
         let binding = SessionEventBinding::observed(identity.clone(), generation, Some(epoch.as_u64()), false).expect("validated observation binding");
         let _ = observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent {
-            binding, run_id: None, cursor: None, history_refresh: true, changes: Vec::new(),
+            binding, run_id: None, cursor: None, history_refresh: true, changes: Vec::new(), work_pending: None,
         })).await;
     }
 
@@ -88,9 +99,9 @@ impl EventRouter {
         let cursor = event.gateway_sequence;
         let persisted = event.transcript_message.is_some();
         let key = (identity_key(&identity), generation);
-        let image_result = event.activity.as_ref().is_some_and(|activity| matches!(activity.kind(), super::protocol::SessionActivityKind::Tool { .. }))
+        let media_result = event.activity.as_ref().is_some_and(|activity| matches!(activity.kind(), super::protocol::SessionActivityKind::Tool { .. }))
             || event.transcript_message.as_ref().is_some_and(|message| matches!(message.role(), super::window::MessageRole::ToolResult));
-        let known_image_tasks = image_result.then(|| self.image_task_tools(&identity, generation).iter().filter_map(|tool| super::image_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>());
+        let known_media_tasks = media_result.then(|| self.media_task_tools(&identity, generation).iter().filter_map(|tool| super::media_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>());
         let live_run = self.actor(&identity, generation).live_run_id().map(str::to_owned);
         let has_live_run = live_run.is_some();
         let missing_final = event.chat.as_ref().filter(|chat|
@@ -130,9 +141,9 @@ impl EventRouter {
             accepted && self.claim_terminal_history(&identity, generation, epoch, run, observations));
         let replay_pending = accepted && self.actor(&identity, generation).live_run_id().is_none()
             && self.pending_messages.remove(&key);
-        let image_task_started = known_image_tasks.is_some_and(|known| self.image_task_tools(&identity, generation).iter().filter_map(super::image_tasks::task_id)
+        let media_task_started = known_media_tasks.is_some_and(|known| self.media_task_tools(&identity, generation).iter().filter_map(super::media_tasks::task_id)
             .any(|id| !known.contains(id)));
-        let history_refresh = accepted && (truncated || message_refresh || changed_refresh || replay_pending || recovery_refresh || image_task_started);
+        let history_refresh = accepted && (truncated || message_refresh || changed_refresh || replay_pending || recovery_refresh || media_task_started);
         if (message_refresh && !has_live_run) || recovery_refresh { self.pending_messages.remove(&key); }
         self.prune_recoveries();
         if super::trace::enabled() && (persisted || terminal || truncated) {
@@ -174,7 +185,7 @@ impl EventRouter {
                     "cursorOnly": cursor.is_some() }));
             }
             if cursor.is_some() || history_refresh {
-                let sent = observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent { binding, run_id, cursor, history_refresh, changes: Vec::new() })).await;
+                let sent = observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent { binding, run_id, cursor, history_refresh, changes: Vec::new(), work_pending: None })).await;
                 if super::trace::enabled() {
                     super::trace::log_unscoped("runtime.openclaw.router.delivery", || serde_json::json!({
                         "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
@@ -256,7 +267,7 @@ impl EventRouter {
             recovery.deadline = None;
             let binding = SessionEventBinding::observed(recovery.identity.clone(), recovery.generation, Some(recovery.epoch.as_u64()), false).expect("validated observation binding");
             let _ = recovery.observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(recovery.identity.clone(), sessions_module::command::SessionEvent {
-                binding, run_id: Some(recovery.run_id.clone()), cursor: None, history_refresh: true, changes: Vec::new(),
+                binding, run_id: Some(recovery.run_id.clone()), cursor: None, history_refresh: true, changes: Vec::new(), work_pending: None,
             })).await;
         }
     }
@@ -277,7 +288,7 @@ impl EventRouter {
         if self.actor(identity, generation).sync_goal(session_id, goal.clone())? {
             let binding = SessionEventBinding::observed(identity.clone(), generation, Some(epoch.as_u64()), false).ok_or(RuntimeOperationFailure::Unknown)?;
             observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent {
-                binding, run_id: None, cursor, history_refresh: false, changes: vec![sessions_module::state::SessionChange::GoalChanged { goal }],
+                binding, run_id: None, cursor, history_refresh: false, changes: vec![sessions_module::state::SessionChange::GoalChanged { goal }], work_pending: None,
             })).await?;
         }
         Ok(())
@@ -321,7 +332,7 @@ impl EventRouter {
         }
         view.session_key = identity.session_key;
         view.input_receipts = window.take_input_receipts();
-        Ok(Some(SessionSync { view, source_epoch: Some(epoch.as_u64()), source_branch: window.state().active_leaf_entry_id().map(str::to_owned), cut: SessionSyncCut::Snapshot, replay_baseline: None, terminal_runs: actor.terminal_runs(), retired_item_ids: actor.retired_item_ids(), retired_tool_ids: actor.retired_tool_ids(), retired_approval_ids: actor.retired_approval_ids() }))
+        Ok(Some(SessionSync { view, source_epoch: Some(epoch.as_u64()), source_branch: window.state().active_leaf_entry_id().map(str::to_owned), cut: SessionSyncCut::Snapshot, replay_baseline: None, work_pending: window.state().work_pending(), terminal_runs: actor.terminal_runs(), retired_item_ids: actor.retired_item_ids(), retired_tool_ids: actor.retired_tool_ids(), retired_approval_ids: actor.retired_approval_ids() }))
     }
 
     pub(crate) fn restart(&mut self, identity: &SessionIdentity, generation: u64, next_generation: u64) -> Result<(), RuntimeOperationFailure> {
@@ -419,6 +430,9 @@ mod tests {
                 message_text: None,
                 message_thinking: None,
                 final_message: None,
+                projection_content: super::super::protocol::DisplayContent::Empty,
+                projection_final_identity: None,
+                has_projection_message: false,
                 yielded: false,
                 message_absent: true,
                 error_kind: None,

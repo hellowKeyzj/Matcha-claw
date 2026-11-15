@@ -28,7 +28,7 @@ enum ImageApi {
     WanLegacy,
 }
 
-fn image_api(model: &str) -> Option<ImageApi> {
+fn image_api(model: &str, endpoint_validates_options: bool) -> Option<ImageApi> {
     match model {
         "qwen-image-3.0-pro"
         | "qwen-image-3.0"
@@ -44,6 +44,7 @@ fn image_api(model: &str) -> Option<ImageApi> {
         "wan2.6-image" => Some(ImageApi::WanEdit),
         "wan2.5-t2i-preview" | "wan2.2-t2i-flash" | "wan2.2-t2i-plus" | "wanx2.1-t2i-turbo"
         | "wanx2.1-t2i-plus" | "wanx2.0-t2i-turbo" => Some(ImageApi::WanLegacy),
+        _ if endpoint_validates_options => Some(ImageApi::Qwen),
         _ => None,
     }
 }
@@ -56,7 +57,7 @@ enum VideoApi {
     FrameLegacy,
 }
 
-fn video_api(model: &str) -> Option<VideoApi> {
+fn video_api(model: &str, endpoint_validates_options: bool, first_frame: bool) -> Option<VideoApi> {
     match model {
         "wan2.7-t2v" | "wan2.7-t2v-2026-06-12" => Some(VideoApi::Text),
         "wan2.6-t2v" | "wan2.5-t2v-preview" | "wan2.2-t2v-plus" | "wan2.1-t2v-turbo"
@@ -66,6 +67,11 @@ fn video_api(model: &str) -> Option<VideoApi> {
         | "wan2.2-i2v-plus" | "wanx2.1-i2v-turbo" | "wanx2.1-i2v-plus" => {
             Some(VideoApi::FrameLegacy)
         }
+        _ if endpoint_validates_options => Some(if first_frame {
+            VideoApi::Frame
+        } else {
+            VideoApi::Text
+        }),
         _ => None,
     }
 }
@@ -80,11 +86,16 @@ const SIZES_1080: &[&str] = &[
     "1248x1632",
 ];
 
-pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabilities, Failure> {
+pub(super) fn capabilities(
+    model: &ProviderModel,
+    kind: Kind,
+    endpoint_validates_options: bool,
+) -> Result<Capabilities, Failure> {
     let mut limits = Capabilities {
         max_images: 0,
         max_count: 1,
         mask: false,
+        endpoint_validates_options,
         pixel_size: false,
         pixel_size_limits: None,
         sizes: None,
@@ -95,14 +106,23 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
     if model.quality().is_some()
         || model.aspect_ratio().is_some_and(|ratio| {
             kind != Kind::Video
-                || !matches!(video_api(name), Some(VideoApi::Text))
-                || !matches!(ratio, "16:9" | "9:16" | "1:1" | "4:3" | "3:4")
+                || !endpoint_validates_options
+                    && (!matches!(video_api(name, false, false), Some(VideoApi::Text))
+                        || !matches!(ratio, "16:9" | "9:16" | "1:1" | "4:3" | "3:4"))
         })
     {
         return Err(Failure::Unsupported);
     }
     match kind {
-        Kind::Image => match image_api(name) {
+        Kind::Image => match image_api(name, endpoint_validates_options) {
+            Some(api) if endpoint_validates_options => {
+                limits.max_images = if matches!(api, ImageApi::WanLegacy) {
+                    0
+                } else {
+                    16
+                };
+                limits.max_count = 10;
+            }
             Some(ImageApi::Qwen) => {
                 limits.max_images = if name.starts_with("qwen-image-2.1-") {
                     10
@@ -146,7 +166,15 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
             None => return Err(Failure::Unsupported),
         },
         Kind::Video => {
-            if let Some(api) = video_api(name) {
+            let api =
+                video_api(name, endpoint_validates_options, false).ok_or(Failure::Unsupported)?;
+            let known_api = video_api(name, false, false);
+            if endpoint_validates_options {
+                limits.max_images = match known_api {
+                    Some(VideoApi::Frame | VideoApi::FrameLegacy) | None => 1,
+                    Some(VideoApi::Text | VideoApi::TextLegacy) => 0,
+                };
+            } else {
                 limits.max_images =
                     u8::from(matches!(api, VideoApi::Frame | VideoApi::FrameLegacy));
                 let mut sizes = Vec::new();
@@ -195,16 +223,18 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
                         vec![5]
                     },
                 );
-            } else {
-                return Err(Failure::Unsupported);
             }
         }
-        Kind::Speech if name == "qwen3-tts-flash" => {}
+        Kind::Speech if name == "qwen3-tts-flash" || endpoint_validates_options => {}
         _ => return Err(Failure::Unsupported),
     }
     if let Some(size) = model.resolution() {
-        if kind == Kind::Image {
-            let api = image_api(name).ok_or(Failure::Unsupported)?;
+        if endpoint_validates_options {
+            if !matches!(kind, Kind::Image | Kind::Video) {
+                return Err(Failure::Unsupported);
+            }
+        } else if kind == Kind::Image {
+            let api = image_api(name, false).ok_or(Failure::Unsupported)?;
             if !image_size(name, api, size) {
                 return Err(Failure::Unsupported);
             }
@@ -213,11 +243,12 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
             if !sizes.contains(&size) {
                 sizes.push(size);
             }
-        } else if kind != Kind::Video
-            || !limits
-                .sizes
-                .as_ref()
-                .is_some_and(|sizes| sizes.contains(&size.replace('*', "x")))
+        } else if !endpoint_validates_options
+            && (kind != Kind::Video
+                || !limits
+                    .sizes
+                    .as_ref()
+                    .is_some_and(|sizes| sizes.contains(&size.replace('*', "x"))))
         {
             return Err(Failure::Unsupported);
         }
@@ -229,7 +260,11 @@ fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
 
-pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), Failure> {
+pub(super) fn validate(
+    model: &ProviderModel,
+    request: &Request,
+    endpoint_validates_options: bool,
+) -> Result<(), Failure> {
     if request.mask.is_some() || request.audio.is_some() || model.quality().is_some() {
         return Err(Failure::Unsupported);
     }
@@ -237,12 +272,12 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
     let size = request.size.as_deref().or(model.resolution());
     match request.kind {
         Kind::Image => {
-            let api = image_api(name).ok_or(Failure::Unsupported)?;
-            let limits = capabilities(model, Kind::Image)?;
+            let api = image_api(name, endpoint_validates_options).ok_or(Failure::Unsupported)?;
+            let limits = capabilities(model, Kind::Image, endpoint_validates_options)?;
             if request.duration_seconds.is_some()
                 || request.voice.is_some()
                 || request.language.is_some()
-                || model.aspect_ratio().is_some()
+                || model.aspect_ratio().is_some() && !endpoint_validates_options
                 || request.images.len() > usize::from(limits.max_images)
                 || request.count.unwrap_or(1) > limits.max_count
                 || matches!(api, ImageApi::WanEdit) && request.images.is_empty()
@@ -257,23 +292,26 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
                 ImageApi::WanLegacy => 500,
                 ImageApi::Qwen => 32_000,
             };
-            if request.prompt.chars().count() > prompt_limit {
+            if !endpoint_validates_options && request.prompt.chars().count() > prompt_limit {
                 return Err(Failure::InvalidRequest);
             }
-            if size.is_some_and(|size| !image_size(name, api, size)) {
+            if !endpoint_validates_options && size.is_some_and(|size| !image_size(name, api, size))
+            {
                 return Err(Failure::Unsupported);
             }
         }
         Kind::Video => {
-            let api = video_api(name).ok_or(Failure::Unsupported)?;
+            let api = video_api(name, endpoint_validates_options, !request.images.is_empty())
+                .ok_or(Failure::Unsupported)?;
             let first_frame = matches!(api, VideoApi::Frame | VideoApi::FrameLegacy);
             if request.images.len() != usize::from(first_frame)
                 || request.count.unwrap_or(1) != 1
                 || request.voice.is_some()
                 || request.language.is_some()
                 || model.aspect_ratio().is_some_and(|ratio| {
-                    !matches!(api, VideoApi::Text)
-                        || !matches!(ratio, "16:9" | "9:16" | "1:1" | "4:3" | "3:4")
+                    !endpoint_validates_options
+                        && (!matches!(api, VideoApi::Text)
+                            || !matches!(ratio, "16:9" | "9:16" | "1:1" | "4:3" | "3:4"))
                 })
             {
                 return Err(Failure::Unsupported);
@@ -285,25 +323,27 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
             } else {
                 800
             };
-            if request.prompt.chars().count() > prompt_limit {
+            if !endpoint_validates_options && request.prompt.chars().count() > prompt_limit {
                 return Err(Failure::InvalidRequest);
             }
-            let limits = capabilities(model, Kind::Video)?;
-            if size.is_some_and(|size| {
-                !limits
-                    .sizes
-                    .as_ref()
-                    .is_some_and(|sizes| sizes.contains(&size.replace('*', "x")))
-            }) || request.duration_seconds.is_some_and(|seconds| {
-                !limits
-                    .durations_seconds
-                    .as_ref()
-                    .is_some_and(|durations| durations.contains(&seconds))
-            }) {
+            let limits = capabilities(model, Kind::Video, endpoint_validates_options)?;
+            if !endpoint_validates_options
+                && (size.is_some_and(|size| {
+                    !limits
+                        .sizes
+                        .as_ref()
+                        .is_some_and(|sizes| sizes.contains(&size.replace('*', "x")))
+                }) || request.duration_seconds.is_some_and(|seconds| {
+                    !limits
+                        .durations_seconds
+                        .as_ref()
+                        .is_some_and(|durations| durations.contains(&seconds))
+                }))
+            {
                 return Err(Failure::Unsupported);
             }
         }
-        Kind::Speech if name == "qwen3-tts-flash" => {
+        Kind::Speech if name == "qwen3-tts-flash" || endpoint_validates_options => {
             if !request.images.is_empty()
                 || size.is_some()
                 || model.aspect_ratio().is_some()
@@ -314,32 +354,34 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
                         || voice.len() > 256
                         || voice.chars().any(char::is_control)
                 })
-                || request.language.as_deref().is_some_and(|language| {
-                    !matches!(
-                        language,
-                        "Auto"
-                            | "Chinese"
-                            | "English"
-                            | "German"
-                            | "Italian"
-                            | "Portuguese"
-                            | "Spanish"
-                            | "Japanese"
-                            | "Korean"
-                            | "French"
-                            | "Russian"
-                    )
-                })
+                || !endpoint_validates_options
+                    && request.language.as_deref().is_some_and(|language| {
+                        !matches!(
+                            language,
+                            "Auto"
+                                | "Chinese"
+                                | "English"
+                                | "German"
+                                | "Italian"
+                                | "Portuguese"
+                                | "Spanish"
+                                | "Japanese"
+                                | "Korean"
+                                | "French"
+                                | "Russian"
+                        )
+                    })
             {
                 return Err(Failure::Unsupported);
             }
-            if request.prompt.chars().count() > 600 {
+            if !endpoint_validates_options && request.prompt.chars().count() > 600 {
                 return Err(Failure::InvalidRequest);
             }
         }
         _ => return Err(Failure::Unsupported),
     }
-    let max_image_bytes = if request.kind == Kind::Video
+    let max_image_bytes = if !endpoint_validates_options
+        && request.kind == Kind::Video
         && (name.starts_with("wan2.7-")
             || name.starts_with("wan2.6-")
             || name.starts_with("wan2.5-"))
@@ -348,10 +390,12 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
     } else {
         10 * 1024 * 1024
     };
-    for image in &request.images {
-        // The shared request validator already checked canonical base64 and MIME.
-        if image.data.trim_end_matches('=').len() * 3 / 4 > max_image_bytes {
-            return Err(Failure::InvalidRequest);
+    if !endpoint_validates_options {
+        for image in &request.images {
+            // The shared request validator already checked canonical base64 and MIME.
+            if image.data.trim_end_matches('=').len() * 3 / 4 > max_image_bytes {
+                return Err(Failure::InvalidRequest);
+            }
         }
     }
     Ok(())
@@ -399,10 +443,12 @@ pub(super) async fn generate(
     credential: &LlmCredential,
     model: &ProviderModel,
     request: Request,
+    endpoint_validates_options: bool,
 ) -> Result<Output, Failure> {
     match request.kind {
         Kind::Image => {
-            let api = image_api(model.model_id()).ok_or(Failure::Unsupported)?;
+            let api = image_api(model.model_id(), endpoint_validates_options)
+                .ok_or(Failure::Unsupported)?;
             let count = request.count.unwrap_or(1);
             let mut parameters = json!({"n": count});
             if let Some(size) = request.size.as_deref().or(model.resolution()) {
@@ -446,7 +492,7 @@ pub(super) async fn generate(
             };
             image_output(client, &response, count, matches!(api, ImageApi::WanLegacy)).await
         }
-        Kind::Speech if model.model_id() == "qwen3-tts-flash" => {
+        Kind::Speech if model.model_id() == "qwen3-tts-flash" || endpoint_validates_options => {
             let mut input = json!({"text": request.prompt, "voice": request.voice.as_deref().unwrap_or("Cherry")});
             if let Some(language) = request.language {
                 input["language_type"] = json!(language);
@@ -638,8 +684,14 @@ async fn video_submission(
     credential: &LlmCredential,
     model: &ProviderModel,
     request: Request,
+    endpoint_validates_options: bool,
 ) -> Result<Value, Failure> {
-    let api = video_api(model.model_id()).ok_or(Failure::Unsupported)?;
+    let api = video_api(
+        model.model_id(),
+        endpoint_validates_options,
+        !request.images.is_empty(),
+    )
+    .ok_or(Failure::Unsupported)?;
     let mut input = json!({"prompt": request.prompt});
     match api {
         VideoApi::Frame => {
@@ -687,8 +739,19 @@ pub(super) async fn submit_video(
     credential: &LlmCredential,
     model: &ProviderModel,
     request: Request,
+    endpoint_validates_options: bool,
 ) -> Result<RemoteVideo, Failure> {
-    remote_video(&video_submission(client, endpoint, credential, model, request).await?)
+    remote_video(
+        &video_submission(
+            client,
+            endpoint,
+            credential,
+            model,
+            request,
+            endpoint_validates_options,
+        )
+        .await?,
+    )
 }
 
 pub(super) fn is_remote_id(id: &str) -> bool {

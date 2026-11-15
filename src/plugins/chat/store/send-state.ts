@@ -7,14 +7,14 @@ export function currentSessionSend(record: ChatSessionRecord): ChatSessionSendSt
 }
 
 export function isSendPending(send: ChatSessionSendState | null): boolean {
-  return send !== null && send.receipt.phase !== 'failed';
+  return send !== null && send.receipt.phase !== 'failed' && send.receipt.phase !== 'handed-off';
 }
 
 export function recordSendTerminals(
   send: ChatSessionSendState | null,
   runIds: readonly string[],
 ): ChatSessionSendState | null {
-  if (!send || send.receipt.phase === 'failed' || runIds.length === 0) return send;
+  if (!send || send.receipt.phase === 'failed' || send.receipt.phase === 'handed-off' || runIds.length === 0) return send;
   const receipt = send.receipt;
   if (receipt.phase === 'accepted') return runIds.includes(receipt.runId) ? null : send;
   if (receipt.phase === 'unknown' && receipt.runId !== null) return runIds.includes(receipt.runId) ? null : send;
@@ -37,6 +37,8 @@ export function linkSessionSend(
 ): ChatSessionSendState | null {
   const receipt = send.receipt;
   if (receipt.phase === 'failed') return send;
+  if (receipt.phase === 'handed-off') return receipt.runId === runId ? send
+    : { ...send, receipt: { phase: 'handed-off', runId } };
   if (receipt.phase !== 'accepted') {
     if (receipt.terminalRunIds.includes(runId)) return null;
     if (receipt.terminalOverflow) return {
@@ -50,7 +52,7 @@ export function linkSessionSend(
 
 export function markSessionSendUnknown(send: ChatSessionSendState, error: string): ChatSessionSendState {
   const receipt = send.receipt;
-  if (receipt.phase === 'failed') return send;
+  if (receipt.phase === 'failed' || receipt.phase === 'handed-off') return send;
   return {
     ...send,
     receipt: {

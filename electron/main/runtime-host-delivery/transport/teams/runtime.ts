@@ -1,6 +1,7 @@
 import type { TeamCreationFailure } from '../../../../../src/types/call-log/organization';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { decodeTeamDesignMutation, decodeTeamDesignSnapshot, isTeamDesignFailure } from '../../../../../src/types/team-design';
+import { isTeamApprovalProjection, isTeamArtifactProjection, isTeamNodeReviewHistory, isTeamNodeReviewMessages, isTeamNodeReviewQuery, isTeamRunLifecycle, isTeamRunRecordProjection, isTeamRunSummaryProjection } from '../../../../../src/types/team-workspace';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { isRecord, sendLoopbackJsonDelivery } from '../client';
 
@@ -52,6 +53,13 @@ export function createTeamRuntimeTransport(
         }
         if (response?.status === 200) return { status: 503, body: withCreationFailure(UNAVAILABLE, request, 'invalid_response') };
       } else if (response?.status === 200) {
+        if (isRecord(request) && request.operationId === 'team.runReworkContinue') {
+          if (isTeamDesignFailure(response.body)) return { status: 200, body: response.body };
+          return isRecord(response.body) && Object.keys(response.body).length === 2
+            && response.body.success === true && response.body.outcome === 'continued'
+            ? { status: 200, body: response.body }
+            : { status: 503, body: UNAVAILABLE };
+        }
         if (isRecord(request) && (request.operationId === 'team.designStart' || request.operationId === 'team.runStart' || request.operationId === 'team.designExit' || request.operationId === 'team.designSnapshot' || request.operationId === 'team.designGraphPatch')) {
           if (isTeamDesignFailure(response.body)) return { status: 200, body: response.body };
           try {
@@ -65,6 +73,9 @@ export function createTeamRuntimeTransport(
             return { status: 503, body: UNAVAILABLE };
           }
         }
+        if (isRecord(request) && !validRunProjection(request, response.body)) {
+          return { status: 503, body: withCreationFailure(UNAVAILABLE, request, 'invalid_response') };
+        }
         return { status: 200, body: response.body };
       }
       if (response?.status === 400) return { status: 400, body: response.body ?? INVALID };
@@ -74,6 +85,42 @@ export function createTeamRuntimeTransport(
       return { status: 503, body: withCreationFailure(response.body ?? UNAVAILABLE, request, reason) };
     },
   };
+}
+
+function validRunProjection(request: Record<string, unknown>, body: unknown): boolean {
+  if (isTeamDesignFailure(body)) return true;
+  if (request.operationId === 'team.runCreate') {
+    return isTeamRunSummaryProjection(body) || isRecord(body) && body.outcome === 'outcome-unknown'
+      && Object.keys(body).every((key) => key === 'outcome' || key === 'creationFailure');
+  }
+  if (request.operationId === 'team.runList' || request.operationId === 'team.resume') {
+    const teamId = isRecord(request.input) ? request.input.teamId : undefined;
+    const keys = request.operationId === 'team.runList' ? ['teamId', 'runs']
+      : ['success', 'teamId', 'restoredRunIds', 'activeRunIds', 'skippedTerminalRunIds', 'runs'];
+    return isRecord(body) && Object.keys(body).length === keys.length && keys.every((key) => Object.hasOwn(body, key))
+      && body.teamId === teamId && Array.isArray(body.runs)
+      && body.runs.every((run) => isTeamRunRecordProjection(run, ['sessions']) && isRecord(run) && Array.isArray(run.sessions));
+  }
+  if (request.operationId === 'team.nodeReviewHistory') {
+    const input = request.input;
+    if (!isRecord(input) || typeof input.runId !== 'string' || typeof input.nodeId !== 'string'
+      || !isTeamNodeReviewQuery(input.query)) return false;
+    return input.query.kind === 'list'
+      ? isTeamNodeReviewHistory(body, input.runId, input.nodeId)
+      : isTeamNodeReviewMessages(body, input.runId, input.nodeId, input.query);
+  }
+  if (request.operationId === 'team.runSnapshot') {
+    const runId = isRecord(request.input) ? request.input.runId : undefined;
+    const keys = ['run', 'lifecycle', 'graph', 'nodeInputStates', 'nodeExecutions', 'nodeDeliveries', 'roles', 'stages', 'workflowPlan', 'dispatchGroups', 'dispatchTasks', 'approvals', 'artifacts', 'dispatches', 'dispatchExecutions', 'messages', 'messagePage', 'nodePromptDeliveries', 'gates', 'kickbacks', 'decisions', 'unavailableSections', 'diagnostics', 'events', 'startGate', 'nextEventCursor'];
+    return isRecord(body) && Object.keys(body).every((key) => keys.includes(key))
+      && isTeamRunLifecycle(body.lifecycle)
+      && (body.run === null || isTeamRunRecordProjection(body.run) && body.run.runId === runId)
+      && typeof runId === 'string' && Array.isArray(body.approvals)
+      && body.approvals.every((approval) => isTeamApprovalProjection(approval, runId))
+      && Array.isArray(body.artifacts)
+      && body.artifacts.every((artifact) => isTeamArtifactProjection(artifact, runId));
+  }
+  return true;
 }
 
 function withCreationFailure(body: unknown, request: unknown, reason: TeamCreationFailure['reason'] | undefined): unknown {

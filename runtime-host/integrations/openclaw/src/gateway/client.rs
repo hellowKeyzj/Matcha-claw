@@ -780,23 +780,23 @@ impl GatewayClient {
         Err(RuntimeOperationFailure::Unknown)
     }
 
-    async fn hydrate_image_tasks(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64, sync: &mut sessions_module::ports::SessionSync) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+    async fn hydrate_media_tasks(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64, sync: &mut sessions_module::ports::SessionSync) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::{ports::RuntimeOperationFailure, state::SessionFact};
         let tools = match &sync.view.tools { SessionFact::Complete(tools) | SessionFact::Incomplete { facts: tools, .. } => tools, _ => return Ok(()) };
-        let task_ids = tools.iter().filter(|tool| crate::session::image_tasks::needs_read(tool))
-            .filter_map(|tool| crate::session::image_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>();
+        let task_ids = tools.iter().filter(|tool| crate::session::media_tasks::needs_read(tool))
+            .filter_map(|tool| crate::session::media_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>();
         for task_id in task_ids {
-            let id = next_request_id("image-task-get");
+            let id = next_request_id("media-task-get");
             let request = wire::session_request(id.clone(), "tasks.get", serde_json::json!({ "taskId": task_id })).map_err(|_| RuntimeOperationFailure::Unknown)?;
             let (reply, result) = tokio::sync::oneshot::channel();
-            self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::ImageTask { identity: identity.clone(), generation, task_id, reply });
+            self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::MediaTask { identity: identity.clone(), generation, task_id, reply });
             let response = control.dispatcher.ordered_query(request).await;
             self.observations.pending.lock().expect("observation pending lock poisoned").remove(&id);
             if response.is_err() {
                 trace::log_unscoped("runtime.openclaw.image_task.read_unavailable", || serde_json::json!({ "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "reason": "transport" }));
                 continue;
             }
-            let current = match result.await {
+            let (task, current) = match result.await {
                 Ok(Ok(current)) => current,
                 _ => {
                     trace::log_unscoped("runtime.openclaw.image_task.read_unavailable", || serde_json::json!({ "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "reason": "native_or_binding" }));
@@ -804,9 +804,11 @@ impl GatewayClient {
                 }
             };
             if let SessionFact::Complete(tools) | SessionFact::Incomplete { facts: tools, .. } = &mut sync.view.tools {
-                for tool in tools {
-                    if let Some(updated) = current.iter().find(|current| current.tool_call_id == tool.tool_call_id) {
+                for tool in tools.iter_mut().filter(|tool| crate::session::media_tasks::task_id(tool) == Some(task.task_id.as_str())) {
+                    if let Some(updated) = current.iter().find(|current| current.tool_call_id == tool.tool_call_id && current.name == tool.name) {
                         tool.details = updated.details.clone();
+                    } else {
+                        crate::session::media_tasks::update_tool(tool, &task);
                     }
                 }
             }
@@ -842,19 +844,20 @@ impl GatewayClient {
         Ok(control.dispatcher.mutate_with_deadline_cancellable(request, RPC_DEADLINE, &CancellationToken::new()).await)
     }
 
-    pub(crate) async fn cancel_image_tasks(&self, identity: &sessions_module::state::SessionIdentity, run_id: &str) -> Result<Option<crate::session::image_tasks::ImageTaskCancellation>, sessions_module::ports::RuntimeOperationFailure> {
+    pub(crate) async fn cancel_image_tasks(&self, identity: &sessions_module::state::SessionIdentity, run_id: &str) -> Result<Option<crate::session::media_tasks::ImageTaskCancellation>, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         let binding = self.observations.entries.lock().expect("observation registry lock poisoned")
             .get(&identity_key(identity)).filter(|entry| !entry.paused).and_then(|entry| entry.source_epoch.map(|epoch| (entry.generation, epoch)));
         let Some((generation, epoch)) = binding else { return Ok(None); };
         let ingest = self.event_ingest.as_ref().ok_or(RuntimeOperationFailure::Unavailable)?;
-        let tools = ingest.image_task_tools(identity.clone(), generation, epoch, Arc::clone(&self.observations)).await?;
-        let task_ids = tools.iter().filter(|tool| crate::session::image_tasks::needs_read(tool))
+        let tools = ingest.media_task_tools(identity.clone(), generation, epoch, Arc::clone(&self.observations)).await?
+            .into_iter().filter(|tool| tool.name.as_deref() == Some("image_generate")).collect::<Vec<_>>();
+        let task_ids = tools.iter().filter(|tool| crate::session::media_tasks::is_active(tool))
             .filter(|tool| tool.run_id.as_deref() == Some(run_id) || tool.details.as_ref().and_then(|details| details.get("runId")).and_then(serde_json::Value::as_str) == Some(run_id)
                 || tool.details.as_ref().and_then(|details| details.pointer("/task/runId")).and_then(serde_json::Value::as_str) == Some(run_id))
-            .filter_map(|tool| crate::session::image_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>();
+            .filter_map(|tool| crate::session::media_tasks::task_id(tool).map(str::to_owned)).collect::<HashSet<_>>();
         if task_ids.is_empty() { return Ok(None); }
-        let standalone = !tools.iter().any(|tool| task_ids.contains(crate::session::image_tasks::task_id(tool).unwrap_or_default()) && tool.run_id.as_deref() == Some(run_id));
+        let standalone = !tools.iter().any(|tool| task_ids.contains(crate::session::media_tasks::task_id(tool).unwrap_or_default()) && tool.run_id.as_deref() == Some(run_id));
         let mut cancelled = true;
         for task_id in task_ids {
             if !self.observations.is_active(identity, generation, epoch) { return Err(RuntimeOperationFailure::Unavailable); }
@@ -868,7 +871,7 @@ impl GatewayClient {
                 _ => return Err(RuntimeOperationFailure::Unknown),
             }
         }
-        Ok(Some(crate::session::image_tasks::ImageTaskCancellation { cancelled, standalone }))
+        Ok(Some(crate::session::media_tasks::ImageTaskCancellation { cancelled, standalone }))
     }
 
     pub(crate) async fn sync_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64, input_ids: &[String]) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
@@ -909,7 +912,7 @@ impl GatewayClient {
             let history = self.history_observation(&control, identity, generation, page, host_epoch, input_ids).await;
             history_elapsed_ms = started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
             let mut history = history?;
-            self.hydrate_image_tasks(&control, identity, generation, &mut history).await?;
+            self.hydrate_media_tasks(&control, identity, generation, &mut history).await?;
             history.view.model_state = model_state;
             Ok(history)
         }.await;
@@ -966,7 +969,7 @@ impl GatewayClient {
         self.observations.restart(identity, generation, next_generation)?;
         self.observations.pending.lock().expect("observation pending lock poisoned").retain(|_, context| {
             let (target, target_generation) = match context {
-                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } | OrderedContext::ImageTask { identity, generation, .. } => (identity, generation),
+                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } | OrderedContext::MediaTask { identity, generation, .. } => (identity, generation),
             };
             target != identity || *target_generation != generation
         });
@@ -1009,7 +1012,7 @@ impl GatewayClient {
         }
         self.observations.pending.lock().expect("observation pending lock poisoned").retain(|_, context| {
             let (target, target_generation) = match context {
-                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } | OrderedContext::ImageTask { identity, generation, .. } => (identity, generation),
+                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } | OrderedContext::MediaTask { identity, generation, .. } => (identity, generation),
             };
             *target != identity || *target_generation != generation
         });
@@ -1972,7 +1975,7 @@ impl GatewayClient {
     }
 }
 
-const CONTROL_METHODS: [&str; 15] = [
+const CONTROL_METHODS: [&str; 16] = [
     "status",
     "config.get",
     "config.patch",
@@ -1984,6 +1987,7 @@ const CONTROL_METHODS: [&str; 15] = [
     "sessions.describe",
     "tasks.get",
     "tasks.cancel",
+    "tools.invoke",
     "question.list",
     "question.get",
     wire::QUESTION_RESOLVE_METHOD,

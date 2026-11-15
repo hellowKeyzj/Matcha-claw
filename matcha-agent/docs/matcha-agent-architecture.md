@@ -60,6 +60,18 @@ src/entrypoints/cli.tsx → src/main.tsx → src/cli/print.ts
 QueryEngine.ask() → query() → providers / tools
 ```
 
+### 后台协作与请求终态
+
+```text
+外部请求 M → 主 Agent A 的 ask(M) → 后台 Agent / Workflow
+                                       ↓ 结构通知 N（root=M，真实 task/tool）
+                    同一个 A 继续 ask(N) → 唯一最终 result → drained idle
+```
+
+CLI 的 `print` 复用原命令队列、AppState tasks 和 held result，按 root 串行续执行；`request_message_id=M` 跨 ask 保持，`input_message_id` 保留最后一次实际 ask 的输入 UUID。当前 root 的后台 Agent／Workflow 及一次性 Bash／remote 在 terminal 但尚未交接通知时仍未收尾；Task 注册处统一绑定请求 root，monitor／长驻 remote／Ultraplan 保留会话寿命，不阻塞本请求。同 root 通知先 drain，完成后才发唯一 result、处理下一个外部输入；now 保留中断旧请求后立即发送的语义。请求预算使用 queryLoop 的真实回合，不使用 SDK `num_turns` 消息计数。取消或已结束 root 的迟到结构通知只保留 SDK 事实，不再次 ask。普通聊天与团队调用共用此链，后台 B 不是另一个 Team 节点，团队消费 A 的最终回复。[VERIFY: matcha-agent/src/cli/print.ts] [VERIFY: matcha-agent/src/QueryEngine.ts] [VERIFY: matcha-agent/src/query.ts] [VERIFY: matcha-agent/src/utils/requestExecution.ts]
+
+App Server 不接管后台执行：仅在原输入精确 ACK 后登记显式 root 匹配的真实 `task_started` 来源；通知 ACK 须核 task/tool 与实际观察的工具／parent，最终 result 须命中已 ACK 输入，全部来源核证、唯一 result 与 drained idle 齐备才结算。工具输出迟到不靠最新 task snapshot 猜归属，证据缺失仍为 Unknown。Host 适配器按原外部 root 消费已核证的最终正文和 measurement，不要求续执行输入 UUID 等于 root。[VERIFY: matcha-agent/app-server/src/session/observation.rs] [VERIFY: matcha-agent/app-server/src/session/run.rs] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/runtime.rs]
+
 历史读取使用 `sessions.get({sessionId, history:true, offset, limit})`：Rust app-server 直接读取 Agent runtime 下的原生 transcript JSONL，恢复会话父链并返回原始消息页 `{messages, total, nextOffset, managedInputMessageIds}`；输入身份集合由原生持久证据查询，runtime-host 在自身适配边界按 SDK 规则归一化与产品投影，不再走旧 TS app-server 的 snapshot/hydration 路径。 [VERIFY: matcha-agent/app-server/src/session/dispatch.rs:353-375] [VERIFY: matcha-agent/app-server/src/session/history.rs:28-81] [VERIFY: runtime-host/integrations/matcha-agent/src/session/history.rs:20-71] [VERIFY: runtime-host/integrations/matcha-agent/src/session/normalization.rs:121-225]
 
 事件与历史页分离：app-server 将 `native.message` / `native.result` 等会话事实写入 SQLite，事件信封包含 `sessionId / seq / runId / kind / atMs / payload`；`events.replay` 与 `events.subscribe` 按 `afterSeq` 读取，订阅先补持久化事件再继续通知。 [VERIFY: matcha-agent/app-server/src/session/observation.rs:143-214] [VERIFY: matcha-agent/app-server/src/events.rs:14-23,50-77] [VERIFY: matcha-agent/app-server/src/gateway/subscriptions.rs:43-115]

@@ -1,39 +1,13 @@
 use super::actor::{SessionLane, SessionShared};
 use crate::{
-    command::session_identity_lane_key,
     ports::RuntimeOperationFailure,
     question::{
         PendingQuestionsCommand, PendingQuestionsOutcome, QuestionAvailability, QuestionDelivery,
         QuestionReceipt, SessionQuestionCommand, SessionQuestionOutcome, supports_identity,
     },
-    state::SessionIdentity,
 };
 
 impl SessionLane {
-    fn question_binding_matches(
-        &self,
-        shared: &SessionShared,
-        identity: &SessionIdentity,
-        native_id: &str,
-    ) -> bool {
-        let snapshot = shared.snapshot.load();
-        let stored = snapshot.states.get(&session_identity_lane_key(identity));
-        let states = self.state.iter().chain(stored);
-        let mut bound = false;
-        for state in states {
-            if state.identity() != identity {
-                return false;
-            }
-            if let Some(id) = state.native_session_id() {
-                if id != native_id {
-                    return false;
-                }
-                bound = true;
-            }
-        }
-        bound
-    }
-
     pub(super) async fn handle_pending_questions(
         &self,
         shared: &SessionShared,
@@ -45,7 +19,11 @@ impl SessionLane {
         if !supports_identity(&command.identity) {
             return PendingQuestionsOutcome::Unsupported;
         }
-        if !self.question_binding_matches(shared, &command.identity, &command.endpoint_session_id) {
+        if shared.resolve_matcha_session_id(
+            &command.identity,
+            Some(&command.endpoint_session_id),
+            self.state.as_ref(),
+        ).is_err() {
             return PendingQuestionsOutcome::TargetRejected;
         }
         let driver = match shared.running_session_driver(

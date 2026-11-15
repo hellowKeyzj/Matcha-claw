@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use super::model::{
     ReviewDurableSnapshot, ReviewRestoreError, ReviewVerdict, ReviewVerdictError,
@@ -56,13 +56,12 @@ impl ReviewLedger {
 
     pub fn restore(snapshot: ReviewLedgerSnapshot) -> Result<Self, ReviewRestoreError> {
         let mut ledger = Self::default();
-        let mut review_ids = BTreeSet::new();
         for durable in snapshot.reviews {
             durable
                 .request
                 .validate()
                 .map_err(ReviewRestoreError::InvalidRequest)?;
-            if !review_ids.insert(durable.request.review_id.clone()) {
+            if ledger.reviews.contains_key(&durable.request.review_id) {
                 return Err(ReviewRestoreError::DuplicateIdempotencyKey);
             }
             if ledger
@@ -80,7 +79,7 @@ impl ReviewLedger {
             }
             if let Some(verdict) = &durable.verdict {
                 verdict
-                    .validate_for_restore(&durable.request)
+                    .validate(&durable.request)
                     .map_err(|error| match error {
                         ReviewVerdictError::BindingMismatch | ReviewVerdictError::BeforeRequest => {
                             ReviewRestoreError::VerdictRequestMismatch
@@ -119,13 +118,7 @@ impl ReviewLedger {
             }
             return Err(ReviewLedgerError::ConflictingIdempotencyKey);
         }
-        if let Some(existing) = self.reviews.get(&request.review_id) {
-            if existing.request == request {
-                return Ok(RegisterReviewOutcome::Replayed(ReviewerReceipt::recorded(
-                    existing.request.clone(),
-                    existing.accepted_at,
-                )));
-            }
+        if self.reviews.contains_key(&request.review_id) {
             return Ok(RegisterReviewOutcome::ConflictingReviewId);
         }
         if accepted_at < request.requested_at {
@@ -208,14 +201,5 @@ impl ReviewLedger {
         }
         durable.verdict = Some(receipt.clone());
         Ok(ResolveReviewOutcome::Recorded(receipt))
-    }
-}
-
-impl ReviewVerdictReceipt {
-    pub(crate) fn validate_for_restore(
-        &self,
-        request: &ReviewerRequest,
-    ) -> Result<(), ReviewVerdictError> {
-        self.validate(request)
     }
 }

@@ -12,7 +12,7 @@ export type SessionObservationRequest = Readonly<{
   operationId: 'sessions.observe' | 'sessions.release';
   scope: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
   target: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
-  input: Readonly<{ sessionIdentity: SessionIdentity; sessionKey: string; leaseId: string; limit?: number; inputIds?: string[] }>;
+  input: Readonly<{ sessionIdentity: SessionIdentity; endpointSessionId?: string; sessionKey: string; leaseId: string; limit?: number; inputIds?: string[] }>;
 }>;
 export type SessionObservationResponse = Readonly<{
   status: 200 | 400 | 503;
@@ -24,11 +24,11 @@ export interface SessionObservationTransport {
   release(request: unknown, traceId?: string | null): Promise<SessionObservationResponse>;
 }
 
-export function observationRequest(identity: SessionIdentity, leaseId: string, operationId: SessionObservationRequest['operationId'], limit?: number, inputIds?: string[]): SessionObservationRequest {
+export function observationRequest(identity: SessionIdentity, leaseId: string, operationId: SessionObservationRequest['operationId'], limit?: number, inputIds?: string[], endpointSessionId?: string): SessionObservationRequest {
   return {
     id: 'session.management', operationId,
     scope: { kind: 'session', identity }, target: { kind: 'session', identity },
-    input: { sessionIdentity: identity, sessionKey: identity.sessionKey, leaseId, ...(limit === undefined ? {} : { limit }), ...(inputIds === undefined ? {} : { inputIds }) },
+    input: { sessionIdentity: identity, sessionKey: identity.sessionKey, leaseId, ...(endpointSessionId === undefined ? {} : { endpointSessionId }), ...(limit === undefined ? {} : { limit }), ...(inputIds === undefined ? {} : { inputIds }) },
   };
 }
 
@@ -39,11 +39,13 @@ export function isSessionObservationRequest(value: unknown, operation: SessionOb
     || !isRecord(value.target) || !hasExactKeys(value.target, ['kind', 'identity']) || value.target.kind !== 'session' || !isSessionIdentity(value.target.identity)
     || !isRecord(value.input) || !isSessionIdentity(value.input.sessionIdentity)
     || !hasExactKeys(value.input, ['sessionIdentity', 'sessionKey', 'leaseId',
+      ...(operation === 'sessions.observe' && Object.hasOwn(value.input, 'endpointSessionId') ? ['endpointSessionId'] : []),
       ...(operation === 'sessions.observe' && Object.hasOwn(value.input, 'limit') ? ['limit'] : []),
       ...(operation === 'sessions.observe' && Object.hasOwn(value.input, 'inputIds') ? ['inputIds'] : []),
     ])
+    || (Object.hasOwn(value.input, 'endpointSessionId') && !isObservationId(value.input.endpointSessionId))
     || (Object.hasOwn(value.input, 'inputIds') && (!isSessionInputIds(value.input.inputIds) || value.input.inputIds.length === 0))
-    || !isLeaseId(value.input.leaseId)
+    || !isObservationId(value.input.leaseId)
     || (value.input.limit !== undefined && (!Number.isSafeInteger(value.input.limit) || (value.input.limit as number) < 1 || (value.input.limit as number) > 200))) return false;
   return sameSessionIdentity(value.scope.identity, value.target.identity)
     && sameSessionIdentity(value.scope.identity, value.input.sessionIdentity)
@@ -91,7 +93,7 @@ export function createSessionObservationTransport(issuer: RuntimeHostDeliveryIss
   };
 }
 
-function isLeaseId(value: unknown): value is string {
+function isObservationId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value, 'utf8') <= 4096
     && value.trim() === value && ![...value].some((char) => (char.codePointAt(0) ?? 0) < 32 || char.codePointAt(0) === 127);
 }

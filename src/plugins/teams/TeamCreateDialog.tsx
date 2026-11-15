@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
+import { openTeamRun } from './session-navigation';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { Bot, ChevronDown, Crown, FileArchive, Folder, FolderArchive, Loader2, Package, UserRoundPlus, Users, X } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Label } from '@/components/ui/label';
@@ -13,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { invokeIpc } from '@/lib/api-client';
 import { RuntimeScopeSelector } from '@/plugins/runtime/RuntimeScopeSelector';
 import { isRuntimeEndpointReady, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
-import { agentScope, buildCapabilityScopeKey, buildRuntimeEndpointKey, runtimeEndpointsEqual, runtimeInstanceScope } from '@/types/desktop/runtime-address';
+import { agentScope, buildRuntimeEndpointKey, runtimeEndpointsEqual, runtimeInstanceScope, type NativeRuntimeEndpointRef } from '@/types/desktop/runtime-address';
 import { pickLocalDirectory } from '@/lib/local-path-picker';
 import { pickLocalArchive } from '@/plugins/teams/services/archive-picker';
 import { pickLocalSkillSource, readLocalSkillImport } from '@/plugins/skills/services/local-import';
@@ -22,8 +21,6 @@ import {
   validateTeamSkillPackage,
   type TeamDependencyPlanItem,
   type TeamDependencyPreparationPlan,
-  type TeamRoleBindingRecord,
-  type TeamRunListItem,
 } from '@/plugins/teams/services/team-runtime-client';
 import {
   isClawHubDependencySource,
@@ -33,10 +30,9 @@ import {
   readClawHubSkillSlug,
 } from '@/plugins/teams/pages/dependency-source';
 import { useSkillsStore } from '@/plugins/skills/stores/skills';
-import { getSubagentManagementScope, useSubagentsStore } from '@/plugins/agents/stores/subagents';
-import { resolveTeamRuntimeScope, useTeamsStore } from '@/plugins/teams/store';
+import { getSubagentManagementScope, selectAgentsResource, useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import { useTeamsStore } from '@/plugins/teams/store';
 import type { ManualTeamCandidate, ManualTeamMemberProvisionRecord, TeamSkillCandidate, TeamSkillCreationPlan } from '@/plugins/teams/types/team-creation';
-import type { TeamMeta } from '@/plugins/teams/types/team';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 import { ManualTeamCreationProgress } from '@/plugins/teams/pages/ManualTeamCreationProgress';
@@ -131,52 +127,46 @@ function buildManualRoleId(agent: SubagentSummary, usedRoleIds: ReadonlySet<stri
   return roleId;
 }
 
-function teamRoleCount(team: TeamMeta, roles: TeamRoleBindingRecord[] | undefined, runs: TeamRunListItem[] | undefined): number | undefined {
-  if (roles?.length && (!team.activeRunId || roles.every((role) => role.runId === team.activeRunId))) return new Set(roles.map((role) => role.roleId)).size;
-  const run = runs?.find((run) => run.runId === team.activeRunId);
-  if (run) return new Set(run.sessions.map((role) => role.roleId)).size;
-  return !team.activeRunId && runs?.length === 0 ? 0 : undefined;
-}
-
-export function TeamsPage() {
+export function TeamCreateDialog({ open, onOpenChange }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const { t } = useTranslation('teams');
-  const subtitle = t('subtitle');
   const navigate = useNavigate();
-  const selectedRuntime = useRuntimeEndpointsStore(selectManagementRuntime);
-  const selectedEndpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
+  const selectedRuntime = useRuntimeEndpointsStore((state) => state.managementEndpoint
+    ? state.endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, state.managementEndpoint!)) ?? null
+    : selectManagementRuntime(state));
+  const selectedEndpoint = useRuntimeEndpointsStore((state) => state.managementEndpoint ?? selectManagementEndpoint(state));
   const endpoints = useRuntimeEndpointsStore((state) => state.endpoints);
-  const creationRuntime = selectedRuntime?.runtimeAdapterId === 'openclaw' ? selectedRuntime : null;
+  const creationRuntime = selectedRuntime?.location.kind === 'local'
+    && selectedRuntime.endpointRef.kind === 'native-runtime'
+    && selectedRuntime.endpointRef.runtimeAdapterId === 'openclaw'
+    && selectedRuntime.endpointRef.runtimeInstanceId === 'local' ? selectedRuntime : null;
   const runtimeReady = Boolean(creationRuntime && isRuntimeEndpointReady(creationRuntime) && supportsRuntimeEndpointCapabilityFamily(creationRuntime, 'team'));
-  const requestedManagementScope = getSubagentManagementScope(creationRuntime?.endpointRef ?? null);
-  const managementScopeKey = requestedManagementScope ? buildCapabilityScopeKey(requestedManagementScope) : '';
-  const manualAgentsReady = Boolean(requestedManagementScope && runtimeReady);
+  const manualRuntimes = useMemo(() => endpoints.filter((entry) => entry.location.kind === 'local'
+    && entry.endpointRef.kind === 'native-runtime' && entry.endpointRef.runtimeInstanceId === 'local'
+    && (entry.endpointRef.runtimeAdapterId === 'openclaw' || entry.endpointRef.runtimeAdapterId === 'matcha-agent')
+    && isRuntimeEndpointReady(entry) && supportsRuntimeEndpointCapabilityFamily(entry, 'team')), [endpoints]);
+  const [manualEndpoint, setManualEndpoint] = useState<NativeRuntimeEndpointRef | null>(null);
+  const manualRuntime = manualRuntimes.find((entry) => manualEndpoint && runtimeEndpointsEqual(entry.endpointRef, manualEndpoint));
+  const requestedManagementScope = useMemo(() => manualRuntime ? getSubagentManagementScope(manualRuntime.endpointRef) : null, [manualRuntime]);
+  const manualAgentsReady = requestedManagementScope !== null;
 
-  const teams = useTeamsStore((state) => state.teams);
-  const rolesByTeamId = useTeamsStore((state) => state.rolesByTeamId);
-  const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
-  const syncRunList = useTeamsStore((state) => state.syncRunList);
-  const loadingByTeamId = useTeamsStore((state) => state.loadingByTeamId);
-  const errorByTeamId = useTeamsStore((state) => state.errorByTeamId);
   const planTeamSkillCreation = useTeamsStore((state) => state.planTeamSkillCreation);
   const createTeam = useTeamsStore((state) => state.createTeam);
   const manualTeamCreation = useTeamsStore((state) => state.manualTeamCreation);
   const createManualTeamWithProgress = useTeamsStore((state) => state.createManualTeamWithProgress);
   const resetManualTeamCreation = useTeamsStore((state) => state.resetManualTeamCreation);
   const replaceTeamSkillVersion = useTeamsStore((state) => state.replaceTeamSkillVersion);
-  const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
   const deleteTeam = useTeamsStore((state) => state.deleteTeam);
   const provisionTeamAgents = useTeamsStore((state) => state.provisionTeamAgents);
   const createRun = useTeamsStore((state) => state.createRun);
-  const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const installSkill = useSkillsStore((state) => state.installSkill);
   const importLocalSkill = useSkillsStore((state) => state.importLocalSkill);
   const finishSkillInstallation = useSkillsStore((state) => state.finishSkillInstallation);
-  const agentsResource = useSubagentsStore((state) => state.agentsResource);
+  const agentsResource = useSubagentsStore((state) => selectAgentsResource(state, manualEndpoint));
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
-  const setManagementScope = useSubagentsStore((state) => state.setManagementScope);
 
-  const [roleReads, setRoleReads] = useState<Record<string, { loading: boolean; error?: string }>>({});
-  const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [createSourceType, setCreateSourceType] = useState<CreateSourceType>('teamskill');
   const [teamName, setTeamName] = useState('');
   const [teamSkillPackagePath, setTeamSkillPackagePath] = useState('');
@@ -186,7 +176,7 @@ export function TeamsPage() {
   const [replacementConfirmed, setReplacementConfirmed] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const createTitleRef = useRef<HTMLHeadingElement>(null);
-  const createTriggerRef = useRef<HTMLButtonElement>(null);
+  const createReturnFocusRef = useRef<HTMLElement | null>(null);
   const packageReviewRevisionRef = useRef(0);
   const createOperationRef = useRef(0);
 
@@ -201,30 +191,22 @@ export function TeamsPage() {
   }, []);
 
   const packagePath = teamSkillPackagePath.trim();
-  const managementScope = useSubagentsStore((state) => state.managementScope);
-  const managementMatches = Boolean(managementScopeKey && managementScope && buildCapabilityScopeKey(managementScope) === managementScopeKey);
-  const agentsLoading = manualAgentsReady && (!managementMatches || agentsResource.status === 'idle' || agentsResource.status === 'loading');
-  const agents = creationRuntime && managementMatches && Array.isArray(agentsResource.data) ? agentsResource.data : [];
+  const agentsLoading = manualAgentsReady && (agentsResource.status === 'idle' || agentsResource.status === 'loading');
+  const agents = manualAgentsReady ? agentsResource.data : [];
   const refreshManualAgents = useCallback(async () => {
-    if (!requestedManagementScope || !manualAgentsReady) return;
-    setManagementScope(requestedManagementScope);
-    const scope = useSubagentsStore.getState().managementScope;
-    if (scope && buildCapabilityScopeKey(scope) === managementScopeKey) await loadAgents({ silent: true, scope });
-  }, [requestedManagementScope, manualAgentsReady, managementScopeKey, setManagementScope, loadAgents]);
+    if (requestedManagementScope) await loadAgents({ scope: requestedManagementScope });
+  }, [requestedManagementScope, loadAgents]);
   const teamAssignableAgents = agents.filter((agent) => agent.kind !== 'system');
   const creationScope = useMemo(() => creationRuntime ? runtimeInstanceScope(creationRuntime.endpointRef) : null, [creationRuntime]);
-  const selectedManualMembers = manualMembers.map((member) => ({
-    member,
-    agent: agents.find((agent) => agent.id === member.agentId) ?? null,
-  }));
   const manualLeaderCount = manualMembers.filter((member) => member.isLeader).length;
   const showingManualCreation = manualTeamCreation !== null;
   const creatingManual = manualTeamCreation?.status === 'running' || manualTeamCreation?.status === 'cleaning_up';
-  const canCreateManualTeam = manualAgentsReady
-    && !showingManualCreation
+  const manualMembersReady = manualMembers.every(({ endpoint }) => manualRuntimes.some((runtime) => runtimeEndpointsEqual(runtime.endpointRef, endpoint)));
+  const canCreateManualTeam = !showingManualCreation
     && manualMembers.length > 0
     && manualLeaderCount === 1
-    && selectedManualMembers.every(({ agent }) => agent && agent.kind !== 'system');
+    && manualMembersReady
+    && manualMembers.every(({ agent }) => agent.kind !== 'system');
   const phaseReview = createDialogPhase.type === 'review_ready'
     || createDialogPhase.type === 'installing_dependency'
     || createDialogPhase.type === 'importing_dependency'
@@ -240,30 +222,6 @@ export function TeamsPage() {
   const mutatingDependency = installingDependency || importingDependency;
   const packageBusy = selectingPackage || checkingPackage || creatingRun || Boolean(mutatingDependency);
   const canSelectPackage = runtimeReady && Boolean(creationScope) && !packageBusy;
-  const roleCounts = teams.map((team) => teamRoleCount(team, rolesByTeamId[team.id], runListByTeamId[team.id]));
-  const provisionedRoleCount = roleCounts.every((count) => count !== undefined)
-    ? roleCounts.reduce((total, count) => total + count, 0)
-    : undefined;
-  const rolesLoading = teams.some((team, index) => roleCounts[index] === undefined && roleReads[team.id]?.loading);
-  useEffect(() => {
-    for (const team of teams) {
-      const teamId = team.id;
-      const state = useTeamsStore.getState();
-      if (teamRoleCount(team, state.rolesByTeamId[teamId], state.runListByTeamId[teamId]) !== undefined) continue;
-      const scope = resolveTeamRuntimeScope(teamId);
-      if (!endpoints.some((entry) => runtimeEndpointsEqual(entry.endpointRef, scope.endpoint)
-        && isRuntimeEndpointReady(entry) && supportsRuntimeEndpointCapabilityFamily(entry, 'team'))) continue;
-      const read = { loading: true };
-      setRoleReads((current) => ({ ...current, [teamId]: read }));
-      void syncRunList(teamId).then(() => {
-        setRoleReads((current) => current[teamId] === read ? { ...current, [teamId]: { loading: false } } : current);
-      }, (error: unknown) => {
-        setRoleReads((current) => current[teamId] === read ? {
-          ...current, [teamId]: { loading: false, error: error instanceof Error ? error.message : String(error) },
-        } : current);
-      });
-    }
-  }, [teams, endpoints, syncRunList]);
 
   const resetPackageReview = () => {
     packageReviewRevisionRef.current += 1;
@@ -274,7 +232,7 @@ export function TeamsPage() {
   const closeCreateDialog = () => {
     createOperationRef.current += 1;
     resetPackageReview();
-    setCreateDialogOpen(false);
+    onOpenChange(false);
   };
 
   const restorePackageReview = (currentReview: TeamSkillReview, error: string | null = null) => {
@@ -288,28 +246,27 @@ export function TeamsPage() {
     const previousEndpoint = selectManagementEndpoint(previous);
     if ((endpoint ? buildRuntimeEndpointKey(endpoint) : '') === (previousEndpoint ? buildRuntimeEndpointKey(previousEndpoint) : '')) return;
     packageReviewRevisionRef.current += 1;
-    createOperationRef.current += 1;
     setCreateDialogPhase({ type: 'editing_source' });
     setReplacementConfirmed(false);
     setCreateError(null);
-    setTeamName('');
     setTeamSkillPackagePath('');
-    setManualMembers([]);
   }), []);
 
   useEffect(() => {
-    if (!createDialogOpen || createSourceType !== 'manual' || !manualAgentsReady
-      || (managementMatches && (agentsResource.hasLoadedOnce || agentsResource.status !== 'idle'))) {
-      return;
-    }
-    void refreshManualAgents();
-  }, [agentsResource.hasLoadedOnce, agentsResource.status, createDialogOpen, createSourceType, manualAgentsReady, managementMatches, refreshManualAgents]);
+    if (!open || manualEndpoint) return;
+    const initial = manualRuntimes.find((entry) => selectedEndpoint && runtimeEndpointsEqual(entry.endpointRef, selectedEndpoint));
+    if (initial?.endpointRef.kind === 'native-runtime') setManualEndpoint(initial.endpointRef);
+  }, [open, manualEndpoint, manualRuntimes, selectedEndpoint]);
 
   useEffect(() => {
-    if (createDialogOpen && showingManualCreation) {
+    if (open && createSourceType === 'manual' && manualAgentsReady && agentsResource.status === 'idle') void refreshManualAgents();
+  }, [agentsResource.status, open, createSourceType, manualAgentsReady, refreshManualAgents]);
+
+  useEffect(() => {
+    if (open && showingManualCreation) {
       createTitleRef.current?.focus({ preventScroll: true });
     }
-  }, [createDialogOpen, showingManualCreation]);
+  }, [open, showingManualCreation]);
 
   const handleCreateSourceTypeChange = (value: string) => {
     const nextSourceType = value === 'manual' ? 'manual' : 'teamskill';
@@ -321,9 +278,9 @@ export function TeamsPage() {
     const displayName = teamName.trim() || t('create.manualDefaultTeamName');
     const usedRoleIds = new Set<string>();
     const members = manualMembers.map((member): ManualTeamMemberProvisionRecord => {
-      const agent = agents.find((candidate) => candidate.id === member.agentId);
-      if (!agent) {
-        throw new Error(t('create.manualAgentMissing', { agentId: member.agentId }));
+      const { agent } = member;
+      if (!manualRuntimes.some((runtime) => runtimeEndpointsEqual(runtime.endpointRef, member.endpoint))) {
+        throw new Error(t('create.manualRuntimeUnavailable'));
       }
       const workspace = agent.workspace?.trim();
       if (!workspace) {
@@ -335,6 +292,7 @@ export function TeamsPage() {
       }
       usedRoleIds.add(roleId);
       return {
+        endpoint: { ...member.endpoint },
         agentId: agent.id,
         agentName: displayAgentName(agent),
         workspace,
@@ -349,10 +307,9 @@ export function TeamsPage() {
     if (!leader || members.filter((member) => member.isLeader).length !== 1) {
       throw new Error(t('create.manualLeaderRequired'));
     }
-    if (!selectedEndpoint) throw new Error('Select a runtime for this team.');
     return {
       displayName,
-      runtimeScope: agentScope(selectedEndpoint, leader.agentId),
+      runtimeScope: agentScope(leader.endpoint, leader.agentId),
       manualTeam: {
         name: displayName,
         description: t('create.manualDescription', { teamName: displayName }),
@@ -499,19 +456,13 @@ export function TeamsPage() {
     await invokeIpc('shell:openExternal', value);
   };
 
-  const openExistingTeam = async (teamId: string) => {
-    setActiveTeam(teamId);
-    setCreateDialogOpen(false);
-    navigate(`/teams/${teamId}`);
-    await refreshSnapshot(teamId);
-  };
-
   const handleCreateOrReplace = async () => {
     if (createSourceType !== 'teamskill' || !runtimeReady || !review || review.revision !== packageReviewRevisionRef.current || creatingRun || mutatingDependency || !review.dependencyPlan.canProceed) {
       return;
     }
     if (review.creationPlan.action === 'open_existing') {
-      await openExistingTeam(review.creationPlan.teamId);
+      closeCreateDialog();
+      void openTeamRun(navigate, review.creationPlan.teamId).catch((error: unknown) => toast.error(error instanceof Error ? error.message : String(error)));
       return;
     }
     if (review.creationPlan.action === 'replace_required' && !replacementConfirmed) {
@@ -523,13 +474,11 @@ export function TeamsPage() {
     setCreateError(null);
     if (review.creationPlan.action === 'create') {
       const teamId = createTeam({ ...review.candidate, displayName: teamName.trim() || review.candidate.teamSkillPackage.name });
+      let runId: string;
       try {
         await provisionTeamAgents(teamId);
-        await createRun(teamId);
+        runId = (await createRun(teamId)).runId;
         if (operation !== createOperationRef.current || review.revision !== packageReviewRevisionRef.current) return;
-        setActiveTeam(teamId);
-        setCreateDialogOpen(false);
-        navigate(`/teams/${teamId}`);
       } catch (error) {
         const provisioningErrorMessage = error instanceof Error ? error.message : String(error);
         try {
@@ -538,7 +487,10 @@ export function TeamsPage() {
           // Store-level delete failure keeps the team and records its own per-team error.
         }
         restorePackageReview(review, provisioningErrorMessage);
+        return;
       }
+      closeCreateDialog();
+      void openTeamRun(navigate, teamId, runId).catch((error: unknown) => toast.error(error instanceof Error ? error.message : String(error)));
       return;
     }
 
@@ -547,16 +499,17 @@ export function TeamsPage() {
       expectedCurrentVersion: review.creationPlan.currentVersion,
       candidate: { ...review.candidate, displayName: teamName.trim() || review.candidate.teamSkillPackage.name },
     });
+    let runId: string;
     try {
       await provisionTeamAgents(teamId);
-      await createRun(teamId);
+      runId = (await createRun(teamId)).runId;
       if (operation !== createOperationRef.current || review.revision !== packageReviewRevisionRef.current) return;
-      setActiveTeam(teamId);
-      setCreateDialogOpen(false);
-      navigate(`/teams/${teamId}`);
     } catch (error) {
       restorePackageReview(review, error instanceof Error ? error.message : String(error));
+      return;
     }
+    closeCreateDialog();
+    void openTeamRun(navigate, teamId, runId).catch((error: unknown) => toast.error(error instanceof Error ? error.message : String(error)));
   };
 
   const handleCreateManualTeam = async () => {
@@ -564,23 +517,23 @@ export function TeamsPage() {
       return;
     }
     const operation = ++createOperationRef.current;
+    let result: { teamId: string; runId: string };
     setCreateError(null);
     try {
       const candidate = buildManualCandidate();
       setCreateDialogPhase({ type: 'creating_manual' });
-      const teamId = await createManualTeamWithProgress(candidate);
+      result = await createManualTeamWithProgress(candidate);
       if (operation !== createOperationRef.current) return;
-      setActiveTeam(teamId);
-      setCreateDialogOpen(false);
-      setCreateDialogPhase({ type: 'editing_source' });
-      navigate(`/teams/${teamId}`);
     } catch (error) {
       if (operation !== createOperationRef.current) return;
       if (useTeamsStore.getState().manualTeamCreation === null) {
         setCreateDialogPhase({ type: 'editing_source' });
         setCreateError(error instanceof Error ? error.message : String(error));
       }
+      return;
     }
+    closeCreateDialog();
+    void openTeamRun(navigate, result.teamId, result.runId).catch((error: unknown) => toast.error(error instanceof Error ? error.message : String(error)));
   };
 
   const handleSelectPackage = async (kind: 'directory' | 'archive') => {
@@ -606,25 +559,6 @@ export function TeamsPage() {
     }
   };
 
-  const handleDeleteTeam = async (teamId: string) => {
-    try {
-      const result = await deleteTeam(teamId);
-      if (result.state === 'outcome_unknown') {
-        toast.warning(t('deleteToast.cleanupUnknownTitle'), {
-          description: t('deleteToast.cleanupUnknownDescription'),
-          duration: 8000,
-        });
-        return;
-      }
-      toast.success(t('deleteToast.deletedTitle'), {
-        description: t('deleteToast.deletedDescription'),
-        duration: 4000,
-      });
-    } catch {
-      // Store keeps the team visible and records the per-team error.
-    }
-  };
-
   const primaryButtonLabel = createSourceType === 'manual'
     ? creatingManual ? t('create.creatingButton') : t('create.createButton')
     : review?.creationPlan.action === 'open_existing'
@@ -642,44 +576,9 @@ export function TeamsPage() {
       || (review.creationPlan.action === 'replace_required' && !replacementConfirmed);
 
   return (
-    <section className="space-y-6 text-foreground">
-      <header className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
-          {subtitle ? <p className="text-sm text-[hsl(var(--shell-text-muted))]">{subtitle}</p> : null}
-        </div>
-        {!createDialogOpen ? (
-          <Button ref={createTriggerRef} onClick={() => setCreateDialogOpen(true)}>
-            {t('create.openCreateDialog')}
-          </Button>
-        ) : null}
-      </header>
-
-      <Card className="overflow-hidden bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
-        <CardContent className="grid gap-5 p-6 md:grid-cols-[1.2fr_0.8fr] md:items-center">
-          <div className="space-y-3">
-            <Badge variant="outline" className="w-fit">{t('overview.badge')}</Badge>
-            <div className="space-y-2">
-              <h2 className="text-xl font-semibold tracking-[-0.02em]">{t('overview.title')}</h2>
-              <p className="max-w-2xl text-sm leading-6 text-[hsl(var(--shell-text-muted))]">{t('overview.description')}</p>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-2 rounded-2xl border bg-[hsl(var(--shell-surface))] p-2 text-center [border-color:hsl(var(--shell-border))]">
-            <div className="rounded-xl bg-[hsl(var(--shell-surface-muted))] px-3 py-3">
-              <div className="text-lg font-semibold">{teams.length}</div>
-              <div className="text-[11px] text-[hsl(var(--shell-text-muted))]">{t('create.metricTeams')}</div>
-            </div>
-            <div className="rounded-xl bg-[hsl(var(--shell-surface-muted))] px-3 py-3">
-              <div className="text-lg font-semibold" aria-busy={rolesLoading}>{provisionedRoleCount ?? (rolesLoading ? t('common:status.loading') : '—')}</div>
-              <div className="text-[11px] text-[hsl(var(--shell-text-muted))]">{t('create.metricRoles')}</div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <DialogPrimitive.Root open={createDialogOpen} onOpenChange={(open) => {
-        if (!open && !creatingManual && !creatingRun && !mutatingDependency) closeCreateDialog();
-      }}>
+    <DialogPrimitive.Root open={open} onOpenChange={(nextOpen) => {
+      if (!nextOpen && !creatingManual && !creatingRun && !mutatingDependency) closeCreateDialog();
+    }}>
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-[hsl(var(--shell-scrim))]" />
           <DialogPrimitive.Content
@@ -687,12 +586,17 @@ export function TeamsPage() {
             aria-describedby={undefined}
             aria-busy={creatingManual || creatingRun}
             onOpenAutoFocus={(event) => {
+              const activeElement = document.activeElement;
+              const content = event.currentTarget;
+              if (activeElement instanceof HTMLElement && content instanceof HTMLElement && !content.contains(activeElement)) {
+                createReturnFocusRef.current = activeElement;
+              }
               event.preventDefault();
               createTitleRef.current?.focus();
             }}
             onCloseAutoFocus={(event) => {
               event.preventDefault();
-              createTriggerRef.current?.focus();
+              if (createReturnFocusRef.current?.isConnected) createReturnFocusRef.current.focus();
             }}
             onInteractOutside={(event) => event.preventDefault()}
             className="fixed left-1/2 top-1/2 z-50 flex h-[min(680px,calc(100dvh-3rem))] w-[min(1000px,calc(100vw-3rem))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[22px] border border-border bg-card text-card-foreground shadow-[var(--shell-shadow-overlay)] outline-none max-sm:h-[calc(100dvh-1.5rem)] max-sm:w-[calc(100vw-1.5rem)]"
@@ -736,11 +640,31 @@ export function TeamsPage() {
                 </div>
                 <div className="min-w-0 space-y-2">
                   <div className="text-xs font-medium text-muted-foreground">{t('create.runtimeLabel')}</div>
-                  <RuntimeScopeSelector
-                    runtimeAdapterId="openclaw"
-                    collisionBoundary={createDialogElement}
-                    className="h-11 rounded-[var(--radius-interactive)] border border-border bg-muted/40 px-3"
-                  />
+                  {createSourceType === 'manual' ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button type="button" variant="outline" aria-label={t('create.runtimeLabel')} disabled={manualRuntimes.length === 0}
+                          className="h-11 w-full justify-between gap-2 bg-muted/40 px-3 text-sm font-normal">
+                          <span className="min-w-0 truncate">{manualRuntime?.displayName ?? t('create.manualSelectRuntime')}</span>
+                          <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent collisionBoundary={createDialogElement} align="end">
+                        {manualRuntimes.map((runtime) => (
+                          <DropdownMenuItem key={buildRuntimeEndpointKey(runtime.endpointRef)} onSelect={() => {
+                            if (runtime.endpointRef.kind === 'native-runtime') setManualEndpoint(runtime.endpointRef);
+                            setCreateError(null);
+                          }}>{runtime.displayName}</DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : (
+                    <RuntimeScopeSelector
+                      runtimeAdapterId="openclaw"
+                      collisionBoundary={createDialogElement}
+                      className="h-11 rounded-[var(--radius-interactive)] border border-border bg-muted/40 px-3"
+                    />
+                  )}
                 </div>
               </fieldset>
 
@@ -923,10 +847,11 @@ export function TeamsPage() {
 
                 <TabsContent value="manual" className="mt-0 min-h-0 flex-1 overflow-y-auto py-6">
                   <TeamMemberPicker
-                    key={managementScopeKey}
+                    endpoint={manualEndpoint}
+                    runtimeName={manualRuntime?.displayName ?? ''}
                     agents={teamAssignableAgents}
                     loading={agentsLoading}
-                    error={managementMatches && agentsResource.status === 'error' ? agentsResource.error : null}
+                    error={manualAgentsReady && agentsResource.status === 'error' ? agentsResource.error : null}
                     ready={manualAgentsReady}
                     members={manualMembers}
                     onMembersChange={(members) => {
@@ -935,6 +860,7 @@ export function TeamsPage() {
                     }}
                     onRefresh={() => void refreshManualAgents()}
                   />
+                  {!manualMembersReady && manualAgentsReady ? <p role="status" className="mt-3 text-sm text-muted-foreground">{t('create.manualRuntimeUnavailable')}</p> : null}
                 </TabsContent>
               </Tabs>
             </div>
@@ -954,10 +880,18 @@ export function TeamsPage() {
                   </Button>
                   {manualTeamCreation.status === 'failed' && manualTeamCreation.cleanup === 'confirmed' ? (
                     <Button type="button" onClick={() => {
-                      if (selectedEndpoint && manualTeamCreation.candidate.runtimeScope && runtimeEndpointsEqual(selectedEndpoint, manualTeamCreation.candidate.runtimeScope.endpoint)) {
-                        setTeamName(manualTeamCreation.candidate.displayName);
-                        setManualMembers(manualTeamCreation.candidate.manualTeam.members.map((member) => ({ agentId: member.agentId, isLeader: member.isLeader })));
-                      }
+                      setTeamName(manualTeamCreation.candidate.displayName);
+                      setManualMembers((current) => manualTeamCreation.candidate.manualTeam.members.map((member) => {
+                        const draft = current.find((draft) => draft.agent.id === member.agentId && runtimeEndpointsEqual(draft.endpoint, member.endpoint));
+                        return {
+                          endpoint: { ...member.endpoint },
+                          runtimeName: draft?.runtimeName ?? endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, member.endpoint))?.displayName
+                            ?? `${member.endpoint.runtimeAdapterId} · ${member.endpoint.runtimeInstanceId}`,
+                          agent: draft?.agent ?? { id: member.agentId, name: member.agentName, workspace: member.workspace, skills: [...member.skills], model: member.model },
+                          isLeader: member.isLeader,
+                        };
+                      }));
+                      setManualEndpoint(manualTeamCreation.candidate.manualTeam.members.find((member) => member.isLeader)?.endpoint ?? null);
                       resetManualTeamCreation();
                       setCreateSourceType('manual');
                       setCreateError(null);
@@ -982,67 +916,8 @@ export function TeamsPage() {
             </footer>
           </DialogPrimitive.Content>
         </DialogPrimitive.Portal>
-      </DialogPrimitive.Root>
-
-      <div className="space-y-3">
-        <h2 className="text-sm font-medium text-muted-foreground">{t('list.title')}</h2>
-        {teams.length === 0 ? (
-          <Card>
-            <CardContent className="py-4 text-sm text-muted-foreground">{t('list.empty')}</CardContent>
-          </Card>
-        ) : (
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            {teams.map((team, index) => {
-              const roleCount = roleCounts[index];
-              const roleLoading = roleCount === undefined && roleReads[team.id]?.loading;
-              const deletingTeam = loadingByTeamId[team.id] === true;
-              const teamError = errorByTeamId[team.id] ?? roleReads[team.id]?.error;
-              return (
-                <Card key={team.id}>
-                  <CardContent className="py-4">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">{team.name}</div>
-                        <div className="text-xs text-muted-foreground" aria-busy={Boolean(roleLoading)}>
-                          {t('list.managedRoles')}: {roleCount ?? (roleLoading ? t('common:status.loading') : '—')}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          size="sm"
-                          disabled={!endpoints.some((entry) => runtimeEndpointsEqual(entry.endpointRef, resolveTeamRuntimeScope(team.id).endpoint) && isRuntimeEndpointReady(entry))}
-                          onClick={async () => {
-                            setActiveTeam(team.id);
-                            navigate(`/teams/${team.id}`);
-                            await refreshSnapshot(team.id);
-                          }}
-                        >
-                          {t('list.open')}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={!endpoints.some((entry) => runtimeEndpointsEqual(entry.endpointRef, resolveTeamRuntimeScope(team.id).endpoint) && isRuntimeEndpointReady(entry)) || deletingTeam}
-                          onClick={() => void handleDeleteTeam(team.id)}
-                        >
-                          {t('list.delete')}
-                        </Button>
-                      </div>
-                    </div>
-                    {teamError ? (
-                      <div className="mt-3 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                        {teamError}
-                      </div>
-                    ) : null}
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </section>
+    </DialogPrimitive.Root>
   );
 }
 
-export default TeamsPage;
+export default TeamCreateDialog;

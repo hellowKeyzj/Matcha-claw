@@ -132,8 +132,7 @@ export function createAppSessionMedia(identity: SessionIdentity) {
         return result;
       }
       const result = await hostFileReadBinary({
-        endpoint: sourceIdentity.endpoint,
-        agentId: sourceIdentity.agentId,
+        scope: entry.media.source.scope,
         relativePath: entry.media.source.relativePath,
         maxBytes: MAX_MEDIA_BYTES,
       });

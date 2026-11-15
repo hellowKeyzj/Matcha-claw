@@ -56,7 +56,7 @@ fn graph_patch_tool() -> Value {
 运行中修改：
 1. 外层 teamId/runId/nodeId/nodeExecutionId 全部取本次 <team_run_context> 原值；先用相同四项调用 team_graph_context（view=run_prompts）读取原任务、角色与连线。不能用待修改的目标节点替换外层 nodeId，也不能借用其他节点或旧尝试的执行标识。
 2. 任务已适用则不改；否则 operations 中只用 set_node_prompt，op/nodeId/prompt 同层，不传 node/config。operations[i].nodeId 从上下文选取目标节点；expectedGraphVersion 取返回的 graphVersion，prompt 提交保留有效要求后的完整正文，不是追加片段。
-3. 仅改本 Run 已有 work/review 的 prompt，包括正在执行或已完成的节点；不改拓扑、角色或绑定，不传设计上下文参数及 baseGraphId/baseWorkflowPlanId。新正文只用于后续新派发，已派发任务及同次发送重试不变，不触发重跑。
+3. 仅改本 Run 已有 work/review 的 prompt，包括正在执行或已完成的节点；不改拓扑、角色、绑定或 reworkLimits，不传设计上下文参数及 baseGraphId/baseWorkflowPlanId。返工预算耗尽时只能等待负责人增额并继续，模型不能自行加额或改图绕过。新正文只用于后续新派发，已派发任务及同次发送重试不变，不触发重跑。
 4. 新修改生成 commandId/idempotencyKey；重放原请求须保持全部参数不变。版本冲突先重读再判断，重算修改用新键；结果未知先核对正文，不盲目重发。当前执行失效即停止，等待新的系统上下文，不猜执行标识。
 5. 确认 applied/replayed 后重读 team_graph_context（view=run_prompts）核验；未确认不声称保存。完成当前任务仍用 team_message 的 summary/decision，不用 dispatch 派任务。
 
@@ -81,14 +81,15 @@ fn graph_patch_tool() -> Value {
 5. join 是无组、无任务正文的程序同步节点，不调用模型做汇总；只等待全部 gate 入边的上游当前尝试成功完成且选中对应 sourcePort，不能用 activate/finish/rework 接入 join。需要模型撰写汇总时另建有负责人和 prompt 的 work/review。join 不接收 groupId、group 或 config.join；config 省略或 {}。可暂存未接线的 join，但启动执行前至少接入一条 gate。
 6. 上游摘要按边的 payload.includeUpstreamResult 与已消费 source fence 对应的精确尝试透传，join 不生成新摘要，也不把所有历史结果混入；控制节点正常完成并选择 rejected/failed 等业务端口仍可满足匹配 gate，不等同于尝试 Failed/Cancelled。
 7. script_review 必须显式提供 config.rule，没有默认通过，也不执行脚本正文：pass_through 无条件通过；assert_all_upstream_completed 检查本次尝试全部非 rework 入边的已消费输入及其精确上游尝试 Completed/端口，零输入不通过；assert_no_blocking_gate 只检查 gate 输入，零 gate 通过；assert_artifact_exists 要求本 Run 已消费的直接上游尝试至少有一个 typed Artifact，不检查脚本节点自身、无关产物或祖先，也不验证文件实体存在。结果选择 passed/failed 业务端口，不等于尝试失败。
-8. human_decision 不需要负责人或任务正文，config 省略或 {}；程序按当前尝试与真实团队负责人生成审批，等待明确人工决定后选择 approved/rejected/aborted。
-9. 可选字段不需要时省略，不要统一填 null。尤其 start/end/join/human_decision/script_review 不需要 roleId，应省略；roleId:null 不合法。只提交输入 schema 定义的字段，不能把 context 的节点投影原样回传。
+8. human_decision 不需要负责人；可用 config.prompt 写明需要人工确认的具体内容，省略或空白表示无正文。程序在发起审批时保存标题、正文和已消费的上游材料，等待明确人工决定后选择 approved/rejected/aborted。
+9. reworkLimits 按返工源节点的 sourcePort 配置非负整数预算，仅 review.rework、human_decision.rejected/aborted、script_review.failed 可配置；每个端口默认 3，0 禁止自动返工。同一来源端口的多个返工目标共消耗一次，不按边计数，也不是目标节点总执行次数。仅需改预算时使用 {"op":"set_rework_limit","nodeId":"返工源节点ID","sourcePort":"对应业务端口","maxReworks":3}，仅设计期可用。预算耗尽会阻塞本轮返工，已完成源节点仍为 completed；运行中只能由负责人增加并继续，模型不能加额或改拓扑绕过。
+10. 可选字段不需要时省略，不要统一填 null。尤其 start/end/join/human_decision/script_review 不需要 roleId，应省略；roleId:null 不合法。只提交输入 schema 定义的字段，不能把 context 的节点投影原样回传。
 
 保存后核验返回的当前图、角色绑定、任务正文、连线和 graphVersion，后续修改基于最新返回值。只有预期变更已保存且核验通过，才能说设计已更新；最终设计还需有 start/end，所有节点沿非 rework 连线从 start 可达且能到 end，非 rework 连线不能成环。保存成功不代表任务已执行。
 
 失败处理：按返回的具体 error 修正对应输入，不要把端口、节点引用或 schema 错误猜成权限不足。版本陈旧时重新调用 team_graph_context，基于最新图重算修改；设计轮次或设计对话代次失效、设计阶段已退出时停止，等待新的系统设计上下文，不能猜新值或省略设计上下文参数绕过。未确认成功时不声称已保存。
 
-设计期 replace_node 调用模板（示例为已有 work，{{…}} 替换为当前设计上下文、读取结果或新标识；完整保留该节点原有 maxAttempts/taskId/outputArtifactKind 等可选配置，不原样回传投影）：
+设计期 replace_node 调用模板（示例为已有 work，{{…}} 替换为当前设计上下文、读取结果或新标识；完整保留该节点原有 reworkLimits/taskId/outputArtifactKind 等可选配置，不原样回传投影）：
 ```json
 {"teamId":"{{teamId}}","runId":"{{runId}}","designEpoch":"{{designEpoch}}","promptGeneration":"{{promptGeneration}}","expectedGraphVersion":"{{graphVersion}}","commandId":"{{新命令标识}}","idempotencyKey":"{{新幂等键}}","baseGraphId":"{{graph.graphId}}","baseWorkflowPlanId":"{{graph.workflowPlanId}}","operations":[{"op":"replace_node","node":{"nodeId":"{{原nodeId}}","title":"{{原title}}","kind":"work","roleId":"{{原roleId}}","config":{"prompt":"{{完整任务正文}}","sessionRef":"{{原sessionRef}}"}}]}
 ```
@@ -96,8 +97,8 @@ fn graph_patch_tool() -> Value {
 设计建图 operations 示例（不是完整调用参数）：假设 context 已有 start，writer→rs1、reviewer→rs2 绑定有效，以下新 ID 均未使用；实际用当前 Run 的 ID 和绑定。单出口和目标入口省略，审核选择通过或返工分支。
 ```json
 [
-  {"op":"add_node","node":{"nodeId":"draft","title":"撰写初稿","kind":"work","maxAttempts":2,"roleId":"writer","config":{"prompt":"根据用户目标撰写初稿，说明依据并列出待核实项。","sessionRef":"rs1"}}},
-  {"op":"add_node","node":{"nodeId":"review","title":"审核初稿","kind":"review","maxAttempts":2,"roleId":"reviewer","config":{"prompt":"核对初稿是否满足用户目标；通过时完成，否则给出具体修改意见并返工。","sessionRef":"rs2"}}},
+  {"op":"add_node","node":{"nodeId":"draft","title":"撰写初稿","kind":"work","roleId":"writer","config":{"prompt":"根据用户目标撰写初稿，说明依据并列出待核实项。","sessionRef":"rs1"}}},
+  {"op":"add_node","node":{"nodeId":"review","title":"审核初稿","kind":"review","reworkLimits":{"rework":3},"roleId":"reviewer","config":{"prompt":"核对初稿是否满足用户目标；通过时完成，否则给出具体修改意见并返工。","sessionRef":"rs2"}}},
   {"op":"add_node","node":{"nodeId":"end","title":"完成","kind":"end"}},
   {"op":"add_edge","edge":{"edgeId":"start-draft","sourceNodeId":"start","targetNodeId":"draft","action":"activate"}},
   {"op":"add_edge","edge":{"edgeId":"draft-review","sourceNodeId":"draft","targetNodeId":"review","action":"activate"}},
@@ -132,6 +133,12 @@ fn graph_patch_tool() -> Value {
                         "edge": edge_schema()
                     }), &["op", "edge"]),
                     schema(json!({ "op": { "const": "remove_edge", "description": "删除当前仍存在的边，edgeId 从 context 或本次前序操作取得。" }, "edgeId": identifier() }), &["op", "edgeId"]),
+                    schema(json!({
+                        "op": { "const": "set_rework_limit", "description": "仅设计期设置返工源端口预算；运行期模型不能增额或继续被阻塞的返工。" },
+                        "nodeId": identifier(),
+                        "sourcePort": { "enum": ["rework", "rejected", "aborted", "failed"], "description": "必须是该源节点允许 rework 的端口。" },
+                        "maxReworks": { "type": "integer", "minimum": 0, "maximum": u32::MAX, "description": "该源端口的返工次数上限，默认 3；0 禁止自动返工，同一端口的多个目标共计一次。" }
+                    }), &["op", "nodeId", "sourcePort", "maxReworks"]),
                     schema(json!({
                         "op": { "const": "set_metadata", "description": "逐键设置图元数据；不是节点配置。值限标识字符串、布尔值或非负整数，不用 null 删除键。" },
                         "metadata": { "type": "object", "minProperties": 1, "additionalProperties": { "oneOf": [{ "type": "string" }, { "type": "boolean" }, { "type": "integer", "minimum": 0 }] } }
@@ -193,12 +200,13 @@ fn graph_patch_tool() -> Value {
 fn node_schema() -> Value {
     let prompt = json!({ "type": "string", "minLength": 1, "description": "work/review 的任务正文，必须包含非空白内容，写清目标、输入和完成或审核标准；不能只写 title。" });
     let session_ref = json!({ "type": "string", "minLength": 1, "pattern": "^rs[0-9]+$", "description": "该 roleId 在当前 Run 恰有一个绑定时省略，由保存事务解析；多候选必须从 context.roles 显式选择匹配值，零候选应选择有效角色。显式值必须与当前绑定完全一致，不能用 null、空串或错值代替省略。这是 rsN 形式的 RoleSessionRef，不是原生 session ID/key；不猜 rs0/rs1，不借用其他角色或 Run 的值。仅需独立会话时先单独调用 team_graph_patch 的 create_role_session，成功后重读 context.roles，再用 add_node/replace_node 绑定，不必每个节点新建会话。" });
+    let rework_limit = json!({ "type": "integer", "minimum": 0, "maximum": u32::MAX });
     let mut node = schema(
         json!({
             "nodeId": { "type": "string", "minLength": 1, "description": "图内唯一节点 ID；新增用未占用值，替换用 context 中的原值。" },
             "title": { "type": "string", "minLength": 1, "description": "非空节点标题；具体任务要求写入 config.prompt。" },
             "kind": { "enum": ["start", "work", "review", "human_decision", "script_review", "join", "end"], "description": "节点类型。设计中的 work/review 必须有任务正文和真实成员绑定；start/end 等控制节点不需要负责人。" },
-            "maxAttempts": { "type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "节点总尝试次数，包含初次执行：2 表示初次加一次返工，省略时默认为 1。返工目标和会重新执行的审核等路径节点都要留足次数。" },
+            "reworkLimits": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": u32::MAX }, "description": "按返工源端口配置的次数上限，仅 review.rework、human_decision.rejected/aborted、script_review.failed 可配置；每个可返工端口默认 3，0 禁止自动返工。同一源端口的多个目标共计一次，不限制目标节点总尝试次数；完整替换时保留已有设置。" },
             "taskId": { "type": "string", "minLength": 1, "description": "work 的任务 ID，图内不能与其他 work 重复；省略时使用 nodeId。" },
             "roleId": { "type": "string", "minLength": 1, "description": "work/review 的真实 roleId，从 context.roles 选择，不能用角色显示名称或臆造角色；不需要负责人时省略，不能传 null。" },
             "config": { "type": "object", "description": "仅使用当前 kind 分支定义的配置；不需要配置时省略。" }
@@ -209,6 +217,7 @@ fn node_schema() -> Value {
         {
             "properties": {
                 "kind": { "const": "start" },
+                "reworkLimits": schema(json!({}), &[]),
                 "config": schema(json!({ "trigger": { "oneOf": [
                     schema(json!({ "mode": { "const": "cron" }, "cron": identifier() }), &["mode", "cron"]),
                     schema(json!({ "mode": { "const": "webhook" }, "path": { "type": "string", "minLength": 1, "pattern": "\\S", "description": "webhook 必须提供非空白路径；手动 Start 不传 trigger。" } }), &["mode", "path"])
@@ -219,6 +228,7 @@ fn node_schema() -> Value {
             "required": ["roleId", "config"],
             "properties": {
                 "kind": { "const": "work" },
+                "reworkLimits": schema(json!({}), &[]),
                 "config": schema(json!({
                     "prompt": prompt,
                     "sessionRef": session_ref,
@@ -230,6 +240,7 @@ fn node_schema() -> Value {
             "required": ["roleId", "config"],
             "properties": {
                 "kind": { "const": "review" },
+                "reworkLimits": schema(json!({ "rework": rework_limit }), &[]),
                 "config": schema(json!({ "prompt": prompt, "sessionRef": session_ref }), &["prompt"])
             }
         },
@@ -237,6 +248,7 @@ fn node_schema() -> Value {
             "required": ["config"],
             "properties": {
                 "kind": { "const": "script_review" },
+                "reworkLimits": schema(json!({ "failed": rework_limit }), &[]),
                 "config": schema(json!({
                     "rule": { "enum": ["pass_through", "assert_all_upstream_completed", "assert_no_blocking_gate", "assert_artifact_exists"], "description": "显式选择程序审核规则；没有默认规则，不接受脚本正文。" }
                 }), &["rule"])
@@ -244,7 +256,15 @@ fn node_schema() -> Value {
         },
         {
             "properties": {
-                "kind": { "enum": ["human_decision", "join", "end"] },
+                "kind": { "const": "human_decision" },
+                "reworkLimits": schema(json!({ "rejected": rework_limit, "aborted": rework_limit }), &[]),
+                "config": schema(json!({ "prompt": { "type": "string", "description": "需要人工确认的具体请求与判断标准；省略或空白为无正文。发起时冻结，不从后来修改的图回填历史。" } }), &[])
+            }
+        },
+        {
+            "properties": {
+                "kind": { "enum": ["join", "end"] },
+                "reworkLimits": schema(json!({}), &[]),
                 "config": schema(json!({}), &[])
             }
         }
@@ -347,7 +367,7 @@ fn graph_context_tool() -> Value {
 ```json
 {"teamId":"{{teamId}}","runId":"{{runId}}","nodeId":"{{当前调用节点nodeId}}","nodeExecutionId":"{{当前调用节点nodeExecutionId}}","view":"run_prompts"}
 ```
-- 成功返回 outcome=available、teamId/runId、graphVersion、nodes、edges；work/review 含 nodeId/kind/title/roleId/prompt，控制节点无 roleId/prompt。prompt 是已保存正文，不是已派发任务快照。
+- 成功返回 outcome=available、teamId/runId、graphVersion、nodes、edges；节点含 reworkLimits，work/review 另含 nodeId/kind/title/roleId/prompt，控制节点无 roleId/prompt。prompt 是已保存正文，不是已派发任务快照；预算信息只读，运行中模型不能加额。
 - 用注入 nodeId 定位当前节点，沿 edges 的 sourceNodeId/targetNodeId、sourcePort/action 判断后续路径，必要时穿过控制节点；不按角色猜节点，不把所有可达节点视为必执行。
 - 需要修改才用 team_graph_patch 的 set_node_prompt（op/nodeId/prompt 同层），expectedGraphVersion 取 graphVersion；外层 nodeId 仍为当前调用节点，operations[i].nodeId 才是目标节点。不用 replace_node 或 node.config.prompt。
 
@@ -357,7 +377,7 @@ fn graph_context_tool() -> Value {
 {"teamId":"{{teamId}}","runId":"{{runId}}","designEpoch":"{{designEpoch}}","promptGeneration":"{{promptGeneration}}","view":"graph_summary"}
 ```
 - 返回完整设计快照 graphVersion、graph 和 roles。patch 的 expectedGraphVersion/baseGraphId/baseWorkflowPlanId 分别取 graphVersion/graph.graphId/graph.workflowPlanId；work/review 的 roleId/sessionRef 从 roles 配对取得，不猜显示名称或原生会话标识。replace_node 须按输入 schema 重建完整 node，正文放 node.config.prompt，不原样回传投影。
-- graph 含任务、绑定、连线、payload、布局及 sourcePorts/targetPorts/sourcePortActions。端口空列表表示无入口/出口，单端口可省略，多出口须选业务分支；sourcePortActions 与目标约束求交（join 仅 gate），唯一 action 可省略，多候选须选择，零候选不可连线。
+- graph 含任务、绑定、连线、payload、布局、reworkLimits、rework 预算状态及 sourcePorts/targetPorts/sourcePortActions。端口空列表表示无入口/出口，单端口可省略，多出口须选业务分支；sourcePortActions 与目标约束求交（join 仅 gate），唯一 action 可省略，多候选须选择，零候选不可连线。
 
 脱敏状态读取：
 - 不传设计上下文参数，current_node 或 graph_summary 只返回脱敏状态，无任务正文或 graphVersion，不能作为修改依据。current_node 必须提供当前 nodeExecutionId，不能用 nodeId/runId 代替；graph_summary 可省略它。
@@ -392,7 +412,7 @@ fn node_event_tool() -> Value {
         "name": "team_node_event",
         "description": r#"报告当前节点进度、请求输入或请求审批，不提交节点终态；节点完成沿运行时 terminal hook 结算。
 - runId/nodeExecutionId 取本次系统注入的 <team_run_context>，或当前 Run 的 team_graph_context 脱敏结果中对应 nodes 条目的真实执行 ID；不能用 nodeId/runId 代替执行 ID，也不能沿用旧尝试的 ID。roleId 如需提供，必须取当前节点的真实角色绑定，不猜角色名。
-- progress 记录进度；request_input 使节点等待；request_approval 创建 WorkNode 审批并使节点等待，必须提供 roleId 及实际请求的 approvalAction。这不授予执行许可；已有明确人工决定后可用 team_approval_resolve 记账，再从 view=current_node 返回的 approvals 查询同一尝试的决定。记账不会自动恢复、重派或完成节点。
+- progress 记录进度；request_input 使节点等待；request_approval 创建 WorkNode 审批并使节点等待，必须提供 roleId、实际请求的 approvalAction 和 summary。summary 写明要批准的具体内容、操作对象、参数或结果，不能只重复动作名。risk 为可选真实风险；artifactIds 仅引用本 Run 已登记、确需人工确认的产物，不重复ID，不猜ID或用路径替代。请求和材料关联在发起时保存；原请求重试正文、风险、材料均保持不变。这不授予执行许可；已有明确人工决定后可用 team_approval_resolve 记账，再从 view=current_node 返回的 approvals 查询同一尝试的决定。记账不会自动恢复、重派或完成节点。
 - 每次新事件生成 commandId/idempotencyKey；原请求重试保留这两项及全部参数，不换键重复请求。结果未知先重读当前节点状态及 pendingApprovalIds，无法确认则报告未知。
 - 分别检查 outcome=progressed/waiting_for_input/approval_requested，再按需重读脱敏图核验；这些返回均不代表节点完成或审批通过。返回错误时按错误修正，不伪造成功。"#,
         "inputSchema": { "type": "object", "allOf": [schema(json!({
@@ -400,11 +420,15 @@ fn node_event_tool() -> Value {
             "nodeExecutionId": identifier(),
             "roleId": { "type": ["string", "null"], "minLength": 1 },
             "event": { "enum": ["progress", "request_input", "request_approval"] },
-            "approvalAction": { "enum": ["continue_node", "execute_tool", "publish_result", "external_action"] }
+            "approvalAction": { "enum": ["continue_node", "execute_tool", "publish_result", "external_action"] },
+            "summary": { "type": "string", "minLength": 1, "description": "仅 request_approval：待人工批准的完整请求，具体对象、参数、待发布结果及判断标准。" },
+            "risk": { "type": "string", "minLength": 1, "description": "仅 request_approval：已知风险；没有提供时省略，不编造风险。" },
+            "artifactIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 128 }, "description": "仅 request_approval：当前Run已登记的待确认产物ID；不知道ID时省略，不从文件名猜测。" }
         }), &["runId", "commandId", "idempotencyKey", "nodeExecutionId", "event"]),
             {
                 "if": { "properties": { "event": { "const": "request_approval" } }, "required": ["event"] },
-                "then": { "required": ["roleId", "approvalAction"], "properties": { "roleId": identifier() } }
+                "then": { "required": ["roleId", "approvalAction", "summary"], "properties": { "roleId": identifier() } },
+                "else": { "properties": { "summary": false, "risk": false, "artifactIds": false } }
             }
         ] }
     })

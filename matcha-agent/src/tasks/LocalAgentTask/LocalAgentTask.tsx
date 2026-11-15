@@ -26,6 +26,7 @@ import { createAbortController, createChildAbortController } from '../../utils/a
 import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { getSearchExtraToolsOrReadInfo } from '../../utils/collapseReadSearch.js';
 import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
+import { emitTaskTerminatedSdk } from '../../utils/sdkEventQueue.js';
 import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
@@ -270,11 +271,14 @@ export function enqueueAgentNotification({
   // If the task was already marked as notified (e.g., by TaskStopTool), skip
   // enqueueing to avoid sending redundant messages to the model.
   let shouldEnqueue = false;
+  let requestMessageId: string | undefined;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
-    if (task.notified) {
+    if (task.notified || (toolUseId !== undefined && task.toolUseId !== toolUseId)) {
       return task;
     }
     shouldEnqueue = true;
+    toolUseId = task.toolUseId;
+    requestMessageId = task.requestMessageId;
     return {
       ...task,
       notified: true,
@@ -314,7 +318,22 @@ export function enqueueAgentNotification({
 <${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
 
-  enqueuePendingNotification({ value: message, mode: 'task-notification' });
+  emitTaskTerminatedSdk(taskId, status === 'killed' ? 'stopped' : status, {
+    toolUseId,
+    requestMessageId,
+    summary,
+    outputFile: outputPath,
+    usage: usage && {
+      total_tokens: usage.totalTokens,
+      tool_uses: usage.toolUses,
+      duration_ms: usage.durationMs,
+    },
+  });
+  enqueuePendingNotification({
+    value: message,
+    mode: 'task-notification',
+    taskNotification: { taskId, toolUseId, requestMessageId },
+  });
 }
 
 /**
@@ -417,6 +436,7 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
     toolUseCount: number;
     startTime: number;
     toolUseId: string | undefined;
+    requestMessageId: string | undefined;
   } | null = null;
 
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
@@ -429,6 +449,7 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
       toolUseCount: task.progress?.toolUseCount ?? 0,
       startTime: task.startTime,
       toolUseId: task.toolUseId,
+      requestMessageId: task.requestMessageId,
     };
 
     return {
@@ -446,10 +467,11 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
   // Gate on the SDK option so coordinator-mode sessions without the flag don't
   // leak summary events to consumers who didn't opt in.
   if (captured && getSdkAgentProgressSummariesEnabled()) {
-    const { tokenCount, toolUseCount, startTime, toolUseId } = captured;
+    const { tokenCount, toolUseCount, startTime, toolUseId, requestMessageId } = captured;
     emitTaskProgress({
       taskId,
       toolUseId,
+      requestMessageId,
       description: summary,
       startTime,
       totalTokens: tokenCount,

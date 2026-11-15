@@ -3,6 +3,8 @@ use std::{
     path::PathBuf,
 };
 
+use futures_util::future::BoxFuture;
+use organization::run::public_projection::graph_status;
 use platform::trace::{identifier_hash, runtime_trace};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -62,7 +64,7 @@ impl TeamRuntimeCapabilityRequest {
     }
 
     pub(crate) fn single_stage(&self) -> bool {
-        crate::call::runtime_single_stage(&self.command)
+        self.command.operation().single_stage()
     }
 
     pub fn into_execution(self) -> (TeamRuntimeCommand, Option<TeamRuntimeProjectionContext>) {
@@ -80,15 +82,7 @@ pub enum TeamRuntimeControlOutcome {
 }
 
 impl TeamRuntimeControlOutcome {
-    fn succeeded(result: Value) -> Self {
-        Self::Succeeded(result)
-    }
-
-    fn unknown(result: Value) -> Self {
-        Self::Unknown(result)
-    }
-
-    fn rejected(_: TeamRuntimeProjectionRejection, message: &'static str) -> Self {
+    fn rejected(message: &'static str) -> Self {
         Self::Failed(message, None)
     }
 
@@ -106,21 +100,6 @@ impl TeamRuntimeControlOutcome {
             succeeded => succeeded,
         }
     }
-}
-
-type TeamRuntimeProjectionOutcome = TeamRuntimeControlOutcome;
-
-struct TeamRuntimePrivateResult;
-
-impl TeamRuntimePrivateResult {
-    fn private(value: impl Into<Value>) -> Value {
-        value.into()
-    }
-}
-
-#[derive(Clone, Copy)]
-enum TeamRuntimeProjectionRejection {
-    Failed,
 }
 
 pub fn decode_team_runtime_capability_request(
@@ -177,8 +156,26 @@ pub(crate) async fn execute_inline(
             "runHash": run_id.as_deref().map(identifier_hash),
         }));
     }
-    let outcome = match command {
-        TeamRuntimeCommand::Design { operation } => {
+    let outcome = execute_command(owner, &resolver, command, &operation_id, run_id.as_deref()).await?;
+    let outcome = project_team_runtime_outcome(
+        outcome,
+        team_id.as_deref(),
+        run_id.as_deref(),
+        projection_context.as_ref(),
+        resolver.as_ref(),
+    );
+    Ok((operation_id, outcome))
+}
+
+fn execute_command<'a>(
+    owner: &'a organization::OrganizationHandle,
+    resolver: &'a std::sync::Arc<dyn organization::RoleSessionIdentityResolver>,
+    command: TeamRuntimeCommand,
+    operation_id: &'a str,
+    run_id: Option<&'a str>,
+) -> BoxFuture<'a, Result<TeamRuntimeCommandOutcome, TeamRuntimeDecodeError>> {
+    match command {
+        TeamRuntimeCommand::Design { operation } => Box::pin(async move {
             let read = matches!(
                 operation,
                 super::design::DesignOperation::Snapshot { .. }
@@ -190,7 +187,7 @@ pub(crate) async fn execute_inline(
                 .map_err(|_| {
                     if operation_id == "team.designSnapshot" {
                         runtime_trace("runtime.team_run.design_snapshot", || json!({
-                            "runHash": run_id.as_deref().map(identifier_hash),
+                            "runHash": run_id.map(identifier_hash),
                             "outcome": "error", "kind": "owner_unavailable",
                         }));
                     }
@@ -198,35 +195,29 @@ pub(crate) async fn execute_inline(
                 })?;
             if operation_id == "team.designSnapshot" && result.is_err() {
                 runtime_trace("runtime.team_run.design_snapshot", || json!({
-                    "runHash": run_id.as_deref().map(identifier_hash),
+                    "runHash": run_id.map(identifier_hash),
                     "outcome": "error", "kind": "snapshot_store_failed",
                 }));
             }
             let outcome = TeamRuntimeCommandOutcome::Design { read, result };
             owner.summarize_call(&outcome).await;
-            outcome
-        }
-        command => owner
-            .execute_team_runtime_inline(command)
-            .await
-            .map_err(|_| {
-                if operation_id == "team.runStart" {
-                    runtime_trace("runtime.team_run.run_start.result", || json!({
-                        "runHash": run_id.as_deref().map(identifier_hash),
-                        "outcome": "unknown", "kind": "owner_unavailable",
-                    }));
-                }
-                TeamRuntimeDecodeError::Unavailable
-            })?,
-    };
-    let outcome = project_team_runtime_outcome(
-        outcome,
-        team_id.as_deref(),
-        run_id.as_deref(),
-        projection_context.as_ref(),
-        resolver.as_ref(),
-    );
-    Ok((operation_id, outcome))
+            Ok(outcome)
+        }),
+        command => Box::pin(async move {
+            owner
+                .execute_team_runtime_inline(command)
+                .await
+                .map_err(|_| {
+                    if operation_id == "team.runStart" {
+                        runtime_trace("runtime.team_run.run_start.result", || json!({
+                            "runHash": run_id.map(identifier_hash),
+                            "outcome": "unknown", "kind": "owner_unavailable",
+                        }));
+                    }
+                    TeamRuntimeDecodeError::Unavailable
+                })
+        }),
+    }
 }
 
 pub fn is_team_runtime_facade_scope(value: &Value) -> bool {
@@ -368,25 +359,15 @@ pub fn project_team_runtime_outcome(
     projection_context: Option<&TeamRuntimeProjectionContext>,
     resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> TeamRuntimeControlOutcome {
-    team_runtime_outcome_with_context(outcome, team_id, run_id, projection_context, resolver)
-}
-
-fn team_runtime_outcome_with_context(
-    outcome: TeamRuntimeCommandOutcome,
-    team_id: Option<&str>,
-    run_id: Option<&str>,
-    projection_context: Option<&TeamRuntimeProjectionContext>,
-    resolver: &dyn organization::RoleSessionIdentityResolver,
-) -> TeamRuntimeProjectionOutcome {
     match outcome {
         TeamRuntimeCommandOutcome::RoleSessionCreate(result) => match result {
-            Ok(binding) => TeamRuntimeProjectionOutcome::succeeded(json!({
+            Ok(binding) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "outcome": "created",
                 "roleSession": { "roleId": binding.role().as_str(), "sessionRef": binding.session_ref().as_str() },
             })),
-            Err(TeamRuntimeStatus::Rejected) => TeamRuntimeProjectionOutcome::InvalidInput(None),
-            Err(TeamRuntimeStatus::Unavailable) => TeamRuntimeProjectionOutcome::Unavailable(None),
-            Err(TeamRuntimeStatus::OutcomeUnknown) => TeamRuntimeProjectionOutcome::unknown(json!({"outcome":"outcome-unknown"})),
+            Err(TeamRuntimeStatus::Rejected) => TeamRuntimeControlOutcome::InvalidInput(None),
+            Err(TeamRuntimeStatus::Unavailable) => TeamRuntimeControlOutcome::Unavailable(None),
+            Err(TeamRuntimeStatus::OutcomeUnknown) => TeamRuntimeControlOutcome::Unknown(json!({"outcome":"outcome-unknown"})),
         },
         TeamRuntimeCommandOutcome::RunStart(result) => match result {
             Ok(()) => {
@@ -394,7 +375,7 @@ fn team_runtime_outcome_with_context(
                     "runHash": run_id.map(identifier_hash),
                     "outcome": "success", "startGate": "started",
                 }));
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({"success":true,"outcome":"started"})))
+                TeamRuntimeControlOutcome::Succeeded(json!({"success":true,"outcome":"started"}))
             }
             Err(error) => {
                 let result = super::team_mcp::design_rejected(error);
@@ -402,87 +383,98 @@ fn team_runtime_outcome_with_context(
                     "runHash": run_id.map(identifier_hash),
                     "outcome": "error", "kind": result["errorCode"],
                 }));
-                TeamRuntimeProjectionOutcome::succeeded(result)
+                TeamRuntimeControlOutcome::Succeeded(result)
             }
         },
+        TeamRuntimeCommandOutcome::RunReworkContinue(result) => match result {
+            Ok(()) => TeamRuntimeControlOutcome::Succeeded(json!({
+                "success": true, "outcome": "continued",
+            })),
+            Err(error) => TeamRuntimeControlOutcome::Succeeded(super::team_mcp::rework_continue_rejected(error)),
+        },
         TeamRuntimeCommandOutcome::Design { result, .. } => match result {
-            Ok(result) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(result)),
-            Err(error) => TeamRuntimeProjectionOutcome::succeeded(super::team_mcp::design_rejected(error)),
+            Ok(result) => TeamRuntimeControlOutcome::Succeeded(result),
+            Err(error) => TeamRuntimeControlOutcome::Succeeded(super::team_mcp::design_rejected(error)),
         },
         TeamRuntimeCommandOutcome::PackageValidate(validation) => {
-            TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(team_skill_package_validation_json(&validation)))
+            TeamRuntimeControlOutcome::Succeeded(json!(validation))
         }
         TeamRuntimeCommandOutcome::DependencyPlan(plan) => match team_skill_dependency_plan_json(
             &plan,
             projection_context.map(TeamRuntimeProjectionContext::dependency_package_root),
         ) {
-            Some(result) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(result)),
+            Some(result) => TeamRuntimeControlOutcome::Succeeded(result),
             None => unavailable(),
         },
         TeamRuntimeCommandOutcome::ProvisionAgents(outcome) => match outcome {
             organization::TeamMaterializationCommandOutcome::Materialized {
                 team_id,
                 managed_agent_count,
-            } => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            } => TeamRuntimeControlOutcome::Succeeded(json!({
                 "teamId": team_id.as_str(),
                 "managedAgentCount": managed_agent_count,
-            }))),
+            })),
             organization::TeamMaterializationCommandOutcome::Rejected => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team agent materialization was rejected.")
+                TeamRuntimeControlOutcome::rejected("Team agent materialization was rejected.")
             }
             organization::TeamMaterializationCommandOutcome::OutcomeUnknown => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "outcome": "outcome-unknown" }))
             }
             organization::TeamMaterializationCommandOutcome::Unavailable => unavailable(),
         },
         TeamRuntimeCommandOutcome::Delete(result) => match result {
-            Ok(organization::TeamDeleteOutcome::Deleted) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            Ok(organization::TeamDeleteOutcome::Deleted) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "teamId": team_id,
                 "state": "tombstoned",
-            }))),
+            })),
             Ok(organization::TeamDeleteOutcome::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "teamId": team_id, "state": "outcome_unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "teamId": team_id, "state": "outcome_unknown" }))
             }
-            Err(_) => TeamRuntimeProjectionOutcome::rejected(
-                TeamRuntimeProjectionRejection::Failed,
+            Err(_) => TeamRuntimeControlOutcome::rejected(
                 "Team deletion was rejected.",
             ),
         },
-        TeamRuntimeCommandOutcome::RunCreate { result, creation_failure } => {
+        TeamRuntimeCommandOutcome::RunCreate { result, workspace, creation_failure } => {
             let creation_failure = creation_failure.or_else(|| matches!(&result,
                 Ok(organization::CreateGraphRunOutcome::ExistingRun | organization::CreateGraphRunOutcome::ConflictingIdempotency),
             ).then(|| organization::TeamCreationFailure::new(
                 organization::TeamCreationStage::InitializingSessions, organization::TeamCreationFailureReason::StoreConflict,
             )));
             let outcome = match result {
-            Ok(organization::CreateGraphRunOutcome::Created(run_id)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            Ok(organization::CreateGraphRunOutcome::Created(_) | organization::CreateGraphRunOutcome::Replayed(_)) if workspace.is_none() => unavailable(),
+            Ok(organization::CreateGraphRunOutcome::Created(run_id)) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "runId": run_id.as_str(),
                 "status": "created",
+                "workspace": workspace.expect("successful run creation has a real projection"),
                 "revision": 1,
-            }))),
-            Ok(organization::CreateGraphRunOutcome::Replayed(run_id)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            })),
+            Ok(organization::CreateGraphRunOutcome::Replayed(run_id)) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "runId": run_id.as_str(),
                 "status": "created",
+                "workspace": workspace.expect("successful run creation has a real projection"),
                 "revision": 1,
                 "replayed": true,
-            }))),
+            })),
             Ok(organization::CreateGraphRunOutcome::ExistingRun)
             | Ok(organization::CreateGraphRunOutcome::ConflictingIdempotency)
             | Err(TeamRuntimeStatus::Rejected) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team run creation was rejected.")
+                TeamRuntimeControlOutcome::rejected("Team run creation was rejected.")
             }
             Err(TeamRuntimeStatus::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "outcome": "outcome-unknown" }))
             }
             Err(TeamRuntimeStatus::Unavailable) => unavailable(),
             };
             outcome.with_creation_failure(creation_failure)
         },
         TeamRuntimeCommandOutcome::RunList(runs) => match runs {
-            Ok(runs) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
-                "teamId": team_id,
-                "runs": runs.iter().map(|run| team_run_list_item_json(run, resolver)).collect::<Vec<_>>(),
-            }))),
+            Ok(runs) => match runs.iter().map(|run| team_run_list_item_json(run, resolver)).collect::<Option<Vec<_>>>() {
+                Some(runs) => TeamRuntimeControlOutcome::Succeeded(json!({
+                    "teamId": team_id,
+                    "runs": runs,
+                })),
+                None => unavailable(),
+            },
             Err(error) => unavailable().with_creation_failure(Some(crate::owner::team_run::creation_store_failure(
                 organization::TeamCreationStage::LoadingTeam, &error,
             ))),
@@ -496,22 +488,28 @@ fn team_runtime_outcome_with_context(
                 Ok(runs) => runs,
                 Err(_) => return unavailable(),
             };
-            let result = team_resume_legacy_json(&team_id, &outcomes, &runs, resolver);
+            let Some(result) = team_resume_legacy_json(&team_id, &outcomes, &runs, resolver) else {
+                return unavailable();
+            };
             if outcomes
                 .iter()
                 .any(|outcome| matches!(outcome, organization::ResumeOutcome::OutcomeUnknown(_)))
             {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(result))
+                TeamRuntimeControlOutcome::Unknown(result)
             } else {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(result))
+                TeamRuntimeControlOutcome::Succeeded(result)
             }
         },
-        TeamRuntimeCommandOutcome::TriggerList(triggers) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+        TeamRuntimeCommandOutcome::TriggerList(triggers) => TeamRuntimeControlOutcome::Succeeded(json!({
             "triggers": triggers.iter().map(team_trigger_json).collect::<Vec<_>>(),
-        }))),
+        })),
         TeamRuntimeCommandOutcome::TriggerFire(result) => match result {
             Ok(result) => team_run_trigger_outcome(result),
-            Err(_) => TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team trigger was rejected."),
+            Err(organization::StoreFault::TriggerFire(organization::TriggerFireError::Busy)) => TeamRuntimeControlOutcome::Succeeded(json!({
+                "success": false, "error": "The trigger scope is busy; wait for its current batch to settle.",
+                "errorCode": "scope_busy",
+            })),
+            Err(_) => TeamRuntimeControlOutcome::rejected("Team trigger was rejected."),
         },
         TeamRuntimeCommandOutcome::RunSnapshotInvalidInput { creation_failure } => {
             invalid_input().with_creation_failure(creation_failure)
@@ -522,7 +520,10 @@ fn team_runtime_outcome_with_context(
             creation_failure,
         } => match snapshot {
             organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(snapshot) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(team_run_public_snapshot_legacy_json(&snapshot, role_sessions.as_deref(), resolver)))
+                match team_run_public_snapshot_legacy_json(&snapshot, role_sessions.as_deref(), resolver) {
+                    Some(snapshot) => TeamRuntimeControlOutcome::Succeeded(snapshot),
+                    None => unavailable(),
+                }
             }
             organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Unavailable(reason) => {
                 use organization::run::public_projection::TeamRunPublicSnapshotUnavailable::*;
@@ -538,159 +539,139 @@ fn team_runtime_outcome_with_context(
                 ))))
             }
         },
+        TeamRuntimeCommandOutcome::NodeReviewHistory(result) => match result {
+            Ok(Some(history)) => TeamRuntimeControlOutcome::Succeeded(json!(history)),
+            Ok(None) | Err(_) => unavailable(),
+        },
         TeamRuntimeCommandOutcome::GraphExportYaml(result) => match result {
-            Ok(yaml) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            Ok(yaml) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "runId": run_id,
                 "fileName": run_id.map(|run_id| format!("{run_id}.yaml")),
                 "yaml": yaml,
-            }))),
+            })),
             Err(TeamRuntimeStatus::Rejected) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team graph export was rejected.")
+                TeamRuntimeControlOutcome::rejected("Team graph export was rejected.")
             }
             Err(TeamRuntimeStatus::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "runId": run_id, "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "runId": run_id, "outcome": "outcome-unknown" }))
             }
             Err(TeamRuntimeStatus::Unavailable) => unavailable(),
         },
         TeamRuntimeCommandOutcome::GraphImportYaml(result) => match result {
-            Ok(organization::TeamRunCommandOutcome::Available(run)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            Ok(organization::TeamRunCommandOutcome::Available(run)) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "runId": run.run().as_str(),
                 "imported": true,
-            }))),
+            })),
             Ok(organization::TeamRunCommandOutcome::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "runId": run_id, "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "runId": run_id, "outcome": "outcome-unknown" }))
             }
             Ok(organization::TeamRunCommandOutcome::Unavailable) => unavailable(),
             Err(organization::StoreFault::CommitOutcomeUnknown(_)) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "runId": run_id, "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "runId": run_id, "outcome": "outcome-unknown" }))
             }
-            Err(error) => TeamRuntimeProjectionOutcome::succeeded(super::team_mcp::design_rejected(error)),
+            Err(error) => TeamRuntimeControlOutcome::Succeeded(super::team_mcp::design_rejected(error)),
         },
         TeamRuntimeCommandOutcome::RunDiagnostics(result) => match result {
             organization::TeamRunDiagnosticsQueryOutcome::Available(diagnostics) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!(&diagnostics)))
+                TeamRuntimeControlOutcome::Succeeded(json!(&diagnostics))
             }
             organization::TeamRunDiagnosticsQueryOutcome::Unavailable(_) => unavailable(),
         },
         TeamRuntimeCommandOutcome::WebhookTriggerFire(result) => match result {
-            Ok(organization::TeamTriggerFireOutcome::Recorded(request)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            Ok(organization::TeamTriggerFireOutcome::Recorded(request)) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "success": true,
                 "fired": true,
                 "runId": request.trigger.run_id,
                 "outcome": "recorded",
-            }))),
-            Ok(organization::TeamTriggerFireOutcome::Replayed(request)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            })),
+            Ok(organization::TeamTriggerFireOutcome::Replayed(request)) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "success": true,
                 "fired": false,
                 "runId": request.trigger.run_id,
                 "outcome": "replayed",
-            }))),
+            })),
             Ok(organization::TeamTriggerFireOutcome::Conflicting { .. }) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team webhook trigger conflicted with an existing request.")
+                TeamRuntimeControlOutcome::rejected("Team webhook trigger conflicted with an existing request.")
             }
             Ok(organization::TeamTriggerFireOutcome::NotFound) => unavailable(),
             Ok(organization::TeamTriggerFireOutcome::Unknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "outcome": "outcome-unknown" }))
             }
+            Ok(organization::TeamTriggerFireOutcome::Busy) => TeamRuntimeControlOutcome::Succeeded(json!({
+                "success": false, "error": "The trigger scope is busy; wait for its current batch to settle.",
+                "errorCode": "scope_busy",
+            })),
             Ok(organization::TeamTriggerFireOutcome::Rejected) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team webhook trigger was rejected.")
+                TeamRuntimeControlOutcome::rejected("Team webhook trigger was rejected.")
             }
             Err(TeamRuntimeStatus::Rejected) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team webhook trigger was rejected.")
+                TeamRuntimeControlOutcome::rejected("Team webhook trigger was rejected.")
             }
             Err(TeamRuntimeStatus::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "outcome": "outcome-unknown" }))
             }
             Err(TeamRuntimeStatus::Unavailable) => unavailable(),
         },
-        TeamRuntimeCommandOutcome::GraphSave(result) => match result {
-            Ok(organization::TeamRunCommandOutcome::Available(run)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+        TeamRuntimeCommandOutcome::GraphSave(result)
+        | TeamRuntimeCommandOutcome::GraphPatch(result) => match result {
+            Ok(organization::TeamRunCommandOutcome::Available(run)) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "success": true,
                 "runId": run.run().as_str(),
                 "saved": true,
                 "outcome": "available",
-            }))),
+            })),
             Ok(organization::TeamRunCommandOutcome::Unavailable) => unavailable(),
             Ok(organization::TeamRunCommandOutcome::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "outcome": "outcome-unknown" }))
             }
-            Err(error) => TeamRuntimeProjectionOutcome::succeeded(super::team_mcp::design_rejected(error)),
-        },
-        TeamRuntimeCommandOutcome::GraphPatch(result) => match result {
-            Ok(organization::TeamRunCommandOutcome::Available(run)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
-                "success": true,
-                "runId": run.run().as_str(),
-                "saved": true,
-                "outcome": "available",
-            }))),
-            Ok(organization::TeamRunCommandOutcome::Unavailable) => unavailable(),
-            Ok(organization::TeamRunCommandOutcome::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
-            }
-            Err(error) => TeamRuntimeProjectionOutcome::succeeded(super::team_mcp::design_rejected(error)),
+            Err(error) => TeamRuntimeControlOutcome::Succeeded(super::team_mcp::design_rejected(error)),
         },
         TeamRuntimeCommandOutcome::GraphContext(result) => match result {
-            organization::TeamGraphContextResult::Available(context) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
-                "teamId": context.team().as_str(),
-                "runId": context.run().as_str(),
-                "graphStatus": team_graph_status_name(context.graph_status()),
-                "nodes": context.nodes().iter().map(|node| json!({
-                    "nodeId": node.node_id(),
-                    "nodeExecutionId": node.node_execution_id(),
-                    "status": format!("{:?}", node.status()).to_lowercase(),
-                    "outputPort": node.output_port(),
-                })).collect::<Vec<_>>(),
-                "edges": context.edges().iter().map(|edge| json!({
-                    "edgeId": edge.edge_id(),
-                    "sourceNodeId": edge.source_node_id(),
-                    "targetNodeId": edge.target_node_id(),
-                })).collect::<Vec<_>>(),
-                "pendingApprovalIds": context.pending_approval_ids(),
-                "approvals": context.approvals().iter().map(super::team_mcp::context_approval_json).collect::<Vec<_>>(),
-                "recentEventIds": context.recent_event_ids(),
-            }))),
+            organization::TeamGraphContextResult::Available(context) => {
+                TeamRuntimeControlOutcome::Succeeded(super::team_mcp::graph_context_json(&context))
+            }
             organization::TeamGraphContextResult::Unavailable => unavailable(),
             organization::TeamGraphContextResult::OutcomeUnknown => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "outcome": "outcome-unknown" }))
             }
         },
         TeamRuntimeCommandOutcome::NodePromptRetryDue(result) => match result {
             organization::run::scheduler::NodePromptRetryDueQueryOutcome::Available(plan) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+                TeamRuntimeControlOutcome::Succeeded(json!({
                     "runId": plan.run_id().as_str(),
                     "processedDeliveryRecordIds": plan.due_items().map(|item| item.delivery_id().as_str()).collect::<Vec<_>>(),
                     "nextRetryAt": plan.next_retry_at(),
                     "items": plan.items().iter().map(node_prompt_retry_due_item_json).collect::<Vec<_>>(),
-                })))
+                }))
             }
             organization::run::scheduler::NodePromptRetryDueQueryOutcome::Unknown(reason) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "runId": run_id, "outcome": "unknown", "reason": node_prompt_retry_due_unknown_reason(reason) })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "runId": run_id, "outcome": "unknown", "reason": node_prompt_retry_due_unknown_reason(reason) }))
             }
             organization::run::scheduler::NodePromptRetryDueQueryOutcome::Invalid(reason) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, node_prompt_retry_due_invalid_reason(reason))
+                TeamRuntimeControlOutcome::rejected(node_prompt_retry_due_invalid_reason(reason))
             }
         },
         TeamRuntimeCommandOutcome::NodeEvent(result) => match result {
-            Ok(TeamNodeEventCommandOutcome::NonTerminal(outcome)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            Ok(TeamNodeEventCommandOutcome::NonTerminal(outcome)) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "success": true,
                 "runId": run_id,
                 "outcome": team_node_event_outcome_name(outcome),
-            }))),
-            Ok(TeamNodeEventCommandOutcome::Terminal(outcome)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            })),
+            Ok(TeamNodeEventCommandOutcome::Terminal(outcome)) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "success": true,
                 "runId": run_id,
                 "outcome": team_node_terminal_outcome_name(outcome),
-            }))),
+            })),
             Err(TeamRuntimeStatus::Rejected) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team node event was rejected.")
+                TeamRuntimeControlOutcome::rejected("Team node event was rejected.")
             }
             Err(TeamRuntimeStatus::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "runId": run_id, "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "runId": run_id, "outcome": "outcome-unknown" }))
             }
             Err(TeamRuntimeStatus::Unavailable) => unavailable(),
         },
         TeamRuntimeCommandOutcome::RunDecisionSubmit(result) => match result {
-            Ok(receipt) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            Ok(receipt) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "runId": receipt.decision().run_id(),
                 "decisionId": receipt.decision().decision_id(),
                 "stageId": receipt.decision().stage_id(),
@@ -701,68 +682,67 @@ fn team_runtime_outcome_with_context(
                 },
                 "sequence": receipt.decision().sequence(),
                 "replayed": receipt.is_replay(),
-            }))),
+            })),
             Err(TeamRuntimeStatus::Rejected) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team decision was rejected.")
+                TeamRuntimeControlOutcome::rejected("Team decision was rejected.")
             }
             Err(TeamRuntimeStatus::OutcomeUnknown) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "runId": run_id, "outcome": "outcome-unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "runId": run_id, "outcome": "outcome-unknown" }))
             }
             Err(TeamRuntimeStatus::Unavailable) => unavailable(),
         },
         TeamRuntimeCommandOutcome::ApprovalResolve(result) => match result {
             Ok(organization::run::approval::HumanDecisionOutcome::Recorded) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({ "success": true, "outcome": "recorded" })))
+                TeamRuntimeControlOutcome::Succeeded(json!({ "success": true, "outcome": "recorded" }))
             }
             Ok(organization::run::approval::HumanDecisionOutcome::Replayed) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({ "success": true, "outcome": "replayed" })))
+                TeamRuntimeControlOutcome::Succeeded(json!({ "success": true, "outcome": "replayed" }))
             }
             Err(organization::StoreFault::InvalidFacts) => {
-                TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team approval was rejected.")
+                TeamRuntimeControlOutcome::rejected("Team approval was rejected.")
             }
-            Err(_) => TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" }))),
+            Err(_) => TeamRuntimeControlOutcome::Unknown(json!({ "outcome": "outcome-unknown" })),
         },
         TeamRuntimeCommandOutcome::RunCancel(result) => match result {
             Ok(organization::BeginCancellationOutcome::Started(_))
             | Ok(organization::BeginCancellationOutcome::Replayed(_)) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+                TeamRuntimeControlOutcome::Succeeded(json!({
                     "success": true,
                     "runId": run_id,
                     "state": "cancelling",
-                })))
+                }))
             }
             Ok(organization::BeginCancellationOutcome::AlreadyCancelled) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+                TeamRuntimeControlOutcome::Succeeded(json!({
                     "success": true,
                     "runId": run_id,
                     "state": "cancelled",
-                })))
+                }))
             }
             Ok(organization::BeginCancellationOutcome::Tombstoned) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+                TeamRuntimeControlOutcome::Succeeded(json!({
                     "success": true,
                     "runId": run_id,
                     "state": "tombstoned",
-                })))
+                }))
             }
             Ok(organization::BeginCancellationOutcome::OutcomeUnknown) | Err(_) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "runId": run_id, "state": "outcome_unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "runId": run_id, "state": "outcome_unknown" }))
             }
         },
         TeamRuntimeCommandOutcome::RunDelete(result) => match result {
             Ok(organization::GraphRunPurgeOutcome::Purged)
-            | Ok(organization::GraphRunPurgeOutcome::Replayed) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            | Ok(organization::GraphRunPurgeOutcome::Replayed) => TeamRuntimeControlOutcome::Succeeded(json!({
                 "runId": run_id,
                 "state": "purged",
-            }))),
-            Ok(organization::GraphRunPurgeOutcome::Rejected(_)) => TeamRuntimeProjectionOutcome::rejected(
-                TeamRuntimeProjectionRejection::Failed,
+            })),
+            Ok(organization::GraphRunPurgeOutcome::Rejected(_)) => TeamRuntimeControlOutcome::rejected(
                 "Team run deletion was rejected.",
             ),
             Ok(organization::GraphRunPurgeOutcome::OutcomeUnknown(_)) => {
-                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "runId": run_id, "state": "outcome_unknown" })))
+                TeamRuntimeControlOutcome::Unknown(json!({ "runId": run_id, "state": "outcome_unknown" }))
             }
-            Err(_) => TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team run deletion was rejected."),
+            Err(_) => TeamRuntimeControlOutcome::rejected("Team run deletion was rejected."),
         },
     }
 }
@@ -845,52 +825,28 @@ fn team_skill_dependency_severity_name(
     }
 }
 
-fn team_skill_package_validation_json(
-    validation: &organization::package::TeamSkillPackageValidation,
-) -> Value {
-    match validation {
-        organization::package::TeamSkillPackageValidation::Valid { package } => json!({
-            "status": "valid",
-            "package": {
-                "selectionId": package.selection_id().as_str(),
-                "name": package.name(),
-                "version": package.version(),
-                "kind": "team-skill",
-                "description": package.description(),
-            },
-        }),
-        organization::package::TeamSkillPackageValidation::Invalid => json!({
-            "status": "invalid",
-        }),
-        organization::package::TeamSkillPackageValidation::Unavailable => json!({
-            "status": "unavailable",
-        }),
-    }
-}
-
 fn team_run_trigger_outcome(
     result: organization::TeamRunTriggerOutcome,
-) -> TeamRuntimeProjectionOutcome {
+) -> TeamRuntimeControlOutcome {
     match result.registration() {
         organization::TriggerRegistration::Recorded(request) => {
-            TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            TeamRuntimeControlOutcome::Succeeded(json!({
                 "success": true,
                 "fired": true,
                 "runId": request.run_id.as_str(),
                 "outcome": "recorded",
-            })))
+            }))
         }
         organization::TriggerRegistration::Replayed(request) => {
-            TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+            TeamRuntimeControlOutcome::Succeeded(json!({
                 "success": true,
                 "fired": false,
                 "runId": request.run_id.as_str(),
                 "outcome": "replayed",
-            })))
+            }))
         }
         organization::TriggerRegistration::ConflictingIdempotencyKey { .. } => {
-            TeamRuntimeProjectionOutcome::rejected(
-                TeamRuntimeProjectionRejection::Failed,
+            TeamRuntimeControlOutcome::rejected(
                 "Team trigger was rejected.",
             )
         }
@@ -900,12 +856,12 @@ fn team_run_trigger_outcome(
 fn team_run_list_item_json(
     entry: &organization::TeamRunListEntry,
     resolver: &dyn organization::RoleSessionIdentityResolver,
-) -> Value {
+) -> Option<Value> {
     let run = &entry.projection;
-    let sessions = team_role_session_receipts_legacy_json(run.role_sessions(), resolver);
-    json!({
+    let sessions = team_role_session_receipts_legacy_json(run.role_sessions(), resolver)?;
+    Some(json!({
         "runId": run.run().as_str(),
-        "status": team_run_status(entry.lifecycle, entry.runtime, team_run_status_from_graph_status(run.graph_status())),
+        "status": team_run_status(entry.lifecycle, entry.runtime, team_run_status_from_public_graph_status(graph_status(run.graph_status()))),
         "revision": run.team_revision().get(),
         "packageName": "",
         "packageVersion": "",
@@ -913,19 +869,23 @@ fn team_run_list_item_json(
         "createdAt": 0,
         "updatedAt": 0,
         "sessions": sessions,
-    })
+        "workspace": entry.workspace,
+    }))
 }
 
 pub(crate) fn team_run_public_snapshot_legacy_json(
     snapshot: &organization::run::public_projection::TeamRunPublicSnapshot,
     role_sessions: Option<&[organization::RoleSessionReceipt]>,
     resolver: &dyn organization::RoleSessionIdentityResolver,
-) -> Value {
-    let roles_available = role_sessions.is_some();
-    let roles =
-        role_sessions.map(|sessions| team_role_session_receipts_legacy_json(sessions, resolver));
-    json!({
+) -> Option<Value> {
+    let roles = match role_sessions {
+        Some(sessions) => Some(team_role_session_receipts_legacy_json(sessions, resolver)?),
+        None => None,
+    };
+    let roles_available = roles.is_some();
+    Some(json!({
         "run": team_public_run_legacy_json(snapshot),
+        "lifecycle": snapshot.run().lifecycle(),
         "graph": team_public_graph_legacy_json(snapshot.run().run_id(), snapshot.graph()),
         "nodeInputStates": [],
         "nodeExecutions": snapshot.attempts().iter().map(|attempt| team_public_attempt_legacy_json(snapshot.run().run_id(), attempt)).collect::<Vec<_>>(),
@@ -950,7 +910,7 @@ pub(crate) fn team_run_public_snapshot_legacy_json(
         "events": snapshot.events().iter().map(team_public_event_legacy_json).collect::<Vec<_>>(),
         "startGate": team_run_start_gate_legacy_json(snapshot.run()),
         "nextEventCursor": snapshot.next_event_cursor(),
-    })
+    }))
 }
 
 fn team_public_unavailable_sections_legacy_json(
@@ -972,12 +932,10 @@ fn team_public_unavailable_sections_legacy_json(
 pub(crate) fn team_role_session_receipts_legacy_json(
     sessions: &[organization::RoleSessionReceipt],
     resolver: &dyn organization::RoleSessionIdentityResolver,
-) -> Vec<Value> {
+) -> Option<Vec<Value>> {
     sessions
         .iter()
-        .filter_map(|session| {
-            organization::adapters::loopback::role_session_json(session, resolver)
-        })
+        .map(|session| organization::adapters::loopback::role_session_json(session, resolver))
         .collect()
 }
 
@@ -987,6 +945,7 @@ pub(super) fn team_public_run_legacy_json(
     let run = snapshot.run();
     json!({
         "teamId": run.team_id(),
+        "workspace": run.workspace(),
         "runId": run.run_id(),
         "status": team_run_status_from_public_snapshot(snapshot),
         "revision": run.team_revision(),
@@ -1010,7 +969,8 @@ pub(crate) fn team_public_graph_legacy_json(
         "layout": team_public_graph_layout_legacy_json(graph.layout()),
         "nodes": graph.nodes().iter().map(team_public_node_legacy_json).collect::<Vec<_>>(),
         "edges": graph.edges().iter().map(team_public_edge_legacy_json).collect::<Vec<_>>(),
-        "status": team_public_graph_status_name(graph.status()),
+        "rework": graph.rework(),
+        "status": graph.status(),
     })
 }
 
@@ -1038,7 +998,7 @@ fn team_public_node_legacy_json(
         "taskId": node.task_id(),
         "status": team_public_attempt_status_name(node.attempt().status()),
         "statusReason": node.status_reason(),
-        "maxAttempts": node.max_attempts(),
+        "reworkLimits": node.rework_limits(),
         "config": team_public_node_config_json(node),
     })
 }
@@ -1086,6 +1046,7 @@ fn team_public_attempt_legacy_json(
         "nodeExecutionId": attempt.node_execution_id(),
         "attemptId": attempt.attempt_id(),
         "attemptNumber": attempt.number(),
+        "batchId": attempt.batch_id(),
         "currentAttempt": attempt.current_attempt(),
         "reason": team_public_attempt_reason_name(attempt.reason()),
         "status": team_public_attempt_status_name(attempt.status()),
@@ -1111,7 +1072,12 @@ fn team_public_approval_legacy_json(
         "roleId": approval.role_id(),
         "reason": approval.reason(),
         "requestedAction": approval.requested_action(),
-        "risk": "",
+        "content": approval.content().map(|content| json!({
+            "title": content.title, "body": content.body, "artifactIds": content.artifact_ids,
+        })),
+        "risk": approval.risk(),
+        "note": approval.note(),
+        "cause": approval.cause(),
         "status": team_public_approval_status_name(approval.status()),
         "decision": approval.decision().map(team_public_approval_decision_name),
         "idempotencyKey": "",
@@ -1123,7 +1089,7 @@ fn team_public_approval_legacy_json(
 fn team_public_artifact_legacy_json(
     artifact: &organization::run::public_projection::TeamRunPublicArtifact,
 ) -> Value {
-    json!({
+    let mut value = json!({
         "artifactId": artifact.artifact_id(),
         "runId": artifact.run_id(),
         "stageId": artifact.node_id(),
@@ -1137,10 +1103,14 @@ fn team_public_artifact_legacy_json(
         "nodeExecutionId": artifact.node_execution_id(),
         "attemptId": artifact.attempt_id(),
         "currentAttempt": artifact.current_attempt(),
+        "files": artifact.files(),
         "idempotencyKey": "",
         "createdAt": artifact.created_at(),
         "updatedAt": artifact.updated_at(),
-    })
+    });
+    if let Some(session_ref) = artifact.session_ref() { value["sessionRef"] = json!(session_ref); }
+    if let Some(identity) = artifact.agent_identity() { value["agentIdentity"] = json!(identity); }
+    value
 }
 
 fn team_public_decision_legacy_json(
@@ -1254,17 +1224,6 @@ fn team_run_status(
     }
 }
 
-fn team_run_status_from_graph_status(status: organization::GraphStatus) -> &'static str {
-    match status {
-        organization::GraphStatus::Pending | organization::GraphStatus::Ready => "created",
-        organization::GraphStatus::Running => "running",
-        organization::GraphStatus::Waiting => "waiting_for_user",
-        organization::GraphStatus::Completed => "completed",
-        organization::GraphStatus::Failed => "failed",
-        organization::GraphStatus::Cancelled => "cancelled",
-    }
-}
-
 fn team_run_status_from_public_graph_status(
     status: organization::run::public_projection::TeamPublicGraphStatus,
 ) -> &'static str {
@@ -1273,20 +1232,6 @@ fn team_run_status_from_public_graph_status(
         | organization::run::public_projection::TeamPublicGraphStatus::Ready => "created",
         organization::run::public_projection::TeamPublicGraphStatus::Running => "running",
         organization::run::public_projection::TeamPublicGraphStatus::Waiting => "waiting_for_user",
-        organization::run::public_projection::TeamPublicGraphStatus::Completed => "completed",
-        organization::run::public_projection::TeamPublicGraphStatus::Failed => "failed",
-        organization::run::public_projection::TeamPublicGraphStatus::Cancelled => "cancelled",
-    }
-}
-
-fn team_public_graph_status_name(
-    status: organization::run::public_projection::TeamPublicGraphStatus,
-) -> &'static str {
-    match status {
-        organization::run::public_projection::TeamPublicGraphStatus::Pending => "pending",
-        organization::run::public_projection::TeamPublicGraphStatus::Ready => "ready",
-        organization::run::public_projection::TeamPublicGraphStatus::Running => "running",
-        organization::run::public_projection::TeamPublicGraphStatus::Waiting => "waiting",
         organization::run::public_projection::TeamPublicGraphStatus::Completed => "completed",
         organization::run::public_projection::TeamPublicGraphStatus::Failed => "failed",
         organization::run::public_projection::TeamPublicGraphStatus::Cancelled => "cancelled",
@@ -1395,6 +1340,9 @@ fn team_public_event_type_name(
         organization::run::public_projection::TeamPublicEventType::GraphReplaced => {
             "graph_replaced"
         }
+        organization::run::public_projection::TeamPublicEventType::ReworkContinued => {
+            "rework_continued"
+        }
         organization::run::public_projection::TeamPublicEventType::NodeProgressed => {
             "node_progressed"
         }
@@ -1447,7 +1395,7 @@ fn team_resume_legacy_json(
     outcomes: &[organization::ResumeOutcome],
     runs: &[organization::TeamRunListEntry],
     resolver: &dyn organization::RoleSessionIdentityResolver,
-) -> Value {
+) -> Option<Value> {
     let terminal_run_ids = runs
         .iter()
         .filter_map(team_terminal_run_id)
@@ -1477,14 +1425,15 @@ fn team_resume_legacy_json(
             skipped_terminal_run_ids.insert(run_id);
         }
     }
-    json!({
+    let runs = runs.iter().map(|run| team_run_list_item_json(run, resolver)).collect::<Option<Vec<_>>>()?;
+    Some(json!({
         "success": true,
         "teamId": team_id.as_str(),
         "restoredRunIds": restored_run_ids,
         "activeRunIds": active_run_ids,
         "skippedTerminalRunIds": skipped_terminal_run_ids.into_iter().collect::<Vec<_>>(),
-        "runs": runs.iter().map(|run| team_run_list_item_json(run, resolver)).collect::<Vec<_>>(),
-    })
+        "runs": runs,
+    }))
 }
 
 fn team_resume_run_id(outcome: &organization::ResumeOutcome) -> &str {
@@ -1520,18 +1469,6 @@ fn team_trigger_json(trigger: &organization::ArmedTrigger) -> Value {
         "startNodeId": trigger.start_node_id(),
         "trigger": trigger_value,
     })
-}
-
-fn team_graph_status_name(status: organization::GraphStatus) -> &'static str {
-    match status {
-        organization::GraphStatus::Pending => "pending",
-        organization::GraphStatus::Ready => "ready",
-        organization::GraphStatus::Running => "running",
-        organization::GraphStatus::Waiting => "waiting",
-        organization::GraphStatus::Completed => "completed",
-        organization::GraphStatus::Failed => "failed",
-        organization::GraphStatus::Cancelled => "cancelled",
-    }
 }
 
 fn team_node_terminal_outcome_name(outcome: organization::TeamNodeTerminalResult) -> &'static str {

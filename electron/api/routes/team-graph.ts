@@ -1,5 +1,6 @@
 import {
   isGraphDefinition,
+  isYaml,
   type TeamGraphDefinition,
   type TeamGraphTransport,
 } from '../../main/runtime-host-delivery/transport/teams/graph';
@@ -83,10 +84,6 @@ function isRequest(value: unknown): value is TeamGraphRequest {
     && (value.commandId === undefined || isOpaqueId(value.commandId))
     && isOpaqueId(value.idempotencyKey)
     && isYaml(value.yaml);
-}
-
-function isYaml(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 256 * 1024 && !value.includes('\0');
 }
 
 function isOpaqueId(value: unknown): value is string {

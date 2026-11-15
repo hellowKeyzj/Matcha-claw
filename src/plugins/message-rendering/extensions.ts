@@ -35,6 +35,7 @@ export interface MessagePartProps {
   onOpenToolSurface: (tool: SessionRenderToolCard, identity: SessionIdentity) => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
+  onRefreshMediaTask?: (taskId: string) => Promise<void>;
 }
 
 export interface MessagePartRenderer {

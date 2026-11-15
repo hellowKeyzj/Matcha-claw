@@ -62,6 +62,7 @@ import { handleTeamDecisionRoutes } from './routes/team-decision';
 import { handleTeamGraphRoutes } from './routes/team-graph';
 import { handleTeamLifecycleRoutes } from './routes/team-lifecycle';
 import { handleTeamPublicRoutes } from './routes/team-public';
+import { handleTeamPromptsRoutes } from './routes/team-prompts';
 import { handleTeamTaskBoardRoutes } from './routes/team-task-board';
 import { handleTeamRoleSessionsRoutes } from './routes/team-role-sessions';
 import { handleTeamSkillRoutes } from './routes/team-skill';
@@ -152,6 +153,7 @@ const runtimeRouteFamilies: Readonly<Record<string, readonly RouteHandler<HostAp
     (req, url, deps) => handleTeamGraphRoutes(req, url, deps.runtimeHostTransports.teamGraphTransport),
     (req, url, deps) => handleTeamLifecycleRoutes(req, url, deps.runtimeHostTransports.teamLifecycleTransport),
     (req, url, deps) => handleTeamPublicRoutes(req, url, deps.runtimeHostTransports.teamPublicTransport),
+    (req, url, deps) => handleTeamPromptsRoutes(req, url, deps.runtimeHostTransports.teamPromptsTransport),
     (req, url, deps) => handleTeamTaskBoardRoutes(req, url, deps.runtimeHostTransports.teamTaskBoardTransport),
     (req, url, deps) => handleTeamRoleSessionsRoutes(req, url, deps.runtimeHostTransports.teamRoleSessionsTransport),
     (req, url, deps) => handleTeamSkillRoutes(req, url, deps.runtimeHostTransports.teamSkillTransport),

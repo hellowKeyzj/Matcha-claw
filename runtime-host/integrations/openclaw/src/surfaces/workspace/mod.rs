@@ -7,7 +7,7 @@ mod directory;
 pub mod media;
 mod selection;
 
-use std::{fmt, sync::Arc};
+use std::{fmt, path::{Path, PathBuf}, sync::Arc};
 
 pub use binding::OpenClawWorkspaceBinding;
 
@@ -68,12 +68,45 @@ impl OpenClawWorkspaceAccess {
 
     pub fn bind_workspace(
         &self,
-        session_key: &str,
+        session: &crate::session::protocol::SessionIdentityReadback,
     ) -> Result<OpenClawWorkspaceBinding, WorkspaceDirectoryFailure> {
-        let selection = self.selection(session_key)
-            .map_err(|_| WorkspaceDirectoryFailure::Unavailable)?;
+        let selection = self.session_selection(session)?;
         Ok(OpenClawWorkspaceBinding {
             files: WorkspaceFiles::new(selection),
+            media: Arc::clone(&self.media),
+            state_dir: self.config.state_dir(),
+        })
+    }
+
+    pub(crate) fn session_workspace_directory(
+        &self,
+        session: &crate::session::protocol::SessionIdentityReadback,
+    ) -> Result<TrustedWorkspaceDirectory, WorkspaceDirectoryFailure> {
+        let selection = self.session_selection(session)?;
+        let directory = selection.as_path().to_str().ok_or(WorkspaceDirectoryFailure::Unavailable)?;
+        Ok(TrustedWorkspaceDirectory(directory.to_owned()))
+    }
+
+    fn session_selection(
+        &self,
+        session: &crate::session::protocol::SessionIdentityReadback,
+    ) -> Result<selection::WorkspaceSelection, WorkspaceDirectoryFailure> {
+        if let Some(root) = session.workspace_root() {
+            return Ok(selection::WorkspaceSelection::new(root.to_path_buf()));
+        }
+        self.selector().map_err(|_| WorkspaceDirectoryFailure::Unavailable)?
+            .select_agent(session.agent_id()).ok_or(WorkspaceDirectoryFailure::Unavailable)
+    }
+
+    pub(crate) fn bind_run_workspace(
+        &self,
+        root: &Path,
+    ) -> Result<OpenClawWorkspaceBinding, WorkspaceDirectoryFailure> {
+        if !root.is_absolute() {
+            return Err(WorkspaceDirectoryFailure::Unavailable);
+        }
+        Ok(OpenClawWorkspaceBinding {
+            files: WorkspaceFiles::new(selection::WorkspaceSelection::new(PathBuf::from(root))),
             media: Arc::clone(&self.media),
             state_dir: self.config.state_dir(),
         })
@@ -351,7 +384,8 @@ impl From<WorkspaceFileError> for WorkspaceReadFailure {
             WorkspaceFileError::NotFile => Self::NotFile,
             WorkspaceFileError::TooLarge => Self::TooLarge,
             WorkspaceFileError::Binary => Self::Binary,
-            WorkspaceFileError::Unavailable
+            WorkspaceFileError::Missing
+            | WorkspaceFileError::Unavailable
             | WorkspaceFileError::NotDirectory
             | WorkspaceFileError::OutcomeUnknown => Self::Unavailable,
         }
@@ -397,7 +431,8 @@ impl From<WorkspaceFileError> for WorkspaceBinaryFailure {
             WorkspaceFileError::InvalidRelative => Self::InvalidPath,
             WorkspaceFileError::NotFile => Self::NotFile,
             WorkspaceFileError::TooLarge => Self::TooLarge,
-            WorkspaceFileError::Unavailable
+            WorkspaceFileError::Missing
+            | WorkspaceFileError::Unavailable
             | WorkspaceFileError::NotDirectory
             | WorkspaceFileError::Binary
             | WorkspaceFileError::OutcomeUnknown => Self::Unavailable,
@@ -440,7 +475,8 @@ impl From<WorkspaceFileError> for WorkspaceStatFailure {
     fn from(value: WorkspaceFileError) -> Self {
         match value {
             WorkspaceFileError::InvalidRelative => Self::InvalidPath,
-            WorkspaceFileError::Unavailable
+            WorkspaceFileError::Missing
+            | WorkspaceFileError::Unavailable
             | WorkspaceFileError::NotFile
             | WorkspaceFileError::NotDirectory
             | WorkspaceFileError::TooLarge
@@ -485,7 +521,8 @@ impl From<WorkspaceFileError> for WorkspaceListFailure {
         match value {
             WorkspaceFileError::InvalidRelative => Self::InvalidPath,
             WorkspaceFileError::NotDirectory => Self::NotDirectory,
-            WorkspaceFileError::Unavailable
+            WorkspaceFileError::Missing
+            | WorkspaceFileError::Unavailable
             | WorkspaceFileError::NotFile
             | WorkspaceFileError::TooLarge
             | WorkspaceFileError::Binary
@@ -533,7 +570,8 @@ impl From<WorkspaceFileError> for WorkspaceWriteFailure {
             WorkspaceFileError::NotFile => Self::NotFile,
             WorkspaceFileError::TooLarge => Self::TooLarge,
             WorkspaceFileError::OutcomeUnknown => Self::OutcomeUnknown,
-            WorkspaceFileError::Unavailable
+            WorkspaceFileError::Missing
+            | WorkspaceFileError::Unavailable
             | WorkspaceFileError::NotDirectory
             | WorkspaceFileError::Binary => Self::Unavailable,
         }

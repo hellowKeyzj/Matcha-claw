@@ -50,10 +50,10 @@ export function makeHooks(
 ): WorkflowHooks {
   // All progress events auto-inject runId so the adapter can route them to the corresponding task (multiple concurrent workflows)
   const emit = (init: HookProgressInit): void => {
-    ctx.ports.progressEmitter.emit({
-      runId: ctx.runId,
-      ...init,
-    } as ProgressEvent)
+    ctx.ports.progressEmitter.emit(
+      { runId: ctx.runId, ...init } as ProgressEvent,
+      ctx.signal,
+    )
   }
 
   const agent: WorkflowHooks['agent'] = async (prompt, opts = {}) => {
@@ -162,6 +162,7 @@ export function makeHooks(
                       ctx.runId,
                       id,
                       ac,
+                      ctx.signal,
                     )
                   },
                 }
@@ -172,6 +173,7 @@ export function makeHooks(
                     ctx.ports.taskRegistrar.unregisterAgentAbort?.(
                       ctx.runId,
                       id,
+                      ctx.signal,
                     )
                   },
                 }

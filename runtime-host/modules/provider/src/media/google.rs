@@ -20,12 +20,17 @@ fn uses_interactions_image(model: &ProviderModel) -> bool {
     )
 }
 
-pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabilities, Failure> {
+pub(super) fn capabilities(
+    model: &ProviderModel,
+    kind: Kind,
+    endpoint_validates_options: bool,
+) -> Result<Capabilities, Failure> {
     let name = model.model_id().trim_start_matches("models/");
     let mut limits = Capabilities {
         max_images: 0,
         max_count: 1,
         mask: false,
+        endpoint_validates_options,
         pixel_size: false,
         pixel_size_limits: None,
         sizes: None,
@@ -33,6 +38,9 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
         storyboard: false,
     };
     match kind {
+        Kind::Image | Kind::Video if endpoint_validates_options => {
+            limits.max_images = 16;
+        }
         Kind::Image => {
             if matches!(
                 name,
@@ -70,8 +78,10 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
             );
             limits.durations_seconds = Some((3..=10).collect());
         }
-        Kind::Speech if matches!(name, "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts") => {}
-        Kind::Music if name == "lyria-3.5" => {}
+        Kind::Speech
+            if endpoint_validates_options
+                || matches!(name, "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts") => {}
+        Kind::Music if endpoint_validates_options || name == "lyria-3.5" => {}
         _ => return Err(Failure::Unsupported),
     }
     if model.quality().is_some() {
@@ -80,13 +90,18 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
     Ok(limits)
 }
 
-pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), Failure> {
+pub(super) fn validate(
+    model: &ProviderModel,
+    request: &Request,
+    endpoint_validates_options: bool,
+) -> Result<(), Failure> {
     let name = model.model_id().trim_start_matches("models/");
     if name.is_empty()
         || name.len() > 512
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || !endpoint_validates_options
+            && !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         || matches!(name, "." | "..")
         || request.mask.is_some()
         || request.count.unwrap_or(1) != 1
@@ -97,30 +112,34 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
     }
     match request.kind {
         Kind::Image => {
-            if !uses_interactions_image(model) && !name.starts_with("gemini-")
+            let limits = capabilities(model, Kind::Image, endpoint_validates_options)?;
+            if request.images.len() > usize::from(limits.max_images)
+                || !endpoint_validates_options
+                    && !uses_interactions_image(model)
+                    && !name.starts_with("gemini-")
                 || request.duration_seconds.is_some()
                 || request.voice.is_some()
                 || request.language.is_some()
-                || request
-                    .size
-                    .as_deref()
-                    .or(model.resolution())
-                    .is_some_and(|size| !matches!(size, "512" | "1K" | "2K" | "4K"))
-            {
-                return Err(Failure::Unsupported);
-            }
-            if uses_interactions_image(model) {
-                let limits = capabilities(model, Kind::Image)?;
-                if request.images.len() > usize::from(limits.max_images)
-                    || request
+                || !endpoint_validates_options
+                    && request
                         .size
                         .as_deref()
                         .or(model.resolution())
-                        .is_some_and(|size| {
-                            !limits.sizes.as_ref().is_some_and(|sizes| {
-                                sizes.iter().any(|supported| supported == size)
-                            })
-                        })
+                        .is_some_and(|size| !matches!(size, "512" | "1K" | "2K" | "4K"))
+            {
+                return Err(Failure::Unsupported);
+            }
+            if !endpoint_validates_options && uses_interactions_image(model) {
+                if request
+                    .size
+                    .as_deref()
+                    .or(model.resolution())
+                    .is_some_and(|size| {
+                        !limits
+                            .sizes
+                            .as_ref()
+                            .is_some_and(|sizes| sizes.iter().any(|supported| supported == size))
+                    })
                     || model.aspect_ratio().is_some_and(|ratio| {
                         name != "gemini-nano-banana-2.1"
                             || !matches!(
@@ -147,27 +166,28 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
             }
         }
         Kind::Video => {
-            let limits = capabilities(model, Kind::Video)?;
+            let limits = capabilities(model, Kind::Video, endpoint_validates_options)?;
             if request.images.len() > usize::from(limits.max_images)
                 || request.voice.is_some()
                 || request.language.is_some()
-                || request
-                    .duration_seconds
-                    .is_some_and(|seconds| !(3..=10).contains(&seconds))
-                || request
-                    .size
-                    .as_deref()
-                    .or(model.resolution())
-                    .is_some_and(|size| !matches!(size, "360p" | "720p" | "1080p" | "4k"))
-                || model
-                    .aspect_ratio()
-                    .is_some_and(|ratio| !matches!(ratio, "16:9" | "9:16"))
+                || !endpoint_validates_options
+                    && (request
+                        .duration_seconds
+                        .is_some_and(|seconds| !(3..=10).contains(&seconds))
+                        || request
+                            .size
+                            .as_deref()
+                            .or(model.resolution())
+                            .is_some_and(|size| !matches!(size, "360p" | "720p" | "1080p" | "4k"))
+                        || model
+                            .aspect_ratio()
+                            .is_some_and(|ratio| !matches!(ratio, "16:9" | "9:16")))
             {
                 return Err(Failure::Unsupported);
             }
         }
         Kind::Speech | Kind::Music => {
-            capabilities(model, request.kind)?;
+            capabilities(model, request.kind, endpoint_validates_options)?;
             if !request.images.is_empty()
                 || request.size.is_some()
                 || request.duration_seconds.is_some()
@@ -480,21 +500,28 @@ async fn download_file(
     mime_type: &str,
     remaining: &mut usize,
 ) -> Result<Content, Failure> {
-    let uri = Url::parse(uri).map_err(|_| Failure::InvalidResponse)?;
+    let url = Url::parse(uri).map_err(|_| Failure::InvalidResponse)?;
     // Only the documented Developer API file service receives the account key.
     // In particular, neither a custom endpoint's arbitrary URI nor a CDN gets it.
     if endpoint.scheme() != "https"
         || endpoint.host_str() != Some("generativelanguage.googleapis.com")
         || endpoint.port_or_known_default() != Some(443)
-        || uri.origin() != endpoint.origin()
-        || !uri.username().is_empty()
-        || uri.password().is_some()
-        || uri.fragment().is_some()
-        || uri.query().is_some_and(|query| query != "alt=media")
+        || url.origin() != endpoint.origin()
+    {
+        let output = wire::download(client, uri, remaining).await?;
+        if output.mime_type != mime_type {
+            return Err(Failure::InvalidResponse);
+        }
+        return Ok(output);
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.query().is_some_and(|query| query != "alt=media")
     {
         return Err(Failure::Unsupported);
     }
-    let path = uri.path().strip_suffix(":download").unwrap_or(uri.path());
+    let path = url.path().strip_suffix(":download").unwrap_or(url.path());
     let file_id = path
         .strip_prefix("/v1beta/files/")
         .or_else(|| path.strip_prefix("/v1/files/"))

@@ -10,11 +10,12 @@ import { isRecord, type SandboxMessage } from '@/plugins/surfaces/sandbox-channe
 import { useInstalledAppPlugins } from './installed';
 import { isAppDevelopmentSnapshot, type AppDevelopmentAction, type AppDevelopmentActionResult, type AppFrameHandle } from './development-protocol';
 export type { AppFrameHandle } from './development-protocol';
-import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
+import { buildCapabilityScopeKey, buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
 import { buildAppDocument, getAppBridgeMessages } from './browser-sdk';
 import { useSettingsStore } from '@/plugins/settings/store';
 import { useResolvedTheme } from '@/lib/use-resolved-theme';
 import { createAppSessionMedia } from './session-media';
+import { readSessionWorkspaceFileContext } from '@/plugins/chat/session-media';
 import { AppPluginConfirmation } from './Confirmation';
 import { createAppDesktopMedia } from './desktop-media';
 import { isApplicationOpenRequest, type ApplicationOpenChannel } from './application-open';
@@ -617,6 +618,9 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
           const session = context.sessionIdentity;
           const input = value.request as Parameters<NonNullable<AppWebviewApi['saveWorkspaceFile']>>[0];
           if (!session || !isMediaActive()) throw new Error(text('sessionChanged'));
+          const scope = readSessionWorkspaceFileContext(session).scope;
+          if (!scope) throw new Error(text('workspaceSaveFailed'));
+          const scopeKey = buildCapabilityScopeKey(scope);
           const allowed = await new Promise<boolean>((resolve) => {
             const finish = (accepted: boolean) => {
               if (finishWorkspaceSave !== finish) return;
@@ -630,7 +634,9 @@ export const AppFrame = forwardRef<AppFrameHandle, AppFrameProps>(function AppFr
           if (!allowed) throw new Error(text('workspaceSaveCancelled'));
           staging.signal.throwIfAborted();
           if (!isMediaActive()) throw new Error(text('sessionChanged'));
-          const saved = await hostFileWriteBinary({ endpoint: session.endpoint, agentId: session.agentId, relativePath: input.relativePath, data: input.data });
+          const currentScope = readSessionWorkspaceFileContext(session).scope;
+          if (!currentScope || buildCapabilityScopeKey(currentScope) !== scopeKey) throw new Error(text('sessionChanged'));
+          const saved = await hostFileWriteBinary({ scope, relativePath: input.relativePath, data: input.data });
           if (!saved.ok) throw new Error(text(saved.error === 'outcomeUnknown' ? 'workspaceSaveUnknown' : 'workspaceSaveFailed'));
           return { content: [], structuredContent: { name: saved.name, size: saved.size } };
         })

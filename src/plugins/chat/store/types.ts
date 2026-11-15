@@ -13,6 +13,7 @@ import type {
   SessionDelta,
   SessionModelState,
   SessionRunTiming,
+  SessionView,
 } from '@/types/session/snapshot';
 import type {
   SessionRenderAttachedFile,
@@ -186,6 +187,7 @@ export interface ChatSessionRuntimeNotice {
 export interface ChatSessionRuntimeState {
   activeRunId: string | null;
   runPhase: ChatRunPhase;
+  requestPending: boolean;
   activeTurnItemKey: string | null;
   pendingTurnKey: string | null;
   pendingTurnLaneKey: string | null;
@@ -346,6 +348,7 @@ export type ChatSessionSendAdmission = 'queued' | 'started' | 'in_flight' | 'ok'
 export type ChatSessionSendReceipt =
   | { phase: 'awaiting-receipt'; terminalRunIds: readonly string[]; terminalOverflow: boolean }
   | { phase: 'accepted'; admission: ChatSessionSendAdmission; runId: string }
+  | { phase: 'handed-off'; runId: string | null }
   | { phase: 'failed'; error: string }
   | { phase: 'unknown'; runId: string | null; error: string; terminalRunIds: readonly string[]; terminalOverflow: boolean };
 
@@ -490,7 +493,7 @@ export interface ChatStoreActions {
   applySessionDelta: (delta: SessionDelta) => SessionProjectionApplyResult;
   observeSession: (identity: SessionIdentity, leaseId?: string) => { leaseId: string; ready: Promise<void> };
   releaseSession: (identity: SessionIdentity, leaseId: string) => Promise<void>;
-  resyncSession: (event: unknown) => Promise<void>;
+  resyncSession: (event: unknown) => Promise<SessionView | null>;
   bootstrapSessionRuntime: () => Promise<void>;
   loadSessions: () => Promise<void>;
   openAgentConversation: (agentId: string, endpoint?: RuntimeEndpointRef) => void;

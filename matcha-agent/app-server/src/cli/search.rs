@@ -1,5 +1,5 @@
 use super::{Cli, Instance};
-use crate::{rpc, search::Projection};
+use crate::{config::ConfigStore, rpc, search::Projection};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -7,6 +7,7 @@ use std::time::Duration;
 pub(super) struct State {
     // Instance-scoped flag values, not a second durable settings store.
     original: Option<Value>,
+    unresolved: Option<rpc::Error>,
 }
 
 impl Cli {
@@ -15,12 +16,39 @@ impl Cli {
         self.0.instance.apply_search(projection).await
     }
 
+    pub(crate) async fn reconcile_search(&self, config: &ConfigStore) -> rpc::Result<bool> {
+        let cli = self.clone();
+        let config = config.clone();
+        tokio::spawn(async move {
+            cli.initialized().await?;
+            let instance = &cli.0.instance;
+            let mut state = instance.search.lock().await;
+            // Snapshot after instance serialization: an old project may not overwrite a newer one.
+            let projection = config.checked_snapshot().await?.search;
+            instance
+                .apply_search_locked(&mut state, projection.as_ref())
+                .await
+        })
+        .await
+        .map_err(|error| {
+            rpc::Error::new(
+                -32006,
+                "search_reload_unknown",
+                "Native search reload could not be confirmed",
+            )
+            .with_source(error)
+        })?
+    }
+
     pub(crate) async fn observe_search(
         &self,
         projection: Option<&Projection>,
     ) -> rpc::Result<bool> {
         self.initialized().await?;
         let state = self.0.instance.search.lock().await;
+        if let Some(error) = &state.unresolved {
+            return Err(error.clone());
+        }
         if projection.is_none() {
             return Ok(state.original.is_none());
         }
@@ -35,6 +63,17 @@ impl Cli {
 impl Instance {
     pub(super) async fn apply_search(&self, projection: Option<&Projection>) -> rpc::Result<bool> {
         let mut state = self.search.lock().await;
+        self.apply_search_locked(&mut state, projection).await
+    }
+
+    async fn apply_search_locked(
+        &self,
+        state: &mut State,
+        projection: Option<&Projection>,
+    ) -> rpc::Result<bool> {
+        if let Some(error) = &state.unresolved {
+            return Err(error.clone());
+        }
         if projection.is_none() && state.original.is_none() {
             return Ok(true);
         }
@@ -54,8 +93,16 @@ impl Instance {
                 .clone()
                 .expect("original search flag settings"),
         };
-        self.search_request(json!({ "subtype": "apply_flag_settings", "settings": settings }))
-            .await?;
+        if let Err(error) = self
+            .search_request(json!({ "subtype": "apply_flag_settings", "settings": settings }))
+            .await
+        {
+            if error.code == -32006 {
+                // Pending native writes keep their lease after timeout; never race a new projection with them.
+                state.unresolved = Some(error.clone());
+            }
+            return Err(error);
+        }
         let observed = self.search_settings().await?;
         match projection {
             Some(projection) => Ok(matches_projection(&observed, projection)),

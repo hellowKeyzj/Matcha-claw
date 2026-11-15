@@ -1,21 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use crate::application::review;
+use platform::trace::{identifier_hash, runtime_trace};
+use serde_json::json;
 
 use organization::{
-    ActivityClaim, ActivityFailure, ActivityId, ActivityKind, ActivityPhase,
-    ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
+    ActivityClaim, ActivityFailure, ActivityId, ActivityPhase,
+    ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
     ArmedCronTrigger, BeginCancellationOutcome, CreateGraphRunOutcome, CronScheduleError,
     CronTriggerScheduleError, DeliveryId, DeliveryPhase, DeliveryReceipt, DeliveryRejection,
     DueCronTriggerPlan, GraphDefinition, GraphRunFacts, GraphRunId, GraphRunPurgeOutcome,
     GraphState, IdempotencyKey, NativeTerminalReceiptTarget, NativeTerminalStatus, NodeDefinition,
-    NodeId, OrganizationStore, ResumeOutcome, RoleAbortOutcome, RoleSessionReceipt, RoleSessionRef,
-    RunRuntimeReceipt, RuntimeEndpointReference, SettleCancellationOutcome, StartTrigger,
-    StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamGraphContextQuery,
-    TeamGraphContextResult, TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamRunProjection,
+    NodeId, OrganizationStore, ResumeOutcome, RoleAbortOutcome,
+    RunRuntimeReceipt, SettleCancellationOutcome, StartTrigger,
+    StoreFault, TeamGraphContextQuery,
+    TeamGraphContextResult, TeamId, TeamRunProjection,
     TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome, TeamTriggerFireRequest,
-    TeamTriggerFireRequestError, TerminalObservationOutcome, TombstoneOutcome, TriggerFireRequest,
-    TriggerRegistration, TriggerSource, next_cron_slot_after, plan_due_cron_trigger,
+    TerminalObservationOutcome, TombstoneOutcome, TriggerFireRequest,
+    TriggerRegistration, next_cron_slot_after, plan_due_cron_trigger,
     query_team_run,
     run::graph::GraphLayout,
     run::lifecycle::GraphRunLifecycleState,
@@ -35,7 +36,6 @@ pub(crate) struct TeamRunOwner;
 pub(crate) struct ManualTeamMaterializationInput {
     pub(crate) team_id: TeamId,
     pub(crate) team_name: String,
-    pub(crate) endpoint: RuntimeEndpointReference,
     pub(crate) roles: Vec<organization::ManualTeamRoleBinding>,
     pub(crate) materialization_idempotency_key: IdempotencyKey,
     pub(crate) run: GraphRunFacts,
@@ -68,16 +68,11 @@ pub enum TeamMaterializationCommandOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TeamRunActivityTarget {
-    OpenClaw { run_id: GraphRunId },
-    Matcha { run_id: GraphRunId },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TeamRunActivityError {
     InvalidPrompt,
     InvalidBinding,
     SessionMismatch,
+    TargetUnavailable,
     Retired,
     Store(StoreFault),
 }
@@ -92,11 +87,11 @@ pub enum TeamRunActivityStart {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TeamRunActivityOutcome {
-    Dispatched(TeamRunCommandOutcome),
-    AlreadyClaimed(TeamRunCommandOutcome),
-    AwaitingRetry(TeamRunCommandOutcome),
-    Terminal(TeamRunCommandOutcome),
-    OutcomeUnknown(TeamRunCommandOutcome),
+    Dispatched,
+    AlreadyClaimed,
+    AwaitingRetry,
+    Terminal,
+    OutcomeUnknown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,7 +171,10 @@ pub enum TeamTriggerFireResolution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CronReconciliation {
     AwaitingSlot,
-    Due(DueCronTriggerPlan),
+    Due {
+        plan: DueCronTriggerPlan,
+        expression: String,
+    },
     InvalidSchedule {
         run_id: GraphRunId,
         start_node_id: String,
@@ -187,18 +185,31 @@ pub(crate) enum CronReconciliation {
 #[derive(Default)]
 pub(crate) struct TeamTriggerCron {
     slots: BTreeMap<(String, String), (String, u64)>,
+    last_started_run: Option<String>,
 }
 
 impl TeamTriggerCron {
+    pub(crate) fn next_slot_at(&self, mut run_available: impl FnMut(&str) -> bool) -> Option<u64> {
+        self.slots.iter()
+            .filter_map(|((run_id, _), (_, slot))| run_available(run_id).then_some(*slot))
+            .min()
+    }
+
     pub(crate) fn reconcile(
         &mut self,
         triggers: Vec<ArmedTrigger>,
         now: u64,
+        unavailable_runs: std::collections::BTreeSet<String>,
+        mut capacity: usize,
     ) -> Vec<CronReconciliation> {
+        let mut selected_runs = std::collections::BTreeSet::new();
         let mut armed = BTreeMap::new();
         let mut reconciliations = Vec::new();
 
         for trigger in triggers {
+            if unavailable_runs.contains(trigger.run_id.as_str()) {
+                continue;
+            }
             let TeamTrigger::Cron { expression } = trigger.trigger else {
                 continue;
             };
@@ -225,8 +236,18 @@ impl TeamTriggerCron {
             armed.insert(key.clone(), (expression, next_slot_at));
         }
 
-        self.slots.retain(|key, _| armed.contains_key(key));
+        self.slots.retain(|key, _| unavailable_runs.contains(&key.0) || armed.contains_key(key));
+        let mut armed = armed.into_iter().collect::<Vec<_>>();
+        if let Some(last) = &self.last_started_run {
+            let next = armed.partition_point(|(key, _)| key.0.as_str() <= last.as_str());
+            // Resume after the last admitted Run so continuously due Runs cannot starve later ones.
+            armed.rotate_left(next);
+        }
         for (key, (expression, next_slot_at)) in armed {
+            if capacity == 0 && !selected_runs.contains(&key.0) {
+                self.slots.insert(key, (expression, next_slot_at));
+                continue;
+            }
             let successor = if next_slot_at <= now {
                 match next_cron_slot_after(&expression, now) {
                     Ok(slot) => Some(slot),
@@ -257,15 +278,19 @@ impl TeamTriggerCron {
             );
             match plan {
                 Ok(Some(plan)) => {
+                    if selected_runs.insert(key.0.clone()) {
+                        capacity -= 1;
+                        self.last_started_run = Some(key.0.clone());
+                    }
                     match plan.next_slot_at {
                         Some(slot) => {
-                            self.slots.insert(key, (expression, slot));
+                            self.slots.insert(key, (expression.clone(), slot));
                         }
                         None => {
                             self.slots.remove(&key);
                         }
                     }
-                    reconciliations.push(CronReconciliation::Due(plan));
+                    reconciliations.push(CronReconciliation::Due { plan, expression });
                 }
                 Ok(None) => {
                     self.slots.insert(key, (expression, next_slot_at));
@@ -285,9 +310,13 @@ impl TeamTriggerCron {
         reconciliations
     }
 
-    pub(crate) fn unknown(&mut self, request: &TriggerFireRequest) {
-        self.slots
-            .remove(&(request.run_id.clone(), request.start_node_id.clone()));
+    pub(crate) fn unknown(&mut self, plan: &DueCronTriggerPlan, expression: &str) {
+        let key = (plan.fire.run_id.clone(), plan.fire.start_node_id.clone());
+        if self.slots.get(&key).is_some_and(|(current_expression, slot)| {
+            current_expression == expression && Some(*slot) == plan.next_slot_at
+        }) {
+            self.slots.remove(&key);
+        }
     }
 }
 
@@ -305,40 +334,7 @@ pub(crate) fn prepare_runtime_receipt(
     };
     let run = store.facts().run(run_id)
         .ok_or_else(|| failure(TeamCreationFailureReason::RunMissing))?;
-    if let Some(receipt) = run.runtime() {
-        return Ok(receipt.clone());
-    }
-    let mut slots = BTreeSet::new();
-    for role in materialization.roles() {
-        slots.insert((role.role().as_str().to_owned(), RoleSessionRef::initial()));
-    }
-    for node in run.graph().definition().nodes() {
-        if let Some(assignment) = node.work_assignment() {
-            slots.insert((
-                assignment.role_id().to_owned(),
-                assignment.session_ref().clone(),
-            ));
-        }
-        if let Some(assignment) = node.review_assignment() {
-            slots.insert((
-                assignment.role_id().to_owned(),
-                assignment.session_ref().clone(),
-            ));
-        }
-    }
-    let mut bindings = Vec::with_capacity(slots.len());
-    for (role_id, session_ref) in slots {
-        let role = materialization
-            .roles()
-            .iter()
-            .find(|role| role.role().as_str() == role_id)
-            .ok_or_else(|| failure(TeamCreationFailureReason::StoreInvalid))?;
-        bindings.push(RoleSessionReceipt::for_runtime(
-            team.clone(), run_id.clone(), role.role().clone(), session_ref,
-            role.agent().clone(), role.endpoint().clone(),
-        ));
-    }
-    RunRuntimeReceipt::try_new(run_id.clone(), bindings)
+    run.initial_runtime_receipt(materialization)
         .map_err(|_| failure(TeamCreationFailureReason::StoreInvalid))
 }
 
@@ -359,6 +355,7 @@ pub(crate) fn install_prepared_runtime_receipt(
     store: &mut OrganizationStore,
     receipt: RunRuntimeReceipt,
 ) -> Result<(), StoreFault> {
+    if store.facts().run(receipt.team_run()).and_then(|run| run.runtime()) == Some(&receipt) { return Ok(()); }
     store.install_runtime_receipt(receipt)
 }
 
@@ -387,27 +384,16 @@ impl TeamRunOwner {
         Self
     }
 
-    fn recover_activity_run(
-        &self,
-        store: &OrganizationStore,
-        activity_id: &ActivityId,
-    ) -> TeamRunCommandOutcome {
+    fn assert_activity_run_exists(store: &OrganizationStore, activity_id: &ActivityId) {
         let activity = store
             .facts()
             .activities()
             .activity(activity_id)
             .expect("activity command preserves its extant activity");
-        self.recover_run(store, &activity.facts().run_id)
-    }
-
-    fn recover_run(&self, store: &OrganizationStore, run_id: &GraphRunId) -> TeamRunCommandOutcome {
-        let team = store
+        store
             .facts()
-            .run(run_id)
-            .expect("TeamRun command preserves its extant TeamRun")
-            .team()
-            .clone();
-        self.recover(store, TeamRunQuery::get(team, run_id.clone()))
+            .run(&activity.facts().run_id)
+            .expect("TeamRun command preserves its extant TeamRun");
     }
 
     pub(crate) fn query(
@@ -466,20 +452,6 @@ impl TeamRunOwner {
         .map_err(|_| (StoreFault::InvalidFacts, TeamCreationFailure::new(
             TeamCreationStage::InitializingSessions, TeamCreationFailureReason::StoreInvalid,
         )))
-    }
-
-    pub(crate) fn create_from_team_template(
-        &self,
-        store: &mut OrganizationStore,
-        team_id: &TeamId,
-        run_id: GraphRunId,
-        idempotency_key: &str,
-        created_at: u64,
-    ) -> Result<CreateGraphRunOutcome, StoreFault> {
-        let run =
-            self.run_from_team_template(store, team_id, run_id, idempotency_key, created_at)
-                .map_err(|(error, _)| error)?;
-        self.create(store, run, idempotency_key)
     }
 
     /// Creates a TeamRun through the Organization workflow-plan transition.
@@ -592,23 +564,6 @@ impl TeamRunOwner {
         organization::run::query_node_prompt_retry_due(store.facts(), query)
     }
 
-    pub(crate) fn record_decision(
-        &self,
-        store: &mut OrganizationStore,
-        command: TeamDecisionCommand,
-    ) -> Result<TeamDecisionReceipt, StoreFault> {
-        store.record_decision(command)
-    }
-
-    pub(crate) fn record_node_event(
-        &self,
-        store: &mut OrganizationStore,
-        command: organization::RunCommand,
-        event: TeamNodeEvent,
-    ) -> Result<TeamNodeEventOutcome, StoreFault> {
-        store.team_node_event(command, event)
-    }
-
     pub(crate) fn apply_graph_patch(
         &self,
         store: &mut OrganizationStore,
@@ -623,48 +578,6 @@ impl TeamRunOwner {
             .team()
             .clone();
         Ok(self.recover(store, TeamRunQuery::get(team, run_id)))
-    }
-
-    pub(crate) fn resolve_human_decision(
-        &self,
-        store: &mut OrganizationStore,
-        command: organization::run::approval::HumanDecisionCommand,
-    ) -> Result<organization::run::approval::HumanDecisionOutcome, StoreFault> {
-        store.resolve_human_decision(command)
-    }
-
-    pub(crate) fn register_delivery(
-        &self,
-        store: &mut OrganizationStore,
-        request: organization::DeliveryRequest,
-    ) -> Result<organization::RegisterOutcome, StoreFault> {
-        store.register_delivery(request)
-    }
-
-    pub(crate) fn register_activity(
-        &self,
-        store: &mut OrganizationStore,
-        request: ActivityRequest,
-    ) -> Result<ActivityRegistrationOutcome, StoreFault> {
-        store.register_activity(request)
-    }
-
-    pub(crate) fn apply_control_execution_step(
-        &self,
-        store: &mut OrganizationStore,
-        run_id: &GraphRunId,
-        step: organization::ControlExecutionStep,
-    ) -> Result<(), StoreFault> {
-        store.apply_control_execution_step(run_id, step)
-    }
-
-    pub(crate) fn recovery(
-        &self,
-        store: &OrganizationStore,
-        run_id: GraphRunId,
-        reviews: Option<&organization::run::review::ReviewLedger>,
-    ) -> Result<organization::TeamRunRecoveryPlan, organization::RecoveryQueryError> {
-        organization::query_team_run_recovery(store.facts(), run_id, reviews)
     }
 
     pub(crate) fn recover(
@@ -720,25 +633,6 @@ impl TeamRunOwner {
             registration,
             run: self.recover(store, TeamRunQuery::get(team, run_id)),
         })
-    }
-
-    pub(crate) fn produce_team_trigger_fire_request(
-        &self,
-        armed: &ArmedTrigger,
-        idempotency_key: impl Into<String>,
-    ) -> Result<TeamTriggerFireRequest, TeamTriggerFireRequestError> {
-        let source = match armed.trigger {
-            TeamTrigger::Webhook { .. } => TriggerSource::Webhook,
-            TeamTrigger::Cron { .. } => TriggerSource::Cron,
-        };
-        let trigger = TriggerFireRequest::try_new(
-            armed.run_id.as_str(),
-            armed.start_node_id.as_str(),
-            source,
-            idempotency_key,
-        )
-        .map_err(TeamTriggerFireRequestError::InvalidTrigger)?;
-        TeamTriggerFireRequest::try_new(armed.team_id.clone(), trigger)
     }
 
     pub(crate) fn resolve_webhook_fire(
@@ -808,6 +702,9 @@ impl TeamRunOwner {
             Err(StoreFault::TriggerFire(organization::TriggerFireError::RunMismatch)) => {
                 Ok(TeamTriggerFireOutcome::NotFound)
             }
+            Err(StoreFault::TriggerFire(organization::TriggerFireError::Busy)) => {
+                Ok(TeamTriggerFireOutcome::Busy)
+            }
             Err(StoreFault::TriggerFire(_)) => Ok(TeamTriggerFireOutcome::Rejected),
             Err(StoreFault::CommitOutcomeUnknown(_)) => Ok(TeamTriggerFireOutcome::Unknown),
             Err(error) => Err(error),
@@ -848,45 +745,59 @@ impl TeamRunOwner {
             .facts()
             .activities()
             .activity(&activity_id)
-            .cloned()
-            .ok_or(TeamRunActivityError::SessionMismatch)?;
-        match activity.phase() {
+            .ok_or(TeamRunActivityError::TargetUnavailable)?;
+        let (run, binding) = super::run_scheduler::activity_target(store, activity.facts())
+            .ok_or(TeamRunActivityError::TargetUnavailable)?;
+        let endpoint = runtime_directory::endpoint_from_reference(binding.endpoint().as_str())
+            .ok_or(TeamRunActivityError::TargetUnavailable)?;
+        runtime_trace("runtime.team_run.activity.target", || json!({
+            "runHash": identifier_hash(activity.facts().run_id.as_str()),
+            "activityHash": identifier_hash(activity_id.as_str()),
+            "runtime": match endpoint.runtime_adapter_id() {
+                "openclaw" => "openclaw",
+                "matcha-agent" => "matcha",
+                _ => "unsupported",
+            },
+        }));
+        let outcome = match activity.phase() {
             ActivityPhase::Claimed(_) | ActivityPhase::Dispatched(_) => {
-                return Ok(TeamRunActivityStart::Immediate(
-                    TeamRunActivityOutcome::AlreadyClaimed(
-                        self.recover_activity_run(store, &activity_id),
-                    ),
-                ));
+                TeamRunActivityOutcome::AlreadyClaimed
             }
             ActivityPhase::RetryScheduled { retry_at, .. } if *retry_at > claimed_at => {
-                return Ok(TeamRunActivityStart::Immediate(
-                    TeamRunActivityOutcome::AwaitingRetry(
-                        self.recover_activity_run(store, &activity_id),
-                    ),
-                ));
+                TeamRunActivityOutcome::AwaitingRetry
             }
-            phase if activity.is_terminal() => {
-                return Ok(TeamRunActivityStart::Immediate(match phase {
-                    ActivityPhase::OutcomeUnknown { .. } => TeamRunActivityOutcome::OutcomeUnknown(
-                        self.recover_activity_run(store, &activity_id),
-                    ),
-                    _ => TeamRunActivityOutcome::Terminal(
-                        self.recover_activity_run(store, &activity_id),
-                    ),
-                }));
+            phase if activity.is_terminal() => match phase {
+                ActivityPhase::OutcomeUnknown { .. } => TeamRunActivityOutcome::OutcomeUnknown,
+                _ => TeamRunActivityOutcome::Terminal,
+            },
+            _ if !super::run_scheduler::run_allows_activity_execution(store, &activity.facts().run_id) => {
+                TeamRunActivityOutcome::Terminal
             }
-            _ => {}
-        }
-        if !super::run_scheduler::run_allows_activity_execution(store, &activity.facts().run_id) {
-            return Ok(TeamRunActivityStart::Immediate(TeamRunActivityOutcome::Terminal(
-                self.recover_activity_run(store, &activity_id),
-            )));
-        }
-        let request = agent_task_execution_request(store, activity.facts())?;
-        let claim = store
-            .claim_agent_activity(&activity_id, request.delivery_request().clone(), claimed_at)
-            .map_err(TeamRunActivityError::Store)?;
-        Ok(TeamRunActivityStart::Claimed { claim, request })
+            _ if run.graph().is_rework_blocked(&activity.facts().node_id) => {
+                TeamRunActivityOutcome::AwaitingRetry
+            }
+            _ => {
+                let request = agent_task_execution_request(run, activity.facts(), binding)?;
+                match store
+                    .claim_agent_activity(&activity_id, request.delivery_request().clone(), claimed_at)
+                    .map_err(TeamRunActivityError::Store)?
+                {
+                    Some(organization::ActivityClaimOutcome::Claimed(claim)) => {
+                        return Ok(TeamRunActivityStart::Claimed { claim, request });
+                    }
+                    Some(organization::ActivityClaimOutcome::AlreadyClaimed(_)) => {
+                        TeamRunActivityOutcome::AlreadyClaimed
+                    }
+                    Some(organization::ActivityClaimOutcome::Terminal(phase)) => match phase {
+                        ActivityPhase::OutcomeUnknown { .. } => TeamRunActivityOutcome::OutcomeUnknown,
+                        _ => TeamRunActivityOutcome::Terminal,
+                    },
+                    None => TeamRunActivityOutcome::AwaitingRetry,
+                }
+            }
+        };
+        Self::assert_activity_run_exists(store, &activity_id);
+        Ok(TeamRunActivityStart::Immediate(outcome))
     }
 
     pub(crate) fn settle_agent_activity_dispatch(
@@ -894,9 +805,9 @@ impl TeamRunOwner {
         store: &mut OrganizationStore,
         claim: ActivityClaim,
         outcome: ActivityExecutionOutcome,
+        observed_at: u64,
     ) -> Result<TeamRunActivityOutcome, TeamRunActivityError> {
         let activity_id = claim.activity_id().clone();
-        let observed_at = claim.claimed_at();
         let (delivery_receipt, activity_settlement) = match outcome {
             ActivityExecutionOutcome::Accepted {
                 receipt,
@@ -961,58 +872,76 @@ impl TeamRunOwner {
         {
             return Err(TeamRunActivityError::Retired);
         }
+        Self::assert_activity_run_exists(store, &activity_id);
         Ok(match activity {
-            None => {
-                TeamRunActivityOutcome::Dispatched(self.recover_activity_run(store, &activity_id))
-            }
-            Some(ActivitySettlementOutcome::RetryScheduled) => {
-                TeamRunActivityOutcome::AwaitingRetry(
-                    self.recover_activity_run(store, &activity_id),
-                )
-            }
+            None => TeamRunActivityOutcome::Dispatched,
+            Some(ActivitySettlementOutcome::RetryScheduled) => TeamRunActivityOutcome::AwaitingRetry,
             Some(ActivitySettlementOutcome::Failed)
             | Some(ActivitySettlementOutcome::Completed)
             | Some(ActivitySettlementOutcome::Cancelled)
-            | Some(ActivitySettlementOutcome::TerminalObserved) => {
-                TeamRunActivityOutcome::Terminal(self.recover_activity_run(store, &activity_id))
-            }
-            Some(ActivitySettlementOutcome::OutcomeUnknown) => {
-                TeamRunActivityOutcome::OutcomeUnknown(
-                    self.recover_activity_run(store, &activity_id),
-                )
-            }
-            Some(ActivitySettlementOutcome::Replayed) => TeamRunActivityOutcome::AlreadyClaimed(
-                self.recover_activity_run(store, &activity_id),
-            ),
+            | Some(ActivitySettlementOutcome::TerminalObserved) => TeamRunActivityOutcome::Terminal,
+            Some(ActivitySettlementOutcome::OutcomeUnknown) => TeamRunActivityOutcome::OutcomeUnknown,
+            Some(ActivitySettlementOutcome::Replayed) => TeamRunActivityOutcome::AlreadyClaimed,
         })
     }
 
     pub(crate) fn native_delivery_by_run(
         &self,
         store: &OrganizationStore,
+        identity: &platform::endpoint::runtime_address::SessionIdentity,
         native_run_id: &str,
+        resolver: &dyn crate::RoleSessionIdentityResolver,
     ) -> Result<Option<DeliveryId>, StoreFault> {
-        let mut matches = store
-            .facts()
-            .deliveries()
-            .deliveries()
-            .filter_map(|delivery| {
-                let correlation = match delivery.phase() {
-                    DeliveryPhase::Delivered {
-                        native_correlation: Some(correlation),
-                        ..
-                    } => correlation,
-                    DeliveryPhase::TerminalObserved { observation } => observation.correlation(),
-                    _ => return None,
-                };
-                (correlation.native_run_receipt().as_str() == native_run_id)
-                    .then(|| delivery.facts().delivery_id.clone())
-            })
-            .collect::<Vec<_>>();
-        if matches.len() > 1 {
+        let mut matched = None;
+        for delivery in store.facts().deliveries().deliveries() {
+            let correlation = match delivery.phase() {
+                DeliveryPhase::Delivered {
+                    native_correlation: Some(correlation),
+                    ..
+                } => correlation,
+                DeliveryPhase::TerminalObserved { observation } => observation.correlation(),
+                _ => continue,
+            };
+            if correlation.native_run_receipt().as_str() != native_run_id {
+                continue;
+            }
+            let Some(binding) = self.native_delivery_binding(
+                store, &delivery.facts().delivery_id, identity, resolver,
+            )? else { continue; };
+            let target = self.native_terminal_target(store, &delivery.facts().delivery_id)
+                .ok_or(StoreFault::InvalidFacts)?;
+            if !target.matches_binding(binding) || matched.is_some() {
+                return Err(StoreFault::InvalidFacts);
+            }
+            matched = Some(delivery.facts().delivery_id.clone());
+        }
+        Ok(matched)
+    }
+
+    pub(crate) fn native_delivery_binding<'a>(
+        &self,
+        store: &'a OrganizationStore,
+        delivery_id: &DeliveryId,
+        identity: &platform::endpoint::runtime_address::SessionIdentity,
+        resolver: &dyn crate::RoleSessionIdentityResolver,
+    ) -> Result<Option<&'a crate::RoleSessionReceipt>, StoreFault> {
+        let delivery = store.facts().deliveries().delivery(delivery_id)
+            .ok_or(StoreFault::InvalidFacts)?;
+        let run = store.facts().run(&GraphRunId::new(&delivery.facts().run_id))
+            .ok_or(StoreFault::InvalidFacts)?;
+        let binding = run.runtime().and_then(|runtime| runtime.bindings().iter().find(|binding| {
+            binding.role().as_str() == delivery.facts().role_id
+                && binding.session_ref().as_str() == delivery.facts().session_ref
+        })).ok_or(StoreFault::InvalidFacts)?;
+        if binding.team() != run.team() || binding.team_run() != run.run_id()
+            || delivery.facts().team_id != run.team().as_str()
+        {
             return Err(StoreFault::InvalidFacts);
         }
-        Ok(matches.pop())
+        Ok((runtime_directory::endpoint_from_reference(binding.endpoint().as_str()).as_ref() == Some(identity.endpoint())
+            && binding.agent().as_str() == identity.agent_id()
+            && resolver.session_key(binding).as_deref() == Some(identity.session_key()))
+            .then_some(binding))
     }
 
     pub(crate) fn native_terminal_target(
@@ -1144,43 +1073,6 @@ impl TeamRunOwner {
         })
     }
 
-    pub(crate) fn resolve_authorized_graph_outcome(
-        &self,
-        store: &mut OrganizationStore,
-        resolution: organization::AuthorizedGraphResolution,
-    ) -> Result<TeamRunCommandOutcome, StoreFault> {
-        let run_id = organization::GraphRunId::new(resolution.graph_run_id().to_owned());
-        store.apply_authorized_graph_resolution(resolution)?;
-        let team = store
-            .facts()
-            .run(&run_id)
-            .expect("graph resolution preserves its extant TeamRun")
-            .team()
-            .clone();
-        Ok(self.recover(store, TeamRunQuery::get(team, run_id)))
-    }
-
-    /// Consumes a trusted native Review result only after terminal observation has been durable.
-    /// The native status wire cannot call this with a guessed summary or synthetic receipt.
-    pub(crate) fn resolve_review_after_terminal_observation(
-        &self,
-        store: &mut OrganizationStore,
-        preparation: &review::ReviewDispatchPreparation,
-        input: review::ReviewResolutionInput,
-    ) -> Result<TeamRunCommandOutcome, StoreFault> {
-        let (_, resolution) = review::resolve_review_after_terminal_observation(preparation, input)
-            .map_err(StoreFault::AgentNodeEventResolution)?;
-        let run_id = resolution.graph_run_id().clone();
-        store.apply_agent_node_event_resolution(resolution)?;
-        let team = store
-            .facts()
-            .run(&run_id)
-            .expect("review resolution preserves its extant TeamRun")
-            .team()
-            .clone();
-        Ok(self.recover(store, TeamRunQuery::get(team, run_id)))
-    }
-
     pub(crate) fn observe_native_terminal(
         &self,
         store: &mut OrganizationStore,
@@ -1231,12 +1123,23 @@ pub(crate) fn resolve_native_settled_output(
     settled: NativeRunSettled,
     resolved_at: u64,
 ) -> Result<crate::store::NativeTerminalSettlement, StoreFault> {
+    resolve_native_settled_output_validated(store, run_id, delivery_id, settled, resolved_at, None)
+}
+
+pub(crate) fn resolve_native_settled_output_validated(
+    store: &mut OrganizationStore,
+    run_id: &GraphRunId,
+    delivery_id: &DeliveryId,
+    settled: NativeRunSettled,
+    resolved_at: u64,
+    file_validation: Option<(crate::run::workspace::RunFileValidationPlan, Result<(), crate::RunFileValidationError>)>,
+) -> Result<crate::store::NativeTerminalSettlement, StoreFault> {
     let target = store
         .native_terminal_target(delivery_id)
         .filter(|target| target.graph_run_id() == run_id)
         .ok_or(StoreFault::InvalidFacts)?;
     if store.native_terminal_is_retired(&target)? {
-        return store.settle_native_terminal(target, settled.status, Ok(None), resolved_at);
+        return store.settle_native_terminal(target, settled.status, Ok(None), resolved_at, None);
     }
     let output = if settled.status == NativeTerminalStatus::Completed {
         let graph = store.facts().run(run_id).ok_or(StoreFault::InvalidFacts)?.graph();
@@ -1252,7 +1155,7 @@ pub(crate) fn resolve_native_settled_output(
     } else {
         Ok(None)
     };
-    store.settle_native_terminal(target, settled.status, output, resolved_at)
+    store.settle_native_terminal(target, settled.status, output, resolved_at, file_validation)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1283,33 +1186,16 @@ impl TeamRunCommandOutcome {
 }
 
 pub(super) fn agent_task_execution_request(
-    store: &OrganizationStore,
+    run: &GraphRunFacts,
     activity: &ActivityRequest,
+    binding: &organization::RoleSessionReceipt,
 ) -> Result<ActivityExecutionRequest, TeamRunActivityError> {
-    let run = store
-        .facts()
-        .run(&activity.run_id)
-        .ok_or(TeamRunActivityError::SessionMismatch)?;
-    let ActivityKind::AgentTask { role_id, .. } = &activity.activity_kind else {
-        return Err(TeamRunActivityError::InvalidPrompt);
-    };
-    let binding = run
-        .runtime()
-        .and_then(|runtime| {
-            super::run_scheduler::binding_for_activity_target(
-                runtime.bindings(),
-                role_id,
-                &activity.target,
-            )
-        })
-        .cloned()
-        .ok_or(TeamRunActivityError::SessionMismatch)?;
     if binding.agent().as_str().trim().is_empty()
         || binding.endpoint_session_id().as_str().trim().is_empty()
     {
         return Err(TeamRunActivityError::InvalidBinding);
     }
-    ActivityExecutionRequest::agent_task(run.team(), activity, binding)
+    ActivityExecutionRequest::agent_task(run.team(), activity, binding.clone())
         .map(|request| request.with_execution_context(run.task_execution_context().cloned()))
         .map_err(team_run_activity_error)
 }
@@ -1351,7 +1237,6 @@ fn default_graph_template(team_id: &TeamId, team_name: &str) -> GraphDefinition 
         vec![NodeDefinition::start(
             NodeId::new("start"),
             "Start",
-            std::num::NonZeroU32::MIN,
             None,
         )],
         Vec::new(),

@@ -16,6 +16,7 @@ struct Create {
     session_id: Option<String>,
     model: Option<String>,
     mode: Option<String>,
+    cwd: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -212,7 +213,7 @@ impl Sessions {
                 let owner = self.clone();
                 tokio::spawn(async move {
                     owner.close_execution(session.clone(), true).await?;
-                    Ok(session.data.lock().await.record.view())
+                    Ok(session.record().view())
                 })
                 .await
                 .map_err(|_| {
@@ -225,13 +226,29 @@ impl Sessions {
             }
             "sessions.resume" => {
                 let input: SessionKey = rpc::params(params)?;
-                self.resume(&input.session_id).await
+                let owner = self.clone();
+                tokio::spawn(async move { owner.resume(&input.session_id).await })
+                    .await
+                    .map_err(|error| {
+                        rpc::Error::new(
+                            -32006,
+                            "session_resume_unknown",
+                            "Session resume could not be confirmed",
+                        )
+                        .with_source(error)
+                    })?
             }
             "sessions.fork" => self.fork(rpc::params(params)?).await,
             "sessions.setModel" => self.set_model(rpc::params(params)?).await,
             "sessions.setMode" => {
                 let input: Mode = rpc::params(params)?;
-                self.set_mode(&input.session_id, &input.mode).await
+                let owner = self.clone();
+                tokio::spawn(async move { owner.set_mode(&input.session_id, &input.mode).await })
+                    .await
+                    .map_err(|error| {
+                        rpc::Error::new(-32006, "selection_outcome_unknown", "Session permission mode selection could not be confirmed")
+                            .with_source(error)
+                    })?
             }
             "sessions.thinking.get" => {
                 let input: SessionKey = rpc::params(params)?;
@@ -348,7 +365,8 @@ impl Sessions {
         validate_uuid(&session_id)?;
         let owner = self.clone();
         tokio::spawn(async move {
-            let _guard = owner.agent_guard(&input.agent_id).await;
+            let _guard = owner.agent_admission(&input.agent_id).await;
+            let _registration = owner.registration_guard(&session_id).await;
             owner.accepting()?;
             if !owner
                 .0
@@ -360,23 +378,47 @@ impl Sessions {
             {
                 return Err(rpc::Error::not_found("Agent"));
             }
+            let requested = input
+                .cwd
+                .as_ref()
+                .cloned()
+                .unwrap_or(owner.0.config.paths().workspace(&input.agent_id)?);
+            let workspace = crate::workspace::session_directory(
+                owner.0.config.paths(),
+                &input.agent_id,
+                &requested,
+            )
+            .await?;
             if let Some(existing) = owner.0.sessions.read().await.get(&session_id).cloned() {
-                let execution = existing.data.lock().await;
-                if execution.record.agent_id != input.agent_id {
+                let record = existing.record();
+                if record.agent_id != input.agent_id {
                     return Err(rpc::Error::conflict(
                         "session_agent_mismatch",
                         "This session identity belongs to another Agent",
                     ));
                 }
-                execution.record.mutable()?;
-                return Ok(execution.record.view());
+                existing.mutable()?;
+                if record.workspace != workspace {
+                    return Err(rpc::Error::conflict(
+                        "session_cwd_mismatch",
+                        "This Session identity is already bound to another execution directory",
+                    ));
+                }
+                return Ok(record.view());
             }
             record::assert_not_deleted(&owner.0.database, &session_id).await?;
             let source = if let Some(source_id) = &forked_from {
                 let source = owner.session(source_id).await?;
-                let execution = source.data.lock().await;
-                execution.record.mutable()?;
-                Some(execution.record.clone())
+                let _execution = source.data.lock().await;
+                source.mutable()?;
+                let record = source.record();
+                if record.agent_id != input.agent_id || record.workspace != workspace {
+                    return Err(rpc::Error::conflict(
+                        "session_fork_cwd_mismatch",
+                        "A fork must inherit its source Agent and execution directory",
+                    ));
+                }
+                Some(record)
             } else {
                 None
             };
@@ -405,15 +447,19 @@ impl Sessions {
                 native_cleanup_failed: false,
                 forked_from,
                 native_started: false,
-                workspace: owner.0.config.paths().workspace(&input.agent_id)?,
+                workspace,
                 runtime: owner.0.config.paths().runtime(&input.agent_id)?,
                 transcript: None,
             };
             record::save_session(&owner.0.database, &record).await?;
             let result = record.view();
             let session = Arc::new(Session {
+                committed: super::Committed::new(Arc::new(record)),
+                deleting: std::sync::atomic::AtomicBool::new(false),
                 data: Mutex::new(Execution {
-                    record,
+                    title_attempted: false,
+                    cleanup_failed: false,
+                    record_unknown: None,
                     queue: Default::default(),
                     active: None,
                     cli: None,
@@ -421,6 +467,7 @@ impl Sessions {
                     idle: super::idle::Idle::Dormant,
                     launching: false,
                     launch_error: None,
+                    selecting_provider: None,
                     sending: false,
                     closing: false,
                     consuming: false,
@@ -474,7 +521,7 @@ impl Sessions {
         sessions.truncate(limit);
         let mut selected = Vec::with_capacity(sessions.len());
         for session in sessions {
-            selected.push(session.data.lock().await.record.clone());
+            selected.push(session.record());
         }
         self.hydrate_titles(&mut selected).await;
         let next = if more {
@@ -483,7 +530,7 @@ impl Sessions {
             None
         };
         Ok(
-            json!({ "sessions": selected.iter().map(record::Record::view).collect::<Vec<_>>(), "nextBeforeSessionId": next }),
+            json!({ "sessions": selected.iter().map(|record| record.view()).collect::<Vec<_>>(), "nextBeforeSessionId": next }),
         )
     }
 
@@ -505,32 +552,34 @@ impl Sessions {
             }
         }
         let session = self.session(&input.session_id).await?;
-        let mut record = session.data.lock().await.record.clone();
+        let mut record = session.record();
         self.hydrate_titles(std::slice::from_mut(&mut record)).await;
-        let execution = session.data.lock().await;
-        execution.record.mutable()?;
-        let record = &execution.record;
-        let mut result = record.view();
-        if input.history {
-            result["history"] = history::read(
-                &self.0.database,
-                &record.runtime,
-                &record.workspace,
-                &record.session_id,
-                input.offset,
-                input.limit.unwrap_or(80),
-                input.input_ids.as_deref(),
-            )
-            .await?;
+        if !input.history {
+            return Ok(session.readable_record()?.view());
         }
+        // Preserve the native-history/delete boundary without putting catalog reads on this lock.
+        let _execution = session.data.lock().await;
+        session.mutable()?;
+        let record = session.record();
+        let mut result = record.view();
+        result["history"] = history::read(
+            &self.0.database,
+            &record.runtime,
+            &record.workspace,
+            &record.session_id,
+            input.offset,
+            input.limit.unwrap_or(80),
+            input.input_ids.as_deref(),
+        )
+        .await?;
         Ok(result)
     }
 
     async fn resume(&self, session_id: &str) -> rpc::Result<Value> {
         self.accepting()?;
         let session = self.session(session_id).await?;
-        let agent_id = session.data.lock().await.record.agent_id.clone();
-        let _guard = self.agent_guard(&agent_id).await;
+        let agent_id = session.record().agent_id.clone();
+        let (_guard, _operation) = self.session_admission(&session, &agent_id).await;
         self.accepting()?;
         if !self
             .0
@@ -543,8 +592,8 @@ impl Sessions {
             return Err(rpc::Error::not_found("Agent"));
         }
         let mut execution = session.data.lock().await;
-        execution.record.mutable()?;
-        if execution.record.native_cleanup_failed {
+        session.mutable()?;
+        if execution.cleanup_failed || session.record().native_cleanup_failed {
             return Err(rpc::Error::conflict(
                 "native_cleanup_unconfirmed",
                 "The previous CLI instance cleanup was not confirmed",
@@ -560,10 +609,10 @@ impl Sessions {
                 "Wait for session cleanup or startup to finish",
             ));
         }
-        if execution.record.status == record::Status::Open {
-            return Ok(execution.record.view());
+        if session.record().status == record::Status::Open {
+            return Ok(session.record().view());
         }
-        let mut resumed = execution.record.clone();
+        let mut resumed = (*session.record()).clone();
         if resumed.native_started {
             resumed.transcript =
                 history::locate(&resumed.runtime, &resumed.workspace, session_id).await?;
@@ -573,19 +622,19 @@ impl Sessions {
         }
         resumed.status = record::Status::Open;
         resumed.updated_at_ms = rpc::now_ms();
-        record::save_session(&self.0.database, &resumed).await?;
-        execution.record = resumed;
-        Ok(execution.record.view())
+        session.commit(&self.0.database, &mut execution, resumed).await?;
+        Ok(session.record().view())
     }
 
     async fn fork(&self, input: Fork) -> rpc::Result<Value> {
         self.accepting()?;
         let source = self.session(&input.session_id).await?;
-        let agent_id = source.data.lock().await.record.agent_id.clone();
-        let guard = self.agent_guard(&agent_id).await;
+        let agent_id = source.record().agent_id.clone();
+        let (guard, _operation) = self.session_admission(&source, &agent_id).await;
         let execution = source.data.lock().await;
-        execution.record.mutable()?;
-        if execution.record.native_cleanup_failed {
+        source.mutable()?;
+        let record = source.record();
+        if execution.cleanup_failed || record.native_cleanup_failed {
             return Err(rpc::Error::conflict(
                 "native_cleanup_unconfirmed",
                 "The previous CLI instance cleanup was not confirmed",
@@ -605,8 +654,8 @@ impl Sessions {
             ));
         }
         let path = history::locate(
-            &execution.record.runtime,
-            &execution.record.workspace,
+            &record.runtime,
+            &record.workspace,
             &input.session_id,
         )
         .await?;
@@ -616,13 +665,15 @@ impl Sessions {
         let create = Create {
             agent_id,
             session_id: input.new_session_id,
-            model: execution.record.model.clone(),
-            mode: execution.record.mode.clone(),
+            model: record.model.clone(),
+            mode: record.mode.clone(),
+            cwd: Some(record.workspace.clone()),
         };
         if create.session_id.as_deref() == Some(input.session_id.as_str()) {
             return Err(rpc::Error::invalid("Fork requires a new session identity"));
         }
         drop(execution);
+        drop(_operation);
         drop(guard);
         self.create(create, Some(input.session_id)).await
     }
@@ -632,12 +683,12 @@ impl Sessions {
             .session(&input.session_id)
             .await
             .map_err(super::not_sent)?;
-        let agent_id = session.data.lock().await.record.agent_id.clone();
-        let _guard = self.agent_guard(&agent_id).await;
+        let agent_id = session.record().agent_id.clone();
+        let (guard, _operation) = self.session_admission(&session, &agent_id).await;
         self.accepting().map_err(super::not_sent)?;
         let (control, previous) = {
             let mut execution = session.data.lock().await;
-            execution.record.mutable().map_err(super::not_sent)?;
+            session.mutable().map_err(super::not_sent)?;
             if execution.closing || execution.idle.handing_off() {
                 return Err(super::not_sent(rpc::Error::conflict(
                     "session_closing",
@@ -661,6 +712,7 @@ impl Sessions {
             }
             (control, previous)
         };
+        drop(guard);
         let instance_id = control.instance_id();
         let response = control
             .request(json!({ "subtype": "set_proactive", "enabled": input.enabled }))
@@ -709,12 +761,12 @@ impl Sessions {
         selection(selected, "mode")?;
         validate_mode(selected)?;
         let session = self.session(session_id).await?;
-        let agent_id = session.data.lock().await.record.agent_id.clone();
-        let _guard = self.agent_guard(&agent_id).await;
+        let agent_id = session.record().agent_id.clone();
+        let (guard, _operation) = self.session_admission(&session, &agent_id).await;
         self.accepting()?;
         let (cli, control) = {
             let mut execution = session.data.lock().await;
-            execution.record.mutable()?;
+            session.mutable()?;
             if execution.closing
                 || execution.idle.handing_off()
                 || execution.launching
@@ -736,6 +788,7 @@ impl Sessions {
                     .transpose()?,
             )
         };
+        drop(guard);
         let response = if let Some(control) = &control {
             Some(
                 control
@@ -745,7 +798,16 @@ impl Sessions {
         } else {
             None
         };
+        self.accepting()?;
         let mut execution = session.data.lock().await;
+        session.mutable()?;
+        if execution.closing {
+            return Err(rpc::Error::new(
+                -32006,
+                "selection_instance_changed",
+                "The Session closed before its setting could be confirmed",
+            ).with_data(json!({ "nativeAcknowledged": response.is_some() })));
+        }
         if let Some(cli) = &cli
             && !execution
                 .cli
@@ -759,18 +821,17 @@ impl Sessions {
             )
             .with_data(json!({ "nativeAcknowledged": true })));
         }
-        let mut updated = execution.record.clone();
-        execution.record.mutable()?;
+        let mut updated = (*session.record()).clone();
+        session.mutable()?;
         updated.mode = Some(selected.to_owned());
         updated.updated_at_ms = rpc::now_ms();
-        record::save_session(&self.0.database, &updated)
+        session.commit(&self.0.database, &mut execution, updated)
             .await
             .map_err(|error| {
                 error.with_data(json!({ "nativeAcknowledged": response.is_some() }))
             })?;
-        execution.record = updated;
         Ok(
-            json!({ "session": execution.record.view(), "applied": response.is_some(), "response": response }),
+            json!({ "session": session.record().view(), "applied": response.is_some(), "response": response }),
         )
     }
 
@@ -798,7 +859,7 @@ impl Sessions {
         }
         let session = self.session(&record.run.session_id).await?;
         let mut execution = session.data.lock().await;
-        execution.record.mutable()?;
+        session.mutable()?;
         execution.idle.activity();
         session.wake.notify_one();
         if let Some(index) = execution

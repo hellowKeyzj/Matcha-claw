@@ -107,15 +107,10 @@ pub(crate) async fn dispatch(owner: &OrganizationHandle, request: Request) -> De
         Ok(run) => run,
         Err(_) => return Delivery::Rejected,
     };
-    let endpoint = organization::RuntimeEndpointReference::try_new(
-        RuntimeDriverIdentity::open_claw().runtime_endpoint_reference(),
-    )
-    .expect("fixed OpenClaw endpoint must be valid");
     match owner
         .manual_team_create(
             request.team_id,
             request.team_name,
-            endpoint,
             request.roles,
             request.idempotency_key.clone(),
             run,
@@ -160,6 +155,10 @@ fn decode_role(value: &Value) -> Result<organization::ManualTeamRoleBinding, Dec
         text(role, "displayName")?,
         organization::ManagedAgentReference::try_new(text(role, "agentId")?)
             .map_err(|_| DecodeError::Invalid)?,
+        organization::RuntimeEndpointReference::try_new(
+            RuntimeDriverIdentity::open_claw().runtime_endpoint_reference(),
+        )
+        .expect("fixed OpenClaw endpoint must be valid"),
         leader,
     )
     .map_err(|_| DecodeError::Invalid)
@@ -192,7 +191,6 @@ fn graph_run(
         vec![organization::NodeDefinition::start(
             organization::NodeId::new("start"),
             "Start",
-            std::num::NonZeroU32::MIN,
             None,
         )],
         Vec::new(),

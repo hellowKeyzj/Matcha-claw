@@ -35,7 +35,7 @@ impl Catalog {
     ) {
         self.remove(&session_id);
         // Identity, creation time and Agent never change during a Session's life.
-        // All indexes share the sessions lock; mutable Records stay in Execution.
+        // All indexes share the sessions lock; each Session publishes one committed Record.
         let key = (created_at_ms, session_id.clone());
         self.by_created.insert(key.clone(), session.clone());
         self.by_agent

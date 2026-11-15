@@ -15,6 +15,7 @@ import {
 } from '../../Task.js'
 import type { TaskState } from '../../tasks/types.js'
 import { enqueuePendingNotification } from '../messageQueueManager.js'
+import { currentRequestMessageId } from '../requestExecution.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
 
@@ -71,14 +72,36 @@ export function updateTaskState<T extends TaskState>(
   })
 }
 
+function isRequestScopedTask(task: TaskState): boolean {
+  switch (task.type) {
+    case 'local_agent':
+    case 'local_workflow':
+      return true
+    case 'local_bash':
+      return task.kind !== 'monitor'
+    case 'remote_agent':
+      return !task.isLongRunning && !task.isUltraplan
+    default:
+      return false
+  }
+}
+
 /**
  * Register a new task in AppState.
  */
 export function registerTask(task: TaskState, setAppState: SetAppState): void {
+  task = {
+    ...task,
+    requestMessageId: isRequestScopedTask(task) ? currentRequestMessageId() : undefined,
+  }
   let isReplacement = false
+  let previousToolUseId: string | undefined
+  let previousRequestMessageId: string | undefined
   setAppState(prev => {
     const existing = prev.tasks[task.id]
     isReplacement = existing !== undefined
+    previousToolUseId = existing?.toolUseId
+    previousRequestMessageId = existing?.requestMessageId
     // Carry forward UI-held state on re-register (resumeAgentBackground
     // replaces the task; user's retain shouldn't reset). startTime keeps
     // the panel sort stable; messages + diskLoaded preserve the viewed
@@ -98,14 +121,21 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
     return { ...prev, tasks: { ...prev.tasks, [task.id]: merged } }
   })
 
-  // Replacement (resume) — not a new start. Skip to avoid double-emit.
-  if (isReplacement) return
+  // A resumed task is a new execution when its tool or request owner changes.
+  if (
+    isReplacement &&
+    previousToolUseId === task.toolUseId &&
+    previousRequestMessageId === task.requestMessageId
+  ) {
+    return
+  }
 
   enqueueSdkEvent({
     type: 'system',
     subtype: 'task_started',
     task_id: task.id,
     tool_use_id: task.toolUseId,
+    request_message_id: task.requestMessageId,
     description: task.description,
     task_type: task.type,
     workflow_name:

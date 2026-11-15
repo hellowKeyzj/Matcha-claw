@@ -1,3 +1,4 @@
+use futures_util::future::BoxFuture;
 use platform::capability::CapabilityDecisionVerifier;
 
 pub(crate) mod handler;
@@ -21,6 +22,14 @@ pub(crate) enum DecodeError {
     Invalid,
 }
 
+pub(crate) enum DecodedRequest {
+    Immediate(Request),
+    RunDelete {
+        run_id: organization::GraphRunId,
+        idempotency_key: String,
+    },
+}
+
 pub(crate) enum Request {
     List {
         team_id: organization::TeamId,
@@ -34,7 +43,7 @@ pub(crate) enum Request {
         template_revision: u64,
     },
     Delete {
-        target: DeleteTarget,
+        team_id: organization::TeamId,
         idempotency_key: String,
     },
     Resume {
@@ -62,10 +71,6 @@ pub(crate) enum Delivery {
         run_id: String,
         state: CancellationState,
     },
-    RunDeleted {
-        run_id: String,
-        state: TombstoneState,
-    },
     Rejected,
     Unavailable,
 }
@@ -90,19 +95,6 @@ pub(crate) enum TeamDeleteState {
     OutcomeUnknown,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum DeleteTarget {
-    Team(organization::TeamId),
-    Run(organization::GraphRunId),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TombstoneState {
-    Purged,
-    Rejected,
-    OutcomeUnknown,
-}
-
 impl Delivery {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
@@ -119,10 +111,6 @@ impl Delivery {
                     | CancellationState::Cancelled
                     | CancellationState::Tombstoned,
                 ..
-            }
-            | Self::RunDeleted {
-                state: TombstoneState::Purged | TombstoneState::Rejected,
-                ..
             } => 200,
             Self::TeamDeleted {
                 outcome: TeamDeleteState::OutcomeUnknown,
@@ -130,10 +118,6 @@ impl Delivery {
             }
             | Self::Cancellation {
                 state: CancellationState::OutcomeUnknown,
-                ..
-            }
-            | Self::RunDeleted {
-                state: TombstoneState::OutcomeUnknown,
                 ..
             }
             | Self::Rejected => 409,
@@ -149,10 +133,6 @@ impl Delivery {
             }
             | Self::Cancellation {
                 state: CancellationState::OutcomeUnknown,
-                ..
-            }
-            | Self::RunDeleted {
-                state: TombstoneState::OutcomeUnknown,
                 ..
             } => json!({
                 "success": false,
@@ -186,12 +166,6 @@ impl Delivery {
                 "runId": run_id,
                 "state": cancellation_state_name(*state),
             }),
-            Self::RunDeleted { run_id, state } => json!({
-                "success": true,
-                "action": "delete",
-                "runId": run_id,
-                "state": tombstone_state_name(*state),
-            }),
             Self::Rejected => json!({
                 "success": false,
                 "error": "Team lifecycle request was rejected",
@@ -209,7 +183,7 @@ pub(crate) fn decode(
     authorization: &str,
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
-) -> Result<Request, DecodeError> {
+) -> Result<DecodedRequest, DecodeError> {
     let Value::Object(body) = value else {
         return Err(DecodeError::Invalid);
     };
@@ -235,7 +209,7 @@ pub(crate) fn decode(
         )
         .map_err(|_| DecodeError::Unauthorized)?;
 
-    match action.as_str() {
+    let request = match action.as_str() {
         "list" if has_keys(&body, &["action", "teamId"]) => Ok(Request::List {
             team_id: team_id(body.get("teamId"))?,
         }),
@@ -277,15 +251,15 @@ pub(crate) fn decode(
         }
         "delete" if has_keys(&body, &["action", "teamId", "idempotencyKey"]) => {
             Ok(Request::Delete {
-                target: DeleteTarget::Team(team_id(body.get("teamId"))?),
+                team_id: team_id(body.get("teamId"))?,
                 idempotency_key: opaque_id(string(body.get("idempotencyKey"))?)?,
             })
         }
         "delete" if has_keys(&body, &["action", "runId", "idempotencyKey"]) => {
-            Ok(Request::Delete {
-                target: DeleteTarget::Run(run_id(body.get("runId"))?),
+            return Ok(DecodedRequest::RunDelete {
+                run_id: run_id(body.get("runId"))?,
                 idempotency_key: opaque_id(string(body.get("idempotencyKey"))?)?,
-            })
+            });
         }
         "resume" if has_keys(&body, &["action", "teamId", "idempotencyKey"]) => {
             Ok(Request::Resume {
@@ -300,19 +274,22 @@ pub(crate) fn decode(
             })
         }
         _ => Err(DecodeError::Invalid),
-    }
+    }?;
+    Ok(DecodedRequest::Immediate(request))
 }
 
-pub(crate) async fn handle(
+pub(crate) fn handle(
     owner: &OrganizationHandle,
     request: Request,
     observed_at: u64,
-) -> Delivery {
+) -> BoxFuture<'_, Delivery> {
     match request {
-        Request::List { team_id } => match owner.run_list(team_id).await {
-            Ok(Ok(runs)) => Delivery::Listed(runs),
-            Ok(Err(_)) | Err(_) => Delivery::Unavailable,
-        },
+        Request::List { team_id } => crate::future::boxed(move || async move {
+            match owner.run_list(team_id).await {
+                Ok(Ok(runs)) => Delivery::Listed(runs),
+                Ok(Err(_)) | Err(_) => Delivery::Unavailable,
+            }
+        }),
         Request::Create {
             team_id,
             run_id,
@@ -320,7 +297,7 @@ pub(crate) async fn handle(
             workflow_plan,
             source_identity,
             template_revision,
-        } => {
+        } => crate::future::boxed(move || async move {
             let response_run_id = run_id.as_str().to_owned();
             match owner
                 .run_create(
@@ -349,11 +326,11 @@ pub(crate) async fn handle(
                 | Ok(Err(_)) => Delivery::Rejected,
                 Err(_) => Delivery::Unavailable,
             }
-        }
+        }),
         Request::Delete {
-            target: DeleteTarget::Team(team_id),
+            team_id,
             idempotency_key,
-        } => {
+        } => crate::future::boxed(move || async move {
             let response_team_id = team_id.as_str().to_owned();
             let idempotency_key = match organization::IdempotencyKey::try_new(idempotency_key) {
                 Ok(idempotency_key) => idempotency_key,
@@ -374,21 +351,21 @@ pub(crate) async fn handle(
                 Ok(Err(_)) => Delivery::Rejected,
                 Err(_) => Delivery::Unavailable,
             }
-        }
+        }),
         Request::Resume {
             team_id,
             idempotency_key,
-        } => {
+        } => crate::future::boxed(move || async move {
             debug_assert!(!idempotency_key.is_empty());
             owner
                 .resume(team_id)
                 .await
                 .map_or(Delivery::Unavailable, Delivery::Resumed)
-        }
+        }),
         Request::Cancel {
             run_id,
             idempotency_key,
-        } => {
+        } => crate::future::boxed(move || async move {
             let response_run_id = run_id.as_str().to_owned();
             match owner.run_cancel(run_id, idempotency_key, observed_at).await {
                 Ok(Ok(outcome)) => Delivery::Cancellation {
@@ -398,24 +375,7 @@ pub(crate) async fn handle(
                 Ok(Err(_)) => Delivery::Rejected,
                 Err(_) => Delivery::Unavailable,
             }
-        }
-        Request::Delete {
-            target: DeleteTarget::Run(run_id),
-            idempotency_key,
-        } => {
-            let response_run_id = run_id.as_str().to_owned();
-            match owner
-                .run_delete_and_purge(run_id, idempotency_key, observed_at)
-                .await
-            {
-                Ok(Ok(outcome)) => Delivery::RunDeleted {
-                    run_id: response_run_id,
-                    state: purge_state(outcome),
-                },
-                Ok(Err(_)) => Delivery::Rejected,
-                Err(_) => Delivery::Unavailable,
-            }
-        }
+        }),
     }
 }
 
@@ -426,15 +386,6 @@ fn cancellation_state(outcome: organization::BeginCancellationOutcome) -> Cancel
         organization::BeginCancellationOutcome::AlreadyCancelled => CancellationState::Cancelled,
         organization::BeginCancellationOutcome::OutcomeUnknown => CancellationState::OutcomeUnknown,
         organization::BeginCancellationOutcome::Tombstoned => CancellationState::Tombstoned,
-    }
-}
-
-fn purge_state(outcome: organization::GraphRunPurgeOutcome) -> TombstoneState {
-    match outcome {
-        organization::GraphRunPurgeOutcome::Purged
-        | organization::GraphRunPurgeOutcome::Replayed => TombstoneState::Purged,
-        organization::GraphRunPurgeOutcome::Rejected(_) => TombstoneState::Rejected,
-        organization::GraphRunPurgeOutcome::OutcomeUnknown(_) => TombstoneState::OutcomeUnknown,
     }
 }
 
@@ -507,14 +458,6 @@ fn cancellation_state_name(state: CancellationState) -> &'static str {
         CancellationState::Cancelled => "cancelled",
         CancellationState::OutcomeUnknown => "outcome_unknown",
         CancellationState::Tombstoned => "tombstoned",
-    }
-}
-
-fn tombstone_state_name(state: TombstoneState) -> &'static str {
-    match state {
-        TombstoneState::Purged => "purged",
-        TombstoneState::Rejected => "rejected",
-        TombstoneState::OutcomeUnknown => "outcome_unknown",
     }
 }
 
@@ -645,7 +588,7 @@ mod tests {
             LIST_OPERATION,
         )
         .expect("list request");
-        assert!(matches!(list, Request::List { .. }));
+        assert!(matches!(list, DecodedRequest::Immediate(Request::List { .. })));
 
         let create = decode_with_authorization(
             json!({
@@ -675,7 +618,7 @@ mod tests {
             CREATE_OPERATION,
         )
         .expect("create request");
-        assert!(matches!(create, Request::Create { .. }));
+        assert!(matches!(create, DecodedRequest::Immediate(Request::Create { .. })));
 
         let delete_team = decode_with_authorization(
             json!({
@@ -688,10 +631,7 @@ mod tests {
         .expect("team delete request");
         assert!(matches!(
             delete_team,
-            Request::Delete {
-                target: DeleteTarget::Team(_),
-                ..
-            }
+            DecodedRequest::Immediate(Request::Delete { .. })
         ));
 
         let resume = decode_with_authorization(
@@ -703,7 +643,7 @@ mod tests {
             RESUME_OPERATION,
         )
         .expect("resume request");
-        assert!(matches!(resume, Request::Resume { .. }));
+        assert!(matches!(resume, DecodedRequest::Immediate(Request::Resume { .. })));
 
         let cancel = decode_with_authorization(
             json!({
@@ -714,7 +654,7 @@ mod tests {
             CANCEL_OPERATION,
         )
         .expect("cancel request");
-        assert!(matches!(cancel, Request::Cancel { .. }));
+        assert!(matches!(cancel, DecodedRequest::Immediate(Request::Cancel { .. })));
 
         let delete_run = decode_with_authorization(
             json!({
@@ -727,10 +667,7 @@ mod tests {
         .expect("run delete request");
         assert!(matches!(
             delete_run,
-            Request::Delete {
-                target: DeleteTarget::Run(_),
-                ..
-            }
+            DecodedRequest::RunDelete { .. }
         ));
 
         for malformed in [
@@ -797,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_and_run_delete_never_project_private_plans() {
+    fn cancellation_never_projects_private_plans() {
         let cancellation = Delivery::Cancellation {
             run_id: "run:one".to_owned(),
             state: CancellationState::Cancelling,
@@ -811,20 +748,6 @@ mod tests {
                 "state": "cancelling",
             })
         );
-
-        let deleted = Delivery::RunDeleted {
-            run_id: "run:one".to_owned(),
-            state: TombstoneState::Purged,
-        };
-        assert_eq!(
-            deleted.body(),
-            json!({
-                "success": true,
-                "action": "delete",
-                "runId": "run:one",
-                "state": "purged",
-            })
-        );
     }
 
     #[test]
@@ -836,7 +759,7 @@ mod tests {
         );
     }
 
-    fn decode_with_authorization(value: Value, operation: &str) -> Result<Request, DecodeError> {
+    fn decode_with_authorization(value: Value, operation: &str) -> Result<DecodedRequest, DecodeError> {
         let mut verifier =
             CapabilityDecisionVerifier::try_new(&verification_key()).expect("verifier");
         decode(value, &decision(operation), &mut verifier, 1)

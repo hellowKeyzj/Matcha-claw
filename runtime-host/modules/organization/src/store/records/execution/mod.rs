@@ -1,9 +1,16 @@
 mod activity;
 mod artifact;
-mod decision;
+pub(crate) mod decision;
 mod delivery;
 mod evidence;
 mod task;
+
+pub(crate) use activity::{encode as encode_activity, encode_change as encode_activity_change};
+pub(crate) use artifact::encode as encode_artifact;
+pub(crate) use decision::{encode as encode_decision, encode_event as encode_decision_event};
+pub(crate) use delivery::{encode as encode_delivery, encode_change as encode_delivery_change};
+pub(crate) use evidence::encode as encode_evidence;
+pub(crate) use task::{encode_mailbox, encode_runner, encode_task};
 
 use crate::run::artifact::ArtifactRecord;
 use crate::run::{
@@ -11,7 +18,7 @@ use crate::run::{
     task_board::{AutoRunnerFacts, MailboxMessage, TaskRecord},
 };
 use crate::store::{
-    OrganizationFacts, StoreFault,
+    StoreFault,
     content::{ContentRef, ContentScope, ContentStore},
     schema::{RecordKey, RecordKind, StoredRecord},
 };
@@ -48,14 +55,30 @@ struct Bodies<'a> {
     run: GraphRunId,
 }
 
+impl Body {
+    fn reference(&self) -> Result<ContentRef, StoreFault> {
+        let bytes: &[u8; 40] = self.0.as_slice().try_into().map_err(|_| StoreFault::CorruptRecord)?;
+        Ok(ContentRef {
+            sha256: bytes[..32].try_into().map_err(|_| StoreFault::CorruptRecord)?,
+            byte_len: u64::from_le_bytes(bytes[32..].try_into().map_err(|_| StoreFault::CorruptRecord)?),
+        })
+    }
+}
+
 impl Bodies<'_> {
     fn put(&self, text: &str) -> Result<Body, StoreFault> {
-        let reference = self.contents.put(
+        self.put_reusing(text, None)
+    }
+
+    fn put_reusing(&self, text: &str, previous: Option<&Body>) -> Result<Body, StoreFault> {
+        let previous = previous.map(Body::reference).transpose()?;
+        let reference = self.contents.put_reusing(
             ContentScope::Run {
                 team: self.team,
                 run: &self.run,
             },
             text.as_bytes(),
+            previous.as_ref(),
         )?;
         let mut bytes = reference.sha256.to_vec();
         bytes.extend_from_slice(&reference.byte_len.to_le_bytes());
@@ -63,17 +86,7 @@ impl Bodies<'_> {
     }
 
     fn read(&self, body: Body) -> Result<String, StoreFault> {
-        let bytes: [u8; 40] = body.0.try_into().map_err(|_| StoreFault::CorruptRecord)?;
-        let reference = ContentRef {
-            sha256: bytes[..32]
-                .try_into()
-                .map_err(|_| StoreFault::CorruptRecord)?,
-            byte_len: u64::from_le_bytes(
-                bytes[32..]
-                    .try_into()
-                    .map_err(|_| StoreFault::CorruptRecord)?,
-            ),
-        };
+        let reference = body.reference()?;
         String::from_utf8(self.contents.read(
             ContentScope::Run {
                 team: self.team,
@@ -188,56 +201,6 @@ impl ExecutionRecord {
     }
 }
 
-pub(crate) fn encode(
-    record: &ExecutionRecord,
-    team: Option<&TeamId>,
-    contents: &ContentStore,
-) -> Result<StoredRecord, StoreFault> {
-    let (kind, scope, id, run_id) = record.identity();
-    if matches!(
-        record,
-        ExecutionRecord::Decision(_) | ExecutionRecord::DecisionEvent(_)
-    ) {
-        let payload = match record {
-            ExecutionRecord::Decision(value) => decision::encode(value)?,
-            ExecutionRecord::DecisionEvent(value) => decision::encode_event(value)?,
-            _ => unreachable!(),
-        };
-        return Ok(StoredRecord {
-            key: RecordKey { kind, scope, id },
-            team_id: None,
-            run_id: Some(run_id),
-            payload,
-        });
-    }
-    let team = team.ok_or(StoreFault::InvalidFacts)?;
-    let bodies = Bodies {
-        contents,
-        team,
-        run: GraphRunId::new(run_id.clone()),
-    };
-    let payload = match record {
-        ExecutionRecord::Activity(value) => activity::encode(value, &bodies),
-        ExecutionRecord::Delivery(value) => delivery::encode(value, &bodies),
-        ExecutionRecord::Evidence(value) => evidence::encode(value, &bodies),
-        ExecutionRecord::Artifact(value) => artifact::encode(value, &bodies),
-        ExecutionRecord::Decision(_) | ExecutionRecord::DecisionEvent(_) => unreachable!(),
-        ExecutionRecord::Task { ordinal, record } => task::encode_task(*ordinal, record, &bodies),
-        ExecutionRecord::Runner { ordinal, record } => {
-            task::encode_runner(*ordinal, record, &bodies)
-        }
-        ExecutionRecord::Mailbox { ordinal, record } => {
-            task::encode_mailbox(*ordinal, record, &bodies)
-        }
-    }?;
-    Ok(StoredRecord {
-        key: RecordKey { kind, scope, id },
-        team_id: Some(team.as_str().to_owned()),
-        run_id: Some(run_id),
-        payload,
-    })
-}
-
 pub(crate) fn decode(
     record: &StoredRecord,
     contents: &ContentStore,
@@ -293,99 +256,7 @@ pub(crate) fn decode(
     Ok(value)
 }
 
-pub(crate) fn encode_key(
-    facts: &OrganizationFacts,
-    key: &RecordKey,
-    contents: &ContentStore,
-) -> Result<Option<StoredRecord>, StoreFault> {
-    use RecordKind as K;
-    let value = match key.kind {
-        K::Activity => facts
-            .activities()
-            .activity(&valid(crate::ActivityId::new(key.id.clone()))?)
-            .cloned()
-            .map(ExecutionRecord::Activity),
-        K::Delivery => facts
-            .deliveries()
-            .delivery(&valid(crate::DeliveryId::new(key.id.clone()))?)
-            .cloned()
-            .map(ExecutionRecord::Delivery),
-        K::Evidence => facts
-            .evidence()
-            .evidence(&valid(crate::EvidenceId::new(key.id.clone()))?)
-            .cloned()
-            .map(ExecutionRecord::Evidence),
-        K::Artifact => facts
-            .artifact(&valid(crate::run::artifact::ArtifactId::new(
-                key.id.clone(),
-            ))?)
-            .cloned()
-            .map(ExecutionRecord::Artifact),
-        K::Decision => facts
-            .decision_ledger()
-            .decision_by_id(&key.scope, &key.id)
-            .map(|value| ExecutionRecord::Decision(TeamDecisionSnapshot::from(value))),
-        K::DecisionEvent => facts
-            .decision_ledger()
-            .event(&key.id)
-            .map(|value| ExecutionRecord::DecisionEvent(TeamDecisionEventSnapshot::from(value))),
-        K::Task | K::Runner | K::Mailbox => {
-            let (team, run) = split_scope(&key.scope)?;
-            let board = facts.task_board();
-            match key.kind {
-                K::Task => board
-                    .task_record(team, run, &key.id)
-                    .map(|(ordinal, record)| ExecutionRecord::Task {
-                        ordinal,
-                        record: record.clone(),
-                    }),
-                K::Runner => board
-                    .runner_record(team, run, &key.id)
-                    .map(|(ordinal, record)| ExecutionRecord::Runner {
-                        ordinal,
-                        record: record.clone(),
-                    }),
-                K::Mailbox => board
-                    .mailbox_record(team, run, &key.id)
-                    .map(|(ordinal, record)| ExecutionRecord::Mailbox {
-                        ordinal,
-                        record: record.clone(),
-                    }),
-                _ => unreachable!(),
-            }
-        }
-        _ => return Err(StoreFault::InvalidFacts),
-    };
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let team = match &value {
-        ExecutionRecord::Decision(_) | ExecutionRecord::DecisionEvent(_) => None,
-        ExecutionRecord::Delivery(value) => {
-            Some(valid(TeamId::try_new(value.facts().team_id.clone()))?)
-        }
-        ExecutionRecord::Task { record, .. } => Some(record.team_id().clone()),
-        ExecutionRecord::Runner { record, .. } => Some(record.team_id().clone()),
-        ExecutionRecord::Mailbox { record, .. } => Some(record.team_id().clone()),
-        _ => {
-            let (_, _, _, run) = value.identity();
-            Some(
-                facts
-                    .run(&GraphRunId::new(run))
-                    .ok_or(StoreFault::InvalidFacts)?
-                    .team()
-                    .clone(),
-            )
-        }
-    };
-    let record = encode(&value, team.as_ref(), contents)?;
-    if &record.key != key {
-        return Err(StoreFault::InvalidFacts);
-    }
-    Ok(Some(record))
-}
-
-fn split_scope(scope: &str) -> Result<(&str, &str), StoreFault> {
+pub(crate) fn split_scope(scope: &str) -> Result<(&str, &str), StoreFault> {
     let (length, value) = scope.split_once(':').ok_or(StoreFault::CorruptRecord)?;
     let length = length
         .parse::<usize>()

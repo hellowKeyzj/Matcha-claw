@@ -1,12 +1,14 @@
 import { createContext, useContext, type ReactNode } from 'react';
 import type { ChatArtifactGroup } from './artifacts';
 import type { WorkspaceFileContext } from '@/lib/host-api';
+import type { RunWorkspaceProjection } from '@/types/team-workspace';
 
 export interface ChatArtifactContextValue {
   artifactGroups: ChatArtifactGroup[];
   artifactWorkspaceRoot: string | null;
   artifactWorkspaceContext: WorkspaceFileContext;
   workspaceRecoveryAction?: ReactNode;
+  runWorkspace?: RunWorkspaceProjection;
 }
 
 export const ChatArtifactContext = createContext<ChatArtifactContextValue | null>(null);

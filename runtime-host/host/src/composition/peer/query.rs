@@ -5,7 +5,7 @@ use foundation::execution::QueryRoute;
 use openclaw::gateway::request::{
     OpenClawBrowserGatewayRequest, OpenClawCanvasGatewayRequest, OpenClawMcpAppGatewayRequest,
     OpenClawProgressCardGatewayRequest, OpenClawQuestionListGatewayRequest,
-    OpenClawQuestionResolveGatewayRequest,
+    OpenClawQuestionResolveGatewayRequest, OpenClawVideoTaskRefreshGatewayRequest,
 };
 
 use crate::{
@@ -133,6 +133,13 @@ pub(crate) enum PeerQuery {
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,
     },
+    OpenClawVideoTaskRefresh {
+        request: OpenClawVideoTaskRefreshGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
+        reply: oneshot::Sender<
+            Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
+        >,
+    },
 }
 
 impl PeerQuery {
@@ -175,6 +182,12 @@ impl PeerQuery {
                 QueryRoute::Keyed(PeerLaneKey::Question {
                     identity: sessions_module::command::session_identity_lane_key(&request.session_identity),
                     id: request.id.clone(),
+                })
+            }
+            Self::OpenClawVideoTaskRefresh { request, .. } => {
+                QueryRoute::Keyed(PeerLaneKey::VideoTask {
+                    identity: sessions_module::command::session_identity_lane_key(&request.session_identity),
+                    task_id: request.task_id.clone(),
                 })
             }
         }

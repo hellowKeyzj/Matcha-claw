@@ -125,7 +125,7 @@ pub async fn dispatch(
             let _agent_guard =
                 if method == "instructions.write" && matches!(params.scope, Scope::Workspace) {
                     config::validate_id(&params.agent_id)?;
-                    Some(sessions.agent_guard(&params.agent_id).await)
+                    Some(sessions.agent_scope(&params.agent_id).await)
                 } else {
                     None
                 };

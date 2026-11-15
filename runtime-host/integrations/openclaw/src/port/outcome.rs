@@ -19,6 +19,22 @@ pub enum OpenClawGatewayRequestOutcome {
     CapacityExhausted,
     OutcomeUnknown,
     SurfaceRejected(OpenClawSurfaceFailure),
+    VideoTaskRejected { task_id: String, reason: OpenClawVideoTaskRejection },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenClawVideoTaskRejection {
+    MissingJobReference,
+    ProviderUnsupported,
+    TaskUnavailable,
+    QueryRejected,
+}
+
+impl OpenClawVideoTaskRejection {
+    pub fn public_result(self, task_id: &str) -> Value {
+        serde_json::json!({ "taskId": task_id, "errorCode": self })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

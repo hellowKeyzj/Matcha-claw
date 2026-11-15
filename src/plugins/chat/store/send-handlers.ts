@@ -17,6 +17,7 @@ import {
 import { selectCurrentChatSendGate } from '@/plugins/chat/store/selectors';
 import { resolveChatSendGateForPayload } from '@/plugins/chat/store/send-gate';
 import { currentSessionSend, linkSessionSend, markSessionSendUnknown } from '@/plugins/chat/store/send-state';
+import { projectionStore } from '@/plugins/chat/store/session-projection-state';
 import { buildPendingUserMessageItem, startSessionSend, confirmSessionSend, removeSessionSend, getSessionInputIds } from '@/plugins/chat/store/session-presentation';
 import {
   clearErrorRecoveryTimer,
@@ -28,6 +29,7 @@ import {
 } from '@/plugins/chat/store/timers';
 import {
   applySessionView,
+  applySessionProjectionReceipts,
   getSessionRuntime,
   patchSessionMeta,
   hasTimeoutSignal,
@@ -229,7 +231,10 @@ function confirmOptimisticSendItems(params: {
     if (!current) return state;
     const send = currentSessionSend(current);
     if (!send || send.generation !== generation || send.identityKey !== identityKey) return state;
-    const nextSend = canBindRun ? linkSessionSend(send, runId, admission) : null;
+    const endpoint = current.meta.sessionIdentity?.endpoint;
+    const bindsRun = canBindRun || admission === 'in_flight'
+      && endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'openclaw';
+    const nextSend = bindsRun || send.receipt.phase === 'handed-off' ? linkSessionSend(send, runId, admission) : null;
     const messages = confirmSessionSend(current, send, runId, admission, retainReceipt, nextSend);
     return messages.items !== current.items || messages.runtime !== current.runtime || messages.abort !== current.abort || nextSend !== send ? {
       loadedSessions: patchSessionRecord(state, sessionKey, {
@@ -488,6 +493,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       receipt: sendResult,
       retainReceipt: (attachments?.length ?? 0) > 0,
     });
+    const projection = projectionStore(get).get(identityKey);
+    if (projection) applySessionProjectionReceipts({ set, get }, projection, []);
     if (sendResult.projection && buildSessionIdentityKey(sendResult.projection.kind === 'view'
       ? sendResult.projection.view.identity : sendResult.projection.delta.identity) === identityKey) {
       if (sendResult.projection.kind === 'view') {

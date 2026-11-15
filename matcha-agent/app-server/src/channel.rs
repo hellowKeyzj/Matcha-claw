@@ -208,7 +208,7 @@ pub async fn dispatch(
             agent_ids.dedup();
             let mut admission = Vec::new();
             for agent_id in agent_ids {
-                admission.push(sessions.agent_guard(&agent_id).await);
+                admission.push(sessions.agent_scope(&agent_id).await);
                 login::ensure_idle(&agent_id).await?;
             }
             // Closing a live polling consumer is explicit: configuration is not a fake hot-apply ACK.
@@ -320,7 +320,7 @@ pub async fn dispatch(
             let params: Login = rpc::params(params)?;
             let snapshot = config.snapshot().await;
             let binding = definition(&snapshot, &params.id)?;
-            let _admission = sessions.agent_guard(&binding.agent_id).await;
+            let _admission = sessions.agent_scope(&binding.agent_id).await;
             let snapshot = config.snapshot().await;
             let current = definition(&snapshot, &params.id)?;
             if current != binding {
@@ -345,7 +345,7 @@ pub async fn dispatch(
             let params: CancelLogin = rpc::params(params)?;
             let snapshot = config.snapshot().await;
             let binding = definition(&snapshot, &params.id)?;
-            let _admission = sessions.agent_guard(&binding.agent_id).await;
+            let _admission = sessions.agent_scope(&binding.agent_id).await;
             let snapshot = config.snapshot().await;
             if definition(&snapshot, &params.id)? != binding {
                 return Err(Error::conflict(

@@ -1288,6 +1288,8 @@ const SDKUserMessageContentSchema = lazySchema(() =>
     parent_tool_use_id: z.string().nullable(),
     isSynthetic: z.boolean().optional(),
     source_tool_use_id: z.string().min(1).optional(),
+    source_task_id: z.string().min(1).optional(),
+    request_message_id: UUIDPlaceholder().optional(),
     tool_use_result: z.unknown().optional(),
     priority: z.enum(['now', 'next', 'later']).optional(),
     timestamp: z
@@ -1474,6 +1476,7 @@ export const SDKResultSuccessSchema = lazySchema(() =>
     stop_reason: z.string().nullable(),
     total_cost_usd: z.number(),
     input_message_id: UUIDPlaceholder().optional(),
+    request_message_id: UUIDPlaceholder().optional(),
     native_measurement: NativeMeasurementSchema().optional(),
     native_input_receipt: z.record(z.string(), z.unknown()).optional(),
     usage: NonNullableUsagePlaceholder(),
@@ -1502,6 +1505,7 @@ export const SDKResultErrorSchema = lazySchema(() =>
     stop_reason: z.string().nullable(),
     total_cost_usd: z.number(),
     input_message_id: UUIDPlaceholder().optional(),
+    request_message_id: UUIDPlaceholder().optional(),
     native_measurement: NativeMeasurementSchema().optional(),
     native_input_receipt: z.record(z.string(), z.unknown()).optional(),
     usage: NonNullableUsagePlaceholder(),
@@ -1761,6 +1765,7 @@ export const SDKTaskNotificationMessageSchema = lazySchema(() =>
     subtype: z.literal('task_notification'),
     task_id: z.string(),
     tool_use_id: z.string().optional(),
+    request_message_id: UUIDPlaceholder().optional(),
     status: z.enum(['completed', 'failed', 'stopped']),
     output_file: z.string(),
     summary: z.string(),
@@ -1782,6 +1787,7 @@ export const SDKTaskStartedMessageSchema = lazySchema(() =>
     subtype: z.literal('task_started'),
     task_id: z.string(),
     tool_use_id: z.string().optional(),
+    request_message_id: UUIDPlaceholder().optional(),
     description: z.string(),
     task_type: z.string().optional(),
     workflow_name: z
@@ -1816,6 +1822,7 @@ export const SDKTaskProgressMessageSchema = lazySchema(() =>
     subtype: z.literal('task_progress'),
     task_id: z.string(),
     tool_use_id: z.string().optional(),
+    request_message_id: UUIDPlaceholder().optional(),
     description: z.string(),
     usage: z.object({
       total_tokens: z.number(),

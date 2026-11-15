@@ -98,12 +98,16 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
         session_key: &'a str,
     ) -> WorkspaceFuture<'a, WorkspaceDirectoryRoot, DriverWorkspaceDirectoryFailure> {
         let workspace = self.workspace.clone();
-        let session_key = session_key.to_owned();
-        blocking(DriverWorkspaceDirectoryFailure::Unavailable, move || {
-            workspace
-                .trusted_workspace_directory(&session_key)
-                .map(workspace_directory_root)
-                .map_err(workspace_directory_failure)
+        Box::pin(async move {
+            let key = crate::session::protocol::AgentScopedSessionKey::try_parse(session_key)
+                .map_err(|_| DriverWorkspaceDirectoryFailure::Unavailable)?;
+            let identity = crate::session::cwd::read_identity(&self.gateway, &key, &tokio_util::sync::CancellationToken::new())
+                .await.map_err(|_| DriverWorkspaceDirectoryFailure::Unavailable)?
+                .ok_or(DriverWorkspaceDirectoryFailure::Unavailable)?;
+            blocking(DriverWorkspaceDirectoryFailure::Unavailable, move || {
+                workspace.session_workspace_directory(&identity)
+                    .map(workspace_directory_root).map_err(workspace_directory_failure)
+            }).await
         })
     }
 
@@ -116,15 +120,17 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
         DriverWorkspaceDirectoryFailure,
     > {
         let workspace = self.workspace.clone();
-        let session_key = session_key.to_owned();
-        blocking(DriverWorkspaceDirectoryFailure::Unavailable, move || {
-            let workspace = workspace
-                .bind_workspace(&session_key)
-                .map_err(workspace_directory_failure)?;
-            Ok(Arc::new(WorkspaceBinding {
-                workspace: Arc::new(workspace),
-            })
-                as Arc<dyn workspace_module::WorkspaceBinding>)
+        Box::pin(async move {
+            let key = crate::session::protocol::AgentScopedSessionKey::try_parse(session_key)
+                .map_err(|_| DriverWorkspaceDirectoryFailure::Unavailable)?;
+            let identity = crate::session::cwd::read_identity(&self.gateway, &key, &tokio_util::sync::CancellationToken::new())
+                .await.map_err(|_| DriverWorkspaceDirectoryFailure::Unavailable)?
+                .ok_or(DriverWorkspaceDirectoryFailure::Unavailable)?;
+            blocking(DriverWorkspaceDirectoryFailure::Unavailable, move || {
+                let workspace = workspace.bind_workspace(&identity).map_err(workspace_directory_failure)?;
+                Ok(Arc::new(WorkspaceBinding { workspace: Arc::new(workspace) })
+                    as Arc<dyn workspace_module::WorkspaceBinding>)
+            }).await
         })
     }
 
@@ -249,6 +255,10 @@ struct WorkspaceBinding {
 }
 
 impl workspace_module::WorkspaceBinding for WorkspaceBinding {
+    fn directory_matches(&self, root: &std::path::Path) -> bool {
+        self.workspace.directory_matches(root)
+    }
+
     fn resource_key(&self) -> Option<&str> {
         self.workspace.resource_key()
     }

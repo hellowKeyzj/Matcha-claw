@@ -90,6 +90,7 @@ export interface AppMediaModel {
     readonly maxImages: number;
     readonly maxCount: number;
     readonly mask: boolean;
+    readonly endpointValidatesOptions: boolean;
     readonly pixelSize: boolean;
     readonly pixelSizeLimits?: AppPixelSizeLimits;
     readonly sizes?: readonly string[];
@@ -169,7 +170,7 @@ export function isAppConfirmationRequest(value: unknown): value is AppConfirmati
       if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return false;
       const item = detail as Record<string, unknown>;
       return Object.keys(item).length === 2 && Object.keys(item).every((key) => key === 'label' || key === 'value')
-        && text(item.label, 200) && text(item.value, 24_000);
+        && text(item.label, 200) && typeof item.value === 'string' && item.value.trim().length > 0;
     }) && new TextEncoder().encode(JSON.stringify(request)).byteLength <= 64 * 1024;
 }
 

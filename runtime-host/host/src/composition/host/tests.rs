@@ -841,7 +841,7 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     assert!(run_actor.contains("struct TeamRunActor"));
     assert!(run_actor.contains(".schedule_ready_nodes(run_id.clone(), now)"));
     assert!(run_actor.contains("claim_activity(run_id.clone(), activity_id.clone(), claimed_at)"));
-    assert!(run_actor.contains(".route_activity_receipt("));
+    assert!(run_actor.contains("route_activity_receipt("));
     assert!(supervisor.contains(".active_run_ids()"));
     for removed in [
         concat!("Terminal", "Watches"),

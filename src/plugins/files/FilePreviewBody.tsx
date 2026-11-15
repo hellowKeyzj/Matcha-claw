@@ -4,12 +4,13 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
-import { hostFileReadBinary, hostFileReadText, hostWorkspaceMediaResolve, type WorkspaceFileContext } from '@/lib/host-api';
+import { hostFileReadBinary, hostFileReadText, hostWorkspaceMediaPlayback, hostWorkspaceMediaResolve, type WorkspaceFileContext } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
 import { useContributions } from '@/plugin-host/react';
 import { AppPluginManager } from '@/plugins/application-plugins/AppPluginManager';
-import { fileFormats, fileReaders, findFileReader, resolveFilePreviewTarget, type FilePreviewMode, type FileReaderContribution } from './extensions';
-import { resolveArtifactLocalPath, resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
+import { fileFormats, fileReaders, findFileReader, resolveFilePreviewTarget, type FilePreviewMode, type FileReaderContribution, type TextFileReaderProps } from './extensions';
+import { getMimeTypeForPath } from './file-types';
+import { resolveArtifactLocalPath, resolveWorkspaceRelativePath, resolveWorkspaceResourcePath, type ArtifactPreviewTarget } from './types';
 import { artifactFileErrorMessage, confirmAndOpenArtifactPath, openArtifactPathExternally, revealArtifactPathInFileManager, shouldOfferDirectOpenFallback } from './open-file-utils';
 
 export type { FilePreviewMode } from './extensions';
@@ -29,7 +30,7 @@ interface FilePreviewBodyProps {
 type FileReadState =
   | { status: 'loading' }
   | { status: 'text'; content: string }
-  | { status: 'binary'; data: ArrayBuffer }
+  | { status: 'binary'; data: ArrayBuffer; mimeType?: string }
   | { status: 'tooLarge' | 'unsupportedBinary' }
   | { status: 'error'; message: string };
 
@@ -37,17 +38,17 @@ function PreviewLoading() {
   return <div className="flex h-full items-center justify-center"><LoadingSpinner /></div>;
 }
 
-function WorkspaceFileReader({ file, reader, relativePath, workspaceContext, tooLargeFallback }: {
+function WorkspaceFileReader({ file, reader, relativePath, workspaceContext, readResource, tooLargeFallback }: {
   file: ArtifactPreviewTarget;
   reader: Exclude<FileReaderContribution, { source: 'snapshot' }>;
   relativePath: string | null;
   workspaceContext?: WorkspaceFileContext;
+  readResource: TextFileReaderProps['readResource'];
   tooLargeFallback: ReactNode;
 }) {
   const { t } = useTranslation('chat');
   const [state, setState] = useState<FileReadState>({ status: 'loading' });
-  const endpoint = workspaceContext?.agentScope?.endpoint;
-  const agentId = workspaceContext?.agentScope?.agentId;
+  const scope = workspaceContext?.scope;
   const source = reader.source;
   const mediaSource = file.mediaSource;
 
@@ -57,7 +58,8 @@ function WorkspaceFileReader({ file, reader, relativePath, workspaceContext, too
     void (async () => {
       try {
         if (mediaSource) {
-          const blob = await hostWorkspaceMediaResolve(mediaSource);
+          const blob = await (file.contentType === 'audio' || file.contentType === 'video'
+            ? hostWorkspaceMediaPlayback(mediaSource) : hostWorkspaceMediaResolve(mediaSource));
           if (cancelled) return;
           if (blob.size > INLINE_BINARY_PREVIEW_MAX_BYTES) {
             setState({ status: 'tooLarge' });
@@ -65,15 +67,15 @@ function WorkspaceFileReader({ file, reader, relativePath, workspaceContext, too
           }
           const result: FileReadState = source === 'text'
             ? { status: 'text', content: await blob.text() }
-            : { status: 'binary', data: await blob.arrayBuffer() };
+            : { status: 'binary', data: await blob.arrayBuffer(), mimeType: blob.type || file.mimeType };
           if (!cancelled) setState(result);
           return;
         }
-        if (!endpoint || !agentId) throw new Error('AgentScope is required');
+        if (!scope) throw new Error('Workspace scope is required');
         if (!relativePath) throw new Error('Workspace relative path is unavailable');
-        const payload = { endpoint, agentId, relativePath };
+        const payload = { scope, relativePath };
         if (source === 'text') {
-          const result = await hostFileReadText(payload);
+          const result = await hostFileReadText({ ...payload, maxBytes: INLINE_BINARY_PREVIEW_MAX_BYTES });
           if (cancelled) return;
           if (result.ok && typeof result.content === 'string') {
             setState({ status: 'text', content: result.content });
@@ -103,7 +105,7 @@ function WorkspaceFileReader({ file, reader, relativePath, workspaceContext, too
       }
     })();
     return () => { cancelled = true; };
-  }, [endpoint, agentId, mediaSource, relativePath, source]);
+  }, [scope, mediaSource, relativePath, source, file.contentType, file.mimeType]);
 
   if (state.status === 'tooLarge') return tooLargeFallback;
   if (state.status === 'unsupportedBinary') {
@@ -114,11 +116,11 @@ function WorkspaceFileReader({ file, reader, relativePath, workspaceContext, too
   }
   if (reader.source === 'text' && state.status === 'text') {
     const Reader = reader.component;
-    return <Reader file={file} text={state.content} />;
+    return <Reader file={file} text={state.content} readResource={readResource} />;
   }
   if (reader.source === 'binary' && state.status === 'binary') {
     const Reader = reader.component;
-    return <Reader file={file} data={state.data} />;
+    return <Reader file={state.mimeType ? { ...file, mimeType: state.mimeType } : file} data={state.data} />;
   }
   return <PreviewLoading />;
 }
@@ -178,11 +180,21 @@ export function FilePreviewBody({
   const file = resolveFilePreviewTarget(inputFile, formats);
   const reader = findFileReader(readers, file, mode);
   const [pathCopied, setPathCopied] = useState(false);
-  const shouldUseInlineSnapshot = !file.mediaSource && file.sourceTool !== 'write' && !!file.content;
+  const shouldUseInlineSnapshot = !file.mediaSource && workspaceContext?.scope?.kind !== 'team-run' && file.sourceTool !== 'write' && !!file.content;
   const transportRelativePath = file.mediaSource ? null : resolveWorkspaceRelativePath(
     file.relativePath ?? file.filePath,
     workspaceContext?.workspaceRoot,
   );
+  const scope = workspaceContext?.scope;
+  const readResource = useCallback(async (source: string, maxBytes: number) => {
+    if (!scope || !transportRelativePath) return null;
+    const resourcePath = resolveWorkspaceResourcePath(source, transportRelativePath);
+    if (!resourcePath) return null;
+    const result = await hostFileReadBinary({ scope, relativePath: resourcePath, maxBytes: Math.min(maxBytes, INLINE_BINARY_PREVIEW_MAX_BYTES) });
+    if (!result.ok || typeof result.data !== 'string') throw new Error(result.error ?? 'unavailable');
+    const bytes = Uint8Array.from(window.atob(result.data), (character) => character.charCodeAt(0));
+    return new Blob([bytes], { type: getMimeTypeForPath(resourcePath, formats) });
+  }, [scope, transportRelativePath, formats]);
   const localPath = file.mediaSource ? null : resolveArtifactLocalPath(file.filePath, workspaceContext?.workspaceRoot);
   const canDirectOpen = localPath !== null;
   const fileTooLargeForPreview = typeof file.fileSize === 'number' && file.fileSize > INLINE_BINARY_PREVIEW_MAX_BYTES;
@@ -255,16 +267,16 @@ export function FilePreviewBody({
     }
     if (reader.source === 'text' && shouldUseInlineSnapshot) {
       const Reader = reader.component;
-      return <Reader file={file} text={file.content!} />;
+      return <Reader file={file} text={file.content!} readResource={readResource} />;
     }
-    if (!file.mediaSource && (!transportRelativePath || !workspaceContext?.agentScope)) {
+    if (!file.mediaSource && (!transportRelativePath || !workspaceContext?.scope)) {
       return canDirectOpen
         ? renderFallback(t('artifacts.previewOutsideWorkspace'), t('artifacts.previewOpenExternalDescription'))
         : <div role="status" className="flex h-full items-center justify-center px-6 text-center text-sm text-destructive">{t('artifacts.localPathUnavailable')}</div>;
     }
-    return <WorkspaceFileReader file={file} reader={reader} relativePath={transportRelativePath} workspaceContext={workspaceContext} tooLargeFallback={tooLargeFallback} />;
+    return <WorkspaceFileReader file={file} reader={reader} relativePath={transportRelativePath} workspaceContext={workspaceContext} readResource={file.mediaSource ? undefined : readResource} tooLargeFallback={tooLargeFallback} />;
   })();
-  const previewInstanceKey = JSON.stringify([file.mediaSource ?? workspaceContext?.agentScope, transportRelativePath, file.filePath, mode, reader?.id]);
+  const previewInstanceKey = JSON.stringify([file.mediaSource ?? workspaceContext?.scope, transportRelativePath, file.filePath, mode, reader?.id]);
 
   return (
     <div className={cn('flex h-full min-h-0 flex-col overflow-hidden', className)}>

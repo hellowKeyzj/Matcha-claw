@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
 const MAX_FIELD_BYTES: usize = 128;
-const MAX_NOTE_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TeamDecisionType {
@@ -40,37 +39,40 @@ impl TeamDecisionCommand {
         idempotency_key: impl Into<String>,
         created_at: u64,
     ) -> Result<Self, TeamDecisionCommandError> {
-        let decision_id = decision_id.into();
-        let run_id = run_id.into();
-        let stage_id = stage_id.into();
-        let idempotency_key = idempotency_key.into();
-        if !valid_field(&decision_id) {
+        let command = Self {
+            decision_id: decision_id.into(),
+            run_id: run_id.into(),
+            stage_id: stage_id.into(),
+            decision,
+            note,
+            idempotency_key: idempotency_key.into(),
+            created_at,
+        };
+        command.validate()?;
+        Ok(command)
+    }
+
+    fn validate(&self) -> Result<(), TeamDecisionCommandError> {
+        if !valid_field(&self.decision_id) {
             return Err(TeamDecisionCommandError::InvalidDecisionId);
         }
-        if !valid_field(&run_id) {
+        if !valid_field(&self.run_id) {
             return Err(TeamDecisionCommandError::InvalidRunId);
         }
-        if !valid_field(&stage_id) {
+        if !valid_field(&self.stage_id) {
             return Err(TeamDecisionCommandError::InvalidStageId);
         }
-        if !valid_field(&idempotency_key) {
+        if !valid_field(&self.idempotency_key) {
             return Err(TeamDecisionCommandError::InvalidIdempotencyKey);
         }
-        if note
+        if self
+            .note
             .as_deref()
-            .is_some_and(|value| value.trim().is_empty() || value.len() > MAX_NOTE_BYTES)
+            .is_some_and(|value| value.trim().is_empty())
         {
             return Err(TeamDecisionCommandError::InvalidNote);
         }
-        Ok(Self {
-            decision_id,
-            run_id,
-            stage_id,
-            decision,
-            note,
-            idempotency_key,
-            created_at,
-        })
+        Ok(())
     }
 
     pub fn decision_id(&self) -> &str {
@@ -208,6 +210,17 @@ impl TeamDecisionSnapshot {
         &self.stage_id
     }
 
+    pub(crate) fn matches_decision(&self, decision: &TeamDecision) -> bool {
+        self.sequence == decision.sequence()
+            && self.decision_id == decision.decision_id()
+            && self.run_id == decision.run_id()
+            && self.stage_id == decision.stage_id()
+            && self.decision == decision.decision()
+            && self.note.as_deref() == decision.note()
+            && self.idempotency_key == decision.idempotency_key()
+            && self.created_at == decision.created_at()
+    }
+
     pub(crate) fn command(&self) -> Result<TeamDecisionCommand, TeamDecisionCommandError> {
         TeamDecisionCommand::try_new(
             self.decision_id.clone(),
@@ -226,24 +239,14 @@ pub enum TeamDecisionEventType {
     Submitted,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct TeamDecisionEvent {
-    event_id: String,
-    run_id: String,
-    sequence: u64,
-    event_type: TeamDecisionEventType,
     decision: TeamDecision,
 }
 
 impl TeamDecisionEvent {
     pub(crate) fn submitted(decision: TeamDecision) -> Self {
-        Self {
-            event_id: decision.decision_id().to_owned(),
-            run_id: decision.run_id().to_owned(),
-            sequence: decision.sequence(),
-            event_type: TeamDecisionEventType::Submitted,
-            decision,
-        }
+        Self { decision }
     }
 
     fn from_snapshot(
@@ -259,33 +262,50 @@ impl TeamDecisionEvent {
         {
             return Err(TeamDecisionEventRestoreError::IdentityMismatch);
         }
-        Ok(Self {
-            event_id: snapshot.event_id.clone(),
-            run_id: snapshot.run_id.clone(),
-            sequence: snapshot.sequence,
-            event_type: TeamDecisionEventType::Submitted,
-            decision: TeamDecision::from_durable(snapshot.decision.sequence, command),
-        })
+        Ok(Self::submitted(TeamDecision::from_durable(
+            snapshot.decision.sequence,
+            command,
+        )))
+    }
+
+    pub(super) fn validate(&self) -> Result<(), TeamDecisionEventRestoreError> {
+        self.decision
+            .command
+            .validate()
+            .map_err(TeamDecisionEventRestoreError::InvalidCommand)
     }
 
     pub fn event_id(&self) -> &str {
-        &self.event_id
+        self.decision.decision_id()
     }
 
     pub fn run_id(&self) -> &str {
-        &self.run_id
+        self.decision.run_id()
     }
 
     pub const fn sequence(&self) -> u64 {
-        self.sequence
+        self.decision.sequence()
     }
 
     pub const fn event_type(&self) -> TeamDecisionEventType {
-        self.event_type
+        TeamDecisionEventType::Submitted
     }
 
     pub fn decision(&self) -> &TeamDecision {
         &self.decision
+    }
+}
+
+impl fmt::Debug for TeamDecisionEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TeamDecisionEvent")
+            .field("event_id", &self.event_id())
+            .field("run_id", &self.run_id())
+            .field("sequence", &self.sequence())
+            .field("event_type", &self.event_type())
+            .field("decision", &self.decision)
+            .finish()
     }
 }
 
@@ -306,9 +326,9 @@ pub struct TeamDecisionEventSnapshot {
 impl From<&TeamDecisionEvent> for TeamDecisionEventSnapshot {
     fn from(event: &TeamDecisionEvent) -> Self {
         Self {
-            event_id: event.event_id.clone(),
-            run_id: event.run_id.clone(),
-            sequence: event.sequence,
+            event_id: event.event_id().to_owned(),
+            run_id: event.run_id().to_owned(),
+            sequence: event.sequence(),
             decision: TeamDecisionSnapshot::from(&event.decision),
         }
     }
@@ -403,11 +423,7 @@ impl TeamDecisionReducer {
         state: &mut TeamDecisionState,
         event: &TeamDecisionEvent,
     ) -> Result<(), TeamDecisionReducerError> {
-        if event.event_type != TeamDecisionEventType::Submitted
-            || event.run_id != event.decision.run_id()
-            || event.sequence != event.decision.sequence()
-            || !valid_field(event.event_id())
-        {
+        if !valid_field(event.event_id()) {
             return Err(TeamDecisionReducerError::InvalidEvent);
         }
         let expected_sequence = state
@@ -421,12 +437,8 @@ impl TeamDecisionReducer {
             event.run_id().to_owned(),
             event.decision().idempotency_key().to_owned(),
         );
-        if let Some(existing) = state.decisions.get(&key) {
-            return if existing == event.decision() {
-                Err(TeamDecisionReducerError::ConflictingIdempotencyKey)
-            } else {
-                Err(TeamDecisionReducerError::ConflictingIdempotencyKey)
-            };
+        if state.decisions.contains_key(&key) {
+            return Err(TeamDecisionReducerError::ConflictingIdempotencyKey);
         }
         if state.decisions.values().any(|decision| {
             decision.run_id() == event.run_id()

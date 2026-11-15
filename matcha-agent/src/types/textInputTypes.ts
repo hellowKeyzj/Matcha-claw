@@ -328,6 +328,11 @@ export type QueuedCommand = {
    * the queue instead of calling `onQuery` directly.
    */
   isMeta?: boolean
+  taskNotification?: {
+    taskId: string
+    toolUseId?: string
+    requestMessageId?: string
+  }
   nativeBudget?: { maxTurns?: number }
   nativeExecution?: import('../world/investigation.js').AcceptedInputScope
   /** Raw SDK input retained only until its IO runs in the accepted-input scope. */

@@ -2,8 +2,14 @@ use super::*;
 
 #[derive(Clone, Default)]
 pub(super) struct DeliveryIndexes {
-    correlations: BTreeMap<(String, String), crate::DeliveryId>,
-    receipts: BTreeMap<String, crate::DeliveryId>,
+    pub(super) correlations: BTreeMap<(String, String, String, String), crate::DeliveryId>,
+    pub(super) receipts: BTreeMap<String, crate::DeliveryId>,
+}
+
+#[derive(Default)]
+pub(super) struct DeliveryIndexEntries<'a> {
+    pub(super) correlations: BTreeMap<(&'a str, &'a str, &'a str, &'a str), &'a crate::DeliveryId>,
+    pub(super) receipts: BTreeMap<&'a str, &'a crate::DeliveryId>,
 }
 
 impl PartialEq for DeliveryIndexes {
@@ -17,13 +23,46 @@ impl fmt::Debug for DeliveryIndexes {
     }
 }
 
-fn correlation_key(delivery: &crate::Delivery) -> Option<(String, String)> {
-    let correlation = match delivery.phase() {
+pub(super) fn correlation(delivery: &crate::Delivery) -> Option<&crate::NativeDeliveryCorrelation> {
+    match delivery.phase() {
         DeliveryPhase::Delivered { native_correlation, .. } => native_correlation.as_ref(),
         DeliveryPhase::TerminalObserved { observation } => Some(observation.correlation()),
         _ => None,
-    }?;
-    Some((correlation.endpoint_session_id().as_str().to_owned(), correlation.native_run_receipt().as_str().to_owned()))
+    }
+}
+
+pub(super) fn correlation_key<'a>(
+    delivery: &'a crate::Delivery,
+    run: Option<&'a GraphRunFacts>,
+) -> Result<Option<(&'a str, &'a str, &'a str, &'a str)>, OrganizationFactsError> {
+    if correlation(delivery).is_none() { return Ok(None); }
+    let run = run.ok_or(OrganizationFactsError::UnknownDeliveryRun)?;
+    correlation_key_for_runtime(delivery, run.runtime())
+}
+
+fn correlation_key_for_runtime<'a>(
+    delivery: &'a crate::Delivery,
+    runtime: Option<&'a RunRuntimeReceipt>,
+) -> Result<Option<(&'a str, &'a str, &'a str, &'a str)>, OrganizationFactsError> {
+    let Some(correlation) = correlation(delivery) else { return Ok(None); };
+    let binding = runtime.and_then(|runtime| runtime.bindings().iter().find(|binding| {
+        binding.role().as_str() == delivery.facts().role_id
+            && binding.session_ref().as_str() == delivery.facts().session_ref
+    })).ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
+    if binding.team().as_str() != delivery.facts().team_id
+        || binding.team_run().as_str() != delivery.facts().run_id
+        || correlation.endpoint_session_id() != binding.endpoint_session_id()
+    {
+        return Err(OrganizationFactsError::InvalidTerminalObservation);
+    }
+    Ok(Some((
+        binding.endpoint().as_str(), binding.agent().as_str(),
+        binding.endpoint_session_id().as_str(), correlation.native_run_receipt().as_str(),
+    )))
+}
+
+fn owned_correlation_key((endpoint, agent, session, receipt): (&str, &str, &str, &str)) -> (String, String, String, String) {
+    (endpoint.to_owned(), agent.to_owned(), session.to_owned(), receipt.to_owned())
 }
 
 fn resolution_key(delivery: &crate::Delivery) -> Option<String> {
@@ -32,16 +71,23 @@ fn resolution_key(delivery: &crate::Delivery) -> Option<String> {
     Some(resolution.receipt().as_str().to_owned())
 }
 
-impl DeliveryIndexes {
-    pub(super) fn restore(deliveries: &DeliveryLedger) -> Result<Self, OrganizationFactsError> {
-        let mut indexes = Self::default();
-        for delivery in deliveries.deliveries() { indexes.insert(delivery)?; }
-        Ok(indexes)
+impl DeliveryIndexEntries<'_> {
+    pub(super) fn into_owned(self) -> DeliveryIndexes {
+        DeliveryIndexes {
+            correlations: self.correlations.into_iter()
+                .map(|(key, id)| (owned_correlation_key(key), id.clone()))
+                .collect(),
+            receipts: self.receipts.into_iter()
+                .map(|(receipt, id)| (receipt.to_owned(), id.clone()))
+                .collect(),
+        }
     }
+}
 
-    fn insert(&mut self, delivery: &crate::Delivery) -> Result<(), OrganizationFactsError> {
+impl DeliveryIndexes {
+    fn insert(&mut self, delivery: &crate::Delivery, run: Option<&GraphRunFacts>) -> Result<(), OrganizationFactsError> {
         let id = &delivery.facts().delivery_id;
-        if let Some(key) = correlation_key(delivery) {
+        if let Some(key) = correlation_key(delivery, run)?.map(owned_correlation_key) {
             if self.correlations.get(&key).is_some_and(|owner| owner != id) {
                 return Err(OrganizationFactsError::DuplicateMatchaTerminalCorrelation);
             }
@@ -56,22 +102,24 @@ impl DeliveryIndexes {
         Ok(())
     }
 
-    fn remove(&mut self, delivery: &crate::Delivery) {
+    fn remove(&mut self, delivery: &crate::Delivery, runtime: Option<&RunRuntimeReceipt>) -> Result<(), OrganizationFactsError> {
         let id = &delivery.facts().delivery_id;
-        if let Some(key) = correlation_key(delivery) {
+        if let Some(key) = correlation_key_for_runtime(delivery, runtime)?.map(owned_correlation_key) {
             if self.correlations.get(&key) == Some(id) { self.correlations.remove(&key); }
         }
         if let Some(key) = resolution_key(delivery) {
             if self.receipts.get(&key) == Some(id) { self.receipts.remove(&key); }
         }
+        Ok(())
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct FactsJournal {
     pub(super) active: bool,
+    pub(super) team_prompts: Option<crate::prompts::TeamPromptSettings>,
     pub(super) teams: BTreeMap<String, Option<TeamFacts>>,
-    pub(super) materializations: BTreeMap<String, Option<TeamMaterializationLifecycle>>,
+    pub(super) materializations: BTreeMap<String, Option<TeamMaterializationGroups>>,
     pub(super) templates: BTreeMap<String, Option<WorkflowTemplateFacts>>,
     pub(super) admissions: BTreeMap<String, Option<PendingWorkflowPlanAdmission>>,
     pub(super) purged: BTreeMap<String, Option<PurgedRunMarker>>,
@@ -89,7 +137,9 @@ pub(super) struct RunHeader {
     pub(super) team: TeamId,
     pub(super) revision: TeamRevision,
     pub(super) runtime: Option<RunRuntimeReceipt>,
+    pub(super) workspace: Option<crate::RunWorkspace>,
     pub(super) role_session_intents: BTreeMap<String, RoleSessionIntent>,
+    pub(super) deletion_confirmations: Vec<crate::RoleSessionDeletionConfirmation>,
     pub(super) lifecycle: GraphRunLifecycle,
     pub(super) start_gate: RunStartGate,
     pub(super) retired_executions: BTreeSet<(NodeId, ExecutionFence)>,
@@ -100,8 +150,9 @@ impl RunHeader {
     fn capture(run: &GraphRunFacts) -> Self {
         Self {
             team: run.team.clone(), revision: run.frozen_team_revision,
-            runtime: run.runtime.clone(), lifecycle: run.lifecycle.clone(),
+            runtime: run.runtime.clone(), workspace: run.workspace.clone(), lifecycle: run.lifecycle.clone(),
             role_session_intents: run.role_session_intents.clone(),
+            deletion_confirmations: run.deletion_confirmations.clone(),
             start_gate: run.start_gate.clone(),
             retired_executions: run.retired_executions.clone(),
             task_execution_context: run.task_execution_context.clone(),
@@ -112,7 +163,9 @@ impl RunHeader {
         run.team = self.team;
         run.frozen_team_revision = self.revision;
         run.runtime = self.runtime;
+        run.workspace = self.workspace;
         run.role_session_intents = self.role_session_intents;
+        run.deletion_confirmations = self.deletion_confirmations;
         run.lifecycle = self.lifecycle;
         run.start_gate = self.start_gate;
         run.retired_executions = self.retired_executions;
@@ -146,24 +199,50 @@ macro_rules! touch_map {
 
 impl OrganizationFacts {
     pub(super) fn refresh_delivery_indexes(&mut self, id: &crate::DeliveryId, replacement: Option<&crate::Delivery>) -> Result<(), OrganizationFactsError> {
-        if let Some(old) = self.deliveries.delivery(id) { self.delivery_indexes.remove(old); }
-        if let Some(value) = replacement { self.delivery_indexes.insert(value)?; }
+        if let Some(old) = self.deliveries.delivery(id) {
+            self.delivery_indexes.remove(old, self.runs.get(&old.facts().run_id).and_then(GraphRunFacts::runtime))?;
+        }
+        if let Some(value) = replacement {
+            self.delivery_indexes.insert(value, self.runs.get(&value.facts().run_id))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove_run_delivery_indexes(&mut self, run_id: &str) -> Result<(), OrganizationFactsError> {
+        let runtime = self.runs.get(run_id).and_then(GraphRunFacts::runtime);
+        for delivery in self.deliveries.deliveries_for_run(run_id) {
+            self.delivery_indexes.remove(delivery, runtime)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn insert_run_delivery_indexes(&mut self, run_id: &str) -> Result<(), OrganizationFactsError> {
+        let run = self.runs.get(run_id);
+        for delivery in self.deliveries.deliveries_for_run(run_id) {
+            self.delivery_indexes.insert(delivery, run)?;
+        }
         Ok(())
     }
 
     pub(super) fn validate_changed(&self) -> Result<(), OrganizationFactsError> {
         for (key, old) in &self.journal.teams {
             let current = self.teams.get(key).ok_or(OrganizationFactsError::RemovedTeam)?;
+            if current.workspace_directory_name().is_some_and(|name| {
+                !crate::run::workspace::valid_directory_name(name) || self.teams.iter().any(|(id, team)| id != key
+                    && team.workspace_directory_name().is_some_and(|other| name.to_lowercase() == other.to_lowercase()))
+            }) { return Err(OrganizationFactsError::InvalidTeamTransition); }
             if let Some(old) = old {
                 if current.revision().get() < old.revision().get()
                     || (current.revision() == old.revision() && current.definition() != old.definition())
                     || (old.tombstoned() && !current.tombstoned())
+                    || old.workspace_directory_name.as_ref().is_some_and(|name| current.workspace_directory_name.as_ref() != Some(name))
                 { return Err(OrganizationFactsError::InvalidTeamTransition); }
             }
         }
         for (key, old) in &self.journal.materializations {
             let current = self.materializations.get(key).ok_or(OrganizationFactsError::RemovedMaterialization)?;
-            if !self.teams.contains_key(key) { return Err(OrganizationFactsError::UnknownMaterializationTeam); }
+            let team_id = TeamId::try_new(key.clone()).map_err(|_| OrganizationFactsError::UnknownMaterializationTeam)?;
+            validate_materialization(&self.teams, &team_id, current)?;
             if let Some(old) = old {
                 if !current.can_transition_from(old) { return Err(OrganizationFactsError::MaterializationChanged); }
             }
@@ -208,6 +287,11 @@ impl OrganizationFacts {
             }
             if let RunUndo::Updated(old) = old {
                 run.validate_session_transition(old.runtime.as_ref(), &old.role_session_intents)?;
+                if old.deletion_confirmations.iter().any(|confirmation| !run.deletion_confirmations.contains(confirmation)) {
+                    return Err(OrganizationFactsError::InvalidGraphRun);
+                }
+                if old.workspace.is_none() && run.workspace.is_some() { return Err(OrganizationFactsError::RunOwnershipChanged); }
+                run.validate_workspace_transition(old.workspace.as_ref(), run.workspace())?;
                 if run.team != old.team || run.frozen_team_revision != old.revision
                     || run.task_execution_context != old.task_execution_context { return Err(OrganizationFactsError::RunOwnershipChanged); }
                 if !run.lifecycle.can_transition_from(&old.lifecycle) { return Err(OrganizationFactsError::InvalidGraphRunLifecycle); }
@@ -219,10 +303,12 @@ impl OrganizationFacts {
             if run.task_execution_context.as_ref().is_some_and(|context| {
                 !context.valid() || context.root_request_id != run.lifecycle().creation_idempotency_key()
             }) { return Err(OrganizationFactsError::InvalidGraphRun); }
+            self.validate_workspace(run)?;
             run.validate_retired_executions(&run.retired_executions)?;
             run.validate_role_session_intents()?;
+            run.validate_deletion_confirmations(&run.deletion_confirmations)?;
             if matches!(old, RunUndo::Inserted) {
-                GraphState::restore_durable(run.graph.durable_snapshot()).map_err(|_| OrganizationFactsError::InvalidGraphRun)?;
+                run.graph.validate_durable().map_err(|_| OrganizationFactsError::InvalidGraphRun)?;
             } else {
                 run.graph.validate_changes().map_err(|_| OrganizationFactsError::InvalidGraphRun)?;
             }
@@ -230,7 +316,7 @@ impl OrganizationFacts {
                 self.validate_replaced_graph_dependents(key)?;
             }
             if let Some(runtime) = &run.runtime {
-                let receipt = self.materializations.get(run.team.as_str()).and_then(TeamMaterializationLifecycle::receipt)
+                let receipt = self.materializations.get(run.team.as_str()).and_then(TeamMaterializationGroups::retained_receipts)
                     .ok_or(OrganizationFactsError::RunMaterializationMissing)?;
                 validate_runtime_receipt_alignment(run, runtime, receipt)?;
             }
@@ -254,7 +340,7 @@ impl OrganizationFacts {
             if let DeliveryPhase::TerminalObserved { observation } = current.phase() {
                 validate_terminal_observation(current, run, observation)?;
             }
-            if let Some(key) = correlation_key(current) {
+            if let Some(key) = correlation_key(current, Some(run))?.map(owned_correlation_key) {
                 if self.delivery_indexes.correlations.get(&key).is_some_and(|owner| owner != *id && !changed_deliveries.contains(owner))
                     || correlations.insert(key, *id).is_some()
                 { return Err(OrganizationFactsError::DuplicateMatchaTerminalCorrelation); }
@@ -273,11 +359,11 @@ impl OrganizationFacts {
                 }
                 continue;
             };
-            validate_activity(&self.runs, current)?;
+            validate_activity(&self.runs, &self.artifacts, current)?;
             if let Some(old) = old {
                 if current.facts() != old.facts() { return Err(OrganizationFactsError::ActivityIdentityChanged); }
                 validate_activity_transition(old, current)?;
-            } else { validate_new_activity_prompt(&self.runs, current.facts())?; }
+            } else { validate_new_activity_prompt(&self.runs, current.facts(), self.team_prompts())?; }
         }
         for id in self.evidence.changed_ids() {
             if let Some(record) = self.evidence.evidence(id) { validate_evidence_provenance(&self.runs, record)?; }
@@ -338,18 +424,18 @@ impl OrganizationFacts {
         run_id: &str,
     ) -> Result<(), OrganizationFactsError> {
         let run = &self.runs[run_id];
-        for delivery in self.deliveries.deliveries().filter(|value| value.facts().run_id == run_id) {
+        for delivery in self.deliveries_for_run(run_id) {
             if let DeliveryPhase::TerminalObserved { observation } = delivery.phase() {
                 validate_terminal_observation(delivery, run, observation)?;
             }
         }
-        for activity in self.activities.activities().filter(|value| value.facts().run_id.as_str() == run_id) {
-            validate_activity(&self.runs, activity)?;
+        for activity in self.activities_for_run(run_id) {
+            validate_activity(&self.runs, &self.artifacts, activity)?;
         }
-        for record in self.evidence.records().filter(|value| value.run_id() == run_id) {
+        for record in self.evidence.records_for_run(run_id) {
             validate_evidence_provenance(&self.runs, record)?;
         }
-        for record in self.artifacts.records().filter(|value| value.run_id() == run_id) {
+        for record in self.artifacts_for_run(run_id) {
             validate_artifact_provenance(&self.runs, record)?;
         }
         for resolution in self.control_resolutions.resolutions().filter(|value| value.graph_run_id().as_str() == run_id) {
@@ -368,8 +454,8 @@ impl OrganizationFacts {
                 return Err(OrganizationFactsError::InvalidTriggerRegistration);
             }
         }
-        validate_human_decision_approvals(&self.runs,
-            self.approvals.values().filter(|approval| approval.facts().run_id == run_id), &self.control_resolutions)
+        validate_approvals(&self.runs,
+            self.approvals_for_run(run_id), &self.control_resolutions)
     }
 
     fn validate_changed_approvals(&self) -> Result<(), OrganizationFactsError> {
@@ -379,7 +465,7 @@ impl OrganizationFacts {
             if let ApprovalUndo::Removed(old) = undo {
                 if approval != old { return Err(OrganizationFactsError::ApprovalChanged); }
             }
-            Approval::restore(approval.durable_snapshot()).map_err(|_| OrganizationFactsError::InvalidApprovalLedger)?;
+            approval.validate().map_err(|_| OrganizationFactsError::InvalidApprovalLedger)?;
             let facts = approval.facts();
             let run = self.runs.get(&facts.run_id).ok_or(OrganizationFactsError::UnknownApprovalRun)?;
             for receipt in approval.new_resolutions() {
@@ -387,27 +473,7 @@ impl OrganizationFacts {
                     approval_decision_tag(receipt.decision), receipt.idempotency_key.as_str(), receipt.resolved_at))
                     .or_insert(0_usize) += 1;
             }
-            if let crate::ApprovalSubject::HumanDecision { node_id } = &facts.subject
-                && facts.origin == crate::ApprovalOrigin::HumanDecision
-                && facts.effect == crate::ApprovalEffect::RouteDecisionPorts
-            {
-                let node_id = NodeId::new(node_id.clone());
-                let execution = facts.execution_fence.as_deref().ok_or(OrganizationFactsError::InvalidApprovalLedger)?;
-                let attempt = run.graph.executions().get(&node_id)
-                    .and_then(|history| history.attempts().iter().find(|attempt| attempt.fence().node_execution_id().as_str() == execution))
-                    .ok_or(OrganizationFactsError::InvalidApprovalLedger)?;
-                for receipt in approval.new_resolutions() {
-                    let resolution = ControlNodeResolution::human_decision(run.run_id().clone(), node_id.clone(), attempt.fence().clone(),
-                        match receipt.decision {
-                            crate::ApprovalDecision::Approve => crate::HumanDecision::Approve,
-                            crate::ApprovalDecision::Deny => crate::HumanDecision::Deny,
-                            crate::ApprovalDecision::Abort => crate::HumanDecision::Abort,
-                        }, receipt.resolved_at).map_err(|_| OrganizationFactsError::InvalidApprovalLedger)?;
-                    if self.control_resolutions.resolution(resolution.idempotency_key()) != Some(&resolution) {
-                        return Err(OrganizationFactsError::InvalidApprovalLedger);
-                    }
-                }
-            }
+            validate_approval_resolutions(run, approval, approval.new_resolutions(), &self.control_resolutions)?;
         }
         for run_id in self.events.changed_runs() {
             for event in self.events.new_events(run_id) {
@@ -466,18 +532,18 @@ impl OrganizationFacts {
 
     pub(super) fn insert_approval(&mut self, approval: Approval) {
         let key = approval.facts().approval_id.clone();
-        self.touch_approval(&key);
-        if let Some(mut old) = self.approvals.insert(key.clone(), approval) {
-            if matches!(self.journal.approvals.get(&key), Some(ApprovalUndo::Updated)) {
-                old.rollback_transaction();
-                self.journal.approvals.insert(key, ApprovalUndo::Removed(old));
-            }
-        }
+        self.remove_approval(&key);
+        self.approval_ids_by_run.entry(approval.facts().run_id.clone()).or_default().insert(key.clone());
+        self.approvals.insert(key, approval);
     }
 
     pub(super) fn remove_approval(&mut self, key: &str) {
         self.touch_approval(key);
         if let Some(mut approval) = self.approvals.remove(key) {
+            if let Some(ids) = self.approval_ids_by_run.get_mut(&approval.facts().run_id) {
+                ids.remove(key);
+                if ids.is_empty() { self.approval_ids_by_run.remove(&approval.facts().run_id); }
+            }
             approval.rollback_transaction();
             if self.journal.active && matches!(self.journal.approvals.get(key), Some(ApprovalUndo::Updated)) {
                 self.journal.approvals.insert(key.to_owned(), ApprovalUndo::Removed(approval));
@@ -501,11 +567,20 @@ impl OrganizationFacts {
 
     pub(crate) fn commit_transaction(&mut self) {
         for id in self.deliveries.changed_ids() {
-            if let Some(old) = self.deliveries.previous(id) { self.delivery_indexes.remove(old); }
+            if let Some(old) = self.deliveries.previous(id) {
+                let runtime = match self.journal.runs.get(&old.facts().run_id) {
+                    Some(RunUndo::Updated(header)) => header.runtime.as_ref(),
+                    Some(RunUndo::Removed(run)) => run.runtime(),
+                    Some(RunUndo::Inserted) => None,
+                    None => self.runs.get(&old.facts().run_id).and_then(GraphRunFacts::runtime),
+                };
+                self.delivery_indexes.remove(old, runtime).expect("previous delivery indexes are valid");
+            }
         }
         for id in self.deliveries.changed_ids() {
             if let Some(current) = self.deliveries.delivery(id) {
-                self.delivery_indexes.insert(current).expect("validated delivery indexes");
+                self.delivery_indexes.insert(current, self.runs.get(&current.facts().run_id))
+                    .expect("validated delivery indexes");
             }
         }
         for key in self.journal.runs.keys() {
@@ -528,6 +603,9 @@ impl OrganizationFacts {
 
     pub(crate) fn rollback_transaction(&mut self) {
         let journal = std::mem::take(&mut self.journal);
+        if let Some(settings) = journal.team_prompts {
+            self.team_prompts = settings;
+        }
         macro_rules! restore_map {
             ($field:ident, $undo:ident) => {
                 for (key, old) in journal.$undo {
@@ -556,8 +634,8 @@ impl OrganizationFacts {
         }
         for (key, old) in journal.approvals {
             match old {
-                ApprovalUndo::Removed(approval) => { self.approvals.insert(key, approval); }
-                ApprovalUndo::Inserted => { self.approvals.remove(&key); }
+                ApprovalUndo::Removed(approval) => { self.insert_approval(approval); }
+                ApprovalUndo::Inserted => { self.remove_approval(&key); }
                 ApprovalUndo::Updated => {
                     if let Some(approval) = self.approvals.get_mut(&key) {
                         approval.rollback_transaction();

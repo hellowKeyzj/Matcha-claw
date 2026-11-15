@@ -1,17 +1,12 @@
-use std::{collections::BTreeMap, fmt, num::NonZeroU32};
+use std::{collections::BTreeMap, fmt};
 
 use super::{
     EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy, GraphDefinition, GraphRunId,
     NodeDefinition, NodeId, NodeKind, StartTrigger, WorkAssignment,
 };
 
-const VERSION: &str = "1";
+const VERSION: &str = "2";
 const MAX_INPUT_BYTES: usize = 1_048_576;
-const MAX_LINES: usize = 4_096;
-const MAX_LINE_BYTES: usize = 131_072;
-const MAX_NODES: usize = 256;
-const MAX_EDGES: usize = 512;
-const MAX_SCALAR_BYTES: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphYamlError {
@@ -48,7 +43,7 @@ impl fmt::Display for GraphYamlError {
 impl std::error::Error for GraphYamlError {}
 
 pub fn export(definition: &GraphDefinition) -> String {
-    let mut yaml = String::from("version: 1\n");
+    let mut yaml = String::from("version: 2\n");
     write_scalar(&mut yaml, "graphId", definition.graph_id());
     write_scalar(&mut yaml, "workflowPlanId", definition.workflow_plan_id());
     write_scalar(&mut yaml, "runId", definition.run_id().as_str());
@@ -65,8 +60,8 @@ pub fn export(definition: &GraphDefinition) -> String {
         yaml.push_str("    title: ");
         yaml.push_str(&quoted(node.title()));
         yaml.push('\n');
-        yaml.push_str("    maxAttempts: ");
-        yaml.push_str(&node.max_attempts().get().to_string());
+        yaml.push_str("    reworkLimits: ");
+        yaml.push_str(&serde_json::to_string(node.rework_limits()).expect("limits encode as JSON"));
         yaml.push('\n');
         yaml.push_str("    isControl: ");
         yaml.push_str(if node.is_control() { "true" } else { "false" });
@@ -88,6 +83,9 @@ pub fn export(definition: &GraphDefinition) -> String {
                 crate::ScriptReviewRule::AssertNoBlockingGate => "assert_no_blocking_gate",
                 crate::ScriptReviewRule::AssertArtifactExists => "assert_artifact_exists",
             });
+        }
+        if let Some(prompt) = node.approval_prompt() {
+            write_indented_scalar(&mut yaml, "prompt", prompt);
         }
         if let Some(assignment) = node.work_assignment() {
             yaml.push_str("    taskId: ");
@@ -209,13 +207,10 @@ fn parse_document(input: &str) -> Result<Document, GraphYamlError> {
         return Err(GraphYamlError::InvalidDocument);
     }
     let lines = input.lines().collect::<Vec<_>>();
-    if lines.is_empty() || lines.len() > MAX_LINES || !input.ends_with('\n') {
+    if lines.is_empty() || !input.ends_with('\n') {
         return Err(GraphYamlError::InvalidDocument);
     }
-    if lines
-        .iter()
-        .any(|line| line.len() > MAX_LINE_BYTES || line.contains('\t'))
-    {
+    if lines.iter().any(|line| line.contains('\t')) {
         return Err(GraphYamlError::InvalidDocument);
     }
     let mut document = Document {
@@ -251,9 +246,6 @@ fn parse_document(input: &str) -> Result<Document, GraphYamlError> {
                     }
                     document.edges_seen = true;
                     document.edges = entries;
-                }
-                if document.nodes.len() > MAX_NODES || document.edges.len() > MAX_EDGES {
-                    return Err(GraphYamlError::InvalidDocument);
                 }
             }
             "version" | "graphId" | "workflowPlanId" | "runId" | "title" => {
@@ -326,11 +318,9 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
     let id = take(&mut fields, "id")?;
     let kind = parse_node_kind(&take(&mut fields, "kind")?)?;
     let title = take(&mut fields, "title")?;
-    let max_attempts = take(&mut fields, "maxAttempts")?
-        .parse::<u32>()
-        .ok()
-        .and_then(NonZeroU32::new)
-        .ok_or(GraphYamlError::InvalidNode)?;
+    let rework_limits = fields.remove("reworkLimits")
+        .map(|value| serde_json::from_str::<BTreeMap<String, u32>>(&value).map_err(|_| GraphYamlError::InvalidNode))
+        .transpose()?;
     let is_control = fields
         .remove("isControl")
         .ok_or(GraphYamlError::MissingField)?
@@ -369,7 +359,6 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
             Ok(NodeDefinition::start(
                 NodeId::new(id),
                 title,
-                max_attempts,
                 trigger,
             ))
         }
@@ -385,8 +374,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 Ok(NodeDefinition::work(
                     NodeId::new(id),
                     title,
-                    max_attempts,
-                    WorkAssignment::typed(
+                        WorkAssignment::typed(
                         task_id,
                         prompt,
                         ExecutorPolicy::team_role_session(role_id, role_session_ref(session_ref)?),
@@ -409,8 +397,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 Ok(NodeDefinition::review(
                     NodeId::new(id),
                     title,
-                    max_attempts,
-                    super::ReviewAssignment::with_executor(
+                        super::ReviewAssignment::with_executor(
                         ExecutorPolicy::team_role_session(role_id, role_session_ref(session_ref)?),
                         prompt,
                     ),
@@ -427,7 +414,17 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 && session_ref.is_none()
                 && output_artifact_kind.is_none() =>
         {
-            Ok(NodeDefinition::join(NodeId::new(id), title, max_attempts))
+            Ok(NodeDefinition::join(NodeId::new(id), title))
+        }
+        (NodeKind::HumanDecision, true)
+            if webhook_path.is_none()
+                && cron_expression.is_none()
+                && task_id.is_none()
+                && role_id.is_none()
+                && session_ref.is_none()
+                && output_artifact_kind.is_none() =>
+        {
+            Ok(NodeDefinition::human_decision(NodeId::new(id), title, prompt))
         }
         (kind, true)
             if matches!(
@@ -454,13 +451,16 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                     Some("assert_artifact_exists") => crate::ScriptReviewRule::AssertArtifactExists,
                     _ => return Err(GraphYamlError::InvalidNode),
                 };
-                Ok(NodeDefinition::script_review(NodeId::new(id), title, max_attempts, rule))
+                Ok(NodeDefinition::script_review(NodeId::new(id), title, rule))
             } else {
-                Ok(NodeDefinition::control(NodeId::new(id), kind, title, max_attempts))
+                Ok(NodeDefinition::control(NodeId::new(id), kind, title))
             }
         }
         _ => Err(GraphYamlError::InvalidNode),
-    }
+    }.map(|node| match rework_limits {
+        Some(limits) => node.with_rework_limits(limits),
+        None => node,
+    })
 }
 
 fn role_session_ref(value: Option<String>) -> Result<crate::RoleSessionRef, GraphYamlError> {
@@ -529,11 +529,12 @@ fn split_field(line: &str) -> Result<(&str, &str), GraphYamlError> {
 }
 
 fn scalar(field: &str, value: &str) -> Result<String, GraphYamlError> {
-    if value.len() > MAX_SCALAR_BYTES
-        || value.is_empty() && field != "prompt"
-        || value.contains('\t')
-    {
+    if value.is_empty() && field != "prompt" || value.contains('\t') {
         return Err(GraphYamlError::InvalidScalar);
+    }
+    if field == "reworkLimits" {
+        serde_json::from_str::<BTreeMap<String, u32>>(value).map_err(|_| GraphYamlError::InvalidScalar)?;
+        return Ok(value.to_owned());
     }
     let parsed = if value.starts_with('"') {
         serde_json::from_str::<String>(value).map_err(|_| GraphYamlError::InvalidScalar)?
@@ -543,9 +544,8 @@ fn scalar(field: &str, value: &str) -> Result<String, GraphYamlError> {
         }
         value.to_owned()
     };
-    if parsed.len() > MAX_SCALAR_BYTES
-        || (parsed.is_empty() && field != "prompt")
-        || parsed.chars().any(char::is_control)
+    if (parsed.is_empty() && field != "prompt")
+        || (field != "prompt" && parsed.chars().any(char::is_control))
     {
         return Err(GraphYamlError::InvalidScalar);
     }
@@ -554,7 +554,6 @@ fn scalar(field: &str, value: &str) -> Result<String, GraphYamlError> {
             field,
             "version"
                 | "kind"
-                | "maxAttempts"
                 | "isControl"
                 | "action"
                 | "includeUpstreamResult"
@@ -624,7 +623,19 @@ fn write_indented_scalar(yaml: &mut String, key: &str, value: &str) {
 }
 
 fn quoted(value: &str) -> String {
-    serde_json::to_string(value).expect("strings always encode as JSON")
+    use fmt::Write as _;
+
+    let json = serde_json::to_string(value).expect("strings always encode as JSON");
+    let mut quoted = String::with_capacity(json.len());
+    for character in json.chars() {
+        match character {
+            '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}' | '\u{feff}' | '\u{fffe}' | '\u{ffff}' => {
+                write!(&mut quoted, "\\u{:04x}", u32::from(character)).expect("writing to String cannot fail");
+            }
+            _ => quoted.push(character),
+        }
+    }
+    quoted
 }
 
 #[cfg(test)]

@@ -27,6 +27,9 @@ pub fn openclaw_session_event(
             if binding.session_key() != session_key || binding.source_epoch() != delta.source_epoch() {
                 return None;
             }
+            let binding = if let Some(run_id) = delta.resumed_run_id() {
+                binding.with_resumed_run(run_id.as_str().to_owned())?
+            } else { binding };
             let identity = binding.identity().clone();
             Some(SessionIngressEvent::new(
                 identity,
@@ -36,6 +39,7 @@ pub fn openclaw_session_event(
                     cursor: delta.source_cursor(),
                     changes: openclaw_canonical_changes(delta.changes()),
                     history_refresh: false,
+                    work_pending: None,
                 },
             ))
         }
@@ -55,6 +59,7 @@ pub fn openclaw_session_event(
                         reason: RecoveryReason::NativeUnknown,
                     }],
                     history_refresh: false,
+                    work_pending: None,
                 },
             ))
         }
@@ -261,6 +266,15 @@ pub fn openclaw_canonical_changes(changes: &[CanonicalSessionChange]) -> Vec<Ses
                         },
                     });
                 }
+            }
+            CanonicalSessionChange::RunErrorUpdated { run_id, phase, error_kind, error_message, stop_reason, error_detail } => {
+                projected.push(SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: *phase, active_run_id: (!sessions_module::state::terminal_run_phase(*phase)).then(|| run_id.as_str().to_owned()),
+                        issue: None, run_progress: None, runtime_activity: None,
+                        error_detail: terminal_runtime_error_detail(error_detail, error_message, error_kind, stop_reason),
+                    },
+                });
             }
             CanonicalSessionChange::ApprovalRequested { run_id, approval_id, option_ids, details } => {
                 projected.push(SessionChange::ApprovalUpdated {

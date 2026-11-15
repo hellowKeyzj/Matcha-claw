@@ -91,14 +91,15 @@ fn public_projection_body(projection: &public::TeamPublicProjection) -> Value {
         "teamId": projection.team_id(),
         "runId": projection.run_id(),
         "teamRevision": projection.team_revision(),
-        "runtime": format_runtime_state(projection.runtime()),
+        "runtime": projection.runtime(),
         "graph": {
             "graphId": graph.graph_id(),
             "workflowPlanId": graph.workflow_plan_id(),
             "title": graph.title(),
-            "status": format_graph_status(graph.status()),
+            "status": graph.status(),
             "nodes": graph.nodes().iter().map(node_body).collect::<Vec<_>>(),
-            "edges": graph.edges().iter().map(edge_body).collect::<Vec<_>>(),
+            "edges": graph.edges(),
+            "rework": graph.rework(),
         },
     })
 }
@@ -106,98 +107,19 @@ fn public_projection_body(projection: &public::TeamPublicProjection) -> Value {
 fn node_body(node: &public::TeamPublicNode) -> Value {
     json!({
         "nodeId": node.node_id(),
-        "kind": format_node_kind(node.kind()),
+        "kind": node.kind(),
         "title": node.title(),
         "roleId": node.role_id(),
         "taskId": node.task_id(),
-        "maxAttempts": node.max_attempts(),
-        "trigger": node.trigger().map(trigger_body),
+        "reworkLimits": node.rework_limits(),
+        "trigger": node.trigger(),
         "attempt": {
             "number": node.attempt().number(),
-            "status": format_attempt_status(node.attempt().status()),
+            "batchId": node.attempt().batch_id(),
+            "status": node.attempt().status(),
             "updatedAt": node.attempt().updated_at(),
         },
     })
-}
-
-fn trigger_body(trigger: &public::TeamPublicStartTrigger) -> Value {
-    match trigger {
-        public::TeamPublicStartTrigger::Webhook => json!({ "kind": "webhook" }),
-        public::TeamPublicStartTrigger::Cron { expression } => {
-            json!({ "kind": "cron", "expression": expression })
-        }
-    }
-}
-
-fn edge_body(edge: &public::TeamPublicEdge) -> Value {
-    json!({
-        "edgeId": edge.edge_id(),
-        "sourceNodeId": edge.source_node_id(),
-        "sourcePort": edge.source_port(),
-        "targetNodeId": edge.target_node_id(),
-        "targetPort": edge.target_port(),
-        "action": format_edge_action(edge.action()),
-        "status": format_edge_status(edge.status()),
-    })
-}
-
-fn format_runtime_state(status: public::TeamRuntimeState) -> &'static str {
-    match status {
-        public::TeamRuntimeState::Confirmed => "confirmed",
-        public::TeamRuntimeState::Unknown => "unknown",
-    }
-}
-
-fn format_graph_status(status: public::TeamPublicGraphStatus) -> &'static str {
-    match status {
-        public::TeamPublicGraphStatus::Pending => "pending",
-        public::TeamPublicGraphStatus::Ready => "ready",
-        public::TeamPublicGraphStatus::Running => "running",
-        public::TeamPublicGraphStatus::Waiting => "waiting",
-        public::TeamPublicGraphStatus::Completed => "completed",
-        public::TeamPublicGraphStatus::Failed => "failed",
-        public::TeamPublicGraphStatus::Cancelled => "cancelled",
-    }
-}
-
-fn format_node_kind(kind: public::TeamPublicNodeKind) -> &'static str {
-    match kind {
-        public::TeamPublicNodeKind::Start => "start",
-        public::TeamPublicNodeKind::Work => "work",
-        public::TeamPublicNodeKind::Review => "review",
-        public::TeamPublicNodeKind::HumanDecision => "human_decision",
-        public::TeamPublicNodeKind::ScriptReview => "script_review",
-        public::TeamPublicNodeKind::Join => "join",
-        public::TeamPublicNodeKind::End => "end",
-    }
-}
-
-fn format_attempt_status(status: public::TeamPublicAttemptStatus) -> &'static str {
-    match status {
-        public::TeamPublicAttemptStatus::Pending => "pending",
-        public::TeamPublicAttemptStatus::Ready => "ready",
-        public::TeamPublicAttemptStatus::Running => "running",
-        public::TeamPublicAttemptStatus::Waiting => "waiting",
-        public::TeamPublicAttemptStatus::Completed => "completed",
-        public::TeamPublicAttemptStatus::Failed => "failed",
-        public::TeamPublicAttemptStatus::Cancelled => "cancelled",
-    }
-}
-
-fn format_edge_action(action: public::TeamPublicEdgeAction) -> &'static str {
-    match action {
-        public::TeamPublicEdgeAction::Activate => "activate",
-        public::TeamPublicEdgeAction::Rework => "rework",
-        public::TeamPublicEdgeAction::Gate => "gate",
-        public::TeamPublicEdgeAction::Finish => "finish",
-    }
-}
-
-fn format_edge_status(status: public::TeamPublicEdgeStatus) -> &'static str {
-    match status {
-        public::TeamPublicEdgeStatus::Waiting => "waiting",
-        public::TeamPublicEdgeStatus::Satisfied => "satisfied",
-    }
 }
 
 pub(crate) async fn read(owner: &OrganizationHandle, request: Request) -> Delivery {

@@ -21,6 +21,23 @@ impl OpenClawWorkspaceBinding {
         self.files.resource_key()
     }
 
+    pub fn directory_matches(&self, root: &std::path::Path) -> bool {
+        self.matches_directory(root).unwrap_or(false)
+    }
+
+    pub(crate) fn matches_directory(&self, root: &std::path::Path) -> Result<bool, super::WorkspaceDirectoryFailure> {
+        self.files.matches_directory(root).map_err(|_| super::WorkspaceDirectoryFailure::Unavailable)
+    }
+
+    pub(crate) fn validate_run_file(&self, path: &str) -> Result<(), organization::RunFileValidationError> {
+        use super::access::WorkspaceFileError;
+        self.files.validate_file(path).map_err(|error| match error {
+            WorkspaceFileError::InvalidRelative => organization::RunFileValidationError::InvalidPath,
+            WorkspaceFileError::Missing | WorkspaceFileError::NotFile | WorkspaceFileError::NotDirectory => organization::RunFileValidationError::MissingFile,
+            _ => organization::RunFileValidationError::Unavailable,
+        })
+    }
+
     pub fn read_text(
         &self,
         relative_path: &str,

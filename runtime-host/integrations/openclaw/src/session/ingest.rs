@@ -215,7 +215,7 @@ pub(crate) enum IngestFrame {
     HistoryStarted { identity: sessions_module::state::SessionIdentity, generation: u64, page: super::window::PageRequest, reply: tokio::sync::oneshot::Sender<u64> },
     HistoryFinished { identity: sessions_module::state::SessionIdentity, generation: u64, read: u64, reply: tokio::sync::oneshot::Sender<bool> },
     PendingApprovals { identity: sessions_module::state::SessionIdentity, session_id: String, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Vec<sessions_module::state::ApprovalView>, sessions_module::ports::RuntimeOperationFailure>> },
-    ImageTaskTools { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Vec<sessions_module::state::ToolView>, sessions_module::ports::RuntimeOperationFailure>> },
+    MediaTaskTools { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Vec<sessions_module::state::ToolView>, sessions_module::ports::RuntimeOperationFailure>> },
     Close { identity: sessions_module::state::SessionIdentity, generation: u64, reply: tokio::sync::oneshot::Sender<()> },
     Restart { identity: sessions_module::state::SessionIdentity, generation: u64, next_generation: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<(), sessions_module::ports::RuntimeOperationFailure>> },
 }
@@ -287,7 +287,7 @@ impl SessionEventIngest {
                     };
                     for (identity, generation) in observation_targets(&observations, value, None) {
                         let binding = sessions_module::state::SessionEventBinding::observed(identity.clone(), generation, Some(value), false).expect("validated observation binding");
-                        let event = SessionIngressEvent::new(identity, sessions_module::command::SessionEvent { binding, run_id: None, cursor: None, history_refresh: false, changes: vec![sessions_module::state::SessionChange::RecoveryRequired { reason }] });
+                        let event = SessionIngressEvent::new(identity, sessions_module::command::SessionEvent { binding, run_id: None, cursor: None, history_refresh: false, changes: vec![sessions_module::state::SessionChange::RecoveryRequired { reason }], work_pending: None });
                         if observations.enqueue_ingress(&session_events, event).await.is_err() { break; }
                     }
                 } => {},
@@ -311,10 +311,10 @@ impl SessionEventIngest {
         receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
     }
 
-    pub(crate) async fn image_task_tools(&self, identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<Vec<sessions_module::state::ToolView>, sessions_module::ports::RuntimeOperationFailure> {
+    pub(crate) async fn media_task_tools(&self, identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<Vec<sessions_module::state::ToolView>, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         let (reply, receiver) = tokio::sync::oneshot::channel();
-        self.sender.send(IngestFrame::ImageTaskTools { identity, generation, source_epoch, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        self.sender.send(IngestFrame::MediaTaskTools { identity, generation, source_epoch, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
         receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
     }
 
@@ -420,9 +420,9 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 let _ = reply.send(result);
                 continue;
             }
-            IngestFrame::ImageTaskTools { identity, generation, source_epoch, observations, reply } => {
+            IngestFrame::MediaTaskTools { identity, generation, source_epoch, observations, reply } => {
                 let result = if source_epoch == active_epoch && observations.is_active(&identity, generation, source_epoch) {
-                    Ok(router.image_task_tools(&identity, generation))
+                    Ok(router.media_task_tools(&identity, generation))
                 } else { Err(RuntimeOperationFailure::Unavailable) };
                 let _ = reply.send(result);
                 continue;
@@ -507,17 +507,16 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                     let payload = event.payload.as_ref();
                     match payload.and_then(|payload| payload.get("action")).and_then(serde_json::Value::as_str) {
                         Some("upserted") => {
-                            if let Some(task) = payload.and_then(|payload| payload.get("task")).and_then(super::image_tasks::ImageTask::decode) {
+                            if let Some(task) = payload.and_then(|payload| payload.get("task")).and_then(super::media_tasks::MediaGenerationTask::decode) {
                                 for (identity, generation) in observation_targets(&observations, active_epoch, Some(&task.session_key)) {
-                                    if task.matches(&identity) { let _ = router.image_task(&identity, generation, &task, epoch, event.sequence, &observations).await; }
+                                    if task.matches(&identity) { let _ = router.media_task(&identity, generation, &task, epoch, event.sequence, &observations).await; }
                                 }
                             }
                         }
                         Some("deleted") => {
                             if let Some(task_id) = payload.and_then(|payload| payload.get("taskId")).and_then(serde_json::Value::as_str) {
                                 for (identity, generation) in observation_targets(&observations, active_epoch, None) {
-                                    let task = super::image_tasks::ImageTask::deleted(task_id, &identity);
-                                    let _ = router.image_task(&identity, generation, &task, epoch, event.sequence, &observations).await;
+                                    let _ = router.delete_media_task(&identity, generation, task_id, epoch, event.sequence, &observations).await;
                                 }
                             }
                         }
@@ -683,12 +682,12 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                         let _ = describe_reply.send(result);
                         status
                     }
-                    Some(OrderedContext::ImageTask { identity, generation, task_id, reply: task_reply }) => {
+                    Some(OrderedContext::MediaTask { identity, generation, task_id, reply: task_reply }) => {
                         let result = if epoch.as_u64() == active_epoch && observations.is_active(&identity, generation, active_epoch) {
                             match &response {
                                 crate::gateway::wire::GatewayResponse::Success { payload: Some(payload), .. } => {
-                                    match payload.get("task").and_then(super::image_tasks::ImageTask::decode) {
-                                        Some(task) if task.task_id == task_id && task.matches(&identity) => router.image_task(&identity, generation, &task, epoch, None, &observations).await,
+                                    match payload.get("task").and_then(super::media_tasks::MediaGenerationTask::decode) {
+                                        Some(task) if task.task_id == task_id && task.matches(&identity) => router.media_task(&identity, generation, &task, epoch, None, &observations).await.map(|tools| (task, tools)),
                                         _ => Err(RuntimeOperationFailure::Unknown),
                                     }
                                 }
@@ -882,6 +881,9 @@ mod tests {
                 message_text: None,
                 message_thinking: None,
                 final_message: None,
+                projection_content: super::super::protocol::DisplayContent::Empty,
+                projection_final_identity: None,
+                has_projection_message: false,
                 yielded: false,
                 message_absent: true,
                 error_kind: None,

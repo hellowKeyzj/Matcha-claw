@@ -37,7 +37,7 @@ impl fmt::Debug for MemberProfile {
 #[derive(Clone, PartialEq)]
 pub struct MemberIntroductionRequest {
     pub role_id: RoleId,
-    pub system_prompt: &'static str,
+    pub system_prompt: String,
     pub prompt: String,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -48,7 +48,7 @@ impl fmt::Debug for MemberIntroductionRequest {
         formatter
             .debug_struct("MemberIntroductionRequest")
             .field("role_id", &self.role_id)
-            .field("system_prompt", &self.system_prompt)
+            .field("system_prompt", &"<redacted>")
             .field("prompt", &"<redacted>")
             .field("max_output_tokens", &self.max_output_tokens)
             .field("temperature", &self.temperature)

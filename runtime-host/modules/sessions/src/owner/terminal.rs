@@ -1,6 +1,10 @@
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}},
+};
 
 use foundation::execution::OwnedTask;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use super::actor::{SessionLane, SessionShared};
@@ -36,7 +40,16 @@ impl TerminalBodies {
     }
 }
 
+// Bound retained deliveries independently of the public event batch size.
+const TERMINAL_DELIVERY_CAPACITY: usize = 256;
+
 pub(crate) type TerminalPermit = Arc<Mutex<Option<OwnedSemaphorePermit>>>;
+
+enum TerminalDeliveryOutcome {
+    Delivered,
+    Deferred,
+    Failed,
+}
 
 pub(super) struct TerminalDelivery {
     gate: Arc<Semaphore>,
@@ -94,6 +107,7 @@ impl Drop for Producer {
     fn drop(&mut self) {
         if std::thread::panicking() { self.delivery.join_failed.store(true, Ordering::Release); }
         if self.blocked { self.delivery.blocked.fetch_sub(1, Ordering::AcqRel); }
+        self.completion_custody.take();
         self.delivery.producers.fetch_sub(1, Ordering::AcqRel);
         self.delivery.notify();
     }
@@ -102,7 +116,7 @@ impl Drop for Producer {
 impl TerminalDelivery {
     pub(super) fn new() -> Self {
         Self {
-            gate: Arc::new(Semaphore::new(1)),
+            gate: Arc::new(Semaphore::new(TERMINAL_DELIVERY_CAPACITY)),
             stopping: AtomicBool::new(false),
             admission: Mutex::new(()),
             stopped: tokio_util::sync::CancellationToken::new(),
@@ -126,6 +140,12 @@ impl TerminalDelivery {
     }
 
     pub(crate) fn is_stopping(&self) -> bool { self.stopping.load(Ordering::Acquire) }
+
+    pub(super) fn retry_pending(&self) {
+        self.retry.fetch_add(1, Ordering::AcqRel);
+        self.retry_changed.notify_waiters();
+        self.notify();
+    }
 
     pub(super) fn notify(&self) { self.changed.notify_waiters(); self.changed.notify_one(); }
 }
@@ -193,94 +213,266 @@ impl SessionShared {
         self.terminal_delivery.producer()
     }
 
-    pub(crate) async fn terminal_permit(&self) -> TerminalPermit {
-        Arc::new(Mutex::new(Some(Arc::clone(&self.terminal_delivery.gate)
-            .acquire_owned().await.expect("session terminal gate closed"))))
+    pub(crate) async fn terminal_permit(&self, count: usize) -> TerminalPermit {
+        loop {
+            let changed = self.terminal_delivery.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(permit) = self.try_terminal_permit(count) { return permit; }
+            changed.await;
+        }
+    }
+
+    pub(super) fn try_terminal_permit(&self, count: usize) -> Option<TerminalPermit> {
+        Arc::clone(&self.terminal_delivery.gate).try_acquire_many_owned(count as u32).ok()
+            .map(|permit| Arc::new(Mutex::new(Some(permit))))
+    }
+
+    async fn read_terminal_run(
+        &self,
+        command: crate::execution::SessionRunReadCommand,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::execution::SessionRunRecord, crate::state::RuntimeIssue> {
+        use crate::execution::SessionRunReadOutcome;
+        use crate::state::RuntimeIssue;
+        let outcome = tokio::select! {
+            outcome = tokio::time::timeout(std::time::Duration::from_secs(30), self.read_run(command, true)) =>
+                outcome.map_err(|_| RuntimeIssue::Timeout)?,
+            _ = cancellation.cancelled() => return Err(RuntimeIssue::Unavailable),
+        };
+        match outcome {
+            SessionRunReadOutcome::Found(record) if crate::state::terminal_run_phase(record.phase)
+                || record.phase == crate::state::RunPhase::Yielded => Ok(record),
+            SessionRunReadOutcome::Unavailable | SessionRunReadOutcome::Unsupported => Err(RuntimeIssue::Unavailable),
+            SessionRunReadOutcome::Rejected => Err(RuntimeIssue::Rejected),
+            _ => Err(RuntimeIssue::Unknown),
+        }
+    }
+
+    async fn deliver_terminal(
+        &self,
+        pending: crate::state::PendingTerminal,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> TerminalDeliveryOutcome {
+        let crate::state::PendingTerminal { mut snapshot, bodies, permit, read: terminal_read, .. } = pending;
+        let openclaw = snapshot.identity.provider() == crate::state::SessionProvider::OpenClaw;
+        let collect_request = openclaw && (snapshot.native_request_id.is_some() || snapshot.delivery_context.is_some()
+            || snapshot.execution_context.is_some() || self.observed_run(&snapshot.identity, &snapshot.native_run_id));
+        if collect_request && terminal_read != crate::state::TerminalRead::Complete {
+            let endpoint_session_id = match &bodies {
+                TerminalBodies::Items { endpoint_session_id, .. } => endpoint_session_id.clone(),
+                TerminalBodies::Complete(_) => None,
+            };
+            let selector = snapshot.native_request_id.clone().map(crate::execution::SessionRunSelector::RequestId)
+                .unwrap_or_else(|| crate::execution::SessionRunSelector::RunId(snapshot.native_run_id.clone()));
+            let Ok(read) = crate::execution::SessionRunReadCommand::try_new(
+                snapshot.identity.clone(), endpoint_session_id, selector,
+            ) else { return TerminalDeliveryOutcome::Failed; };
+            let mut result = self.read_terminal_run(read.clone(), &cancellation).await;
+            if cancellation.is_cancelled() { return TerminalDeliveryOutcome::Failed; }
+            if result.is_err() && terminal_read == crate::state::TerminalRead::Pending {
+                let (reply, received) = tokio::sync::oneshot::channel();
+                let recovery = SessionCommand::RecoverTerminalRead {
+                    identity: snapshot.identity.clone(), run_id: snapshot.native_run_id.clone(),
+                    permit: Arc::clone(&permit), reply,
+                };
+                let sender = self.completion_handle.get().expect("session completion handle");
+                let recovered = tokio::select! {
+                    result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                        sender.send_command(recovery).await.map_err(|_| ())?;
+                        received.await.map_err(|_| ())?.map_err(|_| ())
+                    }) => matches!(result, Ok(Ok(()))),
+                    _ = cancellation.cancelled() => return TerminalDeliveryOutcome::Failed,
+                };
+                if recovered { result = self.read_terminal_run(read, &cancellation).await; }
+            }
+            if cancellation.is_cancelled() { return TerminalDeliveryOutcome::Failed; }
+            if result.as_ref().is_ok_and(|record| record.phase == crate::state::RunPhase::Yielded) {
+                let binding = crate::state::SessionEventBinding::new(snapshot.identity.clone(), None)
+                    .expect("validated terminal identity");
+                let (reply, received) = tokio::sync::oneshot::channel();
+                let refresh = SessionCommand::Ingest {
+                    identity: snapshot.identity.clone(),
+                    event: crate::command::SessionEvent {
+                        binding, run_id: None, cursor: None, history_refresh: false, changes: Vec::new(), work_pending: Some(true),
+                    },
+                    permit: None, reply,
+                };
+                let sender = self.completion_handle.get().expect("session completion handle");
+                let refreshed = tokio::select! {
+                    result = async {
+                        sender.send_command(refresh).await.is_ok()
+                            && matches!(received.await, Ok(Ok(crate::command::SessionIngestOutcome::Applied(_)
+                                | crate::command::SessionIngestOutcome::Consumed { .. })))
+                    } => result,
+                    _ = cancellation.cancelled() => false,
+                };
+                return if refreshed { TerminalDeliveryOutcome::Deferred } else { TerminalDeliveryOutcome::Failed };
+            }
+            let (reply, received) = tokio::sync::oneshot::channel();
+            let completion = SessionCommand::TerminalReadCompleted {
+                identity: snapshot.identity.clone(), run_id: snapshot.native_run_id.clone(),
+                permit: Arc::clone(&permit), result, reply,
+            };
+            let sender = self.completion_handle.get().expect("session completion handle");
+            let committed = tokio::select! {
+                result = async {
+                    sender.send_command(completion).await.is_ok() && received.await == Ok(true)
+                } => result,
+                _ = cancellation.cancelled() => false,
+            };
+            if !committed {
+                return if self.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                    .is_some_and(|state| state.work_pending()) { TerminalDeliveryOutcome::Deferred }
+                else { TerminalDeliveryOutcome::Failed };
+            }
+            let current = self.snapshot.load();
+            let Some(pending) = current.states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                .and_then(|state| state.pending_terminals.first())
+                .filter(|pending| pending.snapshot.native_run_id == snapshot.native_run_id && Arc::ptr_eq(&pending.permit, &permit))
+            else { return TerminalDeliveryOutcome::Failed; };
+            snapshot = pending.snapshot.clone();
+        } else if !collect_request {
+            let collected = tokio::select! {
+                texts = self.complete_terminal_texts(&snapshot.identity, bodies) => texts,
+                _ = cancellation.cancelled() => return TerminalDeliveryOutcome::Failed,
+            };
+            let use_native_texts = collected.as_ref().is_some_and(Vec::is_empty);
+            snapshot.assistant_texts = Ok(collected.unwrap_or_default());
+            let read = crate::execution::SessionRunReadCommand::try_new(
+                snapshot.identity.clone(), None,
+                crate::execution::SessionRunSelector::RunId(snapshot.native_run_id.clone()),
+            );
+            let needs_execution_facts = snapshot.execution_context.is_some()
+                || self.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                    .is_some_and(|state| state.run_execution_contexts.contains_key(&snapshot.native_run_id));
+            if !openclaw && (needs_execution_facts || use_native_texts) && let Ok(read) = read {
+                let outcome = tokio::select! {
+                    outcome = self.handle_read_run(read) => Some(outcome),
+                    _ = cancellation.cancelled() => return TerminalDeliveryOutcome::Failed,
+                };
+                if let Some(crate::execution::SessionRunReadOutcome::Found(record)) = outcome
+                    && record.phase == snapshot.phase && crate::state::terminal_run_phase(record.phase)
+                    && snapshot.native_request_id.as_ref().is_none_or(|expected| record.request_id.as_ref() == Some(expected))
+                    && snapshot.native_message_id.as_ref().is_none_or(|expected| expected == &record.message_id)
+                {
+                    if use_native_texts { snapshot.assistant_texts = Ok(record.assistant_texts); }
+                    let execution = self.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                        .and_then(|state| state.run_execution_contexts.get(&snapshot.native_run_id)
+                            .or_else(|| record.request_id.as_ref().and_then(|id| state.run_execution_contexts.get(id))))
+                        .cloned();
+                    if let Some((request_id, context)) = execution
+                        && record.request_id.as_deref() == Some(request_id.as_str())
+                        && snapshot.execution_context.as_ref().is_none_or(|expected| expected == &context)
+                    {
+                        snapshot.execution_context = Some(context);
+                        snapshot.native_request_id = Some(request_id);
+                        snapshot.native_message_id = Some(record.message_id);
+                        snapshot.measurement = record.measurement;
+                        if snapshot.delivery_context.is_none() {
+                            snapshot.delivery_context = self.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                                .and_then(|state| snapshot.native_request_id.as_ref()
+                                    .and_then(|id| state.run_delivery_contexts.get(id))).cloned();
+                        }
+                    }
+                }
+            }
+        }
+        if openclaw {
+            let current = self.snapshot.load();
+            let Some(pending) = current.states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                .filter(|state| !state.work_pending() && !self.terminal_sync_pending(state.identity()) && self.terminal_read_ready(state))
+                .and_then(|state| state.pending_terminals.iter().find(|pending|
+                    pending.snapshot.native_run_id == snapshot.native_run_id && Arc::ptr_eq(&pending.permit, &permit)))
+            else { return TerminalDeliveryOutcome::Deferred; };
+            snapshot.delivery_context = pending.snapshot.delivery_context.clone();
+            snapshot.execution_context = pending.snapshot.execution_context.clone();
+        }
+        if !crate::state::terminal_run_phase(snapshot.phase) { return TerminalDeliveryOutcome::Failed; }
+        let request_id = snapshot.native_request_id.clone();
+        let identity = snapshot.identity.clone();
+        let run_id = snapshot.native_run_id.clone();
+        let Some(hook) = &self.terminal_hook else { return TerminalDeliveryOutcome::Failed; };
+        let delivered = tokio::select! {
+            result = hook.run_terminal_async(snapshot, cancellation.clone()) => result.is_ok(),
+            _ = cancellation.cancelled() => false,
+        };
+        if !delivered { return TerminalDeliveryOutcome::Failed; }
+        let (reply, received) = tokio::sync::oneshot::channel();
+        let sender = self.completion_handle.get().expect("session completion handle");
+        tokio::select! {
+            result = async {
+                sender.send_command(SessionCommand::TerminalDelivered { identity, run_id, request_id, permit, reply }).await.is_ok()
+                    && received.await == Ok(true)
+            } => if result { TerminalDeliveryOutcome::Delivered } else { TerminalDeliveryOutcome::Failed },
+            _ = cancellation.cancelled() => TerminalDeliveryOutcome::Failed,
+        }
     }
 
     fn terminal_task(&self) -> OwnedTask<Result<(), SessionTerminalCloseError>> {
         let shared = self.clone();
         let (task, _) = OwnedTask::spawn(move |cancellation| async move {
+            let mut work = FuturesUnordered::new();
+            let mut active = HashSet::new();
+            let mut failed = HashMap::<(String, String), TerminalPermit>::new();
+            let mut retry = shared.terminal_delivery.retry.load(Ordering::Acquire);
             loop {
                 let changed = shared.terminal_delivery.changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                let pending = shared.snapshot.load().states.values()
-                    .find_map(|state| state.pending_terminals.first().cloned());
-                if let Some(crate::state::PendingTerminal { mut snapshot, bodies }) = pending {
-                    let collected = tokio::select! {
-                        texts = shared.complete_terminal_texts(&snapshot.identity, bodies) => texts,
-                        _ = cancellation.cancelled() => return Err(SessionTerminalCloseError::Unsettled),
-                    };
-                    let use_native_texts = collected.as_ref().is_some_and(Vec::is_empty);
-                    snapshot.assistant_texts = collected.unwrap_or_default();
-                    let read = crate::execution::SessionRunReadCommand::try_new(
-                        snapshot.identity.clone(), None,
-                        crate::execution::SessionRunSelector::RunId(snapshot.native_run_id.clone()),
-                    );
-                    let needs_execution_facts = snapshot.execution_context.is_some()
-                        || shared.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
-                            .is_some_and(|state| state.run_execution_contexts.contains_key(&snapshot.native_run_id));
-                    if needs_execution_facts && let Ok(read) = read {
-                        let outcome = tokio::select! {
-                            outcome = shared.handle_read_run(read) => Some(outcome),
-                            _ = cancellation.cancelled() => None,
-                        };
-                        if let Some(crate::execution::SessionRunReadOutcome::Found(record)) = outcome {
-                            let execution = shared.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
-                                .and_then(|state| state.run_execution_contexts.get(&snapshot.native_run_id)
-                                    .or_else(|| record.request_id.as_ref().and_then(|id| state.run_execution_contexts.get(id))))
-                                .cloned();
-                            if let Some((request_id, context)) = execution
-                                && record.request_id.as_deref() == Some(request_id.as_str())
-                                && snapshot.native_request_id.as_ref().is_none_or(|expected| expected == &request_id)
-                                && snapshot.execution_context.as_ref().is_none_or(|expected| expected == &context)
-                                && record.phase == snapshot.phase && crate::state::terminal_run_phase(record.phase)
-                            {
-                                snapshot.execution_context = Some(context);
-                                snapshot.native_request_id = Some(request_id);
-                                snapshot.native_message_id = Some(record.message_id);
-                                snapshot.measurement = record.measurement;
-                                if use_native_texts { snapshot.assistant_texts = record.assistant_texts; }
-                                if snapshot.delivery_context.is_none() {
-                                    snapshot.delivery_context = shared.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
-                                        .and_then(|state| snapshot.native_request_id.as_ref()
-                                            .and_then(|id| state.run_delivery_contexts.get(id))).cloned();
-                                }
-                            }
-                        }
-                    }
-                    let request_id = snapshot.native_request_id.clone();
-                    let identity = snapshot.identity.clone();
-                    let run_id = snapshot.native_run_id.clone();
-                    let Some(hook) = &shared.terminal_hook else {
-                        return Err(SessionTerminalCloseError::Unsettled);
-                    };
-                    if hook.run_terminal_async(snapshot, cancellation.clone()).await.is_err() {
-                        return Err(SessionTerminalCloseError::Unsettled);
-                    }
-                    let (reply, received) = tokio::sync::oneshot::channel();
-                    let sender = shared.completion_handle.get().expect("session completion handle");
-                    if sender.send_command(SessionCommand::TerminalDelivered { identity, run_id, request_id, reply }).await.is_err()
-                        || received.await != Ok(true)
-                    {
-                        return Err(SessionTerminalCloseError::Unsettled);
-                    }
-                    continue;
+                let current_retry = shared.terminal_delivery.retry.load(Ordering::Acquire);
+                if retry != current_retry { failed.clear(); retry = current_retry; }
+                let snapshot = shared.snapshot.load();
+                failed.retain(|(key, run_id), permit| snapshot.states.get(key)
+                    .is_some_and(|state| state.pending_terminals.iter().any(|pending|
+                        &pending.snapshot.native_run_id == run_id && Arc::ptr_eq(&pending.permit, permit))));
+                let candidates = snapshot.states.iter().filter_map(|(key, state)| {
+                    let pending = state.pending_terminals.first()?;
+                    (!active.contains(key)
+                        && !failed.contains_key(&(key.clone(), pending.snapshot.native_run_id.clone()))
+                        && (state.identity().provider() != crate::state::SessionProvider::OpenClaw
+                            || (!state.work_pending() && !shared.terminal_sync_pending(state.identity())
+                                && shared.terminal_read_ready(state)))
+                        && pending.completion_custody.strong_count() <= 1)
+                        .then(|| (key.clone(), pending.snapshot.native_run_id.clone()))
+                }).collect::<Vec<_>>();
+                drop(snapshot);
+                for (key, run_id) in candidates.into_iter().take(TERMINAL_DELIVERY_CAPACITY - work.len()) {
+                    let pending = shared.snapshot.load().states.get(&key)
+                        .and_then(|state| state.pending_terminals.first())
+                        .filter(|pending| pending.snapshot.native_run_id == run_id && pending.completion_custody.strong_count() <= 1)
+                        .cloned();
+                    let Some(pending) = pending else { continue; };
+                    let shared = shared.clone();
+                    let cancellation = cancellation.child_token();
+                    active.insert(key.clone());
+                    let permit = Arc::clone(&pending.permit);
+                    work.push(async move {
+                        let delivered = shared.deliver_terminal(pending, cancellation).await;
+                        (key, run_id, permit, delivered)
+                    });
                 }
-                if shared.terminal_delivery.blocked.load(Ordering::Acquire) != 0 {
-                    return Err(SessionTerminalCloseError::Unsettled);
-                }
-                if shared.terminal_delivery.stopping.load(Ordering::Acquire)
-                    && shared.terminal_delivery.producers.load(Ordering::Acquire) == 0
-                {
-                    return Ok(());
+                let pending = shared.snapshot.load().states.values().any(|state| !state.pending_terminals.is_empty());
+                let producers = shared.terminal_delivery.producers.load(Ordering::Acquire);
+                if work.is_empty() && shared.terminal_delivery.stopping.load(Ordering::Acquire) {
+                    if !failed.is_empty() || shared.terminal_delivery.blocked.load(Ordering::Acquire) != 0 {
+                        return Err(SessionTerminalCloseError::Unsettled);
+                    }
+                    if producers == 0 {
+                        return if pending { Err(SessionTerminalCloseError::Unsettled) } else { Ok(()) };
+                    }
                 }
                 tokio::select! {
+                    biased;
                     _ = cancellation.cancelled() => {
-                        return if shared.terminal_delivery.producers.load(Ordering::Acquire) == 0 {
-                            Ok(())
-                        } else { Err(SessionTerminalCloseError::Unsettled) };
+                        drop(work);
+                        let producers = shared.terminal_delivery.producers.load(Ordering::Acquire);
+                        let pending = shared.snapshot.load().states.values().any(|state| !state.pending_terminals.is_empty());
+                        return if !pending && producers == 0 { Ok(()) } else { Err(SessionTerminalCloseError::Unsettled) };
+                    },
+                    Some((key, run_id, permit, delivered)) = work.next(), if !work.is_empty() => {
+                        active.remove(&key);
+                        if matches!(delivered, TerminalDeliveryOutcome::Failed) { failed.insert((key, run_id), permit); }
                     },
                     _ = changed => {},
                 }
@@ -364,6 +556,71 @@ impl SessionShared {
 }
 
 impl SessionLane {
+    pub(super) fn admit_terminals<'a>(
+        &mut self,
+        shared: &SessionShared,
+        identity: &crate::state::SessionIdentity,
+        run_ids: impl Iterator<Item = &'a str>,
+        permit: Option<TerminalPermit>,
+    ) -> Result<(), usize> {
+        let needed = if shared.terminal_hook.is_some() {
+            self.state.as_ref().filter(|state| state.identity() == identity && state.is_team_source())
+                .map_or(0, |state| run_ids.filter(|run_id|
+                    !state.has_terminal_run(run_id)
+                        && !state.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id == *run_id)
+                        && (state.identity().provider() != crate::state::SessionProvider::OpenClaw || state.pending_terminals.is_empty())
+                ).collect::<HashSet<_>>().len())
+        } else { 0 };
+        if needed == 0 { return Ok(()); }
+        self.terminal_permit = permit.or_else(|| shared.try_terminal_permit(needed));
+        if self.terminal_permit.is_some() { Ok(()) } else { Err(needed) }
+    }
+
+    pub(super) async fn collect_settled_request(
+        &mut self,
+        shared: &SessionShared,
+        identity: &crate::state::SessionIdentity,
+        permit: Option<TerminalPermit>,
+    ) -> Result<bool, usize> {
+        let Some(mut state) = self.state.clone().filter(|state| state.identity() == identity
+            && state.is_team_source() && identity.provider() == crate::state::SessionProvider::OpenClaw)
+            else { return Ok(false); };
+        let Some(run_id) = shared.settlement_request_id(&state) else {
+            return Ok(!state.pending_terminals.is_empty() && !shared.session_execution_pending(identity));
+        };
+        let delivery_context = state.run_delivery_contexts.get(&run_id).cloned();
+        let execution_context = state.run_execution_contexts.get(&run_id).map(|(_, context)| context.clone());
+        if let Some(pending) = state.pending_terminals.first_mut() {
+            if pending.snapshot.native_request_id.as_ref().is_some_and(|id| id != &run_id) { return Ok(false); }
+            pending.snapshot.native_request_id = Some(run_id);
+            if pending.snapshot.delivery_context.is_none() { pending.snapshot.delivery_context = delivery_context; }
+            if pending.snapshot.execution_context.is_none() { pending.snapshot.execution_context = execution_context; }
+            self.state = Some(state.clone());
+            shared.store_snapshot_state(state).await;
+            return Ok(true);
+        }
+        let phase = match state.runtime() {
+            SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. } => runtime.phase,
+            _ => return Ok(false),
+        };
+        self.admit_terminals(shared, identity, std::iter::once(run_id.as_str()), permit)?;
+        let snapshot = crate::terminal_hook::SessionRunTerminalSnapshot {
+            identity: identity.clone(), source_binding: state.source_binding().clone(), native_run_id: run_id.clone(),
+            delivery_context,
+            execution_context,
+            native_request_id: Some(run_id.clone()),
+            native_message_id: None, measurement: crate::execution::SessionRunMeasurement::Unavailable,
+            phase, assistant_texts: Ok(Vec::new()),
+        };
+        let retained = self.retain_terminals(shared, &mut state, &[snapshot]);
+        if retained {
+            self.state = Some(state.clone());
+            shared.store_snapshot_state(state).await;
+        }
+        self.terminal_permit.take();
+        Ok(retained)
+    }
+
     pub(super) fn completion_producer(&self, shared: &SessionShared) -> Result<Producer, ()> {
         let mut producer = shared.producer()?;
         producer.completion_custody = Some(Arc::clone(&self.completion_custody));
@@ -389,14 +646,65 @@ impl SessionLane {
             return true;
         }
         if terminals.is_empty() { return true; }
-        if state.pending_terminals.len() + terminals.len() > crate::state::MAX_CHANGE_COUNT { return false; }
+        if state.pending_terminals.len() + terminals.len() > TERMINAL_DELIVERY_CAPACITY { return false; }
         let Some(permit) = &self.terminal_permit else { return false; };
-        if state.terminal_permit.as_ref().is_some_and(|current| !Arc::ptr_eq(current, permit)) { return false; }
+        let mut permit = permit.lock().expect("session terminal permit lock");
+        let Some(permit) = permit.as_mut().filter(|permit| permit.num_permits() >= terminals.len()) else { return false; };
         for terminal in terminals {
             let bodies = TerminalBodies::capture(state.items(), state.native_session_id(), &terminal.native_run_id);
-            state.pending_terminals.push(crate::state::PendingTerminal { snapshot: terminal.clone(), bodies });
+            let permit = Arc::new(Mutex::new(permit.split(1)));
+            state.pending_terminals.push(crate::state::PendingTerminal {
+                snapshot: terminal.clone(), bodies, read: crate::state::TerminalRead::Pending,
+                permit, completion_custody: Arc::downgrade(&self.completion_custody),
+            });
         }
-        state.terminal_permit = Some(Arc::clone(permit));
+        true
+    }
+
+    pub(super) async fn complete_terminal_read(
+        &mut self,
+        shared: &SessionShared,
+        identity: &crate::state::SessionIdentity,
+        run_id: &str,
+        permit: &TerminalPermit,
+        result: Result<crate::execution::SessionRunRecord, crate::state::RuntimeIssue>,
+    ) -> bool {
+        let Some(mut next) = self.state.clone().filter(|state| state.identity() == identity && !state.work_pending())
+        else { return false; };
+        let Some(pending) = next.pending_terminals.first_mut().filter(|pending|
+            pending.snapshot.native_run_id == run_id && Arc::ptr_eq(&pending.permit, permit)
+                && pending.read != crate::state::TerminalRead::Complete)
+        else { return false; };
+        let issue = result.as_ref().err().copied();
+        match result {
+            Ok(record) => {
+                pending.snapshot.phase = record.phase;
+                pending.snapshot.native_request_id = record.request_id;
+                pending.snapshot.native_message_id = Some(record.message_id);
+                pending.snapshot.measurement = record.measurement;
+                pending.snapshot.assistant_texts = Ok(record.assistant_texts);
+            }
+            Err(_) => pending.snapshot.assistant_texts = Err(()),
+        }
+        pending.read = crate::state::TerminalRead::Complete;
+        let delta = if let Some(issue) = issue {
+            let reason = if matches!(issue, crate::state::RuntimeIssue::Unavailable | crate::state::RuntimeIssue::Timeout) {
+                crate::state::RecoveryReason::NativeUnavailable
+            } else { crate::state::RecoveryReason::NativeUnknown };
+            let mut changes = vec![crate::state::SessionChange::RecoveryRequired { reason }];
+            if let crate::state::SessionFact::Complete(runtime) | crate::state::SessionFact::Incomplete { facts: runtime, .. } = next.runtime() {
+                let mut runtime = runtime.clone();
+                runtime.issue = Some(issue);
+                changes.push(crate::state::SessionChange::RuntimeChanged { runtime });
+            }
+            let Some(cursor) = next.cursor().checked_add(1) else { return false; };
+            let crate::state::SessionApplyResult::Applied(delta) = next.apply(None, cursor, changes) else { return false; };
+            Some(delta)
+        } else { None };
+        self.state = Some(next.clone());
+        shared.store_snapshot_state(next).await;
+        if let Some(delta) = delta { shared.emit_session_delta(&delta, Vec::new()); }
+        shared.terminal_delivery.notify();
         true
     }
 
@@ -410,25 +718,28 @@ impl SessionLane {
         let Some(state) = &mut self.state else { return false; };
         if state.identity() != &identity { return false; }
         let Some(index) = state.pending_terminals.iter().position(|pending| pending.snapshot.native_run_id == run_id) else { return false; };
-        state.pending_terminals.remove(index);
+        let request_pending = state.request_pending();
+        let pending = state.pending_terminals.remove(index);
+        let delta = if state.request_pending() != request_pending {
+            match state.cursor().checked_add(1).map(|cursor| state.apply(
+                None, cursor, vec![crate::state::SessionChange::RequestPendingChanged { pending: state.work_pending() }],
+            )) {
+                Some(crate::state::SessionApplyResult::Applied(delta)) => Some(delta),
+                _ => { state.pending_terminals.insert(index, pending); return false; }
+            }
+        } else { None };
         state.run_delivery_contexts.remove(&run_id);
         let execution = state.run_execution_contexts.remove(&run_id);
         if let Some(request_id) = request_id.or_else(|| execution.map(|(request, _)| request)) {
             state.run_delivery_contexts.remove(&request_id);
             state.run_execution_contexts.remove(&request_id);
         }
-        if state.pending_terminals.is_empty() {
-            if let Some(permit) = state.terminal_permit.take() {
-                permit.lock().expect("session terminal permit lock").take();
-            }
-        }
         shared.store_snapshot_state(state.clone()).await;
+        if let Some(delta) = delta { shared.emit_session_delta(&delta, Vec::new()); }
+        shared.receive_terminal_delivery(state, &pending.snapshot);
+        pending.permit.lock().expect("session terminal permit lock").take();
         shared.terminal_delivery.notify();
+        self.close_if_idle(shared, &identity);
         true
     }
-}
-
-pub(crate) fn terminal_event(event: &crate::command::SessionEvent) -> bool {
-    event.changes.iter().any(|change| matches!(change,
-        crate::state::SessionChange::RunPhaseChanged { phase, .. } if crate::state::terminal_run_phase(*phase)))
 }

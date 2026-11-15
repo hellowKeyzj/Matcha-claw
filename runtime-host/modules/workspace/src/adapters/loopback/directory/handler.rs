@@ -45,7 +45,7 @@ async fn handle_request(request: Request, dependencies: super::super::Dependenci
         .workspace
         .list_directory(
             request.endpoint(),
-            request.agent_id().to_owned(),
+            request.selection(),
             request.relative_path().to_owned(),
             request.include_hidden(),
         )

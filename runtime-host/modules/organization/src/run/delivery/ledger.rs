@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::{BTreeMap, BTreeSet}, fmt};
 
 use super::{
     Delivery, DeliveryId, DeliveryRequest, DeliveryRequestError, DeliverySnapshot,
@@ -9,6 +9,7 @@ use super::{
 pub struct DeliveryLedger {
     deliveries: BTreeMap<DeliveryId, Delivery>,
     delivery_ids_by_idempotency_key: BTreeMap<String, DeliveryId>,
+    delivery_ids_by_run: BTreeMap<String, BTreeSet<DeliveryId>>,
     undo: Option<BTreeMap<DeliveryId, Option<Delivery>>>,
 }
 
@@ -95,28 +96,49 @@ impl DeliveryLedger {
         for snapshot in snapshot.into_deliveries() {
             let delivery =
                 Delivery::restore(snapshot).map_err(RestoreLedgerError::InvalidDelivery)?;
-            let facts = delivery.facts();
-            if ledger.deliveries.contains_key(&facts.delivery_id) {
-                return Err(RestoreLedgerError::DuplicateDeliveryId(
-                    facts.delivery_id.clone(),
-                ));
-            }
-            if ledger
-                .delivery_ids_by_idempotency_key
-                .contains_key(&facts.idempotency_key)
-            {
-                return Err(RestoreLedgerError::DuplicateIdempotencyKey(
-                    facts.idempotency_key.clone(),
-                ));
-            }
-            ledger
-                .delivery_ids_by_idempotency_key
-                .insert(facts.idempotency_key.clone(), facts.delivery_id.clone());
-            ledger
-                .deliveries
-                .insert(facts.delivery_id.clone(), delivery);
+            ledger.insert_restored(delivery)?;
         }
         Ok(ledger)
+    }
+
+    pub(crate) fn from_restored(
+        deliveries: impl IntoIterator<Item = Delivery>,
+    ) -> Result<Self, RestoreLedgerError> {
+        let mut ledger = Self::default();
+        for delivery in deliveries {
+            ledger.insert_restored(delivery)?;
+        }
+        Ok(ledger)
+    }
+
+    fn insert_restored(&mut self, delivery: Delivery) -> Result<(), RestoreLedgerError> {
+        let facts = delivery.facts();
+        if self.deliveries.contains_key(&facts.delivery_id) {
+            return Err(RestoreLedgerError::DuplicateDeliveryId(facts.delivery_id.clone()));
+        }
+        if self.delivery_ids_by_idempotency_key.contains_key(&facts.idempotency_key) {
+            return Err(RestoreLedgerError::DuplicateIdempotencyKey(facts.idempotency_key.clone()));
+        }
+        self.delivery_ids_by_idempotency_key.insert(facts.idempotency_key.clone(), facts.delivery_id.clone());
+        self.delivery_ids_by_run.entry(facts.run_id.clone()).or_default().insert(facts.delivery_id.clone());
+        self.deliveries.insert(facts.delivery_id.clone(), delivery);
+        Ok(())
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), RestoreLedgerError> {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut keys = std::collections::BTreeSet::new();
+        for delivery in self.deliveries() {
+            delivery.validate_restored().map_err(RestoreLedgerError::InvalidDelivery)?;
+            let facts = delivery.facts();
+            if !ids.insert(&facts.delivery_id) {
+                return Err(RestoreLedgerError::DuplicateDeliveryId(facts.delivery_id.clone()));
+            }
+            if !keys.insert(&facts.idempotency_key) {
+                return Err(RestoreLedgerError::DuplicateIdempotencyKey(facts.idempotency_key.clone()));
+            }
+        }
+        Ok(())
     }
 
     pub fn register(
@@ -153,6 +175,8 @@ impl DeliveryLedger {
             delivery.facts().idempotency_key.clone(),
             delivery.facts().delivery_id.clone(),
         );
+        self.delivery_ids_by_run.entry(delivery.facts().run_id.clone()).or_default()
+            .insert(delivery.facts().delivery_id.clone());
         self.deliveries
             .insert(delivery.facts().delivery_id.clone(), delivery.clone());
         Ok(RegisterOutcome::Recorded(delivery))
@@ -192,6 +216,7 @@ impl DeliveryLedger {
             undo.entry(id.clone()).or_insert(None);
         }
         self.delivery_ids_by_idempotency_key.insert(key, id.clone());
+        self.delivery_ids_by_run.entry(delivery.facts().run_id.clone()).or_default().insert(id.clone());
         self.deliveries.insert(id, delivery);
         Ok(())
     }
@@ -200,6 +225,10 @@ impl DeliveryLedger {
         if let Some(delivery) = self.deliveries.remove(id) {
             self.delivery_ids_by_idempotency_key
                 .remove(&delivery.facts().idempotency_key);
+            if let Some(ids) = self.delivery_ids_by_run.get_mut(&delivery.facts().run_id) {
+                ids.remove(id);
+                if ids.is_empty() { self.delivery_ids_by_run.remove(&delivery.facts().run_id); }
+            }
             if let Some(undo) = &mut self.undo {
                 undo.entry(id.clone()).or_insert(Some(delivery));
             }
@@ -224,16 +253,11 @@ impl DeliveryLedger {
     }
 
     pub(crate) fn rollback_transaction(&mut self) {
-        for (id, previous) in self.undo.take().into_iter().flatten() {
-            if let Some(current) = self.deliveries.remove(&id) {
-                self.delivery_ids_by_idempotency_key
-                    .remove(&current.facts().idempotency_key);
-            }
-            if let Some(delivery) = previous {
-                self.delivery_ids_by_idempotency_key
-                    .insert(delivery.facts().idempotency_key.clone(), id.clone());
-                self.deliveries.insert(id, delivery);
-            }
+        let Some(undo) = self.undo.take() else { return; };
+        // Remove all final identities before restoring keys reused inside the transaction.
+        for id in undo.keys() { self.remove_record(id); }
+        for delivery in undo.into_values().flatten() {
+            self.restore_record(delivery).expect("previous delivery keys are unique");
         }
     }
 
@@ -241,18 +265,14 @@ impl DeliveryLedger {
         self.deliveries.values()
     }
 
+    pub(crate) fn deliveries_for_run(&self, run_id: &str) -> impl Iterator<Item = &Delivery> {
+        self.delivery_ids_by_run.get(run_id).into_iter().flatten()
+            .map(|id| self.deliveries.get(id).expect("delivery Run index references its delivery"))
+    }
+
     pub(crate) fn retain_without_run(&mut self, run_id: &str) {
-        self.deliveries.retain(|id, delivery| {
-            if delivery.facts().run_id != run_id {
-                return true;
-            }
-            if let Some(undo) = &mut self.undo {
-                undo.entry(id.clone())
-                    .or_insert_with(|| Some(delivery.clone()));
-            }
-            false
-        });
-        self.delivery_ids_by_idempotency_key
-            .retain(|_, delivery_id| self.deliveries.contains_key(delivery_id));
+        let ids = self.deliveries_for_run(run_id)
+            .map(|delivery| delivery.facts().delivery_id.clone()).collect::<Vec<_>>();
+        for id in ids { self.remove_record(&id); }
     }
 }

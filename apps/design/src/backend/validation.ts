@@ -1,4 +1,4 @@
-import { anglePresets, type DocumentChange, type Edit, type ExportRequest, type GenerationAction, type GenerationRequest, type Layer, type LayerPatch } from '../document';
+import { anglePresets, MAX_MEDIA_DURATION_SECONDS, type DocumentChange, type Edit, type ExportRequest, type GenerationAction, type GenerationRequest, type Layer, type LayerPatch } from '../document';
 import { DesignError } from './files';
 import { aspectRatios } from './target-size';
 
@@ -231,7 +231,7 @@ export function generationRequest(value: unknown, mode: 'request' | 'draft' | 's
     scenes = raw.scenes.map((value) => {
       const scene = object(value, ['prompt', 'durationSeconds']);
       return { prompt: text(scene.prompt, 'scene prompt', 20000),
-        ...(scene.durationSeconds === undefined ? {} : { durationSeconds: number(scene.durationSeconds, 'scene durationSeconds', 1, 120) }) };
+        ...(scene.durationSeconds === undefined ? {} : { durationSeconds: number(scene.durationSeconds, 'scene durationSeconds', 1, MAX_MEDIA_DURATION_SECONDS, !historical) }) };
     });
   }
   if (action === 'storyboard' && !scenes) invalid('Storyboard requires scenes.');
@@ -255,7 +255,7 @@ export function generationRequest(value: unknown, mode: 'request' | 'draft' | 's
     ...(raw.targetLanguage === undefined ? {} : { targetLanguage: text(raw.targetLanguage, 'targetLanguage', 100) }),
     ...(raw.selectionId === undefined ? {} : { selectionId: text(raw.selectionId, 'selectionId', 500) }),
     ...(raw.size === undefined ? {} : { size: text(raw.size, 'size', 100) }),
-    ...(raw.durationSeconds === undefined ? {} : { durationSeconds: number(raw.durationSeconds, 'durationSeconds', 1, 120) }),
+    ...(raw.durationSeconds === undefined ? {} : { durationSeconds: number(raw.durationSeconds, 'durationSeconds', 1, MAX_MEDIA_DURATION_SECONDS, !historical) }),
     ...(raw.count === undefined ? {} : { count: number(raw.count, 'count', 1, 8, true) }),
     ...(scenes ? { scenes } : {}) };
 }

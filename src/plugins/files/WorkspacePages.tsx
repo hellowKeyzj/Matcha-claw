@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
+import type { WorkspaceFileContext } from '@/lib/host-api';
 import { useChatArtifactContext } from '@/plugins/chat/artifact-context';
 import type { ChatArtifactGroup } from '@/plugins/chat/artifacts';
 import { resolveArtifactGroupFocusFile } from '@/plugins/chat/artifact-workbench';
@@ -21,31 +22,36 @@ import { useOpenFileWorkspacePage, type FileWorkspacePageProps } from './workspa
 
 const EMPTY_FILES: GeneratedFile[] = [];
 
-export function FileBrowserPage(props: WorkspacePageProps) {
+export function FileBrowserPage({ workspaceContext, ...props }: WorkspacePageProps & { workspaceContext?: WorkspaceFileContext }) {
   const { artifactWorkspaceRoot, artifactWorkspaceContext } = useChatArtifactContext();
+  const context = workspaceContext ?? artifactWorkspaceContext;
   const workspaceKey = JSON.stringify([
-    artifactWorkspaceRoot,
-    artifactWorkspaceContext.agentScope ? buildCapabilityScopeKey(artifactWorkspaceContext.agentScope) : null,
+    workspaceContext ? workspaceContext.workspaceRoot ?? null : artifactWorkspaceRoot,
+    context.scope ? buildCapabilityScopeKey(context.scope) : null,
   ]);
-  return <FileBrowser key={workspaceKey} {...props} />;
+  return <FileBrowser key={workspaceKey} {...props} workspaceContext={context} />;
 }
 
-function FileBrowser({ width }: WorkspacePageProps) {
+function FileBrowser({ width, workspaceContext }: WorkspacePageProps & { workspaceContext: WorkspaceFileContext }) {
   const workspace = useWorkspace();
   const openFilePage = useOpenFileWorkspacePage(workspace);
-  const { artifactWorkspaceRoot, artifactWorkspaceContext, workspaceRecoveryAction } = useChatArtifactContext();
+  const { workspaceRecoveryAction, runWorkspace, artifactWorkspaceContext } = useChatArtifactContext();
+  const preparing = workspaceContext.scope?.kind === 'team-run' && artifactWorkspaceContext.scope?.kind === 'team-run'
+    && buildCapabilityScopeKey(workspaceContext.scope) === buildCapabilityScopeKey(artifactWorkspaceContext.scope)
+    && runWorkspace?.status === 'preparing';
   const [selectedFile, setSelectedFile] = useState<ArtifactPreviewTarget | null>(null);
   const selectFile = useCallback((file: ArtifactPreviewTarget) => {
     setSelectedFile(file);
-    openFilePage({ file, workspaceContext: artifactWorkspaceContext });
-  }, [artifactWorkspaceContext, openFilePage]);
+    openFilePage({ file, workspaceContext });
+  }, [workspaceContext, openFilePage]);
   return <WorkspaceBrowserBody
     browseOnly
-    rootPath={artifactWorkspaceRoot}
+    rootPath={workspaceContext.workspaceRoot ?? null}
     selectedFilePath={selectedFile?.filePath ?? null}
     selectedFile={selectedFile}
-    workspaceContext={artifactWorkspaceContext}
-    recoveryAction={workspaceRecoveryAction}
+    workspaceContext={workspaceContext}
+    recoveryAction={workspaceContext.scope?.kind === 'team-run' ? null : workspaceRecoveryAction}
+    preparing={preparing}
     availableWidth={width}
     onSelectFile={selectFile}
   />;

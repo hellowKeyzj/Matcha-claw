@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { preparePatches } from './scripts/patches.mjs';
+import { assertOfficeNative, officeNativeDirectory, officeOcrHelperName, officeSidecarName } from './native.mjs';
+import { signAppPluginNative } from '../../scripts/lib/sign-app-plugin-native.mjs';
 import { MAX_APP_PLUGIN_CONTENT_BYTES, MAX_APP_PLUGIN_FILES } from '../../sdk/app-plugins/dist/package.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -382,10 +384,6 @@ export async function buildDocsParseWorker(output, patches) {
   await writeFile(join(output, 'renderer', 'docs-parse-worker.classic.js.gz'), gzipSync(result.outputFiles[0].contents, { level: 9 }));
 }
 
-function sidecarName(platform) {
-  return platform === 'win32' ? 'xlsx-sidecar.exe' : 'xlsx-sidecar';
-}
-
 // Bundle both jsdom entry points, retaining the stylesheet and real sync-XHR worker.
 export async function copyJsdomTree(destination, patches) {
   const source = dirname(requireFromHere.resolve('jsdom/package.json'));
@@ -459,11 +457,19 @@ export async function copyJsdomTree(destination, patches) {
 }
 
 export async function copySharpRuntime(destination, platform, arch, patches) {
-  const copied = new Set();
+  const sharpManifest = requireFromHere.resolve('sharp/package.json');
+  const require = createRequire(sharpManifest);
+  const packages = [`@img/sharp-${platform}-${arch}`,
+    ...(platform === 'win32' ? [] : [`@img/sharp-libvips-${platform}-${arch}`])];
+  const nativeManifests = packages.map((name) => {
+    try {
+      return require.resolve(`${name}/package`);
+    } catch (error) {
+      throw new Error(`Missing Office Sharp target dependency: ${name}. Install this target's optional dependencies before packaging; host addons are not interchangeable.`, { cause: error });
+    }
+  });
   async function copyPackage(manifestPath) {
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-    if (copied.has(manifest.name)) return;
-    copied.add(manifest.name);
     const directory = dirname(manifestPath);
     const target = join(destination, manifest.name.replace(/^@img\//, ''));
     if (manifest.name === 'sharp') {
@@ -488,34 +494,25 @@ export async function copySharpRuntime(destination, platform, arch, patches) {
         filter: (path) => !path.slice(directory.length).split(/[\\/]/).includes('node_modules')
       });
     }
-    const require = createRequire(manifestPath);
-    for (const dependency of Object.keys(manifest.optionalDependencies ?? {})) {
-      if (!dependency.startsWith(`@img/sharp-${platform}-${arch}`)
-        && !dependency.startsWith(`@img/sharp-libvips-${platform}-${arch}`)) continue;
-      await copyPackage(require.resolve(`${dependency}/package`));
-    }
   }
-  await copyPackage(requireFromHere.resolve('sharp/package.json'));
+  await copyPackage(sharpManifest);
+  for (const manifest of nativeManifests) await copyPackage(manifest);
+  const addon = `sharp-${platform}-${arch}.node`;
+  assertOfficeNative(await readFile(join(destination, `sharp-${platform}-${arch}`, 'lib', addon)), platform, arch, addon);
 }
 
-function sidecarPath(platform) {
-  if (process.env.XLSX_SIDECAR_BIN) return process.env.XLSX_SIDECAR_BIN;
-  return join(genoffice, 'apps', 'sheets', 'native', 'xlsx-engine', 'target', 'release', sidecarName(platform));
+function isBundledNative(name, platform) {
+  return /\.(?:node|dll|dylib)$|\.so(?:\.|$)/.test(name)
+    || name === `native/${officeSidecarName(platform)}`
+    || name === `native/ocr/${officeOcrHelperName(platform)}`;
 }
 
-function assertNative(bytes, platform, name) {
-  if (!bytes || bytes.length < 64) throw new Error(`Bundled ${name} is missing or empty.`);
-  if (platform === 'win32') {
-    if (bytes[0] !== 0x4d || bytes[1] !== 0x5a) throw new Error(`Bundled ${name} is not a Windows PE executable.`);
-    return;
-  }
-  if (platform === 'linux') {
-    if (bytes[0] !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46) throw new Error(`Bundled ${name} is not an ELF executable.`);
-    return;
-  }
-  const magic = bytes.readUInt32BE?.(0) ?? (bytes[0] << 24 | bytes[1] << 16 | bytes[2] << 8 | bytes[3]);
-  if (![0xfeedface, 0xfeedfacf, 0xcafebabe, 0xcffaedfe, 0xcefaedfe].includes(magic >>> 0)) {
-    throw new Error(`Bundled ${name} is not a Mach-O executable.`);
+async function assertNativeDirectory(directory, platform, arch, prefix = '') {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    const name = prefix + entry.name;
+    if (entry.isDirectory()) await assertNativeDirectory(path, platform, arch, name + '/');
+    else if (isBundledNative(name, platform)) assertOfficeNative(await readFile(path), platform, arch, entry.name);
   }
 }
 
@@ -576,6 +573,7 @@ async function assertArtifactBounds(directory) {
 
 export function validatePlugin(contents, platform, arch) {
   if (contents.manifest.id !== id) throw new Error(`Bundled Matcha Office package must declare ${id}.`);
+  const ocrHelper = officeOcrHelperName(platform);
   const required = [
     'main.cjs',
     'backend.mjs',
@@ -598,7 +596,8 @@ export function validatePlugin(contents, platform, arch) {
     'native/pdfium.wasm',
     'native/hb-subset.wasm',
     'native/rhwp_bg.wasm',
-    ...(platform === 'win32' ? ['native/ocr/win-ocr.exe'] : platform === 'darwin' ? ['native/ocr/vision-ocr'] : []),
+    ...(ocrHelper ? [`native/ocr/${ocrHelper}`] : []),
+    `node_modules/sharp-${platform}-${arch}/lib/sharp-${platform}-${arch}.node`,
     'node_modules/jsdom/lib/default-stylesheet.css',
     'node_modules/jsdom/LICENSE.txt',
     'node_modules/jsdom/THIRD_PARTY_LICENSES.txt',
@@ -609,7 +608,7 @@ export function validatePlugin(contents, platform, arch) {
     'markdown.html',
     'html.html',
     'manifest.json',
-    `native/${sidecarName(platform)}`,
+    `native/${officeSidecarName(platform)}`,
     'LICENSE',
     'NOTICE'
   ];
@@ -617,7 +616,9 @@ export function validatePlugin(contents, platform, arch) {
     const bytes = contents.files.get(name);
     if (!bytes?.length) throw new Error(`Bundled Matcha Office package is missing ${name}.`);
   }
-  assertNative(contents.files.get(`native/${sidecarName(platform)}`), platform, sidecarName(platform));
+  for (const [name, bytes] of contents.files) {
+    if (isBundledNative(name, platform)) assertOfficeNative(bytes, platform, arch, basename(name));
+  }
   if (!contents.files.get('BUILD.txt')?.length) throw new Error('Bundled Matcha Office package is missing BUILD.txt.');
   const buildReceipt = Buffer.from(contents.files.get('BUILD.txt')).toString('utf8');
   if (!buildReceipt.includes(`Target: ${platform}-${arch}`)) throw new Error(`Bundled Matcha Office build receipt does not match ${platform}-${arch}.`);
@@ -673,7 +674,7 @@ return build({
   });
 }
 
-export async function buildPlugin({ platform = process.platform, arch = process.arch, outputDirectory = join(root, 'dist') } = {}) {
+export async function buildPlugin({ platform = process.platform, arch = process.arch, outputDirectory = join(root, 'dist'), packager } = {}) {
   if (!['win32', 'darwin', 'linux'].includes(platform) || !['x64', 'arm64'].includes(arch)) {
     throw new Error(`Unsupported Matcha Office target: ${platform}-${arch}.`);
   }
@@ -689,11 +690,16 @@ export async function buildPlugin({ platform = process.platform, arch = process.
     }
   }
 
-  const sidecar = sidecarPath(platform);
-  if (!(await exists(sidecar))) {
-    throw new Error(`Missing xlsx sidecar: ${sidecar}. Build it with "cargo build --release --target-dir target" in apps/office/genoffice/apps/sheets/native/xlsx-engine, or set XLSX_SIDECAR_BIN.`);
+  const nativeDirectory = officeNativeDirectory(platform, arch);
+  const sidecar = process.env.XLSX_SIDECAR_BIN ?? join(nativeDirectory, officeSidecarName(platform));
+  const ocrHelper = officeOcrHelperName(platform);
+  const ocrSource = ocrHelper ? process.env.OFFICE_OCR_HELPER_BIN ?? join(nativeDirectory, ocrHelper) : undefined;
+  for (const [name, source] of [[officeSidecarName(platform), sidecar], ...(ocrHelper ? [[ocrHelper, ocrSource]] : [])]) {
+    if (!(await exists(source))) {
+      throw new Error(`Missing Office native binary: ${source}. Run node apps/office/build-native.mjs --platform ${platform} --arch ${arch}, or explicitly set ${name === ocrHelper ? 'OFFICE_OCR_HELPER_BIN' : 'XLSX_SIDECAR_BIN'}. Host binaries are never reused.`);
+    }
+    assertOfficeNative(await readFile(source), platform, arch, name);
   }
-  assertNative(await readFile(sidecar), platform, sidecarName(platform));
 
   await mkdir(dirname(outputDirectory), { recursive: true });
   const output = await mkdtemp(join(dirname(outputDirectory), '.build-office-'));
@@ -716,12 +722,9 @@ export async function buildPlugin({ platform = process.platform, arch = process.
     await copyFile(requireFromHere.resolve('@embedpdf/pdfium/pdfium.wasm'), join(output, 'native', 'pdfium.wasm'));
     await copyFile(join(dirname(requireFromHere.resolve('harfbuzzjs')), 'harfbuzz-subset.wasm'), join(output, 'native', 'hb-subset.wasm'));
     await copyFile(requireFromHere.resolve('@rhwp/core/rhwp_bg.wasm'), join(output, 'native', 'rhwp_bg.wasm'));
-    if (platform === 'win32' || platform === 'darwin') {
-      const helper = platform === 'win32' ? 'win-ocr.exe' : 'vision-ocr';
-      const source = process.env.OFFICE_OCR_HELPER_BIN ?? join(genoffice, 'packages', 'pdf2docx', 'ocr-helper', helper);
-      if (!(await exists(source))) throw new Error(`Missing Office OCR helper: ${source}. Supply a prebuilt helper with OFFICE_OCR_HELPER_BIN.`);
+    if (ocrHelper) {
       await mkdir(join(output, 'native', 'ocr'), { recursive: true });
-      await copyFile(source, join(output, 'native', 'ocr', helper));
+      await copyFile(ocrSource, join(output, 'native', 'ocr', ocrHelper));
     }
     await copySharpRuntime(join(output, 'node_modules'), platform, arch, patches);
     await copyJsdomTree(join(output, 'node_modules'), patches);
@@ -730,13 +733,16 @@ export async function buildPlugin({ platform = process.platform, arch = process.
       writeFile(join(output, 'manifest.json'), JSON.stringify(manifest) + '\n'),
       copyFile(join(genoffice, 'LICENSE'), join(output, 'LICENSE')),
       copyFile(join(genoffice, 'NOTICE'), join(output, 'NOTICE')),
-      copyFile(sidecar, join(output, 'native', sidecarName(platform)))
+      copyFile(sidecar, join(output, 'native', officeSidecarName(platform)))
     ]);
     await writeFile(
       join(output, 'BUILD.txt'),
       `Matcha Office ${manifest.version}\nTarget: ${platform}-${arch}\nGenOffice source overlay\nbackend: single ESM split build with CJS activate entry\nsheets save adapter: build-only exports from sheets-main (shared module)\nxlsx engine: xlsx-sidecar 0.1.0\nslides engine: bundled\n`
     );
 
+    await assertNativeDirectory(output, platform, arch);
+    // Rust/Swift helpers do not host V8 or JIT; Electron's entitlements.mac.plist stays on Electron.
+    if (platform === 'darwin') await signAppPluginNative(output, packager, 'Office');
     await assertArtifactBounds(output);
     const staged = await mkdtemp(join(dirname(outputDirectory), '.office-previous-'));
     const previous = join(staged, 'dist');

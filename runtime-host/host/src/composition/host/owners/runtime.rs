@@ -514,6 +514,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     let session_terminal = Arc::new(
         super::super::ports::organization::OrganizationSessionTerminal::start(
             organization_handle.clone(),
+            runtime_directory.clone(),
             runtime_observation.sink(),
         ),
     );
@@ -546,6 +547,8 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     let session_handle = session_module.handle().clone();
     session_terminal.bind_repair_session(super::super::ports::organization::repair_port(
         session_handle.clone(),
+        organization_handle.clone(),
+        runtime_directory.clone(),
     ));
 
     let (board, board_task) = board::spawn_owner(
@@ -611,6 +614,10 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         workspace::WorkspaceOwnerInput {
             admission: admission.clone(),
             runtime_directory: runtime_directory.clone(),
+            team_runs: Arc::new(super::super::ports::TeamRunFiles::new(
+                organization_handle.clone(),
+                runtime_directory.clone(),
+            )),
         },
     );
     let vector_index =
@@ -648,6 +655,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         Arc::clone(&admission),
         session_handle.clone(),
         Arc::clone(&runtime_directory),
+        organization_handle.clone(),
     ));
     let team_run_coordinator_handle = organization_runtime.start_coordinator(
         organization::TeamRunCoordinatorInput {

@@ -10,7 +10,7 @@ pnpm run package:win:x64:local
 
 - 自动初始化 MSVC，无需打开 Developer Command Prompt；失败时显示阶段与日志目录。
 - 串行完成两个 Rust 程序、桌面/CLI、OpenClaw/插件、SearXNG 与 EasyTier 资源准备，再生成 NSIS；准备失败不会继续出包。
-- Host 使用已验证的本地低内存优化 `ThinLTO + codegen-units=1`，不是 CI x64 默认的完整 LTO；NSIS 资源归档使用压缩级别 5，减少本机压缩内存。CI 与 Cargo 配置不变。
+- 本入口所有 Rust release 构建（含依赖、AppServer、Host、网络与 Office）统一使用 `CARGO_BUILD_JOBS=18`、`codegen-units=8`；所有阶段的整树提交内存上限统一为 24 GiB，各阶段超时保持不变。Host 最终二进制仍使用 ThinLTO，不是 CI x64 默认的完整 LTO；NSIS 资源归档压缩级别仍为 5。CI 与仓库 Cargo 配置文件不变。
 - uv/Bun/Git 复用版本匹配的本地缓存；预装技能显式复用原锁定远程快照，本地技能源每次更新。无缓存时沿原下载入口获取。
 - 每阶段使用 Windows Job 整树内存硬限、超时和 owned 清理；Cargo 退出后仅回收本次 Job 内、与所选 MSVC 路径精确匹配的遥测进程，其他后代仍须正常退出。不终止已有应用，不覆盖开发态原生 dist，不安装或发布。
 - 网络编译保留原 Cargo 缓存，产物通过 `--artifact-dir` 发布到 `build/local-win-x64/network`，打包器只从该目录取网络组件，不替换开发版正在使用的 `resources/bin/win32-x64/easytier`；网络发布临时目录不进入安装包。

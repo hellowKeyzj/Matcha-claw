@@ -134,7 +134,9 @@ pub(super) struct Active {
     pub acknowledged: bool,
     pub input_started: bool,
     pub native_cycle_observed: bool,
+    pub acknowledged_input_ids: BTreeSet<String>,
     pub tool_use_ids: BTreeSet<String>,
+    pub task_sources: BTreeMap<(String, String), Option<String>>,
     pub idle_observed: bool,
     pub interrupt_observed: bool,
     pub ownership_ambiguous: bool,
@@ -189,10 +191,43 @@ impl Record {
 }
 
 impl Active {
+    pub fn owns_task(
+        &self,
+        task_id: &str,
+        tool_use_id: &str,
+        request_message_id: Option<&str>,
+        snapshot: Option<&Value>,
+    ) -> bool {
+        self.input_started
+            && self.acknowledged
+            && self.tool_use_ids.contains(tool_use_id)
+            && match request_message_id {
+                Some(root) => {
+                    root == self.record.run.message_id
+                        && self.task_sources.get(&(task_id.to_owned(), tool_use_id.to_owned()))
+                            .is_some_and(|parent| parent.as_ref()
+                                .is_none_or(|id| self.tool_use_ids.contains(id)))
+                }
+                None => snapshot.is_some_and(|task| {
+                    task["tool_use_id"].as_str() == Some(tool_use_id)
+                        && task["request_message_id"].as_str()
+                            .is_none_or(|root| root == self.record.run.message_id)
+                }),
+            }
+    }
+
+    fn task_sources_observed(&self) -> bool {
+        self.task_sources.iter().all(|((_, tool), parent)| {
+            self.tool_use_ids.contains(tool)
+                && parent.as_ref().is_none_or(|id| self.tool_use_ids.contains(id))
+        })
+    }
+
     pub fn owned_result(&self) -> Option<Value> {
         if self.acknowledged
             && self.idle_observed
             && !self.ownership_ambiguous
+            && self.task_sources_observed()
             && self.result_count == 1
         {
             self.result.clone()
@@ -202,7 +237,7 @@ impl Active {
     }
 
     pub fn outcome(&self) -> (Status, &'static str) {
-        if self.ownership_ambiguous || self.result_count > 1 {
+        if self.ownership_ambiguous || self.result_count > 1 || !self.task_sources_observed() {
             return (Status::OutcomeUnknown, "native_result_ownership_ambiguous");
         }
         if !self.acknowledged {

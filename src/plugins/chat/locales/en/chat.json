@@ -31,6 +31,37 @@
         "tools_count_one": "{{count}} tool call",
         "tools_count_other": "{{count}} tool calls"
     },
+    "mediaTask": {
+        "imageTitle": "Image generation",
+        "videoTitle": "Video generation",
+        "submitting": "Submitting",
+        "submitted": "Submitted · fetching status",
+        "queued": "Queued",
+        "running": "Generating",
+        "completed": "Generation complete",
+        "deliveryBlocked": "Generated · result not delivered",
+        "delivering": "Generated · delivering result",
+        "failed": "Generation failed",
+        "timed_out": "Wait timed out",
+        "cancelled": "Cancelled",
+        "deleted": "Task deleted",
+        "unconfirmed": "Task status unconfirmed",
+        "waited": "Waiting {{duration}}",
+        "timeoutHint": "Generation may still be running in the cloud.",
+        "failureUnknown": "No failure reason was received."
+    },
+    "videoTask": {
+        "timeoutHint": "Generation may still be running in the cloud. Check the original task without generating again.",
+        "query": "Check original task result",
+        "querying": "Checking",
+        "queryFailed": "Could not check the task: {{error}}",
+        "queryUnavailable": "The original task cannot be checked right now. Try again later.",
+        "missing_job_reference": "This older task has no saved cloud job ID, so its result cannot be retrieved automatically.",
+        "provider_unsupported": "This provider does not support retrieving the original task result.",
+        "task_unavailable": "The original task is no longer available. Check that you are in the correct conversation.",
+        "query_rejected": "The runtime rejected this query. Check video tool permissions and model configuration.",
+        "stillRunning": "The original task is still queued or generating. Check again later."
+    },
     "toolActivity": {
         "input": "Input",
         "output": "Output",
@@ -655,6 +686,7 @@
         "modified": "Modified",
         "deleted": "Deleted",
         "revealFailed": "Failed to reveal the file in your file manager",
+        "workspacePreparing": "Preparing the shared run workspace",
         "workspaceEmpty": "No workspace directory is available to browse.",
         "workspaceLoadError": "Unable to load files",
         "workspaceLoadFailed": "Workspace load failed: {{error}}"

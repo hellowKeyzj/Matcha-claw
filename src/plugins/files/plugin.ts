@@ -19,7 +19,7 @@ const MarkdownReader = lazyWithPreload<TextFileReaderProps>(() => import('./Mark
   default: ({ file, text }: TextFileReaderProps) => createElement(MarkdownPreview, { filePath: file.filePath, markdown: text }),
 })));
 const HtmlReader = lazyWithPreload<TextFileReaderProps>(() => import('./HtmlPreview').then(({ HtmlPreview }) => ({
-  default: ({ file, text }: TextFileReaderProps) => createElement(HtmlPreview, { fileName: file.fileName, source: text }),
+  default: ({ file, text, readResource }: TextFileReaderProps) => createElement(HtmlPreview, { fileName: file.fileName, source: text, readResource }),
 })));
 const CodeReader = lazyWithPreload<TextFileReaderProps>(() => import('./MonacoViewer').then(({ MonacoViewer }) => ({
   default: ({ file, text }: TextFileReaderProps) => createElement(MonacoViewer, { filePath: file.filePath, value: text, className: 'h-full' }),
@@ -27,6 +27,7 @@ const CodeReader = lazyWithPreload<TextFileReaderProps>(() => import('./MonacoVi
 const TextReader = lazyWithPreload<TextFileReaderProps>(() => import('./TextReader').then((module) => ({ default: module.TextReader })));
 const CsvReader = lazyWithPreload<TextFileReaderProps>(() => import('./CsvReader').then((module) => ({ default: module.CsvReader })));
 const ImageReader = lazyWithPreload<BinaryFileReaderProps>(() => import('./ImageReader').then((module) => ({ default: module.ImageReader })));
+const MediaReader = lazyWithPreload<BinaryFileReaderProps>(() => import('./MediaReader').then((module) => ({ default: module.MediaReader })));
 const PdfReader = lazyWithPreload<BinaryFileReaderProps>(() => import('./PdfViewer').then(({ PdfViewer }) => ({
   default: ({ file, data }: BinaryFileReaderProps) => createElement(PdfViewer, { data, fileName: file.fileName, className: 'h-full' }),
 })));
@@ -81,6 +82,7 @@ export const builtinFileReaders: readonly FileReaderContribution[] = [
   { id: 'text', priority: 0, mode: 'preview', matches: (file) => file.contentType === 'text', source: 'text', component: TextReader },
   { id: 'csv', priority: 0, mode: 'preview', matches: (file) => file.contentType === 'sheet' && file.ext === '.csv', source: 'text', component: CsvReader },
   { id: 'image', priority: 0, mode: 'preview', matches: (file) => file.contentType === 'image', source: 'binary', component: ImageReader },
+  { id: 'media', priority: 0, mode: 'preview', matches: (file) => file.contentType === 'audio' || file.contentType === 'video', source: 'binary', component: MediaReader },
   { id: 'pdf', priority: 0, mode: 'preview', matches: (file) => file.contentType === 'pdf', source: 'binary', component: PdfReader },
   { id: 'sheet', priority: 0, mode: 'preview', matches: (file) => file.contentType === 'sheet' && (file.ext === '.xls' || file.ext === '.xlsx'), source: 'binary', component: SheetReader },
   {

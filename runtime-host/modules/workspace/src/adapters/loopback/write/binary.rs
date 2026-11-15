@@ -5,7 +5,8 @@ use platform::{
 };
 use serde::Deserialize;
 
-use super::{super::Dependencies, map_outcome};
+use super::{super::{Dependencies, file::{Endpoint, FileScope as Scope, optional_value}}, map_outcome};
+use crate::application::commands::WorkspaceFileSelection;
 
 pub(in crate::adapters::loopback) const AUTHORIZATION_ENDPOINT: &str = "/api/workspace/files/write-binary";
 const OPERATION_ID: &str = "files.writeBinary";
@@ -50,12 +51,12 @@ pub(crate) async fn handle(request: Request, dependencies: Dependencies) -> Resp
     {
         return error(401, "Workspace write authorization is invalid");
     }
-    let Some((endpoint, agent_id, relative_path, content)) = request.into_write() else {
+    let Some((endpoint, selection, relative_path, content)) = request.into_write() else {
         return error(401, "Workspace write authorization is invalid");
     };
     let result = dependencies
         .workspace
-        .write_binary(endpoint, agent_id, relative_path, content)
+        .write_binary(endpoint, selection, relative_path, content)
         .await
         .unwrap_or(Err(crate::WorkspaceWriteFailure::Unavailable));
     let delivery = map_outcome(result);
@@ -73,16 +74,11 @@ struct WriteRequest {
 }
 
 impl WriteRequest {
-    fn into_write(self) -> Option<(RuntimeEndpoint, String, String, Vec<u8>)> {
+    fn into_write(self) -> Option<(RuntimeEndpoint, WorkspaceFileSelection, String, Vec<u8>)> {
         if self.id != "workspace.file"
             || self.operation_id != OPERATION_ID
-            || self.scope.kind != "agent"
             || self.target.kind != "workspace-file"
-            || self.scope.endpoint != self.input.endpoint
-            || self.scope.agent_id != self.input.agent_id
-            || self.input.agent_id.trim().is_empty()
-            || self.input.agent_id.len() > 4096
-            || self.input.agent_id.as_bytes().contains(&0)
+            || !self.scope.matches_input(&self.input.endpoint, self.input.agent_id.as_deref(), self.input.team_id.as_deref(), self.input.run_id.as_deref())
             || !valid_relative_path(&self.input.relative_path)
             || self.input.data.len() > MAX_BASE64_BYTES
         {
@@ -96,7 +92,7 @@ impl WriteRequest {
         }
         Some((
             endpoint,
-            self.input.agent_id,
+            self.scope.selection(),
             self.input.relative_path,
             content,
         ))
@@ -118,14 +114,6 @@ fn valid_relative_path(value: &str) -> bool {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Scope {
-    kind: String,
-    endpoint: Endpoint,
-    agent_id: String,
-}
-
-#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Target {
     kind: String,
@@ -135,27 +123,14 @@ struct Target {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
     endpoint: Endpoint,
-    agent_id: String,
+    #[serde(default, deserialize_with = "optional_value")]
+    agent_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_value")]
+    team_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_value")]
+    run_id: Option<String>,
     relative_path: String,
     data: String,
-}
-
-#[derive(Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Endpoint {
-    kind: String,
-    runtime_adapter_id: String,
-    runtime_instance_id: String,
-}
-
-impl Endpoint {
-    fn runtime_endpoint(&self) -> Option<RuntimeEndpoint> {
-        (self.kind == "native-runtime")
-            .then(|| {
-                RuntimeEndpoint::try_new(&self.runtime_adapter_id, &self.runtime_instance_id).ok()
-            })
-            .flatten()
-    }
 }
 
 fn error(status: u16, message: &'static str) -> Response {

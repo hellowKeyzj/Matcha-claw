@@ -80,7 +80,7 @@ pub(crate) enum GraphPatchDraftOperation {
 pub(crate) struct NodeDraft {
     pub(crate) id: organization::NodeId,
     pub(crate) title: String,
-    pub(crate) max_attempts: std::num::NonZeroU32,
+    pub(crate) rework_limits: BTreeMap<String, u32>,
     pub(crate) role_id: String,
     pub(crate) prompt: String,
     pub(crate) assignment: NodeAssignmentDraft,
@@ -106,16 +106,17 @@ impl NodeDraft {
 
     fn bind(self, session: organization::RoleSessionRef) -> organization::NodeDefinition {
         let executor = organization::ExecutorPolicy::team_role_session(self.role_id, session);
-        match self.assignment {
+        let node = match self.assignment {
             NodeAssignmentDraft::Work { task_id, output_artifact_kind } => {
-                organization::NodeDefinition::work(self.id, self.title, self.max_attempts,
+                organization::NodeDefinition::work(self.id, self.title,
                     organization::WorkAssignment::typed(task_id, self.prompt, executor, output_artifact_kind))
             }
             NodeAssignmentDraft::Review => organization::NodeDefinition::review(
-                self.id, self.title, self.max_attempts,
+                self.id, self.title,
                 organization::ReviewAssignment::with_executor(executor, self.prompt),
             ),
-        }
+        };
+        node.with_rework_limits(self.rework_limits)
     }
 
     fn resolve(self, bindings: &[organization::RoleSessionReceipt]) -> Result<organization::NodeDefinition, StoreFault> {
@@ -442,6 +443,13 @@ fn team_event_graph_patch_operation(operation: &GraphPatchOperation) -> EventGra
         GraphPatchOperation::RemoveEdge(edge_id) => EventGraphPatchOperation::RemoveEdge {
             edge_id: edge_id.as_str().to_owned(),
         },
+        GraphPatchOperation::SetReworkLimit { source_node_id, source_port, max_reworks } => {
+            EventGraphPatchOperation::SetReworkLimit {
+                source_node_id: source_node_id.as_str().to_owned(),
+                source_port: source_port.clone(),
+                max_reworks: *max_reworks,
+            }
+        }
         GraphPatchOperation::SetNodePosition { node_id, position } => {
             EventGraphPatchOperation::SetNodePosition {
                 node_id: node_id.as_str().to_owned(),
@@ -501,6 +509,9 @@ pub enum TeamRuntimeCommand {
         epoch: Option<String>,
         version: String,
     },
+    RunReworkContinue {
+        request: crate::ReworkContinueRequest,
+    },
     Design {
         operation: crate::application::design::DesignOperation,
     },
@@ -553,6 +564,12 @@ pub enum TeamRuntimeCommand {
         event_limit: Option<u64>,
         message_cursor: Option<crate::run::public_projection::TeamRunMessageCursor>,
     },
+    NodeReviewHistory {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        node_id: organization::NodeId,
+        query: crate::run::public_projection::TeamNodeReviewHistoryQuery,
+    },
     GraphSave {
         command: Box<organization::RunCommand>,
         definition: GraphDefinition,
@@ -587,6 +604,7 @@ pub enum TeamRuntimeCommand {
         summary: String,
         role_id: Option<OpaqueId>,
         requested_action: Option<String>,
+        approval_submission: Option<crate::run::approval::ApprovalSubmission>,
         idempotency_key: IdempotencyKey,
         terminal_resolution: Option<TeamNodeTerminalResolution>,
         output_port: Option<String>,
@@ -619,6 +637,47 @@ pub enum TeamRuntimeCommand {
     },
 }
 
+impl TeamRuntimeCommand {
+    pub(crate) fn operation(&self) -> crate::capability::TeamRuntimeOperation {
+        use crate::{application::design::DesignOperation, capability::TeamRuntimeOperation as Operation};
+        match self {
+            Self::RoleSessionCreate { .. } => Operation::RoleSessionCreate,
+            Self::RunStart { .. } => Operation::RunStart,
+            Self::RunReworkContinue { .. } => Operation::RunReworkContinue,
+            Self::Design { operation } => match operation {
+                DesignOperation::Begin { .. } => Operation::DesignStart,
+                DesignOperation::Exit { .. } => Operation::DesignExit,
+                DesignOperation::Snapshot { .. } | DesignOperation::Context { .. } => Operation::DesignSnapshot,
+                DesignOperation::Patch { .. } => Operation::DesignGraphPatch,
+            },
+            Self::PackageValidate { .. } => Operation::PackageValidate,
+            Self::DependencyPlan { .. } => Operation::DependencyPlan,
+            Self::ProvisionAgents { .. } => Operation::ProvisionAgents,
+            Self::Delete { .. } => Operation::Delete,
+            Self::RunCreate { .. } => Operation::RunCreate,
+            Self::RunList { .. } => Operation::RunList,
+            Self::TriggerList { .. } => Operation::TriggerList,
+            Self::WebhookTriggerFire { .. } => Operation::WebhookTriggerFire,
+            Self::RunSnapshot { .. } => Operation::RunSnapshot,
+            Self::NodeReviewHistory { .. } => Operation::NodeReviewHistory,
+            Self::GraphSave { .. } => Operation::GraphSave,
+            Self::GraphPatch { .. } => Operation::GraphPatch,
+            Self::GraphContext { .. } => Operation::GraphContext,
+            Self::GraphExportYaml { .. } => Operation::GraphExportYaml,
+            Self::GraphImportYaml { .. } => Operation::GraphImportYaml,
+            Self::TriggerFire { .. } => Operation::TriggerFire,
+            Self::NodePromptRetryDue { .. } => Operation::NodePromptRetryDue,
+            Self::NodeEvent { .. } => Operation::NodeEvent,
+            Self::RunDiagnostics { .. } => Operation::RunDiagnostics,
+            Self::RunDecisionSubmit { .. } => Operation::RunDecisionSubmit,
+            Self::Resume { .. } => Operation::Resume,
+            Self::ApprovalResolve { .. } => Operation::ApprovalResolve,
+            Self::RunCancel { .. } => Operation::RunCancel,
+            Self::RunDelete { .. } => Operation::RunDelete,
+        }
+    }
+}
+
 pub enum TeamRuntimeCommandOutcome {
     RoleSessionCreate(Result<organization::RoleSessionReceipt, TeamRuntimeStatus>),
     Design {
@@ -631,6 +690,7 @@ pub enum TeamRuntimeCommandOutcome {
     Delete(Result<TeamDeleteOutcome, StoreFault>),
     RunCreate {
         result: Result<CreateGraphRunOutcome, TeamRuntimeStatus>,
+        workspace: Option<crate::run::public_projection::TeamRunPublicWorkspace>,
         creation_failure: Option<organization::TeamCreationFailure>,
     },
     RunList(Result<Vec<TeamRunListEntry>, StoreFault>),
@@ -644,6 +704,7 @@ pub enum TeamRuntimeCommandOutcome {
     RunSnapshotInvalidInput {
         creation_failure: Option<organization::TeamCreationFailure>,
     },
+    NodeReviewHistory(Result<Option<crate::run::public_projection::TeamNodeReviewHistoryResult>, StoreFault>),
     GraphSave(Result<TeamRunCommandOutcome, StoreFault>),
     GraphPatch(Result<TeamRunCommandOutcome, StoreFault>),
     GraphContext(TeamGraphContextResult),
@@ -651,6 +712,7 @@ pub enum TeamRuntimeCommandOutcome {
     GraphImportYaml(Result<TeamRunCommandOutcome, StoreFault>),
     TriggerFire(Result<TeamRunTriggerOutcome, StoreFault>),
     RunStart(Result<(), StoreFault>),
+    RunReworkContinue(Result<(), StoreFault>),
     NodePromptRetryDue(NodePromptRetryDueQueryOutcome),
     NodeEvent(Result<TeamNodeEventCommandOutcome, TeamRuntimeStatus>),
     RunDiagnostics(TeamRunDiagnosticsQueryOutcome),
@@ -711,17 +773,19 @@ pub fn decode_team_runtime_command(
     input: &Value,
     endpoint: organization::RuntimeEndpointReference,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
+    use crate::capability::TeamRuntimeOperation as Operation;
     let input = input
         .as_object()
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    match operation_id {
-        "team.packageValidate" | "team.dependencyPlan" => {
+    let operation = Operation::parse(operation_id).ok_or(TeamRuntimeDecodeError::Unavailable)?;
+    match operation {
+        Operation::PackageValidate | Operation::DependencyPlan => {
             let target = target
                 .as_object()
                 .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
             if target.len() != 2
                 || target.get("kind") != Some(&json!("team"))
-                || input.len() != 1 + usize::from(operation_id == "team.dependencyPlan" && input.contains_key("sourceAgentId"))
+                || input.len() != 1 + usize::from(operation == Operation::DependencyPlan && input.contains_key("sourceAgentId"))
                 || target.get("packagePath") != input.get("packagePath")
             {
                 return Err(TeamRuntimeDecodeError::InvalidInput);
@@ -732,26 +796,26 @@ pub fn decode_team_runtime_command(
                 .filter(|value| !value.trim().is_empty())
                 .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
             let package_root = PathBuf::from(package_path);
-            if operation_id == "team.packageValidate" {
+            if operation == Operation::PackageValidate {
                 Ok(TeamRuntimeCommand::PackageValidate { package_root })
             } else {
                 let source_agent = decode_source_agent(input.get("sourceAgentId"), &endpoint, TeamRuntimeCreateSource::TeamSkill)?;
                 Ok(TeamRuntimeCommand::DependencyPlan { package_root, endpoint, source_agent })
             }
         }
-        "team.provisionAgents" => decode_team_provision(input, target, endpoint),
-        "team.delete" => decode_team_delete(input, target),
-        "team.runDelete" => decode_team_run_delete(input, target),
-        "team.roleSessionCreate" => decode_role_session_create(input, target, endpoint),
-        "team.runList" => {
+        Operation::ProvisionAgents => decode_team_provision(input, target, endpoint),
+        Operation::Delete => decode_team_delete(input, target),
+        Operation::RunDelete => decode_team_run_delete(input, target),
+        Operation::RoleSessionCreate => decode_role_session_create(input, target, endpoint),
+        Operation::RunList => {
             let team_id = decode_team_id_target(target, input)?;
             if input.len() != 1 {
                 return Err(TeamRuntimeDecodeError::InvalidInput);
             }
             Ok(TeamRuntimeCommand::RunList { team_id })
         }
-        "team.resume" => decode_team_resume(input, target),
-        "team.triggerList" => {
+        Operation::Resume => decode_team_resume(input, target),
+        Operation::TriggerList => {
             if !input.is_empty() {
                 return Err(TeamRuntimeDecodeError::InvalidInput);
             }
@@ -777,27 +841,28 @@ pub fn decode_team_runtime_command(
             };
             Ok(TeamRuntimeCommand::TriggerList { team_id })
         }
-        "team.designStart"
-        | "team.designExit"
-        | "team.designSnapshot"
-        | "team.designGraphPatch" => super::design::decode(operation_id, input, target),
-        "team.runStart" => decode_team_run_start(input, target),
-        "team.runCreate" => decode_team_run_create(input, target, endpoint),
-        "team.webhookTriggerFire" => decode_team_webhook_trigger(input, target),
-        "team.graphSave" => decode_team_graph_save(input, target),
-        "team.graphPatch" => decode_team_graph_patch(input, target),
-        "team.graphContext" => decode_team_graph_context(input, target),
-        "team.nodePromptRetryDue" => decode_team_node_prompt_retry_due(input, target),
-        "team.nodeEvent" => decode_team_node_event(input, target),
-        "team.runDecisionSubmit" => decode_team_run_decision(input, target),
-        "team.runSnapshot" => decode_team_snapshot(input, target),
-        "team.graphExportYaml" => decode_team_graph_export(input, target),
-        "team.graphImportYaml" => decode_team_graph_import(input, target),
-        "team.runDiagnostics" => decode_team_run_diagnostics(input, target),
-        "team.triggerFire" => decode_team_trigger(input, target),
-        "team.approvalResolve" => decode_team_approval(input, target),
-        "team.runCancel" => decode_team_run_cancel(input, target),
-        _ => Err(TeamRuntimeDecodeError::Unavailable),
+        Operation::DesignStart
+        | Operation::DesignExit
+        | Operation::DesignSnapshot
+        | Operation::DesignGraphPatch => super::design::decode(operation.id(), input, target),
+        Operation::RunStart => decode_team_run_start(input, target),
+        Operation::RunReworkContinue => decode_team_run_rework_continue(input, target),
+        Operation::RunCreate => decode_team_run_create(input, target, endpoint),
+        Operation::WebhookTriggerFire => decode_team_webhook_trigger(input, target),
+        Operation::GraphSave => decode_team_graph_save(input, target),
+        Operation::GraphPatch => decode_team_graph_patch(input, target),
+        Operation::GraphContext => decode_team_graph_context(input, target),
+        Operation::NodePromptRetryDue => decode_team_node_prompt_retry_due(input, target),
+        Operation::NodeEvent => decode_team_node_event(input, target),
+        Operation::RunDecisionSubmit => decode_team_run_decision(input, target),
+        Operation::RunSnapshot => decode_team_snapshot(input, target),
+        Operation::NodeReviewHistory => decode_team_node_review_history(input, target),
+        Operation::GraphExportYaml => decode_team_graph_export(input, target),
+        Operation::GraphImportYaml => decode_team_graph_import(input, target),
+        Operation::RunDiagnostics => decode_team_run_diagnostics(input, target),
+        Operation::TriggerFire => decode_team_trigger(input, target),
+        Operation::ApprovalResolve => decode_team_approval(input, target),
+        Operation::RunCancel => decode_team_run_cancel(input, target),
     }
 }
 
@@ -853,6 +918,55 @@ fn decode_team_run_start(
         return Err(InvalidInput);
     }
     Ok(TeamRuntimeCommand::RunStart { team_id, run_id, epoch, version: version.to_owned() })
+}
+
+fn decode_team_run_rework_continue(
+    input: &serde_json::Map<String, Value>,
+    target: &Value,
+) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
+    use TeamRuntimeDecodeError::InvalidInput;
+    let fields = [
+        "teamId", "runId", "nodeId", "sourcePort", "batchId", "sourceNodeExecutionId",
+        "maxReworks", "expectedGraphVersion", "commandId", "idempotencyKey",
+    ];
+    if input.len() != fields.len() || input.keys().any(|key| !fields.contains(&key.as_str())) {
+        return Err(InvalidInput);
+    }
+    let run_id = GraphRunId::new(decode_opaque(input, "runId")?.as_str());
+    if target != &json!({"kind":"team-run","runId":run_id.as_str()}) {
+        return Err(InvalidInput);
+    }
+    let team_id = TeamId::try_new(
+        input.get("teamId").and_then(Value::as_str).filter(|value| valid_identifier(value))
+            .ok_or(InvalidInput)?,
+    ).map_err(|_| InvalidInput)?;
+    let batch_id = input.get("batchId").and_then(Value::as_u64)
+        .filter(|value| *value <= 9_007_199_254_740_991)
+        .and_then(std::num::NonZeroU64::new).ok_or(InvalidInput)?;
+    let max_reworks = input.get("maxReworks").and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok()).ok_or(InvalidInput)?;
+    let version = input.get("expectedGraphVersion").and_then(Value::as_str).ok_or(InvalidInput)?;
+    if version.len() != 64 || !version.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err(InvalidInput);
+    }
+    Ok(TeamRuntimeCommand::RunReworkContinue {
+        request: crate::ReworkContinueRequest {
+            team_id,
+            run_id,
+            source_node_id: organization::NodeId::new(
+                graph_string_field(input, "nodeId").ok_or(InvalidInput)?,
+            ),
+            source_port: graph_string_field(input, "sourcePort").ok_or(InvalidInput)?.to_owned(),
+            batch_id,
+            source_node_execution_id: organization::NodeExecutionId::from_durable(
+                graph_string_field(input, "sourceNodeExecutionId").ok_or(InvalidInput)?.to_owned(),
+            ),
+            max_reworks,
+            expected_graph_version: version.to_owned(),
+            command_id: decode_opaque(input, "commandId")?,
+            idempotency_key: decode_opaque(input, "idempotencyKey")?,
+        },
+    })
 }
 
 fn decode_team_run_cancel(
@@ -1148,7 +1262,7 @@ fn decode_manual_team_member_provision(
     value: &Value,
     leader_count: &mut usize,
     role_ids: &mut BTreeSet<String>,
-    agent_ids: &mut BTreeSet<String>,
+    agent_ids: &mut BTreeSet<(String, String)>,
 ) -> Result<organization::ManualTeamRoleBinding, TeamRuntimeDecodeError> {
     let member = value
         .as_object()
@@ -1158,6 +1272,7 @@ fn decode_manual_team_member_provision(
             key.as_str(),
             "agentId"
                 | "agentName"
+                | "endpoint"
                 | "workspace"
                 | "roleId"
                 | "skills"
@@ -1169,6 +1284,23 @@ fn decode_manual_team_member_provision(
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
     let agent_id = manual_required_string(member, "agentId")?;
+    let endpoint = member
+        .get("endpoint")
+        .and_then(Value::as_object)
+        .filter(|endpoint| {
+            endpoint.len() == 3
+                && endpoint.get("kind").and_then(Value::as_str) == Some("native-runtime")
+        })
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    let endpoint = platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
+        manual_required_string(endpoint, "runtimeAdapterId")?,
+        manual_required_string(endpoint, "runtimeInstanceId")?,
+    )
+    .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
+    let endpoint = organization::RuntimeEndpointReference::try_new(
+        runtime_directory::endpoint_reference(&endpoint),
+    )
+    .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
     let _workspace = manual_required_string(member, "workspace")?;
     let declared_role = manual_required_string(member, "roleId")?;
     let leader = matches!(member.get("isLeader").and_then(Value::as_bool), Some(true));
@@ -1181,7 +1313,9 @@ fn decode_manual_team_member_provision(
         }
         declared_role
     };
-    if !agent_ids.insert(agent_id.to_owned()) || !role_ids.insert(role_id.to_owned()) {
+    if !agent_ids.insert((endpoint.as_str().to_owned(), agent_id.to_owned()))
+        || !role_ids.insert(role_id.to_owned())
+    {
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
     let member_name = member
@@ -1203,7 +1337,7 @@ fn decode_manual_team_member_provision(
         .filter(|tool| !tool.is_empty())
         .map(str::to_owned)
         .collect();
-    organization::ManualTeamRoleBinding::try_new(role, member_name.to_owned(), agent, leader)
+    organization::ManualTeamRoleBinding::try_new(role, member_name.to_owned(), agent, endpoint, leader)
         .map(|binding| binding.with_tools(tools))
         .map_err(|_| TeamRuntimeDecodeError::InvalidInput)
 }
@@ -1248,6 +1382,35 @@ fn decode_team_snapshot(
         event_limit: optional_u64(input, "eventLimit")?,
         message_cursor,
     })
+}
+
+fn decode_team_node_review_history(
+    input: &serde_json::Map<String, Value>,
+    target: &Value,
+) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
+    use TeamRuntimeDecodeError::InvalidInput;
+    let fields = ["teamId", "runId", "nodeId", "query"];
+    if input.len() != fields.len() || input.keys().any(|key| !fields.contains(&key.as_str())) {
+        return Err(InvalidInput);
+    }
+    let field = |key| input.get(key).and_then(Value::as_str)
+        .filter(|value| valid_identifier(value)).ok_or(InvalidInput);
+    let team_id = TeamId::try_new(field("teamId")?).map_err(|_| InvalidInput)?;
+    let run_id = GraphRunId::new(field("runId")?);
+    let node_id = organization::NodeId::new(field("nodeId")?);
+    if target != &json!({"kind":"team-run","teamId":team_id.as_str(),"runId":run_id.as_str()}) {
+        return Err(InvalidInput);
+    }
+    let query = input.get("query").ok_or(InvalidInput)?;
+    if query.get("cursor").is_some_and(Value::is_null) {
+        return Err(InvalidInput);
+    }
+    let query: crate::run::public_projection::TeamNodeReviewHistoryQuery =
+        serde_json::from_value(query.clone()).map_err(|_| InvalidInput)?;
+    if !query.is_valid() {
+        return Err(InvalidInput);
+    }
+    Ok(TeamRuntimeCommand::NodeReviewHistory { team_id, run_id, node_id, query })
 }
 
 fn decode_team_graph_export(
@@ -1668,6 +1831,7 @@ fn decode_team_node_event(
                 | "roleId"
                 | "outputPort"
                 | "evidenceRefs"
+                | "artifactIds"
                 | "requestedAction"
                 | "risk"
                 | "metadata"
@@ -1742,6 +1906,20 @@ fn decode_team_node_event(
     {
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
+    let approval_submission = if event.as_str() == "request_approval" {
+        let risk = input.get("risk").map(|value| {
+            value.as_str().map(str::to_owned).ok_or(TeamRuntimeDecodeError::InvalidInput)
+        }).transpose()?;
+        let artifact_ids = match input.get("artifactIds") {
+            Some(value) => serde_json::from_value::<Vec<String>>(value.clone()).map_err(|_| TeamRuntimeDecodeError::InvalidInput)?,
+            None => Vec::new(),
+        };
+        Some(crate::run::approval::ApprovalSubmission::try_new(summary.clone(), risk, artifact_ids)
+            .ok_or(TeamRuntimeDecodeError::InvalidInput)?)
+    } else {
+        if input.contains_key("artifactIds") { return Err(TeamRuntimeDecodeError::InvalidInput); }
+        None
+    };
     Ok(TeamRuntimeCommand::NodeEvent {
         run_id,
         node_execution_id,
@@ -1749,6 +1927,7 @@ fn decode_team_node_event(
         summary,
         role_id,
         requested_action,
+        approval_submission,
         idempotency_key: decode_idempotency_key(input, "idempotencyKey")?,
         terminal_resolution,
         output_port,
@@ -1906,7 +2085,7 @@ fn decode_team_graph_definition(
     let workflow_plan_id = graph_string_field(graph, "workflowPlanId")
         .map(str::to_owned)
         .unwrap_or_else(|| default_team_workflow_plan_id(run_id));
-    let title = graph_string_field(graph, "title")
+    let title = decode_team_graph_title(graph)?
         .map(str::to_owned)
         .unwrap_or_else(|| "Team graph".to_owned());
     let nodes = decode_team_graph_nodes(
@@ -1949,6 +2128,16 @@ fn graph_string_field<'a>(
         .filter(|value| !value.trim().is_empty() && valid_identifier(value))
 }
 
+fn decode_team_graph_title(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<&str>, TeamRuntimeDecodeError> {
+    object.get("title").map(|value| {
+        value.as_str()
+            .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_control))
+            .ok_or_else(|| TeamRuntimeDecodeError::field("title", "Provide a nonblank single-line title or omit it."))
+    }).transpose()
+}
+
 fn graph_text_field<'a>(
     object: &'a serde_json::Map<String, Value>,
     field: &str,
@@ -1986,15 +2175,15 @@ fn decode_team_graph_node_draft(value: &Value) -> Result<DecodedNode, TeamRuntim
         .ok_or_else(|| TeamRuntimeDecodeError::field("nodeId", "Provide a nonempty node identifier."))?
         .to_owned();
     let id = organization::NodeId::new(node_id.clone());
-    let title = graph_string_field(node, "title")
+    let title = decode_team_graph_title(node)?
         .unwrap_or(node_id.as_str())
         .to_owned();
     let config = node.get("config").map(|value| {
         value.as_object().ok_or_else(|| TeamRuntimeDecodeError::field("config", "Provide a configuration object for this node kind."))
     }).transpose()?;
-    let max_attempts = decode_team_graph_node_max_attempts(node)?;
     let kind =
         decode_team_graph_node_kind(node.get("kind").and_then(Value::as_str).unwrap_or("work"))?;
+    let rework_limits = decode_team_graph_rework_limits(node, kind)?;
     for field in ["groupId", "group"] {
         if node.contains_key(field) {
             return Err(TeamRuntimeDecodeError::field(field, "Groups are retired; Join waits for its gate inputs without group configuration."));
@@ -2011,11 +2200,12 @@ fn decode_team_graph_node_draft(value: &Value) -> Result<DecodedNode, TeamRuntim
             organization::NodeKind::Start => key == "trigger",
             organization::NodeKind::Work => matches!(key.as_str(), "prompt" | "sessionRef" | "outputArtifactKind"),
             organization::NodeKind::Review => matches!(key.as_str(), "prompt" | "sessionRef"),
+            organization::NodeKind::HumanDecision => key == "prompt",
             organization::NodeKind::ScriptReview => key == "rule",
             _ => false,
         }
     })) {
-        return Err(TeamRuntimeDecodeError::field("config", "Remove unsupported config fields; use the fields for this node kind and top-level maxAttempts."));
+        return Err(TeamRuntimeDecodeError::field("config", "Remove unsupported config fields; use the fields for this node kind and top-level reworkLimits."));
     }
     for field in ["roleId", "taskId"] {
         if node.get(field).is_some_and(|value| !value.is_null() && graph_string_field(node, field).is_none()) {
@@ -2041,7 +2231,7 @@ fn decode_team_graph_node_draft(value: &Value) -> Result<DecodedNode, TeamRuntim
                 organization::run::graph::DefinitionError::InvalidReviewAssignment(id)));
         }
         let draft = NodeDraft {
-            id, title, max_attempts, role_id,
+            id, title, rework_limits, role_id,
             prompt: prompt.unwrap_or("").to_owned(),
             assignment: if kind == NodeKind::Work {
                 NodeAssignmentDraft::Work {
@@ -2063,7 +2253,6 @@ fn decode_team_graph_node_draft(value: &Value) -> Result<DecodedNode, TeamRuntim
         organization::NodeKind::Start => organization::NodeDefinition::start(
             id,
             title,
-            max_attempts,
             decode_team_graph_start_trigger(config)?,
         ),
         organization::NodeKind::ScriptReview => {
@@ -2074,12 +2263,15 @@ fn decode_team_graph_node_draft(value: &Value) -> Result<DecodedNode, TeamRuntim
                 Some("assert_artifact_exists") => organization::ScriptReviewRule::AssertArtifactExists,
                 _ => return Err(TeamRuntimeDecodeError::field("config.rule", "Select an explicit ScriptReview rule listed in the graph tool schema.")),
             };
-            organization::NodeDefinition::script_review(id, title, max_attempts, rule)
+            organization::NodeDefinition::script_review(id, title, rule)
         }
-        organization::NodeKind::Join => organization::NodeDefinition::join(id, title, max_attempts),
-        _ => organization::NodeDefinition::control(id, kind, title, max_attempts),
+        organization::NodeKind::Join => organization::NodeDefinition::join(id, title),
+        organization::NodeKind::HumanDecision => organization::NodeDefinition::human_decision(
+            id, title, config.and_then(|config| graph_text_field(config, "prompt")).map(str::to_owned),
+        ),
+        _ => organization::NodeDefinition::control(id, kind, title),
     };
-    Ok(DecodedNode::Defined(definition))
+    Ok(DecodedNode::Defined(definition.with_rework_limits(rework_limits)))
 }
 
 fn decode_team_graph_session_ref(
@@ -2110,17 +2302,28 @@ fn decode_team_graph_node_kind(
     }
 }
 
-fn decode_team_graph_node_max_attempts(
+fn decode_team_graph_rework_limits(
     node: &serde_json::Map<String, Value>,
-) -> Result<std::num::NonZeroU32, TeamRuntimeDecodeError> {
-    let Some(value) = node.get("maxAttempts") else {
-        return Ok(std::num::NonZeroU32::MIN);
+    kind: NodeKind,
+) -> Result<BTreeMap<String, u32>, TeamRuntimeDecodeError> {
+    if node.contains_key("maxAttempts") {
+        return Err(TeamRuntimeDecodeError::field("maxAttempts", "Use reworkLimits on the rework source port; node attempt limits are retired."));
+    }
+    let Some(value) = node.get("reworkLimits") else {
+        return Ok(BTreeMap::new());
     };
-    value
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .and_then(std::num::NonZeroU32::new)
-        .ok_or_else(|| TeamRuntimeDecodeError::field("maxAttempts", "Provide an integer from 1 through 4294967295, or omit it."))
+    let limits = value.as_object().ok_or_else(|| {
+        TeamRuntimeDecodeError::field("reworkLimits", "Provide an object of source ports and nonnegative integer rework limits.")
+    })?;
+    limits.iter().map(|(port, value)| {
+        let field = format!("reworkLimits.{port}");
+        if !kind.source_port_actions(port).contains(&EdgeAction::Rework) {
+            return Err(TeamRuntimeDecodeError::field(field, "Only source ports that allow rework may have a limit."));
+        }
+        let limit = value.as_u64().and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| TeamRuntimeDecodeError::field(field, "Provide an integer from 0 through 4294967295."))?;
+        Ok((port.clone(), limit))
+    }).collect()
 }
 
 fn decode_team_graph_start_trigger(
@@ -2317,6 +2520,25 @@ pub(crate) fn decode_team_graph_patch_value(
                     ))
                     .into(),
                 ),
+                "set_rework_limit" => {
+                    let allowed = ["op", "nodeId", "sourcePort", "maxReworks"];
+                    if operation.len() != allowed.len()
+                        || operation.keys().any(|key| !allowed.contains(&key.as_str()))
+                    {
+                        return Err(TeamRuntimeDecodeError::field("", "A set_rework_limit operation accepts only op, nodeId, sourcePort, and maxReworks."));
+                    }
+                    operations.push(GraphPatchOperation::SetReworkLimit {
+                        source_node_id: organization::NodeId::new(
+                            graph_string_field(operation, "nodeId")
+                                .ok_or_else(|| TeamRuntimeDecodeError::field("nodeId", "Provide the rework source node identifier."))?,
+                        ),
+                        source_port: graph_string_field(operation, "sourcePort")
+                            .ok_or_else(|| TeamRuntimeDecodeError::field("sourcePort", "Provide the exact rework source port."))?.to_owned(),
+                        max_reworks: operation.get("maxReworks").and_then(Value::as_u64)
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or_else(|| TeamRuntimeDecodeError::field("maxReworks", "Provide an integer from 0 through 4294967295."))?,
+                    }.into());
+                }
                 "set_node_position" => operations.push(
                     organization::GraphPatchOperation::SetNodePosition {
                         node_id: organization::NodeId::new(

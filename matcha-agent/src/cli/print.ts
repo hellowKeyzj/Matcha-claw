@@ -66,7 +66,9 @@ import {
   registerProcessOutputErrorHandlers,
 } from 'src/utils/process.js'
 import type { Stream } from 'src/utils/stream.js'
-import { EMPTY_USAGE } from '@ant/model-provider'
+import { EMPTY_USAGE, type NonNullableUsage } from '@ant/model-provider'
+import { accumulateUsage } from 'src/services/api/claude.js'
+import { withRequestExecution } from 'src/utils/requestExecution.js'
 import {
   loadConversationForResume,
   type TurnInterruptionState,
@@ -98,7 +100,7 @@ import {
   READ_FILE_STATE_CACHE_SIZE,
 } from 'src/utils/fileStateCache.js'
 import { expandPath } from 'src/utils/path.js'
-import { extractReadFilesFromMessages } from 'src/utils/queryHelpers.js'
+import { extractReadFilesFromMessages, normalizeMessage } from 'src/utils/queryHelpers.js'
 import { registerHookEventHandler } from 'src/utils/hooks/hookEvents.js'
 import { getHooksConfigFromSnapshot } from 'src/utils/hooks/hooksConfigSnapshot.js'
 import { executeFilePersistence } from 'src/utils/filePersistence/filePersistence.js'
@@ -279,6 +281,9 @@ import {
   createModelSwitchBreadcrumbs,
   createAssistantMessage,
   createUserMessage,
+  createUserInterruptionMessage,
+  INTERRUPT_MESSAGE,
+  INTERRUPT_MESSAGE_FOR_TOOL_USE,
 } from 'src/utils/messages.js'
 import { TodoListSchema } from 'src/utils/todo/types.js'
 import { activeTodos, writeTodos } from 'src/utils/todo/state.js'
@@ -1139,7 +1144,28 @@ function runHeadlessStreaming(
   let inputClosed = false
   let shutdownPromptInjected = false
   let heldBackResult: StdoutMessage | null = null
+  let liveRequest: {
+    id: UUID
+    maxTurns?: number
+    accepted: boolean
+    budgetExhausted: boolean
+    usage: typeof EMPTY_USAGE
+    numTurns: number
+    queryTurns: number
+    durationMs: number
+    durationApiMs: number
+    asks: number
+  } | undefined
+  function hasPendingRequestTasks(): boolean {
+    const requestMessageId = liveRequest?.id
+    return requestMessageId !== undefined && Object.values(getAppState().tasks).some(
+      task => task.requestMessageId === requestMessageId &&
+        (!('isBackgrounded' in task) || task.isBackgrounded) &&
+        (task.status === 'pending' || task.status === 'running' || !task.notified),
+    )
+  }
   let abortController: AbortController | undefined
+  let activeInputAbortController: AbortController | undefined
   // Same queue sendRequest() enqueues to — one FIFO for everything.
   const output = structuredIO.outbound
 
@@ -2084,10 +2110,18 @@ function runHeadlessStreaming(
         }
       : undefined
 
+  const isMainThread = (cmd: QueuedCommand) => cmd.agentId === undefined
+
   // Abort the current operation when a 'now' priority message arrives.
   subscribeToCommandQueue(() => {
-    if (abortController && getCommandsByMaxPriority('now').length > 0) {
+    if (
+      (activeInputAbortController || runPhase === 'waiting_for_agents') &&
+      abortController && getCommandsByMaxPriority('now').length > 0
+    ) {
       abortController.abort('interrupt')
+    }
+    if (!running && !inputClosed && peek(isMainThread)) {
+      queueMicrotask(() => { void run() })
     }
   })
 
@@ -2103,10 +2137,25 @@ function runHeadlessStreaming(
   }
   const runOnce = async () => {
     if (todoControlInFlight) await todoControlInFlight
-    if (!structuredIO.acceptsInput || running) {
+    const resumingAfterInterrupt = abortController?.signal.aborted === true
+    const isQueuedInput = (cmd: QueuedCommand) => isMainThread(cmd) && cmd.mode !== 'task-notification'
+    const isResumableCommand = (cmd: QueuedCommand) =>
+      isQueuedInput(cmd) || (isMainThread(cmd) && cmd.taskNotification?.requestMessageId !== undefined)
+    if (
+      !structuredIO.acceptsInput || running ||
+      (resumingAfterInterrupt && !inputClosed && !peek(isResumableCommand))
+    ) {
       return
     }
 
+    const runAbortController = resumingAfterInterrupt && !peek(isQueuedInput) && abortController
+      ? abortController
+      : createAbortController()
+    abortController = runAbortController
+    const shouldStopForInterrupt = () => runAbortController.signal.aborted
+    let nextCommandFilter = resumingAfterInterrupt ? isResumableCommand : isMainThread
+    // An interrupt during initialization still belongs to this queued input.
+    let initialCommand = peek(nextCommandFilter)
     running = true
     runPhase = undefined
     notifySessionStateChanged('running')
@@ -2157,15 +2206,16 @@ function runHeadlessStreaming(
       setupPluginHookHotReload()
     }
 
-    // Only main-thread commands (agentId===undefined) — subagent
-    // notifications are drained by the subagent's mid-turn gate in query.ts.
-    // Defined outside the try block so it's accessible in the post-finally
-    // queue re-checks at the bottom of run().
-    const isMainThread = (cmd: QueuedCommand) => cmd.agentId === undefined
+    // Subagent notifications are drained by the subagent's mid-turn gate in query.ts.
     let activeInputMessageId: string | undefined
     let activeInputReceipt: Record<string, unknown> | undefined
     let acceptedResult: StdoutMessage | undefined
-    let acceptedResultEmitted = false
+    let resultEmitted = false
+    let interruptionObserved = false
+
+    const isRequestNotification = (cmd: QueuedCommand) =>
+      isMainThread(cmd) && cmd.mode === 'task-notification' &&
+      liveRequest !== undefined && cmd.taskNotification?.requestMessageId === liveRequest.id
 
     function executionErrorResult(error: unknown, previousResult?: StdoutMessage) {
       const previous = previousResult === undefined ? undefined : SDKResultMessageSchema().parse(previousResult)
@@ -2205,10 +2255,14 @@ function runHeadlessStreaming(
         permission_denials: [],
         uuid: randomUUID(),
         ...previous,
+        ...(previous?.native_measurement ? {
+          native_measurement: { ...previous.native_measurement, complete: false },
+        } : {}),
         type: 'result',
         subtype: 'error_during_execution',
         is_error: true,
         input_message_id: activeInputMessageId,
+        request_message_id: liveRequest?.id,
         ...(activeInputReceipt ? { native_input_receipt: activeInputReceipt } : {}),
         errors: [
           ...(previous && 'errors' in previous ? previous.errors : []),
@@ -2219,36 +2273,52 @@ function runHeadlessStreaming(
     }
 
     function emitResult(message: StdoutMessage) {
-      // Flush pending SDK events so they appear before result on the stream.
-      for (const event of drainSdkEvents()) {
-        output.enqueue(event)
-      }
-
-      // Hold-back: don't emit result while background agents are running.
-      if (
-        getRunningTasks(getAppState()).some(
-          t =>
-            (t.type === 'local_agent' || t.type === 'local_workflow') &&
-            isBackgroundTask(t),
-        )
-      ) {
+      for (const event of drainSdkEvents()) output.enqueue(event)
+      if (liveRequest) {
         heldBackResult = message
-        traceSessionTiming('print.result.held', () => ({
-          messageHash: 'uuid' in message && typeof message.uuid === 'string'
-            ? debugIdentifierHash(message.uuid) : undefined,
-          inputHash: message.type === 'result' && message.input_message_id
-            ? debugIdentifierHash(message.input_message_id) : undefined,
-        }))
-      } else {
-        heldBackResult = null
+      } else if (!resultEmitted) {
         output.enqueue(message)
-        traceSessionTiming('print.result.enqueued', () => ({
-          messageHash: 'uuid' in message && typeof message.uuid === 'string'
-            ? debugIdentifierHash(message.uuid) : undefined,
-          inputHash: message.type === 'result' && message.input_message_id
-            ? debugIdentifierHash(message.input_message_id) : undefined,
-        }))
+        resultEmitted = true
       }
+    }
+
+    function recordQueryResult(message: StdoutMessage): StdoutMessage {
+      if (!liveRequest) return message
+      const result = SDKResultMessageSchema().parse(message)
+      liveRequest.usage = accumulateUsage(liveRequest.usage, result.usage as NonNullableUsage)
+      liveRequest.numTurns += result.num_turns
+      liveRequest.durationMs += result.duration_ms
+      liveRequest.durationApiMs += result.duration_api_ms
+      liveRequest.asks++
+      return {
+        ...result,
+        request_message_id: liveRequest.id,
+        usage: liveRequest.usage,
+        num_turns: liveRequest.numTurns,
+        duration_ms: liveRequest.durationMs,
+        duration_api_ms: liveRequest.durationApiMs,
+        ...(liveRequest.asks > 1 && result.native_measurement ? {
+          native_measurement: { ...result.native_measurement, complete: false },
+        } : {}),
+      }
+    }
+
+    function updateTurnBudget() {
+      const candidate = nativeInputActive ? acceptedResult : heldBackResult
+      if (!liveRequest || !candidate) return
+      const result = SDKResultMessageSchema().parse(candidate)
+      if (result.subtype === 'error_max_turns') liveRequest.budgetExhausted = true
+      if (liveRequest.maxTurns === undefined || liveRequest.queryTurns < liveRequest.maxTurns ||
+        (!peek(isRequestNotification) && !hasPendingRequestTasks())) return
+      liveRequest.budgetExhausted = true
+      const exhausted = SDKResultErrorSchema().parse({
+        ...result,
+        subtype: 'error_max_turns',
+        is_error: true,
+        errors: [`Reached maximum number of turns (${liveRequest.maxTurns})`],
+      })
+      if (nativeInputActive) acceptedResult = exhausted
+      else heldBackResult = exhausted
     }
 
     function hasDrainedInputReceipt(): boolean {
@@ -2260,37 +2330,46 @@ function runHeadlessStreaming(
       if (!acceptedResult) return
       if (activeInputReceipt) Object.assign(acceptedResult, { native_input_receipt: activeInputReceipt })
       emitResult(acceptedResult)
-      if (!heldBackResult) {
-        acceptedResultEmitted = true
-        emitPendingSuggestion()
-      }
     }
 
     function releaseHeldBackResult() {
-      if (!heldBackResult) return
+      if (!heldBackResult || resultEmitted) return
+      for (const event of drainSdkEvents()) output.enqueue(event)
       const message = heldBackResult
-      output.enqueue(heldBackResult)
+      output.enqueue(message)
       traceSessionTiming('print.result.released', () => ({
         messageHash: 'uuid' in message && typeof message.uuid === 'string'
           ? debugIdentifierHash(message.uuid) : undefined,
         inputHash: message.type === 'result' && message.input_message_id
           ? debugIdentifierHash(message.input_message_id) : undefined,
       }))
-      if (heldBackResult === acceptedResult) acceptedResultEmitted = true
+      resultEmitted = true
       heldBackResult = null
+      liveRequest = undefined
       emitPendingSuggestion()
+    }
+
+    async function sealInterruptedRequest() {
+      if (resultEmitted || !heldBackResult) return
+      if (!interruptionObserved) {
+        const interruption = createUserInterruptionMessage({})
+        mutableMessages.push(interruption)
+        if (!isSessionPersistenceDisabled()) await recordTranscript(mutableMessages)
+        for (const message of normalizeMessage(interruption)) {
+          output.enqueue({ ...message, request_message_id: liveRequest?.id } as StdoutMessage)
+        }
+        interruptionObserved = true
+      }
+      heldBackResult = executionErrorResult(new Error('Request interrupted by user'), heldBackResult)
+      if (heldBackResult.native_measurement) heldBackResult.native_measurement.complete = false
     }
 
     try {
       let command: QueuedCommand | undefined
       let waitingForAgents = false
 
-      // Extract command processing into a named function for the do-while pattern.
-      // Drains the queue, batching consecutive prompt-mode commands into one
-      // ask() call so messages that queued up during a long turn coalesce
-      // into a single follow-up turn instead of N separate turns.
+      // A live request drains only its own notifications before the next input.
       const drainCommandQueue = async () => {
-        if (heldBackResult && heldBackResult === acceptedResult) return
         const processCommand = async (
           command: QueuedCommand,
           batch: QueuedCommand[],
@@ -2320,35 +2399,8 @@ function runHeadlessStreaming(
             return
           }
           command = batch[0]!
-          if (command.mode === 'prompt' && batch.length > 1) {
-            command = {
-              ...command,
-              value: joinPromptValues(batch.map(c => c.value)),
-              uuid: batch.findLast(c => c.uuid)?.uuid ?? command.uuid,
-            }
-          }
+          if (!command.uuid) command = { ...command, uuid: randomUUID() }
           const batchUuids = batch.map(c => c.uuid).filter(u => u !== undefined)
-
-          // QueryEngine will emit a replay for command.uuid (the last uuid in
-          // the batch) via its messagesToAck path. Emit replays here for the
-          // rest so consumers that track per-uuid delivery (clank's
-          // asyncMessages footer, CCR) see an ack for every message they sent,
-          // not just the one that survived the merge.
-          if (options.replayUserMessages && batch.length > 1) {
-            for (const c of batch) {
-              if (c.uuid && c.uuid !== command.uuid) {
-                output.enqueue({
-                  type: 'user',
-                  content: c.value,
-                  message: { role: 'user', content: c.value } as unknown,
-                  session_id: getSessionId(),
-                  parent_tool_use_id: null,
-                  uuid: c.uuid as string,
-                  isReplay: true,
-                } as unknown as StdoutMessage)
-              }
-            }
-          }
 
           // Combine all MCP clients. appState.mcp is populated incrementally
           // per-server by main.tsx (mirrors useManageMCPConnections). Reading
@@ -2377,12 +2429,10 @@ function runHeadlessStreaming(
             notifyCommandLifecycle(uuid, 'started')
           }
 
-          // Task notifications arrive when background agents complete.
-          // Emit an SDK system event for SDK consumers, then fall through
-          // to ask() so the model sees the agent result and can act on it.
-          // This matches TUI behavior where useQueueProcessor always feeds
-          // notifications to the model regardless of coordinator mode.
-          if (command.mode === 'task-notification') {
+          let notificationToolUseId: string | undefined
+          // Structured notifications already emitted their SDK terminal bookend
+          // at the producer. Keep the parser only for legacy notifications.
+          if (command.mode === 'task-notification' && !command.taskNotification) {
             const notificationText =
               typeof command.value === 'string' ? command.value : ''
             // Parse the XML-formatted notification
@@ -2392,6 +2442,7 @@ function runHeadlessStreaming(
             const toolUseIdMatch = notificationText.match(
               /<tool-use-id>([^<]+)<\/tool-use-id>/,
             )
+            notificationToolUseId = toolUseIdMatch?.[1]
             const outputFileMatch = notificationText.match(
               /<output-file>([^<]+)<\/output-file>/,
             )
@@ -2513,11 +2564,11 @@ function runHeadlessStreaming(
           // const-capture: TS loses `while ((command = dequeue()))` narrowing
           // inside the closure.
           const cmd = command
-          activeInputMessageId = cmd.uuid
           let lastResultIsError = false
 
           function startPromptSuggestion(): Promise<void> | undefined {
             if (
+              inputAbortController.signal.aborted ||
               !options.promptSuggestions ||
               isEnvDefinedFalsy(process.env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION)
             ) return
@@ -2559,7 +2610,7 @@ function runHeadlessStreaming(
                   generationRequestId: result.generationRequestId,
                 }
                 // An accepted-input result remains withheld until this operation joins.
-                if (cmd.nativeExecution || heldBackResult) {
+                if (nativeInputActive || heldBackResult) {
                   suggestionState.pendingSuggestion = suggestionMsg
                   suggestionState.pendingLastEmittedEntry = {
                     text: lastEmittedEntry.text,
@@ -2593,6 +2644,9 @@ function runHeadlessStreaming(
             await runWithWorkload(
               cmd.workload ?? options.workload,
               async () => {
+                activeInputMessageId = cmd.uuid
+                const request = liveRequest
+                const previousQueryTurns = request?.queryTurns ?? 0
                 for await (const message of ask({
                   commands: uniqBy(
                     [...currentCommands, ...appState.mcp.commands],
@@ -2601,6 +2655,7 @@ function runHeadlessStreaming(
                   prompt: input,
                   promptUuid: cmd.uuid,
                   isMeta: cmd.isMeta,
+                  taskNotification: cmd.taskNotification,
                   cwd: cwd(),
                   tools: allTools,
                   refreshTools: () => buildAllTools(getAppState()),
@@ -2608,12 +2663,15 @@ function runHeadlessStreaming(
                   mcpClients: allMcpClients,
                   thinkingConfig: options.thinkingConfig,
                   maxTurns:
-                    cmd.nativeBudget?.maxTurns === undefined
+                    request?.maxTurns === undefined
                       ? options.maxTurns
                       : Math.min(
-                          cmd.nativeBudget.maxTurns,
+                          request.maxTurns - previousQueryTurns,
                           options.maxTurns ?? Infinity,
                         ),
+                  onTurn: request ? turnCount => {
+                    request.queryTurns = previousQueryTurns + turnCount
+                  } : undefined,
                   maxBudgetUsd: options.maxBudgetUsd,
                   taskBudget: options.taskBudget,
                   canUseTool,
@@ -2678,14 +2736,15 @@ function runHeadlessStreaming(
                       messageHash: typeof message.uuid === 'string'
                         ? debugIdentifierHash(message.uuid) : undefined,
                       outcome: message.is_error ? 'error' : 'success',
-                      acceptedInput: cmd.nativeExecution !== undefined,
+                      acceptedInput: nativeInputActive,
                     }))
                     lastResultIsError = !!(message as Record<string, unknown>)
                       .is_error
-                    if (cmd.nativeExecution) {
-                      acceptedResult = message as StdoutMessage
+                    const result = recordQueryResult(message as StdoutMessage)
+                    if (nativeInputActive) {
+                      acceptedResult = result
                     } else {
-                      emitResult(message as StdoutMessage)
+                      emitResult(result)
                     }
                   } else {
                     // Flush SDK events (task_started, task_progress) so background
@@ -2693,7 +2752,17 @@ function runHeadlessStreaming(
                     for (const event of drainSdkEvents()) {
                       output.enqueue(event)
                     }
-                    output.enqueue(message as StdoutMessage)
+                    if (message.type === 'user' && message.isReplay !== true && shouldStopForInterrupt()) {
+                      const content = (message.message as { content?: unknown } | undefined)?.content
+                      const isInterruption = (text: unknown) =>
+                        text === INTERRUPT_MESSAGE || text === INTERRUPT_MESSAGE_FOR_TOOL_USE
+                      if (isInterruption(content) || (Array.isArray(content) && content.some(
+                        block => block.type === 'text' && isInterruption(block.text),
+                      ))) interruptionObserved = true
+                    }
+                    output.enqueue(message.type === 'user' && message.uuid === cmd.uuid && notificationToolUseId
+                      ? { ...message, source_tool_use_id: notificationToolUseId } as StdoutMessage
+                      : message as StdoutMessage)
                   }
                 }
               },
@@ -2734,7 +2803,7 @@ function runHeadlessStreaming(
                 workload: cmd.workload ?? options.workload,
               })
             } catch (cleanupError) {
-              if (cmd.nativeExecution) {
+              if (nativeInputActive) {
                 throw new AggregateError([error, cleanupError], errorMessage(error), { cause: error })
               }
               throw cleanupError
@@ -2774,18 +2843,22 @@ function runHeadlessStreaming(
                 },
               ),
             )
-            if (cmd.nativeExecution) await persistence
+            if (nativeInputActive) await persistence
           }
 
           const suggestion = startPromptSuggestion()
-          if (cmd.nativeExecution && suggestion) await trackInvestigationOperation(suggestion)
+          if (nativeInputActive && suggestion) await trackInvestigationOperation(suggestion)
 
           // Log headless profiler metrics for this turn and start next turn
           logHeadlessProfilerTurn()
           logQueryProfileReport()
           headlessProfilerStartTurn()
         }
-        while ((command = dequeue(isMainThread))) {
+        while ((command = dequeue(shouldStopForInterrupt()
+          ? cmd => cmd === initialCommand
+          : liveRequest ? isRequestNotification : nextCommandFilter))) {
+          initialCommand = undefined
+          nextCommandFilter = isMainThread
           if (
             command.mode !== 'prompt' &&
             command.mode !== 'orphaned-permission' &&
@@ -2795,34 +2868,45 @@ function runHeadlessStreaming(
               'only prompt commands are supported in streaming mode',
             )
           }
-
-          // Non-prompt commands (task-notification, orphaned-permission) carry
-          // side effects or orphanedPermission state, so they process singly.
-          // Prompt commands greedily collect followers with matching workload.
-          const batch: QueuedCommand[] = [command]
-          if (command.mode === 'prompt') {
-            while (
-              !command.nativeBudget &&
-              !command.nativeExecution &&
-              !peek(isMainThread)?.nativeBudget &&
-              !peek(isMainThread)?.nativeExecution &&
-              canBatchWith(command, peek(isMainThread))
-            ) {
-              batch.push(dequeue(isMainThread)!)
+          if (command.mode === 'task-notification' && command.taskNotification?.requestMessageId &&
+            (!liveRequest || liveRequest.accepted || liveRequest.budgetExhausted || command.taskNotification.requestMessageId !== liveRequest.id)) {
+            for (const event of drainSdkEvents()) output.enqueue(event)
+            if (command.uuid) notifyCommandLifecycle(command.uuid, 'completed')
+            continue
+          }
+          if (!command.uuid) command = { ...command, uuid: randomUUID() }
+          const queuedCommand = command
+          const batch = [queuedCommand]
+          const startingRequest = liveRequest === undefined
+          if (startingRequest) {
+            resultEmitted = false
+            interruptionObserved = false
+            activeInputReceipt = undefined
+            acceptedResult = undefined
+            if (queuedCommand.mode !== 'task-notification') {
+              liveRequest = {
+                id: queuedCommand.uuid!,
+                maxTurns: queuedCommand.nativeBudget?.maxTurns,
+                accepted: queuedCommand.nativeExecution !== undefined,
+                budgetExhausted: false,
+                usage: EMPTY_USAGE,
+                numTurns: 0,
+                queryTurns: 0,
+                durationMs: 0,
+                durationApiMs: 0,
+                asks: 0,
+              }
             }
           }
-          const queuedCommand = command
+          const requestMessageId = liveRequest?.id
           const queuedInputHash = process.env.MATCHACLAW_TRACE === '1' && queuedCommand.uuid
             ? debugIdentifierHash(queuedCommand.uuid) : undefined
-          activeInputMessageId = queuedCommand.uuid
-          activeInputReceipt = undefined
-          acceptedResult = undefined
-          acceptedResultEmitted = false
-          const inputAbortController = createAbortController()
-          abortController = inputAbortController
+          if (startingRequest) activeInputMessageId = queuedCommand.uuid
+          const inputAbortController = createChildAbortController(runAbortController)
+          activeInputAbortController = inputAbortController
           nativeInputActive = queuedCommand.nativeExecution !== undefined
           try {
-            await withIabInput(queuedCommand.uuid, () =>
+            const executeInput = () => withIabInput(requestMessageId ?? queuedCommand.uuid, () =>
               withInvestigation(queuedCommand.nativeExecution, {
                 request: (request, signal) => structuredIO.requestInvestigation(request, signal),
                 signal: inputAbortController.signal,
@@ -2833,6 +2917,28 @@ function runHeadlessStreaming(
                     throw new InvestigationAdmissionError('investigation_bridge_active_or_initializing')
                   }
                   await processCommand(queuedCommand, batch, inputAbortController)
+                  if (queuedCommand.nativeExecution) {
+                    while (true) {
+                      updateTurnBudget()
+                      if (inputAbortController.signal.aborted) break
+                      requireInvestigationEffects([])
+                      const notification = dequeue(isRequestNotification)
+                      if (notification) {
+                        for (const event of drainSdkEvents()) output.enqueue(event)
+                        if (!liveRequest?.budgetExhausted) {
+                          const continuation = { ...notification, uuid: notification.uuid || randomUUID() }
+                          await processCommand(continuation, [continuation], inputAbortController)
+                        } else if (notification.uuid) {
+                          notifyCommandLifecycle(notification.uuid, 'completed')
+                        }
+                        continue
+                      }
+                      if (!hasPendingRequestTasks()) break
+                      runPhase = 'waiting_for_agents'
+                      await sleep(100, investigationSignal() ?? inputAbortController.signal)
+                      runPhase = 'draining_commands'
+                    }
+                  }
                 } finally {
                   const receiptStartedAt = process.env.MATCHACLAW_TRACE === '1' ? performance.now() : 0
                   traceSessionTiming('print.input.join.begin', () => ({
@@ -2847,6 +2953,7 @@ function runHeadlessStreaming(
                 }
               }),
             )
+            await withRequestExecution(requestMessageId, executeInput)
           } catch (error) {
             if (!queuedCommand.nativeExecution || !(error instanceof InvestigationAdmissionError) || !hasDrainedInputReceipt()) throw error
             acceptedResult = executionErrorResult(error, acceptedResult)
@@ -2858,11 +2965,23 @@ function runHeadlessStreaming(
               }
             }
           } finally {
+            if (inputAbortController.signal.aborted) {
+              runAbortController.abort(inputAbortController.signal.reason)
+            }
+            activeInputAbortController = undefined
             nativeInputActive = false
           }
-          if (queuedCommand.nativeExecution) {
-            emitAcceptedResult()
-            if (heldBackResult) return
+          if (queuedCommand.nativeExecution) emitAcceptedResult()
+          if (shouldStopForInterrupt()) return
+          if (liveRequest && heldBackResult) {
+            updateTurnBudget()
+            if (liveRequest.accepted || (!peek(isRequestNotification) && !hasPendingRequestTasks())) {
+              releaseHeldBackResult()
+            } else if (!peek(isRequestNotification)) {
+              return
+            }
+          } else if (liveRequest?.asks === 0) {
+            liveRequest = undefined
           }
         }
       }
@@ -2880,49 +2999,39 @@ function runHeadlessStreaming(
         runPhase = 'draining_commands'
         await drainCommandQueue()
 
-        // Check for running background tasks before exiting.
-        // Exclude in_process_teammate — teammates are long-lived by design
-        // (status: 'running' for their whole lifetime, cleaned up by the
-        // shutdown protocol, not by transitioning to 'completed'). Waiting
-        // on them here loops forever (gh-30008). Same exclusion already
-        // exists at useBackgroundTaskNavigation.ts:55 for the same reason;
-        // L1839 above is already narrower (type === 'local_agent') so it
-        // doesn't hit this.
+        if (shouldStopForInterrupt()) break
+
         waitingForAgents = false
-        {
-          const state = getAppState()
-          const hasRunningBg = getRunningTasks(state).some(
-            t => isBackgroundTask(t) && t.type !== 'in_process_teammate',
-          )
-          if (heldBackResult && heldBackResult === acceptedResult && !hasRunningBg) {
-            releaseHeldBackResult()
-          }
-          const hasMainThreadQueued = peek(isMainThread) !== undefined
-          if (hasRunningBg || hasMainThreadQueued) {
-            waitingForAgents = true
-            if (!hasMainThreadQueued || (heldBackResult && heldBackResult === acceptedResult)) {
-              runPhase = 'waiting_for_agents'
-              // No commands ready yet, wait for tasks to complete
-              await sleep(100)
-            }
-            // Loop back to drain any newly queued commands
+        if (liveRequest && heldBackResult) {
+          updateTurnBudget()
+          if (!peek(isRequestNotification) && !hasPendingRequestTasks()) releaseHeldBackResult()
+        }
+        const hasQueuedCommand = peek(liveRequest ? isRequestNotification : isMainThread) !== undefined
+        const hasRunningBg = hasPendingRequestTasks() || (inputClosed && !liveRequest &&
+          getRunningTasks(getAppState()).some(
+            task => isBackgroundTask(task) && task.type !== 'in_process_teammate',
+          ))
+        if (hasQueuedCommand || hasRunningBg) {
+          waitingForAgents = true
+          if (!hasQueuedCommand) {
+            runPhase = 'waiting_for_agents'
+            await sleep(100, runAbortController.signal)
           }
         }
-      } while (waitingForAgents)
+      } while (waitingForAgents && !shouldStopForInterrupt())
 
+      if (shouldStopForInterrupt()) await sealInterruptedRequest()
       releaseHeldBackResult()
     } catch (error) {
       traceSessionTiming('print.run.failed', () => ({
         failure: error instanceof InvestigationAdmissionError ? 'admission' : 'execution',
-        resultAlreadyEmitted: acceptedResultEmitted,
+        resultAlreadyEmitted: resultEmitted,
         aborted: abortController?.signal.aborted === true,
       }))
-      // Emit error result message before shutting down
-      // Write directly to structuredIO to ensure immediate delivery
+      // Emit at most one error result through the same ordered output queue.
       try {
-        if (!acceptedResultEmitted) {
-          if (heldBackResult && heldBackResult === acceptedResult) heldBackResult = null
-          let errorResult = executionErrorResult(error, acceptedResult)
+        if (!resultEmitted) {
+          let errorResult = executionErrorResult(error, acceptedResult ?? heldBackResult ?? undefined)
           if (!isSessionPersistenceDisabled()) {
             try {
               await flushSessionStorage()
@@ -2930,10 +3039,13 @@ function runHeadlessStreaming(
               errorResult = executionErrorResult(flushError, errorResult)
             }
           }
-          await structuredIO.write(errorResult)
+          heldBackResult = errorResult
+          if (shouldStopForInterrupt()) await sealInterruptedRequest()
+          releaseHeldBackResult()
+          await structuredIO.flushOutput()
         } else {
           logError(new Error(error instanceof InvestigationAdmissionError
-            ? error.reason : 'Accepted input failed after result emission'))
+            ? error.reason : 'Input failed after result emission'))
         }
       } catch {
         // If we can't emit the error result, continue with shutdown anyway
@@ -2969,6 +3081,16 @@ function runHeadlessStreaming(
       idleTimeout.start()
     }
 
+    // A canceled request is sealed; only a new input or explicit late task
+    // facts may wake the loop. EOF may still finish shutdown below.
+    if (shouldStopForInterrupt()) {
+      if (peek(isResumableCommand)) {
+        void run()
+        return
+      }
+      if (!inputClosed) return
+    }
+
     // Proactive tick: if proactive is active and queue is empty, inject a tick
     if (
       (feature('PROACTIVE') || feature('KAIROS')) &&
@@ -2986,7 +3108,8 @@ function runHeadlessStreaming(
     // undefined and `running = false` above. In that case the caller
     // saw `running === true` and returned immediately, leaving the
     // message stranded in the queue with no one to process it.
-    if (peek(isMainThread) !== undefined) {
+    if (peek(isMainThread) !== undefined &&
+      (!shouldStopForInterrupt() || peek(isResumableCommand) !== undefined)) {
       void run()
       return
     }
@@ -5248,7 +5371,14 @@ function runHeadlessStreaming(
     }
     inputClosed = true
     cronScheduler?.stop()
-    if (!running) {
+    if (!running && (
+      peek(isMainThread) !== undefined || hasPendingRequestTasks() ||
+      getRunningTasks(getAppState()).some(
+        task => isBackgroundTask(task) && task.type !== 'in_process_teammate',
+      )
+    )) {
+      void run()
+    } else if (!running) {
       // If a push-suggestion is in-flight, wait for it to emit before closing
       // the output stream (5 s safety timeout to prevent hanging).
       if (suggestionState.inflightPromise) {

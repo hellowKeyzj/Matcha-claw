@@ -1,15 +1,19 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { shallow } from 'zustand/shallow';
+import i18n from '@/i18n';
 import { waitForCall } from '@/lib/call-log-await';
 import { subscribeBrowserRecovery, subscribeHostEvent } from '@/lib/host-events';
-import { isTeamGraphSourcePortActions, type TeamDesignRecord, type TeamDesignSnapshot, type TeamDesignTarget } from '@/types/team-design';
+import { isTeamDesignFailure, isTeamDesignPatchOperation, isTeamGraphSourcePortActions, isTeamGraphReworkLimits, isTeamGraphVersion, isTeamReworkLimit, type TeamGraphEditBase, type TeamDesignRecord, type TeamDesignSnapshot, type TeamDesignTarget, type TeamLayoutSave, type TeamRunReworkContinueInput } from '@/types/team-design';
+import { isTeamRunRecordProjection } from '@/types/team-workspace';
 import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier } from '@/lib/session-trace';
 import { matchesOrganizationIdentity, type TeamCreationFailure } from '@/types/call-log/organization';
 import type { CallReceipt, CallRecord } from '@/types/call-log';
 import type { WaitForCallOptions } from '@/types/call-log/wait';
 import type { ManualTeamCreation, TeamCreationObserver } from '@/plugins/teams/types/team-creation';
 import { forgetOwnedSessions } from '@/plugins/chat/session-actions';
-import { agentScope, runtimeEndpointsEqual, runtimeInstanceScope, validateRuntimeScope, type AgentScope, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
+import { useChatStore } from '@/plugins/chat/store';
+import { agentScope, runtimeEndpointsEqual, sessionIdentitiesEqual, runtimeInstanceScope, validateRuntimeScope, type AgentScope, type RuntimeInstanceScope, type SessionIdentity } from '@/types/desktop/runtime-address';
 import {
   cancelTeamRun,
   classifyTeamCreationFailure,
@@ -25,6 +29,7 @@ import {
   readTeamDesignSnapshot,
   startTeamDesign,
   startTeamRun,
+  continueTeamRunRework,
   exitTeamDesign,
   patchTeamDesignGraph,
   resolveTeamApproval,
@@ -53,6 +58,7 @@ import {
   type TeamRoleBindingRecord,
   type TeamRunListItem,
   type TeamRunRecord,
+  type TeamRunSnapshot,
   type TeamRunStartGateProjection,
   type TeamRunSummary,
   type TeamRunWorkflowPlan,
@@ -60,10 +66,54 @@ import {
 } from '@/plugins/teams/services/team-runtime-client';
 
 import type { ManualTeamCandidate, TeamSkillCandidate, TeamSkillCreationPlan } from '@/plugins/teams/types/team-creation';
+import { mergeTeamMessageFragments } from './services/team-message-pages';
 import type { TeamMeta } from '@/plugins/teams/types/team';
 
 interface TeamOperationOptions {
   errorFeedback?: 'store' | 'caller';
+}
+
+export interface TeamReworkContinuation {
+  input: TeamRunReworkContinueInput;
+  leaderIdentity: SessionIdentity;
+  scope: AgentScope;
+  status: 'unconfirmed' | 'outcome-unknown' | 'acknowledged';
+  error: string | null;
+}
+
+const REWORK_CONTINUE_REJECTIONS = new Set([
+  'rework_context_invalid', 'run_not_active', 'execution_expired', 'graph_version_mismatch',
+  'invalid_rework_continuation', 'idempotency_conflict', 'command_id_conflict', 'node_not_found',
+  'stale_node_execution', 'attempt_number_overflow', 'batch_number_overflow', 'batch_mismatch',
+  'scope_busy', 'invalid_rework_port', 'rework_not_blocked', 'rework_limit_not_increased',
+  'graph_base_mismatch', 'invalid_graph_patch', 'invalid_settlement_event', 'invalid_node_output_port',
+]);
+
+export type TeamRunSnapshotReadRecord = {
+  teamId: string;
+  snapshot: TeamRunSnapshot | null;
+  loading: boolean;
+  error: string | null;
+};
+
+export type TeamApprovalRunEligibility = 'actionable' | 'cancelled' | 'readonly';
+
+export function selectTeamApprovalRunEligibility(
+  state: Pick<TeamsState, 'runSnapshotsByRunId'>,
+  teamId: string,
+  runId: string,
+): TeamApprovalRunEligibility {
+  const record = state.runSnapshotsByRunId[runId];
+  const snapshot = record?.snapshot;
+  if (record?.teamId !== teamId || snapshot?.run?.runId !== runId) return 'readonly';
+  if (snapshot.lifecycle === 'cancelled') return 'cancelled';
+  return snapshot.lifecycle === 'active' && !record.error
+    && snapshot.startGate?.status === 'started' ? 'actionable' : 'readonly';
+}
+
+export function isTeamApprovalActionable(approval: TeamApprovalRecord, runEligibility: TeamApprovalRunEligibility): boolean {
+  return runEligibility === 'actionable' && approval.status === 'pending'
+    && (approval.subject === 'work_node' || approval.subject === 'human_decision');
 }
 
 interface TeamsState {
@@ -80,7 +130,8 @@ interface TeamsState {
   dispatchGroupsByTeamId: Record<string, TeamDispatchGroupRecord[]>;
   dispatchTasksByTeamId: Record<string, TeamDispatchTaskRecord[]>;
   approvalsByTeamId: Record<string, TeamApprovalRecord[]>;
-  artifactsByTeamId: Record<string, TeamArtifactRecord[]>;
+  approvalsByRunId: Record<string, TeamApprovalRecord[]>;
+  artifactsByRunId: Record<string, TeamArtifactRecord[]>;
   messagesByTeamId: Record<string, TeamMessageRecord[]>;
   nodeExecutionsByTeamId: Record<string, TeamNodeExecutionRecord[]>;
   nodePromptDeliveryAttemptsByTeamId: Record<string, TeamNodePromptDeliveryAttemptRecord[]>;
@@ -101,31 +152,35 @@ interface TeamsState {
   createManualTeam: (input: ManualTeamCandidate) => string;
   manualTeamCreation: ManualTeamCreation | null;
   designByRunId: Record<string, TeamDesignRecord | undefined>;
+  runSnapshotsByRunId: Record<string, TeamRunSnapshotReadRecord | undefined>;
   refreshDesignSnapshot: (target: TeamDesignTarget, options?: { invalidate?: boolean }) => Promise<void>;
   observeTeamDesign: (target: TeamDesignTarget) => () => void;
   startDesign: (target: TeamDesignTarget) => Promise<void>;
   startRun: (target: TeamDesignTarget) => Promise<void>;
+  reworkContinuations: Record<string, TeamReworkContinuation | undefined>;
+  continueRework: (input: TeamRunReworkContinueInput) => Promise<void>;
   exitDesign: (target: TeamDesignTarget) => Promise<void>;
-  submitRunGraphPatch: (target: TeamDesignTarget, operations: TeamGraphPatchOperation[]) => Promise<void>;
+  submitRunGraphPatch: (target: TeamDesignTarget, operations: TeamGraphPatchOperation[], base?: TeamGraphEditBase) => Promise<void>;
+  retryRunLayoutSave: (target: TeamDesignTarget) => Promise<void>;
   createRoleSession: (target: TeamDesignTarget, roleId: string, requestId: string) => Promise<TeamRoleBindingRecord>;
-  createManualTeamWithProgress: (input: ManualTeamCandidate) => Promise<string>;
+  createManualTeamWithProgress: (input: ManualTeamCandidate) => Promise<{ teamId: string; runId: string }>;
   resetManualTeamCreation: () => void;
   replaceTeamSkillVersion: (input: { teamId: string; expectedCurrentVersion: string; candidate: TeamSkillCandidate }) => string;
   setActiveTeam: (teamId: string | null) => void;
   setActiveRun: (teamId: string, runId: string | null) => void;
   deleteTeam: (teamId: string, options?: TeamOperationOptions) => Promise<TeamDeleteResult>;
   provisionTeamAgents: (teamId: string, options?: TeamOperationOptions & TeamCreationObserver & Pick<WaitForCallOptions<'organization'>, 'onUpdate'>) => Promise<void>;
-  createRun: (teamId: string, options?: TeamOperationOptions & TeamCreationObserver & { onPhase?: (phase: 'initializing_sessions' | 'loading_team') => void }) => Promise<TeamRunSummary | undefined>;
+  createRun: (teamId: string, options?: TeamOperationOptions & TeamCreationObserver & { onPhase?: (phase: 'initializing_sessions' | 'loading_team') => void }) => Promise<TeamRunSummary>;
   syncRunList: (teamId: string) => Promise<void>;
   deleteRun: (teamId: string, runId?: string) => Promise<void>;
-  refreshSnapshot: (teamId: string, options?: TeamOperationOptions & { force?: boolean }) => Promise<void>;
+  refreshSnapshot: (teamId: string, options?: TeamOperationOptions & { force?: boolean; runId?: string; completeMessages?: boolean }) => Promise<void>;
   submitGraphPatch: (teamId: string, operations: TeamGraphPatchOperation[]) => Promise<void>;
-  exportGraphYaml: (teamId: string) => Promise<TeamGraphYamlExportResult>;
-  importGraphYaml: (teamId: string, yaml: string) => Promise<TeamGraphYamlImportResult>;
+  exportGraphYaml: (teamId: string, runId?: string) => Promise<TeamGraphYamlExportResult>;
+  importGraphYaml: (teamId: string, yaml: string, runId?: string) => Promise<TeamGraphYamlImportResult>;
   resumeRun: (teamId: string) => Promise<void>;
-  cancelRun: (teamId: string, reason?: string) => Promise<void>;
+  cancelRun: (teamId: string, reason?: string, runId?: string) => Promise<void>;
   resolveApproval: (
-    teamId: string,
+    target: TeamDesignTarget,
     approvalId: string,
     decision: 'approve' | 'deny' | 'abort',
     note?: string,
@@ -133,7 +188,7 @@ interface TeamsState {
   submitDecision: (teamId: string, decision: TeamDecisionType, note?: string) => Promise<void>;
 }
 
-interface TeamDesignRead {
+interface TeamSnapshotRead {
   dirty: boolean;
   removed: boolean;
   promise: Promise<void>;
@@ -147,13 +202,36 @@ interface RoleSessionCreation {
   promise?: Promise<TeamRoleBindingRecord>;
 }
 
+type TeamLayoutBatch = {
+  positions: TeamLayoutSave['positions'];
+} & (
+  | { status: 'unconfirmed' | 'outcome-unknown'; send: () => Promise<unknown> }
+  | { status: 'acknowledged' }
+);
+
+interface TeamLayoutWrite {
+  target: TeamDesignTarget;
+  pending: TeamLayoutSave['positions'];
+  batch?: TeamLayoutBatch;
+  failure?: { error: unknown };
+  promise?: Promise<void>;
+  removed: boolean;
+  reconciling: boolean;
+}
+
+const layoutWrites = new Map<string, TeamLayoutWrite>();
+const deletingTeams = new Set<string>();
 const roleSessionCreations = new Map<string, RoleSessionCreation>();
-const designReads = new Map<string, TeamDesignRead>();
+const designReads = new Map<string, TeamSnapshotRead>();
 const designObservers = new Map<string, { target: TeamDesignTarget; count: number }>();
 let disposeDesignEvents: (() => void) | null = null;
 
 function designTargetKey(target: TeamDesignTarget): string {
   return JSON.stringify([target.teamId, target.runId]);
+}
+
+export function reworkContinuationKey(input: Pick<TeamRunReworkContinueInput, 'teamId' | 'runId' | 'batchId' | 'nodeId' | 'sourcePort' | 'sourceNodeExecutionId'>): string {
+  return JSON.stringify([input.teamId, input.runId, input.batchId, input.nodeId, input.sourcePort, input.sourceNodeExecutionId]);
 }
 
 function summarizeTeamDesignSnapshot(snapshot: TeamDesignSnapshot) {
@@ -188,14 +266,29 @@ function teamRunErrorMessage(snapshot: TeamDesignSnapshot): string | null {
 function refreshObservedDesigns(): void {
   const state = useTeamsStore.getState();
   for (const { target } of designObservers.values()) {
+    const key = designTargetKey(target);
+    const mutation = actionInFlightByKey.get(`design:${key}`);
+    const layout = layoutWrites.get(key);
+    if (layout?.promise ? layout.batch && !layout.reconciling
+      : (mutation?.operation === 'run-graph-patch' || mutation?.operation === 'run-graph-import' || mutation?.operation?.startsWith('run-rework-continue:')) && !mutation.reconciling) continue;
     void state.refreshDesignSnapshot(target, { invalidate: true }).catch(() => {});
-    if (state.teams.find((team) => team.id === target.teamId)?.activeRunId === target.runId) {
-      void state.refreshSnapshot(target.teamId, { force: true }).catch(() => {});
-    }
+    void state.refreshSnapshot(target.teamId, { force: true, runId: target.runId }).catch(() => {});
   }
 }
 
-function removeDesignReads(teamId: string, runId?: string): void {
+function removeRunReads(teamId: string, runId?: string): void {
+  useTeamsStore.setState((state) => ({
+    reworkContinuations: Object.fromEntries(Object.entries(state.reworkContinuations)
+      .filter(([, request]) => request && (request.input.teamId !== teamId || runId !== undefined && request.input.runId !== runId))),
+    runSnapshotsByRunId: Object.fromEntries(Object.entries(state.runSnapshotsByRunId)
+      .filter(([entryRunId, record]) => record?.teamId !== teamId || runId !== undefined && entryRunId !== runId)),
+  }));
+  for (const [key, entry] of layoutWrites) {
+    if (entry.target.teamId === teamId && (runId === undefined || entry.target.runId === runId)) {
+      entry.removed = true;
+      layoutWrites.delete(key);
+    }
+  }
   for (const [key, entry] of roleSessionCreations) {
     const [entryTeamId, entryRunId] = JSON.parse(key) as [string, string, string];
     if (entryTeamId === teamId && (runId === undefined || entryRunId === runId)) {
@@ -211,11 +304,13 @@ function removeDesignReads(teamId: string, runId?: string): void {
       actionInFlightByKey.delete(key);
     }
   }
-  for (const [key, entry] of designReads) {
-    const [entryTeamId, entryRunId] = JSON.parse(key) as [string, string];
-    if (entryTeamId === teamId && (runId === undefined || entryRunId === runId)) {
-      entry.removed = true;
-      designReads.delete(key);
+  for (const reads of [designReads, snapshotReads]) {
+    for (const [key, entry] of reads) {
+      const [entryTeamId, entryRunId] = JSON.parse(key) as [string, string];
+      if (entryTeamId === teamId && (runId === undefined || entryRunId === runId)) {
+        entry.removed = true;
+        reads.delete(key);
+      }
     }
   }
   for (const [key, observer] of designObservers) {
@@ -227,45 +322,237 @@ function removeDesignReads(teamId: string, runId?: string): void {
   }
 }
 
-async function mutateTeamDesign(target: TeamDesignTarget, operation: string, action: (requestId: string) => Promise<unknown>): Promise<void> {
+function prepareRunGraphPatch(target: TeamDesignTarget, operations: TeamGraphPatchOperation[], requestId: string, base?: TeamGraphEditBase): () => Promise<unknown> {
+  const snapshot = useTeamsStore.getState().designByRunId[target.runId]?.snapshot;
+  if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId) throw new Error('Team run snapshot is required');
+  for (const [expected, current] of [
+    [base?.node, base?.node ? snapshot.graph.nodes.find((node) => node.nodeId === base.node!.nodeId) : undefined],
+    [base?.edge, base?.edge ? snapshot.graph.edges.find((edge) => edge.edgeId === base.edge!.edgeId) : undefined],
+  ] as const) {
+    if (expected && (!current || !equalTeamDesignValue(expected,
+      Object.fromEntries(Object.keys(expected).map((key) => [key, Reflect.get(current, key)]))))) {
+      throw new Error(i18n.t('teams:run.graphCanvas.editConflict'));
+    }
+  }
+  if (base?.reworkLimit) {
+    const { nodeId, sourcePort, maxReworks } = base.reworkLimit;
+    const node = snapshot.graph.nodes.find((node) => node.nodeId === nodeId);
+    if (!node || node.reworkLimits[sourcePort] !== maxReworks) throw new Error(i18n.t('teams:run.graphCanvas.editConflict'));
+  }
+  const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
+  if (snapshot.startGate.status === 'designing') {
+    const designEpoch = snapshot.designEpoch;
+    if (!designEpoch) throw new Error('Team design snapshot is required');
+    return () => patchTeamDesignGraph({
+      ...frozenTarget, designEpoch, expectedGraphVersion: snapshot.graphVersion,
+      commandId: requestId, idempotencyKey: requestId, operations,
+    });
+  }
+  return () => submitTeamRunGraphPatch({
+    scope: frozenTarget.scope, runId: frozenTarget.runId, summary: 'graph_patch',
+    patch: {
+      ...(snapshot.graph.graphId ? { baseGraphId: snapshot.graph.graphId } : {}),
+      ...(snapshot.graph.workflowPlanId ? { baseWorkflowPlanId: snapshot.graph.workflowPlanId } : {}),
+      operations,
+    },
+    idempotencyKey: requestId,
+  });
+}
+
+async function reconcileRunGraph(target: TeamDesignTarget): Promise<void> {
+  const state = useTeamsStore.getState();
+  const [designRead, runRead] = await Promise.allSettled([
+    state.refreshDesignSnapshot(target, { invalidate: true }),
+    state.refreshSnapshot(target.teamId, { force: true, runId: target.runId }),
+  ]);
+  if (runRead.status === 'rejected') throw runRead.reason;
+  if (designRead.status === 'rejected') throw designRead.reason;
+}
+
+function publishLayoutSave(entry: TeamLayoutWrite): void {
+  if (entry.removed) return;
+  const positions = { ...entry.batch?.positions, ...entry.pending };
+  const layoutSave: TeamLayoutSave | undefined = Object.keys(positions).length === 0 ? undefined
+    : entry.failure ? { status: 'failed', positions, error: entry.failure.error instanceof Error ? entry.failure.error.message : String(entry.failure.error) }
+      : { status: 'saving', positions };
+  useTeamsStore.setState((state) => {
+    const current = state.designByRunId[entry.target.runId];
+    return current?.snapshot?.teamId === entry.target.teamId ? { designByRunId: { ...state.designByRunId,
+      [entry.target.runId]: { ...current, layoutSave },
+    } } : {};
+  });
+}
+
+function layoutWriteFailure(error: unknown): 'design-context-stale' | 'context-stale' | 'node-not-found' | 'unconfirmed' {
+  if (!(error instanceof Error) || !isTeamDesignFailure(error.cause)) return 'unconfirmed';
+  switch (error.cause.errorCode) {
+    case 'graph_version_mismatch':
+    case 'stale_design_epoch':
+    case 'not_designing':
+      return 'design-context-stale';
+    case 'graph_base_mismatch':
+      return 'context-stale';
+    case 'node_not_found':
+      return 'node-not-found';
+    default:
+      return 'unconfirmed';
+  }
+}
+
+function drainRunLayout(entry: TeamLayoutWrite): Promise<void> {
+  if (entry.promise) return entry.promise;
+  entry.failure = undefined;
+  entry.promise = Promise.resolve().then(async () => {
+    try {
+      while (!entry.removed && (entry.batch || Object.keys(entry.pending).length > 0)) {
+        if (!entry.batch) {
+          const positions = entry.pending;
+          const operations = Object.entries(positions).map(([nodeId, position]) => ({ op: 'set_node_position' as const, nodeId, position }));
+          entry.batch = { status: 'unconfirmed', positions, send: prepareRunGraphPatch(entry.target, operations, createRequestId('run-layout')) };
+          entry.pending = Object.create(null);
+        }
+        const batch = entry.batch;
+        let failure: { error: unknown } | undefined;
+        let rejectedMissingNode = false;
+        try {
+          if (batch.status !== 'acknowledged') {
+            await batch.send();
+            entry.batch = { status: 'acknowledged', positions: batch.positions };
+          }
+        } catch (error) {
+          failure = { error };
+          const rejection = layoutWriteFailure(error);
+          // Renderer design guards run only after the original command is absent from the ledger.
+          if (rejection === 'design-context-stale'
+            || batch.status === 'unconfirmed' && (rejection === 'context-stale' || rejection === 'node-not-found')) {
+            entry.pending = Object.assign(Object.create(null), batch.positions, entry.pending);
+            entry.batch = undefined;
+            rejectedMissingNode = rejection === 'node-not-found';
+          } else if (batch.status !== 'acknowledged') {
+            entry.batch = { ...batch, status: 'outcome-unknown' };
+          }
+        }
+        if (entry.removed) {
+          if (failure) throw failure.error;
+          return;
+        }
+        entry.reconciling = true;
+        try {
+          await reconcileRunGraph(entry.target);
+          if (rejectedMissingNode) {
+            const snapshot = useTeamsStore.getState().designByRunId[entry.target.runId]?.snapshot;
+            if (snapshot?.teamId === entry.target.teamId && snapshot.runId === entry.target.runId) {
+              const nodeIds = new Set(snapshot.graph.nodes.map((node) => node.nodeId));
+              for (const [nodeId, position] of Object.entries(entry.pending)) {
+                if (!nodeIds.has(nodeId) && position === batch.positions[nodeId]) delete entry.pending[nodeId];
+              }
+              if (Object.keys(entry.pending).length === 0) failure = undefined;
+            }
+          }
+        } catch (error) {
+          failure ??= { error };
+        } finally {
+          entry.reconciling = false;
+        }
+        if (failure) throw failure.error;
+        if (entry.removed) return;
+        entry.batch = undefined;
+        publishLayoutSave(entry);
+      }
+    } catch (error) {
+      entry.failure = { error };
+      publishLayoutSave(entry);
+      throw error;
+    } finally {
+      entry.promise = undefined;
+      if (!entry.batch && Object.keys(entry.pending).length === 0 && layoutWrites.get(designTargetKey(entry.target)) === entry) {
+        layoutWrites.delete(designTargetKey(entry.target));
+      }
+    }
+  });
+  publishLayoutSave(entry);
+  return entry.promise;
+}
+
+async function waitForRunLayout(target: TeamDesignTarget): Promise<void> {
+  const entry = layoutWrites.get(designTargetKey(target));
+  if (entry?.promise) await entry.promise;
+  if (entry?.failure) throw entry.failure.error;
+}
+
+function submitRunLayout(target: TeamDesignTarget, operations: Extract<TeamGraphPatchOperation, { op: 'set_node_position' }>[]): Promise<void> {
   resolveTeamMeta(useTeamsStore.getState().teams, target.teamId);
+  const key = designTargetKey(target);
+  if (deletingTeams.has(target.teamId) || actionInFlightByKey.has(`design:${key}`)) throw new Error('Team run mutation is already pending');
+  const snapshot = useTeamsStore.getState().designByRunId[target.runId]?.snapshot;
+  if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId) throw new Error('Team run snapshot is required');
+  const entry: TeamLayoutWrite = layoutWrites.get(key) ?? { target: { ...target }, pending: Object.create(null), removed: false, reconciling: false };
+  for (const { nodeId, position } of operations) entry.pending[nodeId] = { ...position };
+  layoutWrites.set(key, entry);
+  entry.failure = undefined;
+  if (entry.promise) publishLayoutSave(entry);
+  return drainRunLayout(entry);
+}
+
+async function mutateTeamDesign(target: TeamDesignTarget, operation: string, completion: 'acknowledged' | 'reconciled', action: (requestId: string) => Promise<unknown>): Promise<void> {
+  resolveTeamMeta(useTeamsStore.getState().teams, target.teamId);
+  if (deletingTeams.has(target.teamId)) throw new Error('Team deletion is already pending');
   const key = `design:${designTargetKey(target)}`;
   const existing = actionInFlightByKey.get(key);
   if (existing) {
-    if (existing.operation !== operation || operation === 'run-graph-patch') throw new Error('Team run mutation is already pending');
+    if (existing.operation !== operation || operation === 'run-graph-patch' || operation === 'run-graph-import' || operation.startsWith('run-rework-continue:')) throw new Error('Team run mutation is already pending');
     return existing.promise;
   }
-  const entry = { requestId: createRequestId(operation.split(':', 1)[0]), operation, removed: false, promise: Promise.resolve() };
+  const entry = { requestId: createRequestId(operation.split(':', 1)[0]), operation, removed: false, reconciling: false, promise: Promise.resolve() };
   entry.promise = Promise.resolve().then(async () => {
     if (entry.removed) return;
     try {
+      if (operation === 'run-delete' || operation === 'run-cancel') await layoutWrites.get(designTargetKey(target))?.promise?.catch(() => {});
+      else await waitForRunLayout(target);
+      if (entry.removed) return;
+      let actionFailure: { error: unknown } | undefined;
       try {
         await action(entry.requestId);
       } catch (error) {
-        if (!entry.removed) {
-          await useTeamsStore.getState().refreshDesignSnapshot(target, { invalidate: true }).catch(() => {});
+        actionFailure = { error };
+      }
+      entry.reconciling = true;
+      if (!entry.removed) {
+        const state = useTeamsStore.getState();
+        const [designRead, runRead] = await Promise.allSettled([
+          state.refreshDesignSnapshot(target, { invalidate: true }),
+          operation === 'run-graph-patch' || operation === 'run-graph-import' || operation.startsWith('run-rework-continue:')
+            ? state.refreshSnapshot(target.teamId, { force: true, runId: target.runId })
+            : Promise.resolve(),
+        ]);
+        // Read errors stay in their records; only reconciled actions require readback to complete.
+        const failure = actionFailure ?? (completion === 'reconciled' && runRead.status === 'rejected' ? { error: runRead.reason } : undefined);
+        if (failure) {
+          const error = failure.error;
           if (!entry.removed) useTeamsStore.setState((state) => {
             const current = state.designByRunId[target.runId];
             return current ? { designByRunId: { ...state.designByRunId, [target.runId]: {
               ...current, error: error instanceof Error ? error.message : String(error),
             } } } : {};
           });
+          throw error;
         }
-        throw error;
+        if (completion === 'reconciled' && designRead.status === 'rejected') throw designRead.reason;
       }
-      if (!entry.removed) await useTeamsStore.getState().refreshDesignSnapshot(target, { invalidate: true });
+      if (actionFailure) throw actionFailure.error;
     } finally {
       if (actionInFlightByKey.get(key) === entry) {
         actionInFlightByKey.delete(key);
         if (!entry.removed) useTeamsStore.setState((state) => {
           const current = state.designByRunId[target.runId];
-          return current ? { designByRunId: { ...state.designByRunId, [target.runId]: { ...current, mutationPending: false } } } : {};
+          return current ? { designByRunId: { ...state.designByRunId, [target.runId]: { ...current, mutationPending: deletingTeams.has(target.teamId) } } } : {};
         });
       }
     }
   });
   actionInFlightByKey.set(key, entry);
   useTeamsStore.setState((state) => ({ designByRunId: { ...state.designByRunId, [target.runId]: {
+    ...state.designByRunId[target.runId],
     snapshot: state.designByRunId[target.runId]?.snapshot ?? null,
     loading: state.designByRunId[target.runId]?.loading ?? false,
     error: null,
@@ -283,20 +570,28 @@ async function invalidateRunGraph(target: TeamDesignTarget): Promise<void> {
 interface TeamRunListRead {
   promise: Promise<void>;
   deletedRunIds: Set<string>;
+  // Same-value snapshots still supersede this list's older read without changing projection refs.
+  acceptedRunIds: Set<string>;
+  acceptedListRoleRunIds: Set<string>;
+  acceptedActiveRoleRunIds: Set<string>;
+  reading: boolean;
   next?: TeamRunListRead;
 }
 
-const snapshotInFlightByTeamId = new Map<string, { runId: string | undefined; dirty: boolean; promise: Promise<void> }>();
+const snapshotReads = new Map<string, TeamSnapshotRead & { completeMessages: boolean }>();
 const runListReads = new Map<string, TeamRunListRead>();
-const actionInFlightByKey = new Map<string, { requestId: string; promise: Promise<void>; operation?: string; removed?: boolean }>();
+const actionInFlightByKey = new Map<string, { requestId: string; promise: Promise<void>; operation?: string; removed?: boolean; reconciling?: boolean }>();
 
-export function planTeamSkillCreation(teams: TeamMeta[], candidate: TeamSkillCandidate): TeamSkillCreationPlan {
+export function planTeamSkillCreation(state: Pick<TeamsState, 'teams' | 'designByRunId' | 'runListByTeamId' | 'rolesByTeamId'>, candidate: TeamSkillCandidate): TeamSkillCreationPlan {
   const teamSkillName = candidate.teamSkillPackage.name;
   const teamSkillVersion = candidate.teamSkillPackage.version;
   const scope = runtimeInstanceScope(candidate.runtimeScope.endpoint);
-  teams = teams.filter((team) => runtimeEndpointsEqual(team.runtimeScope?.endpoint ?? {
-    kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
-  }, scope.endpoint));
+  const teams = state.teams.filter((team) => {
+    if (team.teamSkillName !== teamSkillName) return false;
+    const teamScope = selectTeamRuntimeScope(state, team.id);
+    if (!teamScope) throw new Error(i18n.t('teams:chat.runtimeScopeUnavailable'));
+    return runtimeEndpointsEqual(teamScope.endpoint, scope.endpoint);
+  });
   const sameVersion = teams.find((team) => team.teamSkillName === teamSkillName && team.teamSkillVersion === teamSkillVersion);
   if (sameVersion) {
     return { action: 'open_existing', teamId: sameVersion.id };
@@ -327,25 +622,32 @@ function isSafeRunId(value: string): boolean {
   return /^[a-zA-Z0-9._-]+$/.test(value);
 }
 
-function selectedTeamScope(scope: AgentScope): AgentScope {
-  if (!scope) throw new Error('Select a real runtime Agent for this team.');
-  return agentScope(scope.endpoint, scope.agentId);
-}
-
-export function resolveTeamRuntimeScope(teamId: string, runId?: string): AgentScope | RuntimeInstanceScope {
-  const state = useTeamsStore.getState();
-  const team = resolveTeamMeta(state.teams, teamId);
+export function selectTeamRuntimeScope(
+  state: Pick<TeamsState, 'teams' | 'designByRunId' | 'runListByTeamId' | 'rolesByTeamId'>,
+  teamId: string,
+  runId?: string,
+): AgentScope | RuntimeInstanceScope | null {
+  const team = state.teams.find((team) => team.id === teamId);
+  if (!team) return null;
   const targetRunId = runId ?? team.activeRunId;
   const roles = targetRunId
     ? state.designByRunId[targetRunId]?.snapshot?.roles
       ?? state.runListByTeamId[teamId]?.find((run) => run.runId === targetRunId)?.sessions
       ?? state.rolesByTeamId[teamId]?.filter((role) => role.runId === targetRunId)
     : state.rolesByTeamId[teamId];
-  const role = roles?.find((role) => role.roleId === 'leader') ?? roles?.[0];
+  const role = roles?.find((role) => role.roleId === 'leader');
   if (role) return agentScope(role.sessionIdentity.endpoint, role.sessionIdentity.agentId);
-  if (team.runtimeScope) return team.runtimeScope;
-  // Persisted pre-cutover teams belonged to OpenClaw; never rebind them to a new selection.
-  return { kind: 'runtime-instance', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } };
+  const leader = team.manualTeam?.members.find((member) => member.isLeader);
+  if (leader?.endpoint) return agentScope(leader.endpoint, leader.agentId);
+  return team.runtimeScope ?? null;
+}
+
+export function resolveTeamRuntimeScope(teamId: string, runId?: string): AgentScope | RuntimeInstanceScope {
+  const state = useTeamsStore.getState();
+  resolveTeamMeta(state.teams, teamId);
+  const scope = selectTeamRuntimeScope(state, teamId, runId);
+  if (!scope) throw new Error(i18n.t('teams:chat.runtimeScopeUnavailable'));
+  return scope;
 }
 
 function toTeamMeta(input: TeamSkillCandidate, teamId: string, now: number): TeamMeta {
@@ -367,9 +669,12 @@ function toTeamMeta(input: TeamSkillCandidate, teamId: string, now: number): Tea
 
 function toManualTeamMeta(input: ManualTeamCandidate, teamId: string, now: number): TeamMeta {
   const teamName = input.displayName.trim() || input.manualTeam.name;
+  const leaders = input.manualTeam.members.filter((member) => member.isLeader);
+  if (leaders.length !== 1) throw new Error(i18n.t('teams:create.manualLeaderRequired'));
+  const leader = leaders[0];
   return {
     id: teamId,
-    runtimeScope: selectedTeamScope(input.runtimeScope),
+    runtimeScope: agentScope(leader.endpoint, leader.agentId),
     name: teamName,
     teamSkillName: input.manualTeam.name,
     teamSkillVersion: input.manualTeam.version,
@@ -380,7 +685,7 @@ function toManualTeamMeta(input: ManualTeamCandidate, teamId: string, now: numbe
     manualTeam: {
       ...input.manualTeam,
       name: teamName,
-      members: input.manualTeam.members.map((member) => ({ ...member })),
+      members: input.manualTeam.members.map((member) => ({ ...member, endpoint: { ...member.endpoint }, skills: [...member.skills], tools: [...member.tools] })),
     },
     createdAt: now,
     updatedAt: now,
@@ -390,10 +695,12 @@ function toManualTeamMeta(input: ManualTeamCandidate, teamId: string, now: numbe
 function freezeManualTeamCandidate(input: ManualTeamCandidate): ManualTeamCandidate {
   return Object.freeze({
     ...input,
+    runtimeScope: Object.freeze({ ...input.runtimeScope, endpoint: Object.freeze({ ...input.runtimeScope.endpoint }) }),
     manualTeam: Object.freeze({
       ...input.manualTeam,
       members: Object.freeze(input.manualTeam.members.map((member) => Object.freeze({
         ...member,
+        endpoint: Object.freeze({ ...member.endpoint }),
         skills: Object.freeze([...member.skills]),
         tools: Object.freeze([...member.tools]),
       }))),
@@ -502,8 +809,8 @@ function mergeRunIds(leftRunIds: string[], rightRunIds: string[]): string[] {
   return Array.from(new Set([...leftRunIds, ...rightRunIds]));
 }
 
-function removeRunIdsFromRecord(runsById: Record<string, TeamRunRecord | undefined>, runIds: string[]): Record<string, TeamRunRecord | undefined> {
-  return runIds.reduce((nextRunsById, runId) => withoutKey(nextRunsById, runId), runsById);
+function removeRunIdsFromRecord<T>(record: Record<string, T>, runIds: string[]): Record<string, T> {
+  return runIds.reduce((next, runId) => withoutKey(next, runId), record);
 }
 
 function collectTeamRunRoleSessionBindings(
@@ -565,19 +872,7 @@ function isTeamMeta(value: unknown): value is TeamMeta {
 }
 
 function isTeamRunRecord(value: unknown): value is TeamRunRecord {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  return typeof record.runId === 'string'
-    && isSafeRunId(record.runId)
-    && typeof record.status === 'string'
-    && typeof record.revision === 'number'
-    && typeof record.packageName === 'string'
-    && typeof record.packageVersion === 'string'
-    && typeof record.sourcePath === 'string'
-    && typeof record.createdAt === 'number'
-    && typeof record.updatedAt === 'number';
+  return isTeamRunRecordProjection(value, ['sessions']);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -594,8 +889,10 @@ function normalizeTeamGraphNodes(nodes: unknown): TeamGraphSnapshotRecord['nodes
     if (!isRecord(node)) return [];
     const nodeId = readNonEmptyString(node.nodeId);
     const sourcePortActions = node.sourcePortActions;
-    if (!nodeId || !isTeamGraphSourcePortActions(sourcePortActions, node.sourcePorts)) return [];
-    return [{ ...node, nodeId, sourcePortActions } satisfies TeamGraphSnapshotRecord['nodes'][number]];
+    const reworkLimits = node.reworkLimits;
+    if (!nodeId || !isTeamGraphSourcePortActions(sourcePortActions, node.sourcePorts)
+      || !isTeamGraphReworkLimits(reworkLimits, sourcePortActions)) return [];
+    return [{ ...node, nodeId, sourcePortActions, reworkLimits } satisfies TeamGraphSnapshotRecord['nodes'][number]];
   });
 }
 
@@ -613,7 +910,7 @@ function normalizeTeamGraphEdges(edges: unknown): TeamGraphSnapshotRecord['edges
 
 function normalizeTeamGraphLayout(layout: unknown): TeamGraphSnapshotRecord['layout'] {
   if (!isRecord(layout) || !isRecord(layout.nodePositions)) return { nodePositions: {} };
-  const nodePositions: Record<string, { x: number; y: number }> = {};
+  const nodePositions: Record<string, { x: number; y: number }> = Object.create(null);
   for (const [nodeId, position] of Object.entries(layout.nodePositions)) {
     if (!isRecord(position) || typeof position.x !== 'number' || typeof position.y !== 'number') continue;
     nodePositions[nodeId] = { x: position.x, y: position.y };
@@ -655,36 +952,132 @@ function isSnapshotSectionAvailable(snapshot: TeamRunSnapshotRecord, section: Te
   return !snapshot.unavailableSections?.includes(section);
 }
 
+function mergeRunMessagePage(previous: TeamRunSnapshotRecord | null, page: TeamRunSnapshotRecord, cursor?: NonNullable<TeamRunSnapshot['messagePage']['nextCursor']>): TeamRunSnapshotRecord {
+  if (!cursor) {
+    if (page.messages.some((message) => message.bodyOffset !== 0)) throw new Error('Team run message page is not contiguous');
+    return previous?.messagePage.revision === page.messagePage.revision
+      ? { ...page, messages: previous.messages, messagePage: previous.messagePage } : page;
+  }
+  const first = page.messages[0];
+  const nextCursor = page.messagePage.nextCursor;
+  if (!previous || previous.messagePage.revision !== page.messagePage.revision
+    || !first || first.messageId !== cursor.messageId || first.bodyOffset !== cursor.bodyOffset
+    || nextCursor && nextCursor.messageId === cursor.messageId && nextCursor.bodyOffset === cursor.bodyOffset) {
+    throw new Error('Team run message page did not advance');
+  }
+  return { ...page, messages: mergeTeamMessageFragments(previous.messages, page.messages) };
+}
+
+function retainTeamRoleBindings(current: TeamRoleBindingRecord[] | undefined, incoming: TeamRoleBindingRecord[]): TeamRoleBindingRecord[] {
+  if (current === incoming || !current) return incoming;
+  const currentByBinding = new Map(current.map((role) => [JSON.stringify([role.runId, role.roleId, role.sessionRef]), role]));
+  const roles = incoming.map((role) => {
+    const previous = currentByBinding.get(JSON.stringify([role.runId, role.roleId, role.sessionRef]));
+    if (!previous) return role;
+    const next = {
+      ...role,
+      endpointRef: runtimeEndpointsEqual(previous.endpointRef, role.endpointRef) ? previous.endpointRef : role.endpointRef,
+      sessionIdentity: sessionIdentitiesEqual(previous.sessionIdentity, role.sessionIdentity) ? previous.sessionIdentity : role.sessionIdentity,
+    };
+    return shallow(previous, next) ? previous : next;
+  });
+  return shallow(current, roles) ? current : roles;
+}
+
+// These values come from validated JSON Teams projections, not arbitrary runtime objects.
+function equalTeamDesignValue(current: unknown, incoming: unknown): boolean {
+  if (Object.is(current, incoming)) return true;
+  if (Array.isArray(current)) {
+    return Array.isArray(incoming) && current.length === incoming.length
+      && current.every((value, index) => equalTeamDesignValue(value, incoming[index]));
+  }
+  if (!isRecord(current) || !isRecord(incoming)) return false;
+  const keys = Object.keys(incoming);
+  return keys.length === Object.keys(current).length
+    && keys.every((key) => Object.hasOwn(current, key) && equalTeamDesignValue(current[key], incoming[key]));
+}
+
+function retainTeamDesignGraph(current: TeamGraphSnapshotRecord | undefined, incoming: TeamGraphSnapshotRecord): TeamGraphSnapshotRecord {
+  if (!current || current.runId !== incoming.runId || current.graphId !== incoming.graphId) return incoming;
+  const currentNodes = new Map(current.nodes.map((node) => [node.nodeId, node]));
+  const nodes = incoming.nodes.map((node) => {
+    const previous = currentNodes.get(node.nodeId);
+    return equalTeamDesignValue(previous, node) ? previous! : node;
+  });
+  const currentEdges = new Map(current.edges.map((edge) => [edge.edgeId, edge]));
+  const edges = incoming.edges.map((edge) => {
+    const previous = currentEdges.get(edge.edgeId);
+    return equalTeamDesignValue(previous, edge) ? previous! : edge;
+  });
+  const graph = {
+    ...incoming,
+    nodes: shallow(current.nodes, nodes) ? current.nodes : nodes,
+    edges: shallow(current.edges, edges) ? current.edges : edges,
+    layout: equalTeamDesignValue(current.layout, incoming.layout) ? current.layout : incoming.layout,
+    rework: equalTeamDesignValue(current.rework, incoming.rework) ? current.rework : incoming.rework,
+  };
+  return shallow(current, graph) ? current : graph;
+}
+
 function teamRunSnapshotPatch(teamId: string, runId: string, snapshot: TeamRunSnapshotRecord, state: TeamsState) {
   const runIds = appendRunId(state.runIdsByTeamId[teamId], runId);
   const eventsForRun = mergeEvents(state.eventsByRunId[runId] ?? [], snapshot.events);
   const currentRunList = state.runListByTeamId[teamId] ?? [];
   const currentRunListItem = currentRunList.find((teamRun) => teamRun.runId === runId);
-  const snapshotRoles = isSnapshotSectionAvailable(snapshot, 'roles') ? snapshot.roles : currentRunListItem?.sessions ?? state.rolesByTeamId[teamId] ?? [];
-  const snapshotRunListItem = snapshot.run ? { ...snapshot.run, sessions: snapshotRoles } : null;
-  const nextRunList = snapshotRunListItem
-    ? currentRunList.some((teamRun) => teamRun.runId === runId)
+  const rolesAvailable = isSnapshotSectionAvailable(snapshot, 'roles');
+  const snapshotRoles = rolesAvailable ? retainTeamRoleBindings(currentRunListItem?.sessions, snapshot.roles)
+    : currentRunListItem?.sessions ?? state.rolesByTeamId[teamId]?.filter((role) => role.runId === runId) ?? [];
+  const currentRun = state.runsById[runId];
+  const incomingRun = snapshot.run && { ...snapshot.run,
+    workspace: currentRun?.workspace.status === snapshot.run.workspace.status ? currentRun.workspace : snapshot.run.workspace };
+  const run = currentRun && shallow(currentRun, incomingRun) ? currentRun : incomingRun;
+  snapshot = {
+    ...snapshot,
+    run: run ?? null,
+    roles: snapshotRoles,
+    graph: normalizeTeamGraphProjection(snapshot.graph, runId),
+    approvals: equalTeamDesignValue(state.approvalsByRunId[runId], snapshot.approvals) ? state.approvalsByRunId[runId] : snapshot.approvals,
+    artifacts: equalTeamDesignValue(state.artifactsByRunId[runId], snapshot.artifacts) ? state.artifactsByRunId[runId] : snapshot.artifacts,
+    events: eventsForRun,
+  };
+  const snapshotRunListItem = run ? { ...run, sessions: snapshotRoles } : null;
+  const nextRunList = snapshotRunListItem && !shallow(currentRunListItem, snapshotRunListItem)
+    ? currentRunListItem
       ? currentRunList.map((teamRun) => teamRun.runId === runId ? snapshotRunListItem : teamRun)
       : [...currentRunList, snapshotRunListItem]
     : currentRunList;
-  return {
-    runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: runIds },
-    runListByTeamId: snapshot.run ? {
-      ...state.runListByTeamId,
-      [teamId]: nextRunList,
-    } : state.runListByTeamId,
-    runsById: snapshot.run ? { ...state.runsById, [runId]: snapshot.run } : state.runsById,
+  const listRead = runListReads.get(teamId);
+  const isActiveRun = state.teams.find((team) => team.id === teamId)?.activeRunId === runId;
+  if (listRead?.reading) {
+    if (snapshot.run) {
+      listRead.acceptedRunIds.add(runId);
+      if (rolesAvailable) listRead.acceptedListRoleRunIds.add(runId);
+    }
+    if (isActiveRun && rolesAvailable) listRead.acceptedActiveRoleRunIds.add(runId);
+  }
+  const runPatch = {
+    runSnapshotsByRunId: { ...state.runSnapshotsByRunId, [runId]: { teamId, snapshot, loading: false, error: null } },
+    runIdsByTeamId: state.runIdsByTeamId[teamId] === runIds ? state.runIdsByTeamId : { ...state.runIdsByTeamId, [teamId]: runIds },
+    runListByTeamId: nextRunList === currentRunList ? state.runListByTeamId : { ...state.runListByTeamId, [teamId]: nextRunList },
+    runsById: snapshot.run && run !== state.runsById[runId] ? { ...state.runsById, [runId]: run } : state.runsById,
     eventsByRunId: { ...state.eventsByRunId, [runId]: eventsForRun },
     eventCursorByRunId: { ...state.eventCursorByRunId, [runId]: snapshot.nextEventCursor },
-    runByTeamId: { ...state.runByTeamId, [teamId]: snapshot.run ?? state.runsById[runId] },
-    rolesByTeamId: isSnapshotSectionAvailable(snapshot, 'roles') ? { ...state.rolesByTeamId, [teamId]: snapshot.roles } : state.rolesByTeamId,
+    approvalsByRunId: { ...state.approvalsByRunId, [runId]: snapshot.approvals },
+    artifactsByRunId: { ...state.artifactsByRunId, [runId]: snapshot.artifacts },
+  };
+  if (!isActiveRun) return runPatch;
+  const activeRun = run ?? state.runsById[runId];
+  const activeRoles = rolesAvailable ? snapshotRoles : state.rolesByTeamId[teamId];
+  return {
+    ...runPatch,
+    runByTeamId: shallow(state.runByTeamId[teamId], activeRun) ? state.runByTeamId : { ...state.runByTeamId, [teamId]: activeRun },
+    rolesByTeamId: activeRoles === state.rolesByTeamId[teamId] ? state.rolesByTeamId : { ...state.rolesByTeamId, [teamId]: activeRoles },
     stagesByTeamId: isSnapshotSectionAvailable(snapshot, 'stages') ? { ...state.stagesByTeamId, [teamId]: snapshot.stages } : state.stagesByTeamId,
-    graphByTeamId: { ...state.graphByTeamId, [teamId]: normalizeTeamGraphProjection(snapshot.graph, runId) },
+    graphByTeamId: { ...state.graphByTeamId, [teamId]: snapshot.graph },
     workflowPlanByTeamId: isSnapshotSectionAvailable(snapshot, 'workflowPlan') ? { ...state.workflowPlanByTeamId, [teamId]: snapshot.workflowPlan } : state.workflowPlanByTeamId,
     dispatchGroupsByTeamId: isSnapshotSectionAvailable(snapshot, 'dispatchGroups') ? { ...state.dispatchGroupsByTeamId, [teamId]: snapshot.dispatchGroups } : state.dispatchGroupsByTeamId,
     dispatchTasksByTeamId: isSnapshotSectionAvailable(snapshot, 'dispatchTasks') ? { ...state.dispatchTasksByTeamId, [teamId]: snapshot.dispatchTasks } : state.dispatchTasksByTeamId,
     approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: snapshot.approvals },
-    artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: snapshot.artifacts },
     messagesByTeamId: isSnapshotSectionAvailable(snapshot, 'messages') ? { ...state.messagesByTeamId, [teamId]: snapshot.messages } : state.messagesByTeamId,
     nodeExecutionsByTeamId: { ...state.nodeExecutionsByTeamId, [teamId]: snapshot.nodeExecutions },
     nodePromptDeliveryAttemptsByTeamId: isSnapshotSectionAvailable(snapshot, 'nodePromptDeliveries') ? { ...state.nodePromptDeliveryAttemptsByTeamId, [teamId]: snapshot.nodePromptDeliveries } : state.nodePromptDeliveryAttemptsByTeamId,
@@ -709,7 +1102,6 @@ function emptyTeamRunProjection(teamId: string, state: TeamsState) {
     dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [teamId]: [] },
     dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [teamId]: [] },
     approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: [] },
-    artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: [] },
     messagesByTeamId: { ...state.messagesByTeamId, [teamId]: [] },
     nodeExecutionsByTeamId: { ...state.nodeExecutionsByTeamId, [teamId]: [] },
     nodePromptDeliveryAttemptsByTeamId: { ...state.nodePromptDeliveryAttemptsByTeamId, [teamId]: [] },
@@ -731,6 +1123,8 @@ export const useTeamsStore = create<TeamsState>()(
       activeTeamId: null,
       manualTeamCreation: null,
       designByRunId: {},
+      runSnapshotsByRunId: {},
+      reworkContinuations: {},
       refreshDesignSnapshot: async (requestedTarget, options) => {
         const target = { ...requestedTarget };
         resolveTeamMeta(get().teams, target.teamId);
@@ -748,11 +1142,12 @@ export const useTeamsStore = create<TeamsState>()(
           return existing.promise;
         }
         const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
-        const entry: TeamDesignRead = { dirty: false, removed: false, promise: Promise.resolve() };
+        const entry: TeamSnapshotRead = { dirty: false, removed: false, promise: Promise.resolve() };
         designReads.set(key, entry);
         entry.promise = Promise.resolve().then(async () => {
           if (entry.removed) return;
           set((state) => ({ designByRunId: { ...state.designByRunId, [target.runId]: {
+            ...state.designByRunId[target.runId],
             snapshot: state.designByRunId[target.runId]?.snapshot ?? null, loading: true, mutationPending: state.designByRunId[target.runId]?.mutationPending ?? false, error: state.designByRunId[target.runId]?.error ?? null,
           } } }));
           try {
@@ -780,10 +1175,22 @@ export const useTeamsStore = create<TeamsState>()(
                 }));
                 continue;
               }
-              set((state) => state.teams.some((team) => team.id === target.teamId) ? {
-                designByRunId: { ...state.designByRunId, [target.runId]: { snapshot, loading: false, mutationPending: state.designByRunId[target.runId]?.mutationPending ?? false, error: teamRunErrorMessage(snapshot) } },
-              } : {});
-              if (traceId && get().designByRunId[target.runId]?.snapshot === snapshot) {
+              set((state) => {
+                if (!state.teams.some((team) => team.id === target.teamId)) return {};
+                const current = state.designByRunId[target.runId];
+                const previous = current?.snapshot;
+                snapshot = {
+                  ...snapshot,
+                  workspace: previous?.workspace.status === snapshot.workspace.status ? previous.workspace : snapshot.workspace,
+                  graph: retainTeamDesignGraph(previous?.teamId === snapshot.teamId && previous.runId === snapshot.runId ? previous.graph : undefined, snapshot.graph),
+                  roles: retainTeamRoleBindings(previous?.roles, snapshot.roles),
+                };
+                return {
+                  designByRunId: { ...state.designByRunId, [target.runId]: { ...current,
+                    snapshot, loading: false, mutationPending: current?.mutationPending ?? false, error: teamRunErrorMessage(snapshot) } },
+                };
+              });
+              if (traceId && get().designByRunId[target.runId]?.snapshot?.graph === snapshot.graph) {
                 logSessionTrace('renderer.team_run.design_snapshot.applied', traceId, () => ({
                   ...summarizeTeamDesignSnapshot(snapshot),
                   mutationPending: get().designByRunId[target.runId]?.mutationPending ?? false,
@@ -842,22 +1249,25 @@ export const useTeamsStore = create<TeamsState>()(
           }
         };
       },
-      startDesign: async (target) => {
-        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
-        await mutateTeamDesign(frozenTarget, 'design-start', (requestId) => startTeamDesign({ ...frozenTarget, idempotencyKey: requestId }));
+      startDesign: async (requestedTarget) => {
+        const target = { ...requestedTarget };
+        await mutateTeamDesign(target, 'design-start', 'reconciled', (requestId) => startTeamDesign({
+          ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId), idempotencyKey: requestId,
+        }));
       },
       startRun: async (target) => {
-        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
-        const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
-        if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
-          || !(snapshot.startGate.status === 'intake' && snapshot.designEpoch === null
-            || snapshot.startGate.status === 'designing' && snapshot.startGate.designEpoch === snapshot.designEpoch
-              && snapshot.startGate.graphVersion === snapshot.graphVersion)) {
-          throw new Error('Team run start snapshot is required');
-        }
-        const designEpoch = snapshot.designEpoch;
-        const expectedGraphVersion = snapshot.graphVersion;
-        await mutateTeamDesign(frozenTarget, `run-start:${JSON.stringify([designEpoch, expectedGraphVersion])}`, async (requestId) => {
+        const requestedTarget = { ...target };
+        await mutateTeamDesign(requestedTarget, 'run-start', 'reconciled', async (requestId) => {
+          const frozenTarget = { ...requestedTarget, scope: resolveTeamRuntimeScope(requestedTarget.teamId, requestedTarget.runId) };
+          const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
+          if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
+            || !(snapshot.startGate.status === 'intake' && snapshot.designEpoch === null
+              || snapshot.startGate.status === 'designing' && snapshot.startGate.designEpoch === snapshot.designEpoch
+                && snapshot.startGate.graphVersion === snapshot.graphVersion)) {
+            throw new Error('Team run start snapshot is required');
+          }
+          const designEpoch = snapshot.designEpoch;
+          const expectedGraphVersion = snapshot.graphVersion;
           const traceId = createSessionTraceId('team-run-start');
           logSessionTrace('renderer.team_run.run_start.requested', traceId, () => summarizeTeamDesignSnapshot(snapshot));
           try {
@@ -884,54 +1294,107 @@ export const useTeamsStore = create<TeamsState>()(
           }
         });
       },
-      exitDesign: async (target) => {
-        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
-        const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
-        if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
-          || snapshot.startGate.status !== 'designing'
-          || !snapshot.designEpoch || snapshot.startGate.designEpoch !== snapshot.designEpoch) {
-          throw new Error('Team design snapshot is required');
-        }
-        const designEpoch = snapshot.designEpoch;
-        await mutateTeamDesign(frozenTarget, `design-exit:${designEpoch}`, () => exitTeamDesign({ ...frozenTarget, designEpoch }));
-      },
-      submitRunGraphPatch: async (target, operations) => {
-        if (operations.length === 0) return;
-        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
-        const snapshot = get().designByRunId[target.runId]?.snapshot;
-        if (!snapshot || snapshot.teamId !== target.teamId || snapshot.runId !== target.runId) {
-          throw new Error('Team run snapshot is required');
-        }
-        const designActive = snapshot.startGate.status === 'designing';
-        const designEpoch = snapshot.designEpoch;
-        if (designActive && !designEpoch) throw new Error('Team design snapshot is required');
-        await mutateTeamDesign(frozenTarget, 'run-graph-patch', async (requestId) => {
-          if (designActive) return await patchTeamDesignGraph({
-            ...frozenTarget,
-            designEpoch: designEpoch!,
-            expectedGraphVersion: snapshot.graphVersion,
-            commandId: requestId,
-            idempotencyKey: requestId,
-            operations,
+      continueRework: async (input) => {
+        const request = { ...input };
+        const target = { teamId: request.teamId, runId: request.runId };
+        const key = reworkContinuationKey(request);
+        let continuation: TeamReworkContinuation | undefined;
+        try {
+          await mutateTeamDesign(target, `run-rework-continue:${request.idempotencyKey}`, 'reconciled', async () => {
+            const snapshot = get().designByRunId[target.runId]?.snapshot;
+            const chat = useChatStore.getState();
+            const conversation = chat.currentConversation;
+            const meta = conversation?.kind === 'session' ? chat.loadedSessions[conversation.sessionRecordKey]?.meta : null;
+            const ownership = meta?.ownership;
+            if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId || snapshot.startGate.status !== 'started'
+              || conversation?.kind !== 'session' || !meta?.sessionIdentity || !sessionIdentitiesEqual(meta.sessionIdentity, conversation.sessionIdentity)
+              || ownership?.kind !== 'team' || ownership.roleId !== 'leader' || ownership.teamId !== target.teamId || ownership.teamRunId !== target.runId
+              || !snapshot.roles.some((role) => role.roleId === 'leader' && role.runId === target.runId
+                && sessionIdentitiesEqual(role.sessionIdentity, conversation.sessionIdentity))) {
+              throw new Error('The current team run leader session is required');
+            }
+            if (Object.keys(request).length !== 10 || ![request.teamId, request.runId, request.nodeId, request.sourcePort,
+              request.sourceNodeExecutionId, request.commandId, request.idempotencyKey].every((value) => readNonEmptyString(value) !== null)
+              || !Number.isSafeInteger(request.batchId) || request.batchId <= 0 || !isTeamReworkLimit(request.maxReworks)
+              || !isTeamGraphVersion(request.expectedGraphVersion)) throw new Error('A valid rework continuation request is required');
+            const scope = resolveTeamRuntimeScope(target.teamId, target.runId);
+            if (scope.kind !== 'agent' || scope.agentId !== conversation.sessionIdentity.agentId
+              || !runtimeEndpointsEqual(scope.endpoint, conversation.sessionIdentity.endpoint)) throw new Error('The current team run leader scope is required');
+            const existing = get().reworkContinuations[key];
+            if (existing) {
+              if (!equalTeamDesignValue(existing.input, request) || !sessionIdentitiesEqual(existing.leaderIdentity, conversation.sessionIdentity)
+                || !equalTeamDesignValue(existing.scope, scope)) throw new Error('The original rework continuation request and leader are required');
+              continuation = existing;
+            } else {
+              const blocked = snapshot.graph.rework.blocked.find((entry) => entry.batchId === request.batchId
+                && entry.sourceNodeId === request.nodeId && entry.sourcePort === request.sourcePort
+                && entry.sourceNodeExecutionId === request.sourceNodeExecutionId);
+              if (!blocked || request.maxReworks <= blocked.maxReworks || request.maxReworks <= blocked.used) {
+                throw new Error('A matching blocked rework and a higher rework limit are required');
+              }
+              continuation = { input: request, leaderIdentity: conversation.sessionIdentity, scope, status: 'unconfirmed', error: null };
+              set((state) => ({ reworkContinuations: { ...state.reworkContinuations, [key]: continuation } }));
+            }
+            if (continuation.status === 'acknowledged') return;
+            await continueTeamRunRework({ ...continuation.input, scope: continuation.scope });
+            continuation = { ...continuation, status: 'acknowledged', error: null };
+            if (get().reworkContinuations[key]) set((state) => ({ reworkContinuations: { ...state.reworkContinuations, [key]: continuation } }));
           });
-          await submitTeamRunGraphPatch({
-            scope: frozenTarget.scope,
-            runId: frozenTarget.runId,
-            summary: 'graph_patch',
-            patch: {
-              ...(snapshot.graph.graphId ? { baseGraphId: snapshot.graph.graphId } : {}),
-              ...(snapshot.graph.workflowPlanId ? { baseWorkflowPlanId: snapshot.graph.workflowPlanId } : {}),
-              operations,
-            },
-            idempotencyKey: requestId,
-          });
-          if (get().teams.find((team) => team.id === frozenTarget.teamId)?.activeRunId === frozenTarget.runId) {
-            await get().refreshSnapshot(frozenTarget.teamId, { force: true });
+          if (continuation && get().reworkContinuations[key] === continuation) set((state) => ({ reworkContinuations: withoutKey(state.reworkContinuations, key) }));
+        } catch (cause) {
+          if (continuation && get().reworkContinuations[key] === continuation) {
+            if (continuation.status === 'unconfirmed' && cause instanceof Error && isTeamDesignFailure(cause.cause)
+              && REWORK_CONTINUE_REJECTIONS.has(cause.cause.errorCode)) {
+              set((state) => ({ reworkContinuations: withoutKey(state.reworkContinuations, key) }));
+            } else {
+              continuation = { ...continuation, status: continuation.status === 'acknowledged' ? 'acknowledged' : 'outcome-unknown',
+                error: cause instanceof Error ? cause.message : String(cause) };
+              set((state) => ({ reworkContinuations: { ...state.reworkContinuations, [key]: continuation } }));
+            }
           }
+          throw cause;
+        }
+      },
+      exitDesign: async (requestedTarget) => {
+        const target = { ...requestedTarget };
+        await mutateTeamDesign(target, 'design-exit', 'reconciled', () => {
+          const snapshot = get().designByRunId[target.runId]?.snapshot;
+          if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId
+            || snapshot.startGate.status !== 'designing'
+            || !snapshot.designEpoch || snapshot.startGate.designEpoch !== snapshot.designEpoch) {
+            throw new Error('Team design snapshot is required');
+          }
+          return exitTeamDesign({ ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId), designEpoch: snapshot.designEpoch });
         });
       },
+      submitRunGraphPatch: (requestedTarget, operations, base) => {
+        if (operations.some((operation) => operation.op === 'set_node_position' && !isTeamDesignPatchOperation(operation))) {
+          return Promise.reject(new Error(i18n.t('common:calls.values.invalidRequest')));
+        }
+        if (operations.length === 0) return Promise.resolve();
+        const target = { ...requestedTarget };
+        if (operations.every((operation) => operation.op === 'set_node_position')) {
+          try {
+            return submitRunLayout(target, operations);
+          } catch (error) {
+            return Promise.reject(error);
+          }
+        }
+        return mutateTeamDesign(target, 'run-graph-patch', 'acknowledged', (requestId) => prepareRunGraphPatch(target, operations, requestId, base)());
+      },
+      retryRunLayoutSave: (target) => {
+        try {
+          resolveTeamMeta(get().teams, target.teamId);
+          const key = designTargetKey(target);
+          if (deletingTeams.has(target.teamId) || actionInFlightByKey.has(`design:${key}`)) throw new Error('Team run mutation is already pending');
+          const entry = layoutWrites.get(key);
+          return entry ? drainRunLayout(entry) : Promise.resolve();
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      },
       createRoleSession: (requestedTarget, roleId, requestId) => {
-        const target = { ...requestedTarget, scope: resolveTeamRuntimeScope(requestedTarget.teamId, requestedTarget.runId) };
+        const target = { ...requestedTarget };
         const snapshot = get().designByRunId[target.runId]?.snapshot;
         if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId) {
           return Promise.reject(new Error('Team run snapshot is required'));
@@ -941,7 +1404,7 @@ export const useTeamsStore = create<TeamsState>()(
         if (existing && existing.roleId !== roleId) return Promise.reject(new Error('Team role session request conflicts with the original role'));
         if (existing?.promise) return existing.promise;
         const actionKey = `design:${designTargetKey(target)}`;
-        if (actionInFlightByKey.has(actionKey)) return Promise.reject(new Error('Team run mutation is already pending'));
+        if (deletingTeams.has(target.teamId) || actionInFlightByKey.has(actionKey)) return Promise.reject(new Error('Team run mutation is already pending'));
         const creation: RoleSessionCreation = existing ?? { roleId, removed: false };
         const action = { requestId, operation: `role-session-create:${requestId}`, removed: false, promise: Promise.resolve() };
         const requireCurrentRun = () => {
@@ -953,9 +1416,11 @@ export const useTeamsStore = create<TeamsState>()(
         };
         creation.promise = Promise.resolve().then(async () => {
           try {
+            await waitForRunLayout(target);
             requireCurrentRun();
+            const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
             if (!creation.sessionRef) {
-              creation.receipt ??= await createTeamRoleSession({ ...target, roleId, idempotencyKey: requestId });
+              creation.receipt ??= await createTeamRoleSession({ ...frozenTarget, roleId, idempotencyKey: requestId });
               requireCurrentRun();
               const call = await waitForCall(creation.receipt, 'organization', { timeoutMs: null });
               requireCurrentRun();
@@ -974,14 +1439,14 @@ export const useTeamsStore = create<TeamsState>()(
               creation.sessionRef = call.detail.roleSession.sessionRef;
             }
             requireCurrentRun();
-            const readback = await readTeamDesignSnapshot(target);
+            const readback = await readTeamDesignSnapshot(frozenTarget);
             requireCurrentRun();
             const binding = readback.roles.find((role) => role.roleId === roleId && role.sessionRef === creation.sessionRef);
             if (!binding) throw new Error('Created Team role session is not available in the run snapshot');
             const designRead = designReads.get(designTargetKey(target));
             if (designRead) designRead.dirty = true;
-            const runRead = snapshotInFlightByTeamId.get(target.teamId);
-            if (runRead?.runId === target.runId) runRead.dirty = true;
+            const runRead = snapshotReads.get(designTargetKey(target));
+            if (runRead) runRead.dirty = true;
             set((state) => {
               const current = state.designByRunId[target.runId]!;
               const roles = [...new Map([...current.snapshot!.roles, ...readback.roles]
@@ -1006,7 +1471,7 @@ export const useTeamsStore = create<TeamsState>()(
               if (!creation.removed) set((state) => {
                 const current = state.designByRunId[target.runId];
                 return current?.snapshot?.teamId === target.teamId ? { designByRunId: { ...state.designByRunId, [target.runId]: {
-                  ...current, mutationPending: false,
+                  ...current, mutationPending: deletingTeams.has(target.teamId),
                 } } } : {};
               });
             }
@@ -1031,7 +1496,8 @@ export const useTeamsStore = create<TeamsState>()(
       dispatchGroupsByTeamId: {},
       dispatchTasksByTeamId: {},
       approvalsByTeamId: {},
-      artifactsByTeamId: {},
+      approvalsByRunId: {},
+      artifactsByRunId: {},
       messagesByTeamId: {},
       nodeExecutionsByTeamId: {},
       nodePromptDeliveryAttemptsByTeamId: {},
@@ -1047,9 +1513,9 @@ export const useTeamsStore = create<TeamsState>()(
       eventCursorByRunId: {},
       loadingByTeamId: {},
       errorByTeamId: {},
-      planTeamSkillCreation: (candidate) => planTeamSkillCreation(get().teams, candidate),
+      planTeamSkillCreation: (candidate) => planTeamSkillCreation(get(), candidate),
       createTeam: (input) => {
-        const plan = planTeamSkillCreation(get().teams, input);
+        const plan = planTeamSkillCreation(get(), input);
         if (plan.action === 'open_existing') {
           set({ activeTeamId: plan.teamId });
           return plan.teamId;
@@ -1073,7 +1539,6 @@ export const useTeamsStore = create<TeamsState>()(
           dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [id]: [] },
           dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [id]: [] },
           approvalsByTeamId: { ...state.approvalsByTeamId, [id]: [] },
-          artifactsByTeamId: { ...state.artifactsByTeamId, [id]: [] },
           messagesByTeamId: { ...state.messagesByTeamId, [id]: [] },
           nodeExecutionsByTeamId: { ...state.nodeExecutionsByTeamId, [id]: [] },
           nodePromptDeliveryAttemptsByTeamId: { ...state.nodePromptDeliveryAttemptsByTeamId, [id]: [] },
@@ -1103,7 +1568,6 @@ export const useTeamsStore = create<TeamsState>()(
           dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [id]: [] },
           dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [id]: [] },
           approvalsByTeamId: { ...state.approvalsByTeamId, [id]: [] },
-          artifactsByTeamId: { ...state.artifactsByTeamId, [id]: [] },
           messagesByTeamId: { ...state.messagesByTeamId, [id]: [] },
           nodeExecutionsByTeamId: { ...state.nodeExecutionsByTeamId, [id]: [] },
           nodePromptDeliveryAttemptsByTeamId: { ...state.nodePromptDeliveryAttemptsByTeamId, [id]: [] },
@@ -1166,9 +1630,9 @@ export const useTeamsStore = create<TeamsState>()(
                 } } : {};
             });
           } });
-          await get().createRun(teamId, { errorFeedback: 'caller', onFailure, onPhase: updatePhase });
+          const run = await get().createRun(teamId, { errorFeedback: 'caller', onFailure, onPhase: updatePhase });
           set({ manualTeamCreation: null });
-          return teamId;
+          return { teamId, runId: run.runId };
         } catch (error) {
           const observed = get().manualTeamCreation!;
           const failure: TeamCreationFailure | null = observed.failure ?? callbackFailure
@@ -1273,11 +1737,21 @@ export const useTeamsStore = create<TeamsState>()(
 
         const storedRunIds = state.runIdsByTeamId[teamId] ?? [];
         const runIds = storedRunIds.length > 0 ? storedRunIds : team.activeRunId ? [team.activeRunId] : [];
+        if (deletingTeams.has(teamId)) throw new Error('Team deletion is already pending');
+        deletingTeams.add(teamId);
         set((state) => ({
+          designByRunId: Object.fromEntries(Object.entries(state.designByRunId).map(([runId, record]) => [runId,
+            record?.snapshot?.teamId === teamId ? { ...record, mutationPending: true } : record])),
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
           ...(options?.errorFeedback === 'caller' ? {} : { errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined } }),
         }));
         try {
+          const pending = [
+            ...[...actionInFlightByKey].filter(([key]) => key.startsWith('design:')
+              && (JSON.parse(key.slice('design:'.length)) as [string, string])[0] === teamId).map(([, action]) => action.promise),
+            ...[...layoutWrites.values()].filter((entry) => entry.target.teamId === teamId).flatMap((entry) => entry.promise ? [entry.promise] : []),
+          ];
+          if (pending.length > 0) await Promise.allSettled(pending);
           const receipt = await deleteTeamInstance({ teamId, scope: resolveTeamRuntimeScope(teamId) });
           const call = await waitForCall(receipt, 'organization', { timeoutMs: null });
           if (call.command !== 'team.delete'
@@ -1288,7 +1762,7 @@ export const useTeamsStore = create<TeamsState>()(
               : 'Team deletion was not confirmed');
           }
           const runIdsToDelete = mergeRunIds(runIds, get().runIdsByTeamId[teamId] ?? []);
-          removeDesignReads(teamId);
+          removeRunReads(teamId);
           const result: TeamDeleteResult = { teamId, deleted: true, state: 'tombstoned', deletedRunIds: [], deletedAgentIds: [] };
           removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, runIdsToDelete));
           set((state) => ({
@@ -1308,7 +1782,8 @@ export const useTeamsStore = create<TeamsState>()(
             dispatchGroupsByTeamId: withoutKey(state.dispatchGroupsByTeamId, teamId),
             dispatchTasksByTeamId: withoutKey(state.dispatchTasksByTeamId, teamId),
             approvalsByTeamId: withoutKey(state.approvalsByTeamId, teamId),
-            artifactsByTeamId: withoutKey(state.artifactsByTeamId, teamId),
+            approvalsByRunId: removeRunIdsFromRecord(state.approvalsByRunId, runIdsToDelete),
+            artifactsByRunId: removeRunIdsFromRecord(state.artifactsByRunId, runIdsToDelete),
             messagesByTeamId: withoutKey(state.messagesByTeamId, teamId),
             nodeExecutionsByTeamId: withoutKey(state.nodeExecutionsByTeamId, teamId),
             nodePromptDeliveryAttemptsByTeamId: withoutKey(state.nodePromptDeliveryAttemptsByTeamId, teamId),
@@ -1332,6 +1807,11 @@ export const useTeamsStore = create<TeamsState>()(
           }));
           reportTeamError(teamId, error, options);
           throw error;
+        } finally {
+          deletingTeams.delete(teamId);
+          set((state) => ({ designByRunId: Object.fromEntries(Object.entries(state.designByRunId).map(([runId, record]) => [runId,
+            record?.snapshot?.teamId === teamId ? { ...record, mutationPending: actionInFlightByKey.has(`design:${designTargetKey({ teamId, runId })}`) } : record])),
+          }));
         }
       },
       provisionTeamAgents: async (teamId, options) => {
@@ -1446,8 +1926,8 @@ export const useTeamsStore = create<TeamsState>()(
           phase = 'loading_team';
           options?.onPhase?.(phase);
           await get().syncRunList(teamId);
-          await get().refreshSnapshot(teamId, { force: true, errorFeedback: 'caller' });
-          return get().runByTeamId[teamId] ?? get().runsById[created.runId] ?? created;
+          await get().refreshSnapshot(teamId, { force: true, runId: created.runId, errorFeedback: 'caller' });
+          return get().runsById[created.runId] ?? created;
         } catch (error) {
           failure ??= classifyTeamCreationFailure(error, phase);
           reportTeamError(teamId, error, options);
@@ -1463,7 +1943,7 @@ export const useTeamsStore = create<TeamsState>()(
         resolveTeamMeta(get().teams, teamId);
         const previous = runListReads.get(teamId);
         if (previous?.next) return previous.next.promise;
-        const entry: TeamRunListRead = { promise: Promise.resolve(), deletedRunIds: new Set() };
+        const entry: TeamRunListRead = { promise: Promise.resolve(), deletedRunIds: new Set(), acceptedRunIds: new Set(), acceptedListRoleRunIds: new Set(), acceptedActiveRoleRunIds: new Set(), reading: false };
         if (previous) previous.next = entry;
         else runListReads.set(teamId, entry);
         // Coalesce only the next requested list; snapshots and other teams stay independent.
@@ -1471,6 +1951,7 @@ export const useTeamsStore = create<TeamsState>()(
           const baseline = get();
           const team = baseline.teams.find((team) => team.id === teamId);
           if (!team) return;
+          entry.reading = true;
           const result = await listTeamRuns({ teamId, scope: resolveTeamRuntimeScope(teamId) });
           set((state) => {
             const currentTeam = state.teams.find((team) => team.id === teamId);
@@ -1489,6 +1970,7 @@ export const useTeamsStore = create<TeamsState>()(
               !baselineRunIds.has(runId)
               || state.runsById[runId] !== baseline.runsById[runId]
               || currentRuns.get(runId) !== baselineRuns.get(runId)
+              || entry.acceptedRunIds.has(runId)
               || (selectionChanged && activeRunId === runId)
             ));
             const nextRunIds = [...runtimeRunIds, ...retainedRunIds];
@@ -1496,9 +1978,9 @@ export const useTeamsStore = create<TeamsState>()(
             const runsById = { ...removeRunIdsFromRecord(state.runsById, currentRunIds.filter((runId) => !nextRunIdSet.has(runId))) };
             const nextRunList = runtimeRuns.map((run) => {
               const currentRun = state.runsById[run.runId];
-              const record = currentRun && currentRun !== baseline.runsById[run.runId] ? currentRun : run;
+              const record = currentRun && (currentRun !== baseline.runsById[run.runId] || entry.acceptedRunIds.has(run.runId)) ? currentRun : run;
               const current = currentRuns.get(run.runId);
-              const sessions = current && current.sessions !== baselineRuns.get(run.runId)?.sessions ? current.sessions : run.sessions;
+              const sessions = current && (current.sessions !== baselineRuns.get(run.runId)?.sessions || entry.acceptedListRoleRunIds.has(run.runId)) ? current.sessions : run.sessions;
               runsById[run.runId] = record;
               return record === run && sessions === run.sessions ? run : { ...record, sessions };
             });
@@ -1521,15 +2003,18 @@ export const useTeamsStore = create<TeamsState>()(
               runListByTeamId: { ...state.runListByTeamId, [teamId]: nextRunList },
               runsById,
               ...(shouldClearTeamRunProjection ? emptyTeamRunProjection(teamId, state) : {}),
-              ...(shouldClearTeamRunProjection || state.runByTeamId[teamId] === baseline.runByTeamId[teamId] ? {
+              ...(shouldClearTeamRunProjection || state.runByTeamId[teamId] === baseline.runByTeamId[teamId]
+                && !(nextActiveRunId && entry.acceptedRunIds.has(nextActiveRunId)) ? {
                 runByTeamId: { ...state.runByTeamId, [teamId]: nextActiveRun },
               } : {}),
-              ...(shouldClearTeamRunProjection || state.rolesByTeamId[teamId] === baseline.rolesByTeamId[teamId] ? {
+              ...(shouldClearTeamRunProjection || state.rolesByTeamId[teamId] === baseline.rolesByTeamId[teamId]
+                && !(nextActiveRunId && entry.acceptedActiveRoleRunIds.has(nextActiveRunId)) ? {
                 rolesByTeamId: { ...state.rolesByTeamId, [teamId]: nextActiveSessions },
               } : {}),
             };
           });
         }).finally(() => {
+          entry.reading = false;
           if (runListReads.get(teamId) === entry) {
             if (entry.next) runListReads.set(teamId, entry.next);
             else runListReads.delete(teamId);
@@ -1540,6 +2025,7 @@ export const useTeamsStore = create<TeamsState>()(
       deleteRun: async (teamId, requestedRunId) => {
         const state = get();
         const runId = requestedRunId ?? resolveActiveRunId(state, teamId);
+        await mutateTeamDesign({ teamId, runId }, 'run-delete', 'reconciled', async () => {
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
@@ -1555,23 +2041,31 @@ export const useTeamsStore = create<TeamsState>()(
               : 'Team run deletion was not confirmed');
           }
           runListReads.get(teamId)?.deletedRunIds.add(runId);
-          removeDesignReads(teamId, runId);
+          removeRunReads(teamId, runId);
           removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, [runId]));
           set((state) => {
             const remainingRunIds = (state.runIdsByTeamId[teamId] ?? []).filter((candidate) => candidate !== runId);
-            const nextRunId = selectMostRecentRunId(remainingRunIds, state.runsById);
+            const activeRunId = state.teams.find((team) => team.id === teamId)?.activeRunId;
+            const deletingActiveRun = activeRunId === runId;
+            const nextRunId = deletingActiveRun ? selectMostRecentRunId(remainingRunIds, state.runsById) : activeRunId;
             return {
-              teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: nextRunId, updatedAt: Date.now() } : team),
+              teams: deletingActiveRun
+                ? state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: nextRunId, updatedAt: Date.now() } : team)
+                : state.teams,
               runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: remainingRunIds },
               runListByTeamId: { ...state.runListByTeamId, [teamId]: (state.runListByTeamId[teamId] ?? []).filter((run) => run.runId !== runId) },
               runsById: withoutKey(state.runsById, runId),
               designByRunId: withoutKey(state.designByRunId, runId),
+              approvalsByRunId: withoutKey(state.approvalsByRunId, runId),
+              artifactsByRunId: withoutKey(state.artifactsByRunId, runId),
               eventsByRunId: withoutKey(state.eventsByRunId, runId),
               eventCursorByRunId: withoutKey(state.eventCursorByRunId, runId),
-              ...emptyTeamRunProjection(teamId, state),
-              runByTeamId: { ...state.runByTeamId, [teamId]: nextRunId ? state.runsById[nextRunId] : undefined },
-              eventsByTeamId: { ...state.eventsByTeamId, [teamId]: nextRunId ? state.eventsByRunId[nextRunId] ?? [] : [] },
-              eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: nextRunId ? state.eventCursorByRunId[nextRunId] : undefined },
+              ...(deletingActiveRun ? {
+                ...emptyTeamRunProjection(teamId, state),
+                runByTeamId: { ...state.runByTeamId, [teamId]: nextRunId ? state.runsById[nextRunId] : undefined },
+                eventsByTeamId: { ...state.eventsByTeamId, [teamId]: nextRunId ? state.eventsByRunId[nextRunId] ?? [] : [] },
+                eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: nextRunId ? state.eventCursorByRunId[nextRunId] : undefined },
+              } : {}),
               loadingByTeamId: { ...state.loadingByTeamId, [teamId]: false },
             };
           });
@@ -1585,61 +2079,92 @@ export const useTeamsStore = create<TeamsState>()(
           }));
           throw error;
         }
+        });
       },
       refreshSnapshot: async (teamId, options) => {
-        const inFlight = snapshotInFlightByTeamId.get(teamId);
-        const entry = inFlight ?? { runId: get().teams.find((team) => team.id === teamId)?.activeRunId, dirty: false, promise: Promise.resolve() };
+        const team = get().teams.find((team) => team.id === teamId);
+        if (!team) return;
+        const runId = options?.runId ?? team.activeRunId;
+        if (!runId) {
+          set((state) => emptyTeamRunProjection(teamId, state));
+          return;
+        }
+        const key = designTargetKey({ teamId, runId });
+        const inFlight = snapshotReads.get(key);
+        const entry = inFlight ?? { dirty: false, removed: false, completeMessages: Boolean(options?.completeMessages), promise: Promise.resolve() };
         if (inFlight) {
-          if (options?.force || inFlight.runId !== get().teams.find((team) => team.id === teamId)?.activeRunId) inFlight.dirty = true;
+          if (options?.force) entry.dirty = true;
+          if (options?.completeMessages) entry.completeMessages = true;
         } else {
-          snapshotInFlightByTeamId.set(teamId, entry);
-          entry.promise = (async () => {
-            do {
-              entry.dirty = false;
-              const state = get();
-              const team = state.teams.find((team) => team.id === teamId);
-              if (!team) return;
-              const runId = team.activeRunId;
-              entry.runId = runId;
-              if (!runId) {
-                set((state) => emptyTeamRunProjection(teamId, state));
-                return;
-              }
-              let snapshot: TeamRunSnapshotRecord;
-              try {
-                snapshot = await readTeamRunSnapshot({
-                  scope: resolveTeamRuntimeScope(teamId, runId),
-                  runId,
-                  eventCursor: state.eventCursorByRunId[runId],
-                  eventLimit: 200,
-                });
-              } catch (error) {
-                if (entry.dirty) continue;
-                throw error;
-              }
-              if (entry.dirty) continue;
-              set((state) => {
-                if (!state.teams.some((team) => team.id === teamId)) return {};
-                const isRequestedRunStillActive = state.teams.find((team) => team.id === teamId)?.activeRunId === runId;
-                const patch = teamRunSnapshotPatch(teamId, runId, snapshot, state);
-                if (!isRequestedRunStillActive) {
-                  return {
-                    runsById: patch.runsById,
-                    eventsByRunId: patch.eventsByRunId,
-                    eventCursorByRunId: patch.eventCursorByRunId,
-                  };
+          snapshotReads.set(key, entry);
+          entry.promise = Promise.resolve().then(async () => {
+            if (entry.removed) return;
+            const accepted = get().runSnapshotsByRunId[runId];
+            let snapshot: TeamRunSnapshotRecord | null = options?.completeMessages && !options.force && accepted?.teamId === teamId ? accepted.snapshot : null;
+            let restartedStale = false;
+            let retainMessages = true;
+            set((state) => ({ runSnapshotsByRunId: { ...state.runSnapshotsByRunId, [runId]: {
+              teamId, snapshot: accepted?.teamId === teamId ? accepted.snapshot : null, loading: true, error: accepted?.teamId === teamId ? accepted.error : null,
+            } } }));
+            try {
+              const scope = resolveTeamRuntimeScope(teamId, runId);
+              for (;;) {
+                if (entry.removed || !get().teams.some((team) => team.id === teamId)) return;
+                if (entry.dirty) {
+                  entry.dirty = false;
+                  snapshot = null;
                 }
-                return patch;
+                const cursor = entry.completeMessages && snapshot?.messagePage.status === 'incomplete' ? snapshot.messagePage.nextCursor : null;
+                if (!snapshot || cursor) {
+                  let page: TeamRunSnapshotRecord;
+                  try {
+                    page = await readTeamRunSnapshot({
+                      scope, runId, eventCursor: get().eventCursorByRunId[runId], eventLimit: 200,
+                      ...(cursor ? { messageCursor: cursor } : {}),
+                    });
+                  } catch (error) {
+                    if (entry.removed) return;
+                    if (entry.dirty) continue;
+                    throw error;
+                  }
+                  if (entry.removed) return;
+                  if (entry.dirty) continue;
+                  if (page.messagePage.status === 'stale' || cursor && page.messagePage.revision !== cursor.revision) {
+                    if (restartedStale) throw new Error('Team run messages changed while reading; retry the snapshot');
+                    restartedStale = true;
+                    retainMessages = false;
+                    snapshot = null;
+                    continue;
+                  }
+                  const previous = get().runSnapshotsByRunId[runId];
+                  snapshot = mergeRunMessagePage(snapshot ?? (retainMessages && previous?.teamId === teamId ? previous.snapshot : null), page, cursor ?? undefined);
+                  continue;
+                }
+                set((state) => state.teams.some((team) => team.id === teamId)
+                  ? teamRunSnapshotPatch(teamId, runId, snapshot!, state) : {});
+                if (entry.dirty) continue;
+                if (!entry.completeMessages || snapshot.messagePage.status !== 'incomplete' || !snapshot.messagePage.nextCursor) return;
+                set((state) => ({ runSnapshotsByRunId: { ...state.runSnapshotsByRunId, [runId]: {
+                  ...state.runSnapshotsByRunId[runId]!, loading: true,
+                } } }));
+              }
+            } catch (error) {
+              if (!entry.removed) set((state) => {
+                const current = state.runSnapshotsByRunId[runId];
+                return current?.teamId === teamId ? { runSnapshotsByRunId: { ...state.runSnapshotsByRunId, [runId]: {
+                  ...current, loading: false, error: error instanceof Error ? error.message : String(error),
+                } } } : {};
               });
-            } while (entry.dirty);
-          })().finally(() => {
-            if (snapshotInFlightByTeamId.get(teamId) === entry) snapshotInFlightByTeamId.delete(teamId);
+              throw error;
+            }
+          }).finally(() => {
+            if (snapshotReads.get(key) === entry) snapshotReads.delete(key);
           });
         }
         try {
           await entry.promise;
         } catch (error) {
-          if (get().teams.find((team) => team.id === teamId)?.activeRunId === entry.runId) {
+          if (!entry.removed && get().teams.find((team) => team.id === teamId)?.activeRunId === runId) {
             reportTeamError(teamId, error, options);
           }
           throw error;
@@ -1678,13 +2203,14 @@ export const useTeamsStore = create<TeamsState>()(
           throw error;
         }
       },
-      exportGraphYaml: async (teamId) => {
+      exportGraphYaml: async (teamId, requestedRunId) => {
         const state = get();
-        const runId = resolveActiveRunId(state, teamId);
+        const runId = requestedRunId ?? resolveActiveRunId(state, teamId);
         set((state) => ({
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
+          await waitForRunLayout({ teamId, runId });
           return await exportTeamRunGraphYaml({ runId, scope: resolveTeamRuntimeScope(teamId, runId) });
         } catch (error) {
           set((state) => ({
@@ -1696,28 +2222,23 @@ export const useTeamsStore = create<TeamsState>()(
           throw error;
         }
       },
-      importGraphYaml: async (teamId, yaml) => {
-        const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        const actionKey = idempotencyKey(teamId, `graph-import-yaml:${runId}:${createRequestId('yaml')}`);
-        set((state) => ({
-          errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
-        }));
+      importGraphYaml: async (teamId, yaml, requestedRunId) => {
+        const runId = requestedRunId ?? resolveActiveRunId(get(), teamId);
+        let result: TeamGraphYamlImportResult | undefined;
+        set((state) => ({ errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined } }));
         try {
-          const result = await importTeamRunGraphYaml({ runId, scope: resolveTeamRuntimeScope(teamId, runId), yaml, idempotencyKey: actionKey });
-          if (result.snapshot) {
-            set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-          }
-          await invalidateRunGraph({ teamId, runId });
+          await mutateTeamDesign({ teamId, runId }, 'run-graph-import', 'reconciled', async (requestId) => {
+            result = await importTeamRunGraphYaml({ runId, scope: resolveTeamRuntimeScope(teamId, runId), yaml, idempotencyKey: requestId });
+            if (result.snapshot) {
+              const snapshot = result.snapshot;
+              set((state) => state.teams.some((team) => team.id === teamId) && (state.runIdsByTeamId[teamId] ?? []).includes(runId)
+                ? teamRunSnapshotPatch(teamId, runId, snapshot, state) : {});
+            }
+          });
+          if (!result) throw new Error('Team graph import was not confirmed');
           return result;
         } catch (error) {
-          await invalidateRunGraph({ teamId, runId });
-          set((state) => ({
-            errorByTeamId: {
-              ...state.errorByTeamId,
-              [teamId]: error instanceof Error ? error.message : String(error),
-            },
-          }));
+          reportTeamError(teamId, error);
           throw error;
         }
       },
@@ -1746,35 +2267,40 @@ export const useTeamsStore = create<TeamsState>()(
           await get().refreshSnapshot(teamId, { force: true });
         });
       },
-      cancelRun: async (teamId, reason) => {
+      cancelRun: async (teamId, reason, requestedRunId) => {
         const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        await cancelTeamRun({
-          scope: resolveTeamRuntimeScope(teamId, runId),
-          runId,
-          reason,
-          idempotencyKey: idempotencyKey(teamId, `cancel:${runId}`),
-        });
-        await get().refreshSnapshot(teamId, { force: true });
-      },
-      resolveApproval: async (teamId, approvalId, decision, note) => {
-        const approval = get().approvalsByTeamId[teamId]?.find((approval) => approval.approvalId === approvalId);
-        if (!approval || approval.status !== 'pending' || (approval.subject !== 'work_node' && approval.subject !== 'human_decision')) {
-          throw new Error('A pending node approval is required');
-        }
-        const runId = approval.runId;
-        await mutateTeamDesign({ teamId, runId }, `approval:${approvalId}:${decision}`, async () => {
+        const runId = requestedRunId ?? resolveActiveRunId(state, teamId);
+        await mutateTeamDesign({ teamId, runId }, 'run-cancel', 'reconciled', async () => {
           try {
+            await cancelTeamRun({
+              scope: resolveTeamRuntimeScope(teamId, runId),
+              runId,
+              reason,
+              idempotencyKey: idempotencyKey(teamId, `cancel:${runId}`),
+            });
+          } finally {
+            await get().refreshSnapshot(teamId, { force: true, runId });
+          }
+        });
+      },
+      resolveApproval: async ({ teamId, runId }, approvalId, decision, note) => {
+        await mutateTeamDesign({ teamId, runId }, `approval:${approvalId}:${decision}`, 'reconciled', async (requestId) => {
+          try {
+            const current = get();
+            const latest = current.approvalsByRunId[runId]?.find((row) => row.runId === runId && row.approvalId === approvalId);
+            if (!latest || !isTeamApprovalActionable(latest, selectTeamApprovalRunEligibility(current, teamId, runId))) {
+              throw new Error('A pending node approval is required');
+            }
             await resolveTeamApproval({
               scope: resolveTeamRuntimeScope(teamId, runId),
               runId,
               approvalId,
               decision,
               note,
-              idempotencyKey: idempotencyKey(teamId, `approval:${runId}:${approvalId}:${decision}`),
+              idempotencyKey: requestId,
             });
           } finally {
-            await get().refreshSnapshot(teamId, { force: true });
+            await get().refreshSnapshot(teamId, { force: true, runId });
           }
         });
       },
@@ -1806,7 +2332,7 @@ export const useTeamsStore = create<TeamsState>()(
     }),
     {
       name: 'teams-runtime-store',
-      version: 4,
+      version: 5,
       migrate: (persisted) => {
         if (!persisted || typeof persisted !== 'object' || Array.isArray(persisted)) {
           return { teams: [], activeTeamId: null, runIdsByTeamId: {}, runListByTeamId: {}, runsById: {} };

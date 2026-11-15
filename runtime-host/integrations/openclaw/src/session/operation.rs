@@ -8,6 +8,8 @@ pub(crate) mod content;
 mod thinking;
 #[path = "media.rs"]
 pub(crate) mod media;
+#[path = "request.rs"]
+pub(crate) mod request;
 
 use std::{fmt, sync::Arc};
 
@@ -82,11 +84,19 @@ impl SessionOperation {
         &self,
         params: SessionDescribeParams,
     ) -> Result<Option<SessionDescribeRow>, OperationError> {
+        self.describe_session_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn describe_session_cancellable(
+        &self,
+        params: SessionDescribeParams,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<SessionDescribeRow>, OperationError> {
         let request_id = next_request_id("sessions-describe")?;
         let request = request(&request_id, protocol::SESSIONS_DESCRIBE_METHOD, params)?;
         let response = self
             .gateway
-            .rpc_query(request)
+            .rpc_query_cancellable(request, cancellation)
             .await
             .map_err(OperationError::from)?;
         protocol::decode_session_describe_result(&request_id, response)

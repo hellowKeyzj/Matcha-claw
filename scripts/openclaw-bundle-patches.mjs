@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
@@ -7,12 +8,14 @@ import { patchOpenClawSearch } from './openclaw-search-patches.mjs';
 import { patchOpenClawBoard } from './openclaw-board-patches.mjs';
 import { patchOpenClawWorldInvestigation } from './openclaw-world-investigation-patches.mjs';
 import { patchOpenClawMedia } from './openclaw-media-patches.mjs';
+import { patchOpenClawVideo } from './openclaw-video-patches.mjs';
 import { patchOpenClawImageTasks } from './openclaw-image-task-patches.mjs';
 import { patchOpenClawChatStream } from './openclaw-chat-stream-patches.mjs';
 import { patchOpenClawHistoryPath } from './openclaw-history-path-patches.mjs';
 import { patchOpenClawChatMedia } from './openclaw-chat-media-patches.mjs';
+import { patchOpenClawRequests } from './openclaw-request-patches.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'native-account-media', 'native-image-task-cancellation', 'native-chat-consistency', 'owned-stdin-stop']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'native-account-media', 'native-image-task-cancellation', 'native-account-video', 'native-chat-consistency', 'native-session-cwd', 'native-request-completion', 'owned-stdin-stop']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -1600,6 +1603,60 @@ function patchChannelPairingApprovalExport(openclawDir) {
   return { status: 'applied', detail: path.basename(targetFile) };
 }
 
+function patchNativeSessionCwd(openclawDir) {
+  const patchId = 'native-session-cwd';
+  const pkg = JSON.parse(readText(path.join(openclawDir, 'package.json')));
+  if (pkg.name !== 'openclaw' || pkg.version !== '2026.9.3') {
+    throw new Error(`${patchId}: requires openclaw@2026.9.3`);
+  }
+  const distDir = path.join(openclawDir, 'dist');
+  const replyFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'get-reply-',
+    markers: ['function resolveReplySessionRolloverState(entry, sessionKey) {'],
+  });
+  const before = `\t\t\tsubagentControlScope: entry.subagentControlScope
+\t\t} : {},
+\t\tparentSessionKey: entry.parentSessionKey,`;
+  const after = `\t\t\tsubagentControlScope: entry.subagentControlScope
+\t\t} : {},
+\t\t...normalizeOptionalString(entry.spawnedCwd) ? {
+\t\t\tspawnedCwd: entry.spawnedCwd,
+\t\t\tsessionRoot: entry.sessionRoot
+\t\t} : {},
+\t\tparentSessionKey: entry.parentSessionKey,`;
+  const workerBefore = 'subagentControlScope:Ot.subagentControlScope}:{},parentSessionKey:Ot.parentSessionKey,';
+  const workerAfter = 'subagentControlScope:Ot.subagentControlScope}:{},...normalizeOptionalString(Ot.spawnedCwd)?{spawnedCwd:Ot.spawnedCwd,sessionRoot:Ot.sessionRoot}:{},parentSessionKey:Ot.parentSessionKey,';
+  const digest = (source) => createHash('sha256').update(source).digest('hex');
+  const targets = [
+    [replyFile, before, after, 'function resolveReplySessionRolloverState(entry, sessionKey) {'],
+    [path.join(distDir, 'worker', 'worker.mjs'), workerBefore, workerAfter, 'function resolveReplySessionRolloverState(Ot,Zt){'],
+  ].map(([file, before, after, marker]) => {
+    const source = readText(file);
+    const seals = [];
+    let body = source;
+    for (;;) {
+      const stamp = body.match(/^\/\/ (native-chat-commentary-replacement|native-history-path|native-chat-stream-ownership) sha256=([a-f0-9]{64})\n/);
+      if (!stamp) break;
+      body = body.slice(stamp[0].length);
+      if (digest(body) !== stamp[2]) throw new Error(`${patchId}: ${stamp[1]} source seal mismatch`);
+      seals.push(stamp[1]);
+    }
+    const beforeCount = body.split(before).length - 1;
+    const afterCount = body.split(after).length - 1;
+    if (body.split(marker).length !== 2 || !(beforeCount === 1 && afterCount === 0 || beforeCount === 0 && afterCount === 1)) {
+      throw new Error(`${patchId}: rollover cwd anchor mismatch in ${path.basename(file)}`);
+    }
+    if (beforeCount === 1) body = replaceOnce(body, before, after, patchId);
+    for (const seal of seals.reverse()) body = `// ${seal} sha256=${digest(body)}\n${body}`;
+    return { file, source, next: body };
+  });
+  const changed = targets.filter(({ source, next }) => source !== next);
+  for (const { file, next } of changed) writeText(file, next);
+  return changed.length > 0
+    ? { status: 'applied', detail: changed.map(({ file }) => path.relative(distDir, file)).join(', ') }
+    : { status: 'clean', detail: 'already patched' };
+}
+
 function patchOwnedStdinStop(openclawDir) {
   const patchId = 'owned-stdin-stop';
   const targetFile = locateSingleJavaScriptFile(path.join(openclawDir, 'dist'), patchId, {
@@ -1726,6 +1783,10 @@ const OPENCLAW_PATCHES = Object.freeze([
     apply: patchOpenClawImageTasks,
   },
   {
+    id: 'native-account-video',
+    apply: patchOpenClawVideo,
+  },
+  {
     id: 'native-chat-consistency',
     apply(openclawDir) {
       const results = [
@@ -1738,6 +1799,14 @@ const OPENCLAW_PATCHES = Object.freeze([
         detail: results.map((result) => result.detail).join('; '),
       };
     },
+  },
+  {
+    id: 'native-session-cwd',
+    apply: patchNativeSessionCwd,
+  },
+  {
+    id: 'native-request-completion',
+    apply: patchOpenClawRequests,
   },
   {
     id: 'owned-stdin-stop',

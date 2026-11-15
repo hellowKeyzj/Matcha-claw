@@ -74,26 +74,7 @@ impl Directory {
                 ))
             };
         }
-        let mut standard = Fs::FILE_STANDARD_INFO::default();
-        // SAFETY: file is owned and standard is a correctly-sized output structure.
-        if unsafe {
-            Fs::GetFileInformationByHandleEx(
-                file.as_raw_handle(),
-                Fs::FileStandardInfo,
-                (&mut standard as *mut Fs::FILE_STANDARD_INFO).cast(),
-                size_of::<Fs::FILE_STANDARD_INFO>() as u32,
-            )
-        } == 0
-        {
-            return Err(io_error("read_links", io::Error::last_os_error()));
-        }
-        if standard.NumberOfLinks != 1 {
-            return Err(rpc::Error::new(
-                -32007,
-                "workspace_hardlink_forbidden",
-                "Files with multiple hard links cannot be read through the workspace API",
-            ));
-        }
+        require_single_link(&file)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|error| io_error("read", error))?;
@@ -104,7 +85,7 @@ impl Directory {
         let file = match name {
             Some(name) => open_file(
                 &self.path.join(name),
-                Fs::FILE_READ_ATTRIBUTES,
+                Fs::FILE_GENERIC_READ,
                 Fs::FILE_SHARE_READ,
             )?,
             None => self
@@ -115,6 +96,9 @@ impl Directory {
                 .map_err(|error| io_error("stat_clone", error))?,
         };
         let kind = file_kind(&file)?;
+        if kind == Kind::File {
+            require_single_link(&file)?;
+        }
         let metadata = file.metadata().map_err(|error| io_error("stat", error))?;
         super::stat_metadata(
             name.map(name_string).transpose()?.unwrap_or_default(),
@@ -193,6 +177,30 @@ impl Directory {
         }
         Ok(())
     }
+}
+
+fn require_single_link(file: &File) -> rpc::Result<()> {
+    let mut standard = Fs::FILE_STANDARD_INFO::default();
+    // SAFETY: file is owned and standard is a correctly-sized output structure.
+    if unsafe {
+        Fs::GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            Fs::FileStandardInfo,
+            (&mut standard as *mut Fs::FILE_STANDARD_INFO).cast(),
+            size_of::<Fs::FILE_STANDARD_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io_error("read_links", io::Error::last_os_error()));
+    }
+    if standard.NumberOfLinks != 1 {
+        return Err(rpc::Error::new(
+            -32007,
+            "workspace_hardlink_forbidden",
+            "Files with multiple hard links cannot be read through the workspace API",
+        ));
+    }
+    Ok(())
 }
 
 fn identity(file: &File) -> rpc::Result<(u64, [u8; 16])> {

@@ -9,7 +9,7 @@ use chrono::DateTime;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{config::validate_id, persistence::Database, rpc};
+use crate::{agent::RuntimeDirectoryError, persistence::Database, rpc};
 
 pub(super) async fn locate(
     runtime: &Path,
@@ -284,7 +284,7 @@ fn read_metadata(
             .read_to_end(&mut tail)
             .map_err(|error| io_error("history_source_read", error))?;
     }
-    // Fork roots can retain the source sessionId; cwd still belongs to this Agent.
+    // Fork roots can retain the source sessionId; cwd still belongs to this Session.
     for bytes in head.split(|byte| *byte == b'\n') {
         let Ok(entry) = serde_json::from_slice::<Value>(bytes) else {
             continue;
@@ -438,32 +438,23 @@ fn remove_tree(path: &Path) -> rpc::Result<()> {
     }
 }
 
-// The configured home is trusted; every component below it must stay at its assigned location.
 fn locations(runtime: &Path, workspace: &Path) -> rpc::Result<Option<(PathBuf, PathBuf)>> {
-    let agent = runtime.parent().ok_or_else(path_error)?;
-    let agents = agent.parent().ok_or_else(path_error)?;
-    let home = agents.parent().ok_or_else(path_error)?;
-    if !runtime.is_absolute()
-        || runtime.file_name().is_none_or(|name| name != "runtime")
-        || workspace != agent.join("workspace")
-        || agents.file_name().is_none_or(|name| name != "agents")
-    {
-        return Err(path_error());
-    }
-    let agent_id = agent
-        .file_name()
+    let agent_id = runtime
+        .parent()
+        .and_then(Path::file_name)
         .and_then(|name| name.to_str())
         .ok_or_else(path_error)?;
-    validate_id(agent_id).map_err(|_| path_error())?;
-    let home = fs::canonicalize(home).map_err(|error| io_error("history_home_resolve", error))?;
-    let Some(agent) = checked(&home, &Path::new("agents").join(agent_id))? else {
+    let Some(runtime) =
+        crate::agent::runtime_directory(runtime, agent_id).map_err(|error| match error {
+            RuntimeDirectoryError::Rejected => path_error(),
+            RuntimeDirectoryError::HomeResolve(error) => io_error("history_home_resolve", error),
+            RuntimeDirectoryError::Metadata(error) => io_error("history_path_metadata", error),
+            RuntimeDirectoryError::Resolve(error) => io_error("history_path_resolve", error),
+        })?
+    else {
         return Ok(None);
     };
-    let Some(runtime) = checked(&agent, Path::new("runtime"))? else {
-        return Ok(None);
-    };
-    let workspace = checked(&agent, Path::new("workspace"))?
-        .ok_or_else(|| rpc::Error::not_found("Agent workspace"))?;
+    let workspace = crate::workspace::checked_directory(workspace)?;
     Ok(Some((runtime, workspace)))
 }
 
@@ -508,8 +499,8 @@ fn validate_cwd(cwd: &str, workspace: &Path) -> rpc::Result<()> {
     // Native Windows cwd can be unprefixed while canonicalize returns a verbatim path.
     #[cfg(windows)]
     let (cwd, workspace) = (
-        unprefixed(cwd),
-        unprefixed(workspace.to_str().ok_or_else(path_error)?),
+        crate::workspace::native_path(PathBuf::from(cwd)),
+        crate::workspace::native_path(workspace.to_owned()),
     );
     #[cfg(not(windows))]
     let (cwd, workspace) = (PathBuf::from(cwd), workspace.to_owned());
@@ -545,15 +536,6 @@ fn validate_cwd(cwd: &str, workspace: &Path) -> rpc::Result<()> {
         return Err(cwd_error());
     }
     Ok(())
-}
-
-#[cfg(windows)]
-fn unprefixed(path: &str) -> PathBuf {
-    PathBuf::from(if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{unc}")
-    } else {
-        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
-    })
 }
 
 #[derive(Deserialize)]
@@ -1029,7 +1011,7 @@ fn path_error() -> rpc::Error {
 fn cwd_error() -> rpc::Error {
     rpc::Error::conflict(
         "history_workspace_mismatch",
-        "The native transcript cwd does not resolve inside this Agent workspace",
+        "The native transcript cwd does not resolve inside this Session workspace",
     )
 }
 

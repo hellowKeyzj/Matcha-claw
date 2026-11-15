@@ -153,8 +153,10 @@ export function createWorkflowTool(
           : {}),
         ...(input.resumeFromRunId ? { resume: true } : {}),
       })
-        .then(result => onFinish(ports, result, runId))
-        .catch(e => ports.taskRegistrar.fail(runId, (e as Error).message))
+        .then(result => onFinish(ports, result, runId, signal))
+        .catch(e =>
+          ports.taskRegistrar.fail(runId, (e as Error).message, signal),
+        )
 
       const scriptPath = workflowFile ?? `<inline run ${runId}>`
       return {
@@ -185,17 +187,18 @@ function onFinish(
   ports: WorkflowPorts,
   result: WorkflowRunResult,
   runId: string,
+  signal: AbortSignal,
 ): void {
   if (result.status === 'completed') {
     const summary =
       result.returnValue == null
         ? '(no return value)'
         : formatValue(result.returnValue)
-    ports.taskRegistrar.complete(runId, summary)
+    ports.taskRegistrar.complete(runId, summary, signal)
   } else if (result.status === 'failed') {
-    ports.taskRegistrar.fail(runId, result.error ?? 'workflow failed')
+    ports.taskRegistrar.fail(runId, result.error ?? 'workflow failed', signal)
   } else {
-    ports.taskRegistrar.kill(runId)
+    ports.taskRegistrar.kill(runId, signal)
   }
 }
 

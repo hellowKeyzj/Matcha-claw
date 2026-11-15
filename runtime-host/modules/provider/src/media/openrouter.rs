@@ -17,11 +17,16 @@ const IMAGE_RATIOS: &[&str] = &[
     "19.5:9", "9:20", "20:9", "9:21", "21:9", "auto",
 ];
 
-pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabilities, Failure> {
+pub(super) fn capabilities(
+    model: &ProviderModel,
+    kind: Kind,
+    endpoint_validates_options: bool,
+) -> Result<Capabilities, Failure> {
     let mut limits = Capabilities {
         max_images: 0,
         max_count: 1,
         mask: false,
+        endpoint_validates_options,
         pixel_size: false,
         pixel_size_limits: None,
         sizes: None,
@@ -29,6 +34,10 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
         storyboard: false,
     };
     match kind {
+        Kind::Image if endpoint_validates_options => {
+            limits.max_images = 16;
+            limits.max_count = 10;
+        }
         Kind::Image => match model.model_id() {
             GPT_IMAGE => {
                 limits.max_images = 16;
@@ -41,6 +50,7 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
             }
             _ => {}
         },
+        Kind::Video if endpoint_validates_options => limits.max_images = 1,
         Kind::Video => {
             if let Some((sizes, durations, _)) = video_parameters(model) {
                 limits.max_images = 1;
@@ -54,37 +64,47 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
     Ok(limits)
 }
 
-pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), Failure> {
-    let limits = capabilities(model, request.kind)?;
+pub(super) fn validate(
+    model: &ProviderModel,
+    request: &Request,
+    endpoint_validates_options: bool,
+) -> Result<(), Failure> {
+    let limits = capabilities(model, request.kind, endpoint_validates_options)?;
+    let endpoint_image = endpoint_validates_options && request.kind == Kind::Image;
+    let endpoint_video = endpoint_validates_options && request.kind == Kind::Video;
     if request.mask.is_some()
         || request.images.len() > usize::from(limits.max_images)
         || request.count.unwrap_or(1) > limits.max_count
-        || request
-            .size
-            .as_deref()
-            .or(model.resolution())
-            .is_some_and(|size| {
+        || !(endpoint_image || endpoint_video)
+            && request
+                .size
+                .as_deref()
+                .or(model.resolution())
+                .is_some_and(|size| {
+                    !limits
+                        .sizes
+                        .as_ref()
+                        .is_some_and(|sizes| sizes.iter().any(|supported| supported == size))
+                })
+        || !endpoint_video
+            && request.duration_seconds.is_some_and(|seconds| {
                 !limits
-                    .sizes
+                    .durations_seconds
                     .as_ref()
-                    .is_some_and(|sizes| sizes.iter().any(|supported| supported == size))
+                    .is_some_and(|durations| durations.contains(&seconds))
             })
-        || request.duration_seconds.is_some_and(|seconds| {
-            !limits
-                .durations_seconds
-                .as_ref()
-                .is_some_and(|durations| durations.contains(&seconds))
-        })
     {
         return Err(Failure::Unsupported);
     }
     let quality_supported = match request.kind {
+        Kind::Image if endpoint_validates_options => true,
         Kind::Image if model.model_id() == GPT_IMAGE => model
             .quality()
             .is_none_or(|quality| matches!(quality, "auto" | "low" | "medium" | "high")),
         _ => model.quality().is_none(),
     };
     let ratio_supported = match request.kind {
+        Kind::Image | Kind::Video if endpoint_validates_options => true,
         Kind::Image if model.model_id() == GPT_IMAGE => model
             .aspect_ratio()
             .is_none_or(|ratio| matches!(ratio, "1:1" | "3:2" | "2:3" | "auto")),

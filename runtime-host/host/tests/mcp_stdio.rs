@@ -868,16 +868,16 @@ fn prepare_evidence_run(home: &Home) {
                 .manual_team_materialize(
                     team_id.clone(),
                     "Team One".into(),
-                    RuntimeEndpointReference::try_new(
-                        runtime_directory::RuntimeDriverIdentity::open_claw()
-                            .runtime_endpoint_reference(),
-                    )
-                    .unwrap(),
                     vec![
                         organization::ManualTeamRoleBinding::try_new(
                             RoleId::try_new("leader").unwrap(),
                             "Leader",
                             organization::ManagedAgentReference::try_new("leader").unwrap(),
+                            RuntimeEndpointReference::try_new(
+                                runtime_directory::RuntimeDriverIdentity::open_claw()
+                                    .runtime_endpoint_reference(),
+                            )
+                            .unwrap(),
                             true,
                         )
                         .unwrap(),

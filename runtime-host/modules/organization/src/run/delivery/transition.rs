@@ -291,7 +291,7 @@ pub(crate) fn observe_native_terminal(
     Ok(outcome)
 }
 
-fn terminal_observation_matches_graph(
+pub(crate) fn terminal_observation_matches_graph(
     graph: &GraphState,
     observation: &TerminalObservation,
 ) -> bool {

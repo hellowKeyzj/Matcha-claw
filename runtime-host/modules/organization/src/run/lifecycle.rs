@@ -310,9 +310,7 @@ impl GraphRunLifecycle {
 pub(crate) fn cancellation_plan(run: &GraphRunFacts) -> CancellationPlan {
     CancellationPlan::new(
         run.run_id().clone(),
-        run.runtime()
-            .map(|receipt| receipt.bindings().to_vec())
-            .unwrap_or_default(),
+        run.confirmed_role_sessions(),
     )
 }
 

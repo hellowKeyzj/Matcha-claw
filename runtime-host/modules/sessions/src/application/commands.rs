@@ -58,6 +58,8 @@ pub struct SessionEvent {
     pub cursor: Option<u64>,
     pub history_refresh: bool,
     pub changes: Vec<super::state::SessionChange>,
+    /// Explicit native work status; None leaves the last known projection unchanged.
+    pub work_pending: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,13 +147,15 @@ pub enum SessionCommand {
     },
     Ensure {
         identity: SessionIdentity,
+        endpoint_session_id: Option<String>,
         source_binding: SessionSourceBinding,
         reply: oneshot::Sender<SessionEnsureOutcome>,
     },
     Ingest {
         identity: SessionIdentity,
         event: SessionEvent,
-        reply: oneshot::Sender<SessionIngestOutcome>,
+        permit: Option<crate::owner::terminal::TerminalPermit>,
+        reply: oneshot::Sender<Result<SessionIngestOutcome, (SessionEvent, usize)>>,
     },
     ObservationFailed {
         identity: SessionIdentity,
@@ -165,6 +169,20 @@ pub enum SessionCommand {
         waiter_id: u64,
         acquired: bool,
     },
+    WorkCheckReady {
+        identity: SessionIdentity,
+        generation: u64,
+        check_id: u64,
+        reply: oneshot::Sender<Option<(u64, u64, Option<String>)>>,
+    },
+    WorkCheckCompleted {
+        identity: SessionIdentity,
+        generation: u64,
+        check_id: u64,
+        result: Result<bool, RuntimeOperationFailure>,
+        permit: Option<crate::owner::terminal::TerminalPermit>,
+        reply: oneshot::Sender<Result<(), usize>>,
+    },
     SyncCompleted {
         identity: SessionIdentity,
         generation: u64,
@@ -175,19 +193,27 @@ pub enum SessionCommand {
         generation: u64,
         terminals: Vec<(crate::ports::SessionTerminalRun, crate::state::TerminalBodies)>,
         publish: bool,
-        permit: crate::owner::terminal::TerminalPermit,
-        reply: oneshot::Sender<Option<crate::state::SyncTerminalChanges>>,
+        permit: Option<crate::owner::terminal::TerminalPermit>,
+        reply: oneshot::Sender<Result<Option<crate::state::SyncTerminalChanges>, (Vec<(crate::ports::SessionTerminalRun, crate::state::TerminalBodies)>, usize)>>,
     },
-    TerminalIngest {
+    RecoverTerminalRead {
         identity: SessionIdentity,
-        event: SessionEvent,
+        run_id: String,
         permit: crate::owner::terminal::TerminalPermit,
-        reply: oneshot::Sender<SessionIngestOutcome>,
+        reply: oneshot::Sender<Result<(), RuntimeOperationFailure>>,
+    },
+    TerminalReadCompleted {
+        identity: SessionIdentity,
+        run_id: String,
+        permit: crate::owner::terminal::TerminalPermit,
+        result: Result<crate::execution::SessionRunRecord, super::state::RuntimeIssue>,
+        reply: oneshot::Sender<bool>,
     },
     TerminalDelivered {
         identity: SessionIdentity,
         run_id: String,
         request_id: Option<String>,
+        permit: crate::owner::terminal::TerminalPermit,
         reply: oneshot::Sender<bool>,
     },
     ObservationClosed {
@@ -279,13 +305,17 @@ impl SessionCommand {
             Self::Ensure { reply, .. } => {
                 let _ = reply.send(SessionEnsureOutcome::Failed);
             }
-            Self::Ingest { reply, .. } | Self::TerminalIngest { reply, .. } => {
-                let _ = reply.send(SessionIngestOutcome::RuntimeNotFound);
+            Self::Ingest { reply, .. } => {
+                let _ = reply.send(Ok(SessionIngestOutcome::RuntimeNotFound));
             }
-            Self::SyncCompleted { .. } | Self::ObservationClosed { .. } | Self::ObserveReplyCompleted { .. } => {}
+            Self::SyncCompleted { .. }
+            | Self::ObservationClosed { .. } | Self::ObserveReplyCompleted { .. } => {}
+            Self::WorkCheckCompleted { reply, .. } => { let _ = reply.send(Ok(())); }
+            Self::WorkCheckReady { reply, .. } => { let _ = reply.send(None); }
             Self::ObservationFailed { reply, .. } => { let _ = reply.send(false); }
-            Self::SyncTerminals { reply, .. } => { let _ = reply.send(None); }
-            Self::TerminalDelivered { reply, .. } => { let _ = reply.send(false); }
+            Self::SyncTerminals { reply, .. } => { let _ = reply.send(Ok(None)); }
+            Self::TerminalDelivered { reply, .. } | Self::TerminalReadCompleted { reply, .. } => { let _ = reply.send(false); }
+            Self::RecoverTerminalRead { reply, .. } => { let _ = reply.send(Err(RuntimeOperationFailure::Unavailable)); }
             Self::Release { reply, .. } => {
                 let _ = reply.send(SessionReleaseOutcome::Unavailable);
             }
@@ -343,9 +373,12 @@ impl SessionCommand {
             | Self::ObservationFailed { identity, .. }
             | Self::ObserveReplyCompleted { identity, .. }
             | Self::SyncCompleted { identity, .. }
+            | Self::WorkCheckReady { identity, .. }
+            | Self::WorkCheckCompleted { identity, .. }
             | Self::SyncTerminals { identity, .. }
-            | Self::TerminalIngest { identity, .. }
             | Self::TerminalDelivered { identity, .. }
+            | Self::RecoverTerminalRead { identity, .. }
+            | Self::TerminalReadCompleted { identity, .. }
             | Self::ObservationClosed { identity, .. } => {
                 CommandRoute::KeyedControl(session_identity_lane_key(identity))
             }

@@ -15,7 +15,7 @@ pub struct SessionRunTerminalSnapshot {
     pub native_message_id: Option<String>,
     pub measurement: crate::execution::SessionRunMeasurement,
     pub phase: RunPhase,
-    pub assistant_texts: Vec<String>,
+    pub assistant_texts: Result<Vec<String>, ()>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

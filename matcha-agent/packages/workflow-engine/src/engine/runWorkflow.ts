@@ -38,12 +38,10 @@ export async function runWorkflow(
     parsed = parseScript(opts.script)
   } catch (e) {
     const error = (e as Error).message
-    ports.progressEmitter.emit({
-      type: 'run_done',
-      runId: opts.runId,
-      status: 'failed',
-      error,
-    })
+    ports.progressEmitter.emit(
+      { type: 'run_done', runId: opts.runId, status: 'failed', error },
+      opts.signal,
+    )
     return { status: 'failed', error }
   }
 
@@ -72,12 +70,15 @@ export async function runWorkflow(
   })
   if (journalInvalidated) ctx.journalInvalidated = true
 
-  ports.progressEmitter.emit({
-    type: 'run_started',
-    runId: opts.runId,
-    workflowName,
-    meta: parsed.meta,
-  })
+  ports.progressEmitter.emit(
+    {
+      type: 'run_started',
+      runId: opts.runId,
+      workflowName,
+      meta: parsed.meta,
+    },
+    opts.signal,
+  )
 
   // Sub-workflow executor: reuses the same ctx (sharing journal/concurrency/budget/counters), temporarily +1 depth
   const runSubWorkflow: SubWorkflowRunner = async sub => {
@@ -107,11 +108,10 @@ export async function runWorkflow(
   // would stay running forever (the agent list already shows ✓ done). Emit one before the terminal state — shared by all paths.
   const emitTerminalPhaseDone = (): void => {
     if (!ctx.currentPhase) return
-    ports.progressEmitter.emit({
-      type: 'phase_done',
-      runId: opts.runId,
-      phase: ctx.currentPhase,
-    })
+    ports.progressEmitter.emit(
+      { type: 'phase_done', runId: opts.runId, phase: ctx.currentPhase },
+      opts.signal,
+    )
   }
 
   let result: WorkflowRunResult
@@ -130,11 +130,10 @@ export async function runWorkflow(
     }
   }
   emitTerminalPhaseDone()
-  ports.progressEmitter.emit({
-    type: 'run_done',
-    runId: opts.runId,
-    ...result,
-  })
+  ports.progressEmitter.emit(
+    { type: 'run_done', runId: opts.runId, ...result },
+    opts.signal,
+  )
   return result
 }
 

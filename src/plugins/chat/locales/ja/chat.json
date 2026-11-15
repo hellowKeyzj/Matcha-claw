@@ -24,6 +24,37 @@
         "process": "実行過程",
         "tools_count": "ツール呼び出し {{count}} 回"
     },
+    "mediaTask": {
+        "imageTitle": "画像生成",
+        "videoTitle": "動画生成",
+        "submitting": "送信中",
+        "submitted": "送信済み・状態を取得中",
+        "queued": "順番待ち",
+        "running": "生成中",
+        "completed": "生成完了",
+        "deliveryBlocked": "生成済み・結果は未配信",
+        "delivering": "生成済み・結果を配信中",
+        "failed": "生成失敗",
+        "timed_out": "待機がタイムアウトしました",
+        "cancelled": "キャンセル済み",
+        "deleted": "タスクは削除されました",
+        "unconfirmed": "タスクの状態を確認できません",
+        "waited": "待機時間 {{duration}}",
+        "timeoutHint": "クラウドでは生成が続いている可能性があります。",
+        "failureUnknown": "失敗の理由を取得できませんでした。"
+    },
+    "videoTask": {
+        "timeoutHint": "クラウドでは生成が続いている可能性があります。再生成せずに、元のタスクの結果を確認できます。",
+        "query": "元のタスクの結果を確認",
+        "querying": "確認中",
+        "queryFailed": "確認に失敗しました：{{error}}",
+        "queryUnavailable": "現在、元のタスクを確認できません。しばらくしてから再試行してください。",
+        "missing_job_reference": "この過去のタスクにはクラウドのタスクIDが保存されていないため、結果を自動取得できません。",
+        "provider_unsupported": "このプロバイダーは元のタスクの結果取得に対応していません。",
+        "task_unavailable": "元のタスクは確認できません。正しい会話を開いているか確認してください。",
+        "query_rejected": "ランタイムが確認要求を拒否しました。動画ツールの権限とモデル設定を確認してください。",
+        "stillRunning": "元のタスクは順番待ちか生成中です。しばらくしてから再度確認してください。"
+    },
     "toolActivity": {
         "input": "入力",
         "output": "出力",
@@ -557,6 +588,7 @@
         "modified": "更新",
         "deleted": "削除",
         "revealFailed": "ファイルマネージャーで場所を表示できませんでした",
+        "workspacePreparing": "Run の共有ワークスペースを準備中",
         "workspaceEmpty": "参照できるワークスペースディレクトリがありません。",
         "workspaceLoadError": "ファイルを読み込めません",
         "workspaceLoadFailed": "ワークスペースの読み込みに失敗しました: {{error}}"

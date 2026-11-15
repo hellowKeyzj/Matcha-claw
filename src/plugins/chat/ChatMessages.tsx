@@ -369,7 +369,7 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
     avatarStyle: currentAgent?.avatarStyle,
   }), [currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId]);
   const pendingRunProgressLabel = buildRunProgressPendingLabel(currentSession.runtime.runProgress, t);
-  const sessionPending = useMemo(() => createSessionPending(currentSession, currentSessionRecordKey), [currentSession, currentSessionRecordKey]);
+  const sessionPending = useMemo(() => createSessionPending(currentSession), [currentSession]);
   const renderItems = useMemo(() => {
     const runtimePlaceholder = sessionPending?.kind === 'assistant' ? {
       ...sessionPending.item,

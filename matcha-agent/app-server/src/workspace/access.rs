@@ -69,20 +69,13 @@ pub(super) fn validate_segment(name: &str) -> rpc::Result<()> {
 pub(super) struct Directory(platform::Directory);
 
 impl Directory {
-    pub fn open(root: &Path, workspace: &Path) -> rpc::Result<Self> {
-        // These paths come only from ConfigStore; the request contributes no absolute path.
-        let relative = workspace.strip_prefix(root).map_err(|_| denied())?;
-        let canonical = fs::canonicalize(root).map_err(|error| io_error("root", error))?;
-        let mut directory = platform::Directory::open(&canonical)?;
-        for component in relative.components() {
-            let Component::Normal(name) = component else {
-                return Err(denied());
-            };
-            directory.descend(name)?;
-        }
-        let observed = fs::canonicalize(workspace).map_err(|error| io_error("root", error))?;
-        directory.verify_canonical(&observed)?;
-        Ok(Self(directory))
+    pub fn open(workspace: &Path) -> rpc::Result<(Self, PathBuf)> {
+        // Only ConfigStore or a managed Session record selects this root.
+        // Open the original absolute path before canonicalizing: resolving first would hide redirects.
+        let directory = platform::Directory::open(workspace)?;
+        let canonical = fs::canonicalize(workspace).map_err(|error| io_error("root", error))?;
+        directory.verify_canonical(&canonical)?;
+        Ok((Self(directory), super::native_path(canonical)))
     }
 
     pub fn descend(&mut self, name: &str) -> rpc::Result<()> {
@@ -194,6 +187,12 @@ pub(super) fn denied() -> rpc::Error {
 }
 
 pub(super) fn io_error(operation: &'static str, error: io::Error) -> rpc::Error {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return denied()
+            .with_data(serde_json::json!({ "operation": operation }))
+            .with_source(error);
+    }
     let (code, kind, message) = match error.kind() {
         io::ErrorKind::NotFound => (
             -32001,

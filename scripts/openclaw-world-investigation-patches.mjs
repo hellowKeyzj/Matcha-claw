@@ -1221,6 +1221,12 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
     source = replaceOnce(source, 'function deleteSessionPendingInputs(Ot,Zt){', 'function deleteSessionPendingInputs(Ot,Zt){assertMatchaWorldWorkerRetained(Ot,"session_key",Zt);');
     return replaceOnce(source, 'function consumeSessionPendingInput(Ot,Zt){', 'function consumeSessionPendingInput(Ot,Zt){if(Ot.db.prepare("PRAGMA table_info(session_pending_inputs)").all().some(column=>column.name==="world_investigation_json")&&Ot.db.prepare("SELECT world_investigation_json FROM session_pending_inputs WHERE input_id = ?").get(Zt.inputId)?.world_investigation_json)throw new Error("World input promotion requires its original atomic transcript owner");');
   });
+  const inventoryFile = path.join(dist, 'postinstall-inventory.json');
+  const inventory = JSON.parse(fs.readFileSync(inventoryFile, 'utf8'));
+  if (!inventory.includes(`dist/${RUNTIME_FILE}`)) {
+    inventory.push(`dist/${RUNTIME_FILE}`);
+    updates.set(inventoryFile, `${JSON.stringify(inventory, null, 2)}\n`);
+  }
   // All source anchors are checked before any product file is written.
   let changed = 0;
   for (const [file, source] of updates) {

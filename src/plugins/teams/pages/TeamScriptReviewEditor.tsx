@@ -6,11 +6,11 @@ export function TeamScriptReviewEditor({ editable, disabled, labels, rule, onRul
   const id = useId();
 
   return (
-    <section className="space-y-2" aria-labelledby={`${id}-label`}>
-      <h3 id={`${id}-label`} className="text-sm font-medium text-foreground">{labels.scriptReviewRule}</h3>
+    <section className="space-y-[9px]" aria-labelledby={`${id}-label`}>
+      <h3 id={`${id}-label`} className="text-xs font-medium text-foreground">{labels.scriptReviewRule}</h3>
       {editable ? (
         <select
-          className="h-11 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50"
+          className="h-[41px] w-full min-w-0 rounded-[9px] border border-[hsl(var(--shell-border))] bg-[hsl(var(--shell-surface))] px-3 py-2.5 text-xs leading-[1.6] text-foreground hover:border-[hsl(var(--shell-border-strong))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-[hsl(var(--shell-surface-muted))]"
           value={rule}
           required
           disabled={disabled}
@@ -23,11 +23,11 @@ export function TeamScriptReviewEditor({ editable, disabled, labels, rule, onRul
           {Object.entries(labels.scriptReviewRules).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select>
       ) : rule ? (
-        <p className="text-sm text-foreground">{labels.scriptReviewRules[rule]}</p>
+        <p className="text-xs text-foreground">{labels.scriptReviewRules[rule]}</p>
       ) : null}
       <p
         id={`${id}-description`}
-        className={`text-sm leading-relaxed ${rule ? 'text-muted-foreground' : 'text-destructive'}`}
+        className={`text-[11px] leading-relaxed ${rule ? 'text-muted-foreground' : 'text-destructive'}`}
         role={rule ? undefined : 'alert'}
       >
         {rule ? labels.scriptReviewRuleDescriptions[rule] : labels.scriptReviewRuleRequired}

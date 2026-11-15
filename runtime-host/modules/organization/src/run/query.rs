@@ -3,8 +3,8 @@ use std::fmt;
 use crate::{
     DeliveryPhase, GraphStatus, OrganizationFacts, RoleSessionReceipt, TeamId, TeamRevision,
     run::{
-        GraphRunId, delivery::TerminalObservationResolution, lifecycle::GraphRunLifecycleState,
-        project,
+        GraphRunId, delivery::TerminalObservationResolution, graph::graph_status,
+        lifecycle::GraphRunLifecycleState,
         public_projection::{TeamRunPublicLifecycle, TeamRuntimeState},
     },
 };
@@ -104,6 +104,7 @@ pub struct TeamRunListEntry {
     pub projection: TeamRunProjection,
     pub lifecycle: TeamRunPublicLifecycle,
     pub runtime: TeamRuntimeState,
+    pub workspace: crate::run::public_projection::TeamRunPublicWorkspace,
 }
 
 pub(crate) fn query_team_run_list(facts: &OrganizationFacts, team_id: &TeamId) -> Vec<TeamRunListEntry> {
@@ -132,14 +133,47 @@ pub(crate) fn query_team_run_list(facts: &OrganizationFacts, team_id: &TeamId) -
                     team_id.clone(),
                     run.run_id().clone(),
                     team.revision(),
-                    project(run.graph()).status,
+                    graph_status(run.graph()),
                     sessions,
                 ),
                 lifecycle,
                 runtime,
+                workspace: crate::run::public_projection::TeamRunPublicWorkspace::from_run(run),
             })
         })
         .collect()
+}
+
+pub(crate) fn query_run_workspace(
+    facts: &OrganizationFacts,
+    team: &TeamId,
+    run: &GraphRunId,
+) -> Option<crate::run::public_projection::TeamRunPublicWorkspace> {
+    facts.team(team).filter(|team| !team.tombstoned())?;
+    facts.run(run)
+        .filter(|run| run.team() == team
+            && !matches!(run.lifecycle().state(), GraphRunLifecycleState::Tombstoned { .. }))
+        .map(crate::run::public_projection::TeamRunPublicWorkspace::from_run)
+}
+
+pub(crate) fn query_run_workspace_binding(
+    facts: &OrganizationFacts, team: &TeamId, run: &GraphRunId, endpoint: &crate::RuntimeEndpointReference,
+    access: crate::RunWorkspaceAccess,
+) -> Result<Option<crate::RunWorkspaceBinding>, crate::StoreFault> {
+    if facts.team(team).is_none_or(|team| team.tombstoned()) { return Err(crate::StoreFault::InvalidFacts); }
+    let run = facts.run(run).filter(|run| run.team() == team
+        && matches!((run.lifecycle().state(), access),
+            (GraphRunLifecycleState::Active, _)
+            | (GraphRunLifecycleState::Cancelled { .. }, crate::RunWorkspaceAccess::Read)))
+        .ok_or(crate::StoreFault::InvalidFacts)?;
+    let Some(workspace) = run.workspace().filter(|_| run.workspace_ready()) else { return Ok(None); };
+    let runtime = run.runtime().ok_or(crate::StoreFault::InvalidFacts)?;
+    if runtime.team_run() != run.run_id() || runtime.bindings().iter().any(|binding| {
+        binding.team() != team || binding.team_run() != run.run_id()
+    }) { return Err(crate::StoreFault::InvalidFacts); }
+    let binding = runtime.bindings().iter().find(|binding| binding.endpoint() == endpoint)
+        .ok_or(crate::StoreFault::InvalidFacts)?.clone();
+    Ok(Some(crate::RunWorkspaceBinding { workspace: workspace.clone(), binding }))
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -190,6 +224,36 @@ pub(crate) fn query_team_role_sessions(
             TeamRunQueryOutcome::Unavailable => {}
         }
     }
+    sort_role_sessions(&mut sessions);
+
+    if sessions.is_empty() && unknown {
+        TeamRoleSessionQueryOutcome::OutcomeUnknown
+    } else {
+        TeamRoleSessionQueryOutcome::Available(sessions)
+    }
+}
+
+pub(crate) fn query_run_role_sessions(
+    facts: &OrganizationFacts,
+    team: &TeamId,
+    run_id: &GraphRunId,
+) -> Option<Vec<RoleSessionReceipt>> {
+    facts.team(team).filter(|team| !team.tombstoned())?;
+    facts.materialization(team)?;
+    let run = facts.run(run_id).filter(|run| run.team() == team
+        && !matches!(run.lifecycle().state(), GraphRunLifecycleState::Tombstoned { .. }))?;
+    if !runtime_is_unknown(facts, run) {
+        let mut sessions = run.runtime()?.bindings().to_vec();
+        sort_role_sessions(&mut sessions);
+        return Some(sessions);
+    }
+    // Preserve the team query's available-but-empty result without projecting other runs.
+    facts.runs().any(|run| run.team() == team
+        && !matches!(run.lifecycle().state(), GraphRunLifecycleState::Tombstoned { .. })
+        && !runtime_is_unknown(facts, run)).then(Vec::new)
+}
+
+fn sort_role_sessions(sessions: &mut [RoleSessionReceipt]) {
     sessions.sort_by(|left, right| {
         (
             left.team_run().as_str(),
@@ -204,12 +268,6 @@ pub(crate) fn query_team_role_sessions(
                 right.endpoint_session_id().as_str(),
             ))
     });
-
-    if sessions.is_empty() && unknown {
-        TeamRoleSessionQueryOutcome::OutcomeUnknown
-    } else {
-        TeamRoleSessionQueryOutcome::Available(sessions)
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -247,23 +305,7 @@ pub(crate) fn query_team_run(facts: &OrganizationFacts, query: &TeamRunQuery) ->
     let Some(runtime) = run.runtime() else {
         return TeamRunQueryOutcome::OutcomeUnknown;
     };
-    if matches!(
-        run.lifecycle().state(),
-        GraphRunLifecycleState::Cancelling { .. } | GraphRunLifecycleState::OutcomeUnknown { .. }
-    ) {
-        return TeamRunQueryOutcome::OutcomeUnknown;
-    }
-    if facts.deliveries().deliveries().any(|delivery| {
-        delivery.facts().run_id == query.run().as_str()
-            && match delivery.phase() {
-                DeliveryPhase::OutcomeUnknown { .. } => true,
-                DeliveryPhase::TerminalObserved { observation } => matches!(
-                    observation.resolution(),
-                    TerminalObservationResolution::AwaitingAuthorizedGraphResolution
-                ),
-                _ => false,
-            }
-    }) {
+    if runtime_is_unknown(facts, run) {
         return TeamRunQueryOutcome::OutcomeUnknown;
     }
 
@@ -271,9 +313,28 @@ pub(crate) fn query_team_run(facts: &OrganizationFacts, query: &TeamRunQuery) ->
         query.team().clone(),
         query.run().clone(),
         team.revision(),
-        project(run.graph()).status,
+        graph_status(run.graph()),
         runtime.bindings().to_vec(),
     ))
+}
+
+pub(crate) fn runtime_is_unknown(facts: &OrganizationFacts, run: &crate::GraphRunFacts) -> bool {
+    run.runtime().is_none()
+        || matches!(
+            run.lifecycle().state(),
+            GraphRunLifecycleState::Cancelling { .. }
+                | GraphRunLifecycleState::OutcomeUnknown { .. }
+        )
+        || facts.deliveries_for_run(run.run_id().as_str()).any(|delivery| {
+            match delivery.phase() {
+                DeliveryPhase::OutcomeUnknown { .. } => true,
+                DeliveryPhase::TerminalObserved { observation } => matches!(
+                    observation.resolution(),
+                    TerminalObservationResolution::AwaitingAuthorizedGraphResolution
+                ),
+                _ => false,
+            }
+        })
 }
 
 #[cfg(test)]

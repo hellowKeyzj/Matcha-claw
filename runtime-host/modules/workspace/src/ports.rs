@@ -24,6 +24,22 @@ pub trait WorkspaceRuntimeDirectory: Send + Sync {
 
 pub type WorkspaceFuture<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceFileAccess {
+    Read,
+    Write,
+}
+
+pub trait TeamRunWorkspaceReader: Send + Sync {
+    fn bind<'a>(
+        &'a self,
+        endpoint: &'a RuntimeEndpoint,
+        team_id: &'a str,
+        run_id: &'a str,
+        access: WorkspaceFileAccess,
+    ) -> WorkspaceFuture<'a, Arc<dyn WorkspaceBinding>, WorkspaceDirectoryFailure>;
+}
+
 pub trait WorkspaceOps: Send + Sync {
     fn bind_agent_workspace<'a>(
         &'a self,
@@ -102,6 +118,8 @@ pub trait WorkspaceOps: Send + Sync {
 /// Native-selected resource identity and effects share one bound directory.
 pub trait WorkspaceBinding: Send + Sync {
     fn resource_key(&self) -> Option<&str>;
+
+    fn directory_matches(&self, root: &std::path::Path) -> bool;
 
     fn read_text<'a>(
         &'a self,

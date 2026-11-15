@@ -109,7 +109,7 @@ pub(super) async fn historical(
         let stat = client
             .call(
                 "workspace.stat",
-                serde_json::json!({"agentId":agent_id,"path":path}),
+                serde_json::json!({"agentId":agent_id,"sessionId":session_id,"path":path}),
             )
             .await
             .map_err(failure)?;
@@ -123,7 +123,7 @@ pub(super) async fn historical(
         if size > max_bytes as u64 {
             return Err(WorkspaceMediaFailure::TooLarge);
         }
-        let bytes = client.read_file(agent_id, &path).await.map_err(failure)?;
+        let bytes = client.read_file(agent_id, Some(session_id), &path).await.map_err(failure)?;
         if bytes.len() > max_bytes {
             return Err(WorkspaceMediaFailure::TooLarge);
         }

@@ -13,6 +13,7 @@ use crate::api::WorkspaceHandle;
 
 pub(crate) mod binary;
 pub(crate) mod directory;
+mod file;
 pub(crate) mod media;
 pub(crate) mod session_images;
 pub(crate) mod text;

@@ -2,9 +2,7 @@ use std::fmt;
 
 use crate::{GraphRunId, run::event::OpaqueId};
 
-use super::ApprovalDecision;
-
-const MAX_DECISION_NOTE_BYTES: usize = 256;
+use super::{ApprovalDecision, model::is_note};
 
 /// A human decision addressing one already-requested TeamRun approval.
 ///
@@ -91,8 +89,4 @@ impl fmt::Debug for HumanDecisionCommand {
             .field("resolved_at", &self.resolved_at)
             .finish()
     }
-}
-
-fn is_note(value: &str) -> bool {
-    !value.trim().is_empty() && value.len() <= MAX_DECISION_NOTE_BYTES
 }

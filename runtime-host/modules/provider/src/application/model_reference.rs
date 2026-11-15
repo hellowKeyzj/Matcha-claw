@@ -77,9 +77,22 @@ impl ModelReferenceCatalog {
         for record in document.models {
             let model_id =
                 normalized_text(record.model_id).ok_or(ModelReferenceCatalogError::ModelId)?;
+            let capabilities = record
+                .capabilities
+                .into_iter()
+                .map(parse_capability)
+                .collect::<Result<Vec<_>, _>>()?;
             if normalized_text(record.source).is_none()
                 || !is_checked_at_date(&record.checked_at)
-                || (record.context_window.is_none() && record.max_tokens.is_none())
+                || (record.context_window.is_none()
+                    && record.max_tokens.is_none()
+                    && capabilities.iter().any(|capability| {
+                        matches!(
+                            capability,
+                            ProviderModelCapability::Chat
+                                | ProviderModelCapability::ImageUnderstand
+                        )
+                    }))
                 || record.context_window == Some(0)
                 || record.max_tokens == Some(0)
             {
@@ -91,11 +104,6 @@ impl ModelReferenceCatalog {
             {
                 return Err(ModelReferenceCatalogError::Record);
             }
-            let capabilities = record
-                .capabilities
-                .into_iter()
-                .map(parse_capability)
-                .collect::<Result<Vec<_>, _>>()?;
             if capabilities.is_empty() {
                 return Err(ModelReferenceCatalogError::Capability);
             }

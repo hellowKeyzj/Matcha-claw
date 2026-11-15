@@ -8,7 +8,7 @@ use std::{
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::{rpc, session::NativeFiles};
+use crate::{agent::RuntimeDirectoryError, rpc, session::NativeFiles};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -221,23 +221,12 @@ fn timestamp(time: SystemTime) -> rpc::Result<u64> {
 }
 
 fn runtime(files: &NativeFiles) -> rpc::Result<Option<PathBuf>> {
-    let agent = files.runtime.parent().ok_or_else(super::native_invalid)?;
-    let agents = agent.parent().ok_or_else(super::native_invalid)?;
-    let home = agents.parent().ok_or_else(super::native_invalid)?;
-    if files.runtime != agent.join("runtime")
-        || files.workspace != agent.join("workspace")
-        || agent
-            .file_name()
-            .is_none_or(|name| name != files.agent_id.as_str())
-        || agents.file_name().is_none_or(|name| name != "agents")
-    {
-        return Err(super::native_invalid());
-    }
-    let home = fs::canonicalize(home).map_err(|error| io_error("task_io", error))?;
-    checked(
-        &home,
-        &Path::new("agents").join(&files.agent_id).join("runtime"),
-    )
+    crate::agent::runtime_directory(&files.runtime, &files.agent_id).map_err(|error| match error {
+        RuntimeDirectoryError::Rejected => super::native_invalid(),
+        RuntimeDirectoryError::HomeResolve(error)
+        | RuntimeDirectoryError::Metadata(error)
+        | RuntimeDirectoryError::Resolve(error) => io_error("task_io", error),
+    })
 }
 
 fn ensure_runtime(files: &NativeFiles) -> rpc::Result<PathBuf> {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
@@ -8,15 +8,14 @@ use crate::{
         approval::{ApprovalDecision, ApprovalResolutionCause, ApprovalStatus},
         decision::TeamDecisionType,
         delivery::{
-            AuthorizedGraphOutcome, DeliveryFailure, NativeTerminalStatus,
-            TerminalObservationResolution,
+            AuthorizedGraphOutcome, DeliveryFailure, TerminalObservationResolution,
         },
         event::TeamEventType,
         graph::{
-            AttemptReason, AttemptStatus, EdgeAction, EdgeStatus, GraphStatus, NodeKind,
-            StartTrigger, project,
+            self, AttemptReason, AttemptStatus, EdgeAction, GraphStatus, NodeKind, StartTrigger,
         },
         lifecycle::GraphRunLifecycleState,
+        query::runtime_is_unknown,
     },
 };
 
@@ -24,7 +23,16 @@ use crate::{
 mod public_evidence_projection;
 #[path = "public_message_projection.rs"]
 mod public_message_projection;
+#[path = "public_review_projection.rs"]
+mod public_review_projection;
 
+pub(crate) use public_review_projection::query_team_node_review_history;
+pub use public_review_projection::{
+    TeamNodeReviewHistoryCursor, TeamNodeReviewHistoryEntry, TeamNodeReviewHistoryPage,
+    TeamNodeReviewHistoryQuery, TeamNodeReviewHistoryResult,
+};
+
+pub(crate) use public_message_projection::TeamRunMessageProjectionCache;
 pub use public_message_projection::{
     TeamRunMessageCursor, TeamRunMessagePage, TeamRunMessagePageStatus, TeamRunPublicMessage,
 };
@@ -90,6 +98,7 @@ pub struct TeamPublicGraph {
     layout: TeamPublicGraphLayout,
     nodes: Vec<TeamPublicNode>,
     edges: Vec<TeamPublicEdge>,
+    rework: TeamPublicRework,
 }
 
 impl TeamPublicGraph {
@@ -120,6 +129,40 @@ impl TeamPublicGraph {
     pub fn edges(&self) -> &[TeamPublicEdge] {
         &self.edges
     }
+
+    pub fn rework(&self) -> &TeamPublicRework {
+        &self.rework
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamPublicRework {
+    counters: Vec<TeamPublicReworkCounter>,
+    blocked: Vec<TeamPublicBlockedRework>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamPublicReworkCounter {
+    batch_id: u64,
+    source_node_id: String,
+    source_port: String,
+    used: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamPublicBlockedRework {
+    batch_id: u64,
+    source_node_id: String,
+    source_port: String,
+    source_node_execution_id: String,
+    used: u32,
+    max_reworks: u32,
+    blocked_at: u64,
+    scope_node_ids: Vec<String>,
+    edge_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -174,7 +217,7 @@ pub struct TeamPublicNode {
     title: String,
     role_id: Option<String>,
     task_id: Option<String>,
-    max_attempts: u32,
+    rework_limits: BTreeMap<String, u32>,
     trigger: Option<TeamPublicStartTrigger>,
     script_review_rule: Option<crate::ScriptReviewRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,8 +262,8 @@ impl TeamPublicNode {
         self.task_id.as_deref()
     }
 
-    pub const fn max_attempts(&self) -> u32 {
-        self.max_attempts
+    pub fn rework_limits(&self) -> &BTreeMap<String, u32> {
+        &self.rework_limits
     }
 
     pub fn trigger(&self) -> Option<&TeamPublicStartTrigger> {
@@ -259,6 +302,7 @@ pub enum TeamPublicStartTrigger {
 #[serde(rename_all = "camelCase")]
 pub struct TeamPublicAttempt {
     number: u32,
+    batch_id: u64,
     status: TeamPublicAttemptStatus,
     updated_at: u64,
 }
@@ -266,6 +310,10 @@ pub struct TeamPublicAttempt {
 impl TeamPublicAttempt {
     pub const fn number(&self) -> u32 {
         self.number
+    }
+
+    pub const fn batch_id(&self) -> u64 {
+        self.batch_id
     }
 
     pub const fn status(&self) -> TeamPublicAttemptStatus {
@@ -445,6 +493,7 @@ pub struct TeamRunPublicRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     graph_version: Option<String>,
     start_gate: TeamRunPublicStartGate,
+    workspace: TeamRunPublicWorkspace,
 }
 
 impl TeamRunPublicRun {
@@ -480,6 +529,40 @@ impl TeamRunPublicRun {
         self.start_gate
     }
 
+    pub const fn workspace(&self) -> TeamRunPublicWorkspace {
+        self.workspace
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct TeamRunPublicWorkspace {
+    status: TeamRunPublicWorkspaceStatus,
+}
+
+impl TeamRunPublicWorkspace {
+    pub const fn status(&self) -> TeamRunPublicWorkspaceStatus {
+        self.status
+    }
+
+    pub(crate) fn from_run(run: &crate::GraphRunFacts) -> Self {
+        Self {
+            status: if run.workspace().is_none() {
+                TeamRunPublicWorkspaceStatus::Legacy
+            } else if run.workspace_ready() {
+                TeamRunPublicWorkspaceStatus::Ready
+            } else {
+                TeamRunPublicWorkspaceStatus::Preparing
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamRunPublicWorkspaceStatus {
+    Ready,
+    Preparing,
+    Legacy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -507,6 +590,7 @@ pub struct TeamRunPublicAttempt {
     node_execution_id: String,
     current_attempt: bool,
     number: u32,
+    batch_id: u64,
     status: TeamPublicAttemptStatus,
     reason: TeamPublicAttemptReason,
     output_port: Option<String>,
@@ -531,6 +615,10 @@ impl TeamRunPublicAttempt {
 
     pub const fn number(&self) -> u32 {
         self.number
+    }
+
+    pub const fn batch_id(&self) -> u64 {
+        self.batch_id
     }
 
     pub const fn status(&self) -> TeamPublicAttemptStatus {
@@ -675,6 +763,9 @@ pub struct TeamRunPublicApproval {
     role_id: String,
     reason: String,
     requested_action: String,
+    content: Option<crate::run::approval::ApprovalContent>,
+    risk: String,
+    note: Option<String>,
     status: TeamPublicApprovalStatus,
     decision: Option<TeamPublicApprovalDecision>,
     created_at: u64,
@@ -722,6 +813,12 @@ impl TeamRunPublicApproval {
     pub fn requested_action(&self) -> &str {
         &self.requested_action
     }
+
+    pub fn content(&self) -> Option<&crate::run::approval::ApprovalContent> { self.content.as_ref() }
+
+    pub fn risk(&self) -> &str { &self.risk }
+
+    pub fn note(&self) -> Option<&str> { self.note.as_deref() }
 
     pub const fn status(&self) -> TeamPublicApprovalStatus {
         self.status
@@ -821,6 +918,11 @@ pub struct TeamRunPublicArtifact {
     node_id: String,
     node_execution_id: String,
     role_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_identity: Option<TeamRunPublicAgentIdentity>,
+    files: Vec<String>,
     kind: String,
     title: String,
     content_ref: String,
@@ -834,12 +936,35 @@ pub struct TeamRunPublicArtifact {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamRunPublicAgentIdentity {
+    agent_id: String,
+    endpoint_ref: String,
+}
+
+impl TeamRunPublicAgentIdentity {
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub fn endpoint_ref(&self) -> &str {
+        &self.endpoint_ref
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum TeamRunArtifactEvidenceRef {
     Artifact { #[serde(rename = "artifactId")] artifact_id: String },
 }
 
 impl TeamRunPublicArtifact {
+    pub fn session_ref(&self) -> Option<&str> { self.session_ref.as_deref() }
+
+    pub fn agent_identity(&self) -> Option<&TeamRunPublicAgentIdentity> { self.agent_identity.as_ref() }
+
+    pub fn files(&self) -> &[String] { &self.files }
+
     pub fn content_ref(&self) -> &str { &self.content_ref }
 
     pub fn evidence_refs(&self) -> &[TeamRunArtifactEvidenceRef] { &self.evidence_refs }
@@ -939,6 +1064,7 @@ impl TeamRunPublicEvent {
 pub enum TeamPublicEventType {
     GraphPatchAccepted,
     GraphReplaced,
+    ReworkContinued,
     NodeProgressed,
     ApprovalRequested,
     ApprovalResolved,
@@ -1133,6 +1259,7 @@ impl TeamRunPublicSnapshotRequest {
 pub(crate) fn produce_team_run_public_snapshot(
     facts: &OrganizationFacts,
     request: &TeamRunPublicSnapshotRequest,
+    message_projection: &mut TeamRunMessageProjectionCache,
 ) -> TeamRunPublicSnapshotQueryOutcome {
     match validated_public_run(facts, request.team_id(), request.run_id()) {
         Ok(run) => TeamRunPublicSnapshotQueryOutcome::Available(build_public_snapshot(
@@ -1141,8 +1268,12 @@ pub(crate) fn produce_team_run_public_snapshot(
             request.run_id(),
             run,
             request,
+            message_projection,
         )),
-        Err(reason) => TeamRunPublicSnapshotQueryOutcome::Unavailable(reason),
+        Err(reason) => {
+            message_projection.clear();
+            TeamRunPublicSnapshotQueryOutcome::Unavailable(reason)
+        }
     }
 }
 
@@ -1154,16 +1285,27 @@ pub(crate) fn produce_team_run_public_snapshot_for_run(
     event_cursor: u64,
     event_limit: Option<u64>,
     message_cursor: Option<TeamRunMessageCursor>,
+    message_projection: &mut TeamRunMessageProjectionCache,
 ) -> Result<TeamRunPublicSnapshotQueryOutcome, TeamRunPublicSnapshotRequestError> {
     let Some(team_id) = facts.run(run_id).map(|run| run.team().clone()) else {
+        message_projection.clear();
         return Ok(TeamRunPublicSnapshotQueryOutcome::Unavailable(
             TeamRunPublicSnapshotUnavailable::MissingRun,
         ));
     };
-    let request =
-        TeamRunPublicSnapshotRequest::try_new(team_id, run_id.clone(), event_cursor, event_limit)?
-            .with_message_cursor(message_cursor);
-    Ok(produce_team_run_public_snapshot(facts, &request))
+    let request = match TeamRunPublicSnapshotRequest::try_new(
+        team_id,
+        run_id.clone(),
+        event_cursor,
+        event_limit,
+    ) {
+        Ok(request) => request.with_message_cursor(message_cursor),
+        Err(error) => {
+            message_projection.clear();
+            return Err(error);
+        }
+    };
+    Ok(produce_team_run_public_snapshot(facts, &request, message_projection))
 }
 
 /// Queries the complete safe TeamRun snapshot from Organization durable facts. This is separate
@@ -1174,7 +1316,7 @@ pub(crate) fn query_team_run_public_snapshot(
     run_id: &GraphRunId,
 ) -> TeamRunPublicSnapshotQueryOutcome {
     let request = TeamRunPublicSnapshotRequest::unbounded(team_id.clone(), run_id.clone());
-    produce_team_run_public_snapshot(facts, &request)
+    produce_team_run_public_snapshot(facts, &request, &mut TeamRunMessageProjectionCache::default())
 }
 
 pub(crate) fn query_team_run_public_diagnostics(
@@ -1193,32 +1335,16 @@ pub(crate) fn query_team_run_public_diagnostics(
             .values()
             .map(|history| history.attempts().len())
             .sum(),
-        deliveries: facts
-            .deliveries()
-            .deliveries()
-            .filter(|delivery| delivery.facts().run_id == run_id.as_str())
-            .count(),
-        approvals: facts
-            .approvals()
-            .filter(|approval| approval.facts().run_id == run_id.as_str())
-            .count(),
-        decisions: facts
-            .decisions()
-            .filter(|decision| decision.run_id() == run_id.as_str())
-            .count(),
-        evidence: facts
-            .evidence_records()
-            .filter(|record| record.run_id() == run_id.as_str())
-            .count(),
-        artifacts: facts
-            .artifacts()
-            .filter(|record| record.run_id() == run_id.as_str())
-            .count(),
-        events: facts.events_for_run(run_id.as_str()).len(),
+        deliveries: facts.deliveries_for_run(run_id.as_str()).count(),
+        approvals: facts.approvals_for_run(run_id.as_str()).count(),
+        decisions: facts.decision_ledger().decisions_for_run(run_id.as_str()).count(),
+        evidence: facts.evidence().records_for_run(run_id.as_str()).count(),
+        artifacts: facts.artifacts_for_run(run_id.as_str()).count(),
+        events: facts.events().events_for_run(run_id.as_str()).count(),
     };
     TeamRunPublicDiagnosticsQueryOutcome::Available(diagnostics_projection(
         run_id,
-        runtime_state(facts, run_id, run.runtime().is_some()),
+        runtime_state(facts, run),
         counts,
     ))
 }
@@ -1255,9 +1381,10 @@ fn build_public_snapshot(
     run_id: &GraphRunId,
     run: &crate::GraphRunFacts,
     request: &TeamRunPublicSnapshotRequest,
+    message_projection: &mut TeamRunMessageProjectionCache,
 ) -> TeamRunPublicSnapshot {
-    let runtime = runtime_state(facts, run_id, run.runtime().is_some());
-    let graph = graph_projection(facts, run.graph());
+    let runtime = runtime_state(facts, run);
+    let graph = graph_projection(run.graph());
     let attempts = run
         .graph()
         .executions()
@@ -1265,35 +1392,34 @@ fn build_public_snapshot(
         .flat_map(|history| history.attempts().iter().map(|attempt| public_attempt(attempt, run)))
         .collect::<Vec<_>>();
     let deliveries = facts
-        .deliveries()
-        .deliveries()
-        .filter(|delivery| delivery.facts().run_id == run_id.as_str())
+        .deliveries_for_run(run_id.as_str())
         .map(public_delivery)
         .collect::<Vec<_>>();
     let approvals = facts
-        .approvals()
-        .filter(|approval| approval.facts().run_id == run_id.as_str())
+        .approvals_for_run(run_id.as_str())
         .map(public_approval)
         .collect::<Vec<_>>();
     let decisions = facts
-        .decisions()
-        .filter(|decision| decision.run_id() == run_id.as_str())
+        .decision_ledger()
+        .decisions_for_run(run_id.as_str())
         .map(public_decision)
         .collect::<Vec<_>>();
     let evidence = facts
-        .evidence_records()
-        .filter(|record| record.run_id() == run_id.as_str())
+        .evidence()
+        .records_for_run(run_id.as_str())
         .map(project_public_evidence)
         .collect::<Vec<_>>();
     let artifacts = facts
-        .artifacts()
-        .filter(|record| record.run_id() == run_id.as_str())
+        .artifacts_for_run(run_id.as_str())
         .map(|record| public_artifact(record, run))
         .collect::<Vec<_>>();
     let (messages, message_page, messages_missing) = public_message_projection::project_messages(
-        facts, run, &artifacts, request.message_cursor.as_ref(),
+        facts,
+        run,
+        &artifacts,
+        request.message_cursor.as_ref(),
+        message_projection,
     );
-    let events = facts.events_for_run(run_id.as_str());
     let counts = TeamRunPublicCounts {
         attempts: attempts.len(),
         deliveries: deliveries.len(),
@@ -1301,28 +1427,23 @@ fn build_public_snapshot(
         decisions: decisions.len(),
         evidence: evidence.len(),
         artifacts: artifacts.len(),
-        events: events.len(),
+        events: facts.events().events_for_run(run_id.as_str()).count(),
     };
-    let events = events
-        .into_iter()
+    let events = facts
+        .events()
+        .events_for_run(run_id.as_str())
         .filter(|event| event.sequence() >= request.event_cursor())
         .take(request.event_limit().unwrap_or(usize::MAX))
+        .map(project_team_run_public_event)
         .collect::<Vec<_>>();
     let next_event_cursor = events.last().map_or(request.event_cursor(), |event| {
         event.sequence().saturating_add(1)
     });
-    let events = events
-        .into_iter()
-        .map(project_team_run_public_event)
-        .collect::<Vec<_>>();
     let mut diagnostics = diagnostics_projection(run_id, runtime, counts);
     if !messages_missing {
         diagnostics.unavailable_sections.retain(|section| *section != TeamRunPublicUnavailableSection::Messages);
     }
-    let mut unavailable_sections = unavailable_sections();
-    if !messages_missing {
-        unavailable_sections.retain(|section| *section != TeamRunPublicUnavailableSection::Messages);
-    }
+    let unavailable_sections = diagnostics.unavailable_sections.clone();
     TeamRunPublicSnapshot {
         run: TeamRunPublicRun {
             team_id: team_id.as_str().to_owned(),
@@ -1343,6 +1464,7 @@ fn build_public_snapshot(
                 _ => None,
             },
             start_gate: start_gate_status(run.start_gate()),
+            workspace: TeamRunPublicWorkspace::from_run(run),
         },
         graph,
         attempts,
@@ -1398,6 +1520,7 @@ fn public_attempt(attempt: &crate::run::graph::NodeAttempt, run: &crate::GraphRu
         attempt_id: attempt.fence().attempt_id().as_str().to_owned(),
         node_execution_id: attempt.fence().node_execution_id().as_str().to_owned(),
         number: attempt.number().get(),
+        batch_id: attempt.batch_id().get(),
         status: attempt_status(attempt.status()),
         reason: attempt_reason(attempt.reason()),
         output_port: attempt.output_port().map(ToOwned::to_owned),
@@ -1436,6 +1559,9 @@ fn public_approval(approval: &crate::run::approval::Approval) -> TeamRunPublicAp
         role_id: facts.role_id.clone(),
         reason: facts.reason.clone(),
         requested_action: facts.requested_action.clone(),
+        content: facts.content.clone(),
+        risk: facts.risk_summary.clone(),
+        note: resolution.and_then(|item| item.note.clone()),
         status: approval_status(approval.status()),
         decision: resolution.map(|item| approval_decision(item.decision)),
         created_at: facts.requested_at,
@@ -1461,6 +1587,16 @@ fn public_artifact(
 ) -> TeamRunPublicArtifact {
     let public = crate::run::artifact::project_public_artifact(record);
     let node = crate::NodeId::new(record.node_id());
+    let agent_identity = record.producer_session_ref().and_then(|session_ref| {
+        run.runtime()?.bindings().iter().find(|binding| {
+            binding.team_run().as_str() == record.run_id()
+                && binding.role().as_str() == record.role_id()
+                && binding.session_ref() == session_ref
+        })
+    }).map(|binding| TeamRunPublicAgentIdentity {
+        agent_id: binding.agent().as_str().to_owned(),
+        endpoint_ref: binding.endpoint().as_str().to_owned(),
+    });
     // Completion stores the native artifact reference, not the EvidenceRecord identity.
     let evidence_refs = record.evidence().iter().filter_map(|provenance| {
         (provenance.reference_kind() == "artifact").then(|| TeamRunArtifactEvidenceRef::Artifact {
@@ -1473,6 +1609,9 @@ fn public_artifact(
         node_id: public.node_id,
         node_execution_id: public.node_execution_id,
         role_id: public.role_id,
+        session_ref: public.producer_session_ref.map(|session| session.as_str().to_owned()),
+        agent_identity,
+        files: public.files,
         kind: public.kind,
         title: public.title,
         content_ref: record.content_ref().to_owned(),
@@ -1520,6 +1659,9 @@ pub fn project_team_run_public_event(event: &crate::run::event::TeamEvent) -> Te
         } => {
             projection.graph_id = Some(graph_id.clone());
             projection.workflow_plan_id = Some(workflow_plan_id.clone());
+        }
+        crate::run::event::TeamEventPayload::ReworkContinued { source_node_execution_id, .. } => {
+            projection.node_execution_id = Some(source_node_execution_id.clone());
         }
         crate::run::event::TeamEventPayload::NodeProgressed { node_execution_id } => {
             projection.node_execution_id = Some(node_execution_id.as_str().to_owned());
@@ -1675,6 +1817,7 @@ const fn event_type(event_type: TeamEventType) -> TeamPublicEventType {
     match event_type {
         TeamEventType::GraphPatchAccepted => TeamPublicEventType::GraphPatchAccepted,
         TeamEventType::GraphReplaced => TeamPublicEventType::GraphReplaced,
+        TeamEventType::ReworkContinued => TeamPublicEventType::ReworkContinued,
         TeamEventType::NodeProgressed => TeamPublicEventType::NodeProgressed,
         TeamEventType::ApprovalRequested => TeamPublicEventType::ApprovalRequested,
         TeamEventType::ApprovalResolved => TeamPublicEventType::ApprovalResolved,
@@ -1723,77 +1866,49 @@ pub(crate) fn query_team_public_projection(
         team_id: team_id.as_str().to_owned(),
         run_id: run_id.as_str().to_owned(),
         team_revision: team.revision().get(),
-        runtime: runtime_state(facts, run_id, run.runtime().is_some()),
+        runtime: runtime_state(facts, run),
         start_gate: start_gate_status(run.start_gate()),
-        graph: graph_projection(facts, run.graph()),
+        graph: graph_projection(run.graph()),
     })
 }
 
 fn runtime_state(
     facts: &OrganizationFacts,
-    run_id: &GraphRunId,
-    has_runtime_receipt: bool,
+    run: &crate::GraphRunFacts,
 ) -> TeamRuntimeState {
-    if !has_runtime_receipt
-        || facts.run(run_id).is_some_and(|run| {
-            matches!(
-                run.lifecycle().state(),
-                GraphRunLifecycleState::Cancelling { .. }
-                    | GraphRunLifecycleState::OutcomeUnknown { .. }
-            )
-        })
-        || facts.deliveries().deliveries().any(|delivery| {
-            delivery.facts().run_id == run_id.as_str()
-                && match delivery.phase() {
-                    DeliveryPhase::OutcomeUnknown { .. } => true,
-                    DeliveryPhase::TerminalObserved { observation } => matches!(
-                        observation.resolution(),
-                        TerminalObservationResolution::AwaitingAuthorizedGraphResolution
-                    ),
-                    _ => false,
-                }
-        })
-    {
+    if runtime_is_unknown(facts, run) {
         TeamRuntimeState::Unknown
     } else {
         TeamRuntimeState::Confirmed
     }
 }
 
-pub(crate) fn graph_projection(facts: &OrganizationFacts, graph: &GraphState) -> TeamPublicGraph {
-    let projected = project(graph);
+pub(crate) fn graph_projection(graph: &GraphState) -> TeamPublicGraph {
     let definition = graph.definition();
-    let rework_limit_nodes: BTreeSet<_> = facts
-        .deliveries()
-        .deliveries()
-        .filter_map(|delivery| {
-            let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
-                return None;
-            };
-            let TerminalObservationResolution::GraphResolved(resolution) = observation.resolution()
-            else {
-                return None;
-            };
-            if observation.graph_run_id() != definition.run_id().as_str()
-                || observation.native_terminal() != NativeTerminalStatus::Completed
-                || resolution.outcome() != AuthorizedGraphOutcome::Failed
-                || !observation
-                    .output()
-                    .is_some_and(|output| output.decision() == "rework")
-            {
-                return None;
-            }
-            let node_id = crate::NodeId::new(observation.node_id());
-            let current = graph.current_attempt(&node_id)?;
-            (current.fence() == observation.fence() && current.status() == AttemptStatus::Failed)
-                .then_some(node_id)
-        })
-        .collect();
     TeamPublicGraph {
         graph_id: definition.graph_id().to_owned(),
         workflow_plan_id: definition.workflow_plan_id().to_owned(),
         title: definition.title().to_owned(),
-        status: graph_status(projected.status),
+        status: graph_status(graph::graph_status(graph)),
+        rework: TeamPublicRework {
+            counters: graph.rework_counts().iter().map(|(key, used)| TeamPublicReworkCounter {
+                batch_id: key.batch_id.get(),
+                source_node_id: key.source_node_id.as_str().to_owned(),
+                source_port: key.source_port.clone(),
+                used: *used,
+            }).collect(),
+            blocked: graph.blocked_reworks().values().map(|blocked| TeamPublicBlockedRework {
+                batch_id: blocked.batch_id.get(),
+                source_node_id: blocked.source_node_id.as_str().to_owned(),
+                source_port: blocked.source_port.clone(),
+                source_node_execution_id: blocked.source_fence.node_execution_id().as_str().to_owned(),
+                used: blocked.used,
+                max_reworks: blocked.max_reworks,
+                blocked_at: blocked.blocked_at,
+                scope_node_ids: blocked.scope.iter().map(|id| id.as_str().to_owned()).collect(),
+                edge_ids: blocked.edge_ids.iter().map(|id| id.as_str().to_owned()).collect(),
+            }).collect(),
+        },
         layout: TeamPublicGraphLayout {
             node_positions: graph
                 .layout()
@@ -1813,61 +1928,69 @@ pub(crate) fn graph_projection(facts: &OrganizationFacts, graph: &GraphState) ->
         nodes: definition
             .nodes()
             .iter()
-            .zip(projected.nodes)
-            .map(|(definition, current)| TeamPublicNode {
-                node_id: definition.id().as_str().to_owned(),
-                kind: node_kind(definition.kind()),
-                source_ports: definition.kind().source_ports(),
-                target_ports: definition.kind().target_ports(),
-                source_port_actions: definition.kind().source_ports().iter().map(|port| {
-                    (port.as_str(), definition.kind().source_port_actions(port.as_str())
-                        .iter().copied().map(edge_action).collect())
-                }).collect(),
-                title: definition.title().to_owned(),
-                role_id: definition
-                    .work_assignment()
-                    .map(|assignment| assignment.role_id())
-                    .or_else(|| definition.review_assignment().map(|assignment| assignment.role_id()))
-                    .map(ToOwned::to_owned),
-                task_id: definition
-                    .work_assignment()
-                    .map(|assignment| assignment.task_id().to_owned()),
-                max_attempts: definition.max_attempts().get(),
-                script_review_rule: definition.script_review_rule(),
-                trigger: definition.trigger().map(|trigger| match trigger {
-                    StartTrigger::Webhook { .. } => TeamPublicStartTrigger::Webhook,
-                    StartTrigger::Cron { expression } => TeamPublicStartTrigger::Cron {
-                        expression: expression.clone(),
+            .map(|definition| {
+                let current = graph
+                    .current_attempt(definition.id())
+                    .expect("definition nodes always have an execution history");
+                TeamPublicNode {
+                    node_id: definition.id().as_str().to_owned(),
+                    kind: node_kind(definition.kind()),
+                    source_ports: definition.kind().source_ports(),
+                    target_ports: definition.kind().target_ports(),
+                    source_port_actions: definition.kind().source_ports().iter().map(|port| {
+                        (port.as_str(), definition.kind().source_port_actions(port.as_str())
+                            .iter().copied().map(edge_action).collect())
+                    }).collect(),
+                    title: definition.title().to_owned(),
+                    role_id: definition
+                        .work_assignment()
+                        .map(|assignment| assignment.role_id())
+                        .or_else(|| definition.review_assignment().map(|assignment| assignment.role_id()))
+                        .map(ToOwned::to_owned),
+                    task_id: definition
+                        .work_assignment()
+                        .map(|assignment| assignment.task_id().to_owned()),
+                    rework_limits: definition.rework_limits().clone(),
+                    script_review_rule: definition.script_review_rule(),
+                    trigger: definition.trigger().map(|trigger| match trigger {
+                        StartTrigger::Webhook { .. } => TeamPublicStartTrigger::Webhook,
+                        StartTrigger::Cron { expression } => TeamPublicStartTrigger::Cron {
+                            expression: expression.clone(),
+                        },
+                    }),
+                    status_reason: graph.blocked_reworks()
+                        .contains_key(definition.id())
+                        .then_some("rework_limit_exceeded"),
+                    attempt: TeamPublicAttempt {
+                        number: current.number().get(),
+                        batch_id: current.batch_id().get(),
+                        status: attempt_status(current.status()),
+                        updated_at: current.updated_at(),
                     },
-                }),
-                status_reason: rework_limit_nodes
-                    .contains(definition.id())
-                    .then_some("rework_limit_exceeded"),
-                attempt: TeamPublicAttempt {
-                    number: current.current.number,
-                    status: attempt_status(current.current.status),
-                    updated_at: current.current.updated_at,
-                },
+                }
             })
             .collect(),
         edges: definition
             .edges()
             .iter()
-            .zip(projected.edges)
-            .map(|(definition, state)| TeamPublicEdge {
+            .map(|definition| TeamPublicEdge {
                 edge_id: definition.id().as_str().to_owned(),
                 source_node_id: definition.source_node_id().as_str().to_owned(),
                 source_port: definition.source_port().to_owned(),
                 target_node_id: definition.target_node_id().as_str().to_owned(),
                 target_port: definition.target_port().to_owned(),
                 action: edge_action(definition.action()),
-                status: edge_status(state.status),
+                status: if graph::edge_satisfied(graph, definition) {
+                    TeamPublicEdgeStatus::Satisfied
+                } else {
+                    TeamPublicEdgeStatus::Waiting
+                },
             })
             .collect(),
     }
 }
 
-const fn graph_status(status: GraphStatus) -> TeamPublicGraphStatus {
+pub(crate) const fn graph_status(status: GraphStatus) -> TeamPublicGraphStatus {
     match status {
         GraphStatus::Pending => TeamPublicGraphStatus::Pending,
         GraphStatus::Ready => TeamPublicGraphStatus::Ready,
@@ -1909,13 +2032,6 @@ const fn edge_action(action: EdgeAction) -> TeamPublicEdgeAction {
         EdgeAction::Rework => TeamPublicEdgeAction::Rework,
         EdgeAction::Gate => TeamPublicEdgeAction::Gate,
         EdgeAction::Finish => TeamPublicEdgeAction::Finish,
-    }
-}
-
-const fn edge_status(status: EdgeStatus) -> TeamPublicEdgeStatus {
-    match status {
-        EdgeStatus::Waiting => TeamPublicEdgeStatus::Waiting,
-        EdgeStatus::Satisfied => TeamPublicEdgeStatus::Satisfied,
     }
 }
 

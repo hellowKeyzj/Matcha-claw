@@ -8,13 +8,13 @@ use crate::{
     WorkspaceBinaryFailure, WorkspaceBinaryReceipt, WorkspaceStatFailure, WorkspaceStatReceipt,
 };
 
+use super::file::{Endpoint, FileScope as Scope, optional_value};
+
 pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "workspace.file";
 const READ_OPERATION_ID: &str = "files.readBinary";
 const STAT_OPERATION_ID: &str = "files.stat";
-const RUNTIME_KIND: &str = "native-runtime";
-const SCOPE_KIND: &str = "agent";
 const TARGET_KIND: &str = "workspace-file";
 pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/workspace/files/binary";
 const AUTHORIZATION_SCOPE: &str = "workspace-files:binary";
@@ -72,12 +72,8 @@ impl WorkspaceBinaryRequest {
                 self.operation_id.as_str(),
                 READ_OPERATION_ID | STAT_OPERATION_ID
             )
-            && self.scope.kind == SCOPE_KIND
             && self.target.kind == TARGET_KIND
-            && self.scope.endpoint == self.input.endpoint
-            && self.scope.endpoint.runtime_endpoint().is_some()
-            && valid_agent_id(&self.scope.agent_id)
-            && self.scope.agent_id == self.input.agent_id
+            && self.scope.matches_input(&self.input.endpoint, self.input.agent_id.as_deref(), self.input.team_id.as_deref(), self.input.run_id.as_deref())
             && valid_relative_path(&self.input.relative_path)
             && (self.operation_id != STAT_OPERATION_ID || self.input.max_bytes.is_none()))
         .then_some(())
@@ -90,8 +86,8 @@ impl WorkspaceBinaryRequest {
             .runtime_endpoint()
             .expect("workspace binary endpoint validated")
     }
-    pub(crate) fn agent_id(&self) -> &str {
-        &self.input.agent_id
+    pub(crate) fn selection(&self) -> crate::application::commands::WorkspaceFileSelection {
+        self.scope.selection()
     }
 
     pub(crate) fn relative_path(&self) -> &str {
@@ -110,10 +106,6 @@ impl WorkspaceBinaryRequest {
     }
 }
 
-fn valid_agent_id(value: &str) -> bool {
-    !value.trim().is_empty() && value.len() <= 4096 && !value.as_bytes().contains(&0)
-}
-
 fn valid_relative_path(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 4096
@@ -130,15 +122,6 @@ fn valid_relative_path(value: &str) -> bool {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Scope {
-    kind: String,
-    endpoint: Endpoint,
-    #[serde(rename = "agentId")]
-    agent_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
 struct Target {
     kind: String,
 }
@@ -147,36 +130,16 @@ struct Target {
 #[serde(deny_unknown_fields)]
 struct Input {
     endpoint: Endpoint,
-    #[serde(rename = "agentId")]
-    agent_id: String,
+    #[serde(rename = "agentId", default, deserialize_with = "optional_value")]
+    agent_id: Option<String>,
+    #[serde(rename = "teamId", default, deserialize_with = "optional_value")]
+    team_id: Option<String>,
+    #[serde(rename = "runId", default, deserialize_with = "optional_value")]
+    run_id: Option<String>,
     #[serde(rename = "relativePath")]
     relative_path: String,
-    #[serde(rename = "maxBytes")]
+    #[serde(rename = "maxBytes", default, deserialize_with = "optional_value")]
     max_bytes: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-struct Endpoint {
-    kind: String,
-    #[serde(rename = "runtimeAdapterId")]
-    runtime_adapter_id: String,
-    #[serde(rename = "runtimeInstanceId")]
-    runtime_instance_id: String,
-}
-
-impl Endpoint {
-    fn runtime_endpoint(&self) -> Option<platform::endpoint::runtime_address::RuntimeEndpoint> {
-        (self.kind == RUNTIME_KIND)
-            .then(|| {
-                platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
-                    &self.runtime_adapter_id,
-                    &self.runtime_instance_id,
-                )
-                .ok()
-            })
-            .flatten()
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

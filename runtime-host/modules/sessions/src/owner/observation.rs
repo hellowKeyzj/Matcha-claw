@@ -4,11 +4,11 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use foundation::execution::{OwnedTask, TaskHandle};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::actor::{SessionLane, SessionShared};
@@ -20,7 +20,10 @@ use crate::{
         SessionObserveCommand, SessionObserveOutcome, SessionReleaseOutcome, SessionSync,
     },
     send::{SessionSendCommand, SessionSendOutcome},
-    state::{SessionChange, SessionCompleteness, SessionIdentity, SessionState, SessionView},
+    state::{
+        RunPhase, SessionChange, SessionCompleteness, SessionFact, SessionIdentity,
+        SessionProvider, SessionState, SessionView,
+    },
     timeline,
 };
 
@@ -36,9 +39,46 @@ fn command_shape(command: &timeline::Command) -> serde_json::Value {
     })
 }
 
+type ObservationTask = (TaskHandle, Arc<tokio::sync::Mutex<OwnedTask<()>>>);
+
+enum SettlementPhase {
+    Waiting,
+    Scheduled(u64),
+    Checking { check_id: u64, epoch: u64, seq: u64, endpoint_session_id: Option<String> },
+    Invalidated(u64),
+    Confirmed,
+}
+
+struct Settlement {
+    phase: SettlementPhase,
+    delay: Duration,
+    last_check: Option<Instant>,
+    wake: Arc<Notify>,
+}
+
+impl Settlement {
+    fn check_id(&self) -> Option<u64> {
+        match self.phase {
+            SettlementPhase::Scheduled(id) | SettlementPhase::Checking { check_id: id, .. }
+                | SettlementPhase::Invalidated(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.phase = match self.phase {
+            SettlementPhase::Scheduled(id) => SettlementPhase::Scheduled(id),
+            SettlementPhase::Checking { check_id, .. } | SettlementPhase::Invalidated(check_id) => SettlementPhase::Invalidated(check_id),
+            _ => SettlementPhase::Waiting,
+        };
+        self.wake.notify_one();
+    }
+}
+
 pub(super) struct Observation {
     handle: Option<Arc<dyn SessionObservation>>,
-    task: Option<TaskHandle>,
+    task: Option<ObservationTask>,
+    settlement: Option<Settlement>,
     baseline: Option<SessionState>,
     active_command: Option<timeline::Command>,
     committed_command: Option<timeline::Command>,
@@ -86,7 +126,11 @@ struct Waiter {
 
 impl Waiter {
     fn pending(&self) -> bool {
-        !matches!(&self.reply, WaiterReply::Observe { reply: None, .. })
+        match &self.reply {
+            WaiterReply::Observe { reply: None, .. } => false,
+            WaiterReply::TerminalRead { reply, .. } => !reply.is_closed(),
+            _ => true,
+        }
     }
 }
 
@@ -99,6 +143,10 @@ enum WaiterReply {
         reply: Option<oneshot::Sender<SessionObserveOutcome>>,
     },
     Timeline(oneshot::Sender<timeline::Outcome>),
+    TerminalRead {
+        permit: super::terminal::TerminalPermit,
+        reply: oneshot::Sender<Result<(), RuntimeOperationFailure>>,
+    },
     Send {
         command: SessionSendCommand,
         cancellation: CancellationToken,
@@ -106,9 +154,31 @@ enum WaiterReply {
     },
 }
 
+fn terminal_observed(state: &SessionState, run_id: &str) -> bool {
+    state.has_terminal_run(run_id) || state.pending_terminals.iter().any(|pending|
+        pending.snapshot.native_request_id.as_deref() == Some(run_id)
+            && state.has_terminal_run(&pending.snapshot.native_run_id))
+}
+
+fn ordinary_yielded_run_id(state: &SessionState) -> Option<&str> {
+    if state.identity().provider() != SessionProvider::OpenClaw || state.is_team_source() { return None; }
+    match state.runtime() {
+        SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. }
+            if runtime.phase == RunPhase::Yielded && runtime.issue.is_none() => runtime.active_run_id.as_deref(),
+        _ => None,
+    }
+}
+
 impl Observation {
     pub(super) fn cancel_task(&self) {
-        if let Some(task) = &self.task { task.cancel(); }
+        if let Some((task, _)) = &self.task { task.cancel(); }
+    }
+
+    fn take_task(&mut self, shared: &SessionShared) -> Option<ObservationTask> {
+        let task = self.task.take()?;
+        shared.read_tasks.lock().expect("session read tasks lock")
+            .retain(|pending| !Arc::ptr_eq(pending, &task.1));
+        Some(task)
     }
 
     // Keep observe demand ownership until the watcher confirms delivery or cancellation.
@@ -136,12 +206,29 @@ impl Observation {
         waiters
     }
 
-    fn demanded(&self) -> bool {
+    fn settlement_demanded(&self, state: Option<&SessionState>) -> bool {
+        state.is_some_and(|state| state.identity().provider() == SessionProvider::OpenClaw
+            && state.is_team_source()
+            && (!self.runs.is_empty() || self.pending_sends > 0 || self.unknown_send
+                || !state.pending_terminals.is_empty()))
+    }
+
+    fn waiting_for_work(&self, state: Option<&SessionState>) -> bool {
+        self.settlement_demanded(state)
+            && self.settlement.as_ref().is_none_or(|settlement| !matches!(settlement.phase, SettlementPhase::Confirmed))
+    }
+
+    fn invalidate_settlement(&mut self) {
+        if let Some(settlement) = &mut self.settlement { settlement.invalidate(); }
+    }
+
+    fn demanded(&self, state: Option<&SessionState>) -> bool {
         !self.leases.is_empty()
             || !self.runs.is_empty()
             || self.pending_sends > 0
             || self.unknown_send
             || !self.waiters.is_empty()
+            || state.is_some_and(|state| !state.pending_terminals.is_empty())
     }
 }
 
@@ -160,6 +247,34 @@ impl SessionShared {
                 !entry.runs.is_empty() || entry.pending_sends > 0 || entry.unknown_send
                     || entry.waiters.iter().any(|waiter| matches!(&waiter.reply, WaiterReply::Send { .. }))
             })
+    }
+
+    pub(super) fn terminal_read_ready(&self, state: &SessionState) -> bool {
+        self.observations.lock().expect("session observation lock")
+            .get(&session_identity_lane_key(state.identity())).is_none_or(|entry|
+                !entry.unknown_send && entry.pending_sends == 0
+                    && if entry.settlement_demanded(Some(state)) {
+                        entry.settlement.as_ref().is_some_and(|settlement| matches!(settlement.phase, SettlementPhase::Confirmed))
+                    } else {
+                        entry.runs.iter().all(|run_id| terminal_observed(state, run_id))
+                    })
+    }
+
+    pub(super) fn settlement_request_id(&self, state: &SessionState) -> Option<String> {
+        let entries = self.observations.lock().expect("session observation lock");
+        let entry = entries.get(&session_identity_lane_key(state.identity()))?;
+        let mut requests = state.run_execution_contexts.iter()
+            .filter(|(id, (request, _))| entry.runs.contains(*id) || entry.runs.contains(request))
+            .map(|(_, (request, _))| request);
+        if let Some(request) = requests.next() {
+            return requests.all(|other| other == request).then(|| request.clone());
+        }
+        (entry.runs.len() == 1).then(|| entry.runs.iter().next().cloned()).flatten()
+    }
+
+    pub(super) fn observed_run(&self, identity: &SessionIdentity, run_id: &str) -> bool {
+        self.observations.lock().expect("session observation lock")
+            .get(&session_identity_lane_key(identity)).is_some_and(|entry| entry.runs.contains(run_id))
     }
 
     pub(crate) fn terminal_sync_pending(&self, identity: &SessionIdentity) -> bool {
@@ -190,17 +305,49 @@ impl SessionShared {
             .expect("session observation lock")
             .get_mut(&session_identity_lane_key(identity))
         {
+            if !changes.is_empty() { entry.invalidate_settlement(); }
             for change in changes {
                 if let SessionChange::RunPhaseChanged { run_id, phase } = change {
                     if crate::state::terminal_run_phase(*phase) {
-                        entry.runs.remove(run_id);
+                        if identity.provider() != crate::state::SessionProvider::OpenClaw {
+                            entry.runs.remove(run_id);
+                        }
                         if entry.notified_terminals.insert(run_id.clone())
-                            && entry.leases.is_empty()
+                            && (entry.leases.is_empty() || identity.provider() == crate::state::SessionProvider::OpenClaw)
                         {
                             entry.needs_sync = true;
                         }
+                    } else if *phase == RunPhase::Yielded
+                        && self.snapshot.load().states.get(&session_identity_lane_key(identity))
+                            .and_then(ordinary_yielded_run_id) == Some(run_id.as_str())
+                    {
+                        entry.runs.remove(run_id);
                     }
                 }
+            }
+        }
+    }
+
+    pub(super) fn receive_state(&self, state: &SessionState, work_pending: Option<bool>) {
+        let mut entries = self.observations.lock().expect("session observation lock");
+        let Some(entry) = entries.get_mut(&session_identity_lane_key(state.identity())) else { return; };
+        if work_pending == Some(true) { entry.invalidate_settlement(); }
+        if state.identity().provider() != SessionProvider::OpenClaw || !state.is_team_source() {
+            entry.runs.retain(|run_id| !terminal_observed(state, run_id)
+                || (state.identity().provider() == crate::state::SessionProvider::OpenClaw
+                    && state.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id == *run_id
+                        || pending.snapshot.native_request_id.as_deref() == Some(run_id))));
+        }
+    }
+
+    pub(super) fn receive_terminal_delivery(&self, state: &SessionState, terminal: &crate::terminal_hook::SessionRunTerminalSnapshot) {
+        if let Some(entry) = self.observations.lock().expect("session observation lock")
+            .get_mut(&session_identity_lane_key(state.identity())) {
+            if state.pending_terminals.is_empty() && !state.work_pending() {
+                entry.runs.clear();
+            } else {
+                entry.runs.remove(&terminal.native_run_id);
+                if let Some(request_id) = &terminal.native_request_id { entry.runs.remove(request_id); }
             }
         }
     }
@@ -274,7 +421,10 @@ impl SessionShared {
         let entries =
             std::mem::take(&mut *self.observations.lock().expect("session observation lock"));
         for (_, entry) in entries {
-            if let Some(task) = &entry.task { task.cancel(); }
+            if let Some((handle, task)) = entry.task {
+                handle.cancel();
+                let _ = task.lock().await.cancel_and_join().await;
+            }
             if let Some(handle) = entry.handle {
                 handle.close().await;
             }
@@ -286,6 +436,31 @@ impl SessionShared {
 }
 
 impl SessionLane {
+    pub(super) fn effective_work_pending(
+        &self,
+        shared: &SessionShared,
+        work_pending: Option<bool>,
+        changes: &[SessionChange],
+        baseline_seq: Option<u64>,
+    ) -> Option<bool> {
+        if work_pending != Some(false) { return work_pending; }
+        if self.has_pending_completions() { return None; }
+        let Some(state) = &self.state else { return work_pending; };
+        if baseline_seq.is_some_and(|seq| seq != state.seq()) { return None; }
+        let entries = shared.observations.lock().expect("session observation lock");
+        let settled = entries.get(&session_identity_lane_key(state.identity())).is_none_or(|entry| {
+            if entry.settlement_demanded(Some(state)) {
+                return entry.settlement.as_ref().is_some_and(|settlement| matches!(settlement.phase, SettlementPhase::Confirmed));
+            }
+            !entry.unknown_send && entry.pending_sends == 0
+                && entry.runs.iter().all(|run_id| terminal_observed(state, run_id)
+                    || changes.iter().any(|change| matches!(change,
+                        SessionChange::RunPhaseChanged { run_id: incoming, phase }
+                            if incoming == run_id && crate::state::terminal_run_phase(*phase))))
+        });
+        settled.then_some(false)
+    }
+
     pub(super) fn prepare_observer(
         &mut self,
         shared: &SessionShared,
@@ -333,6 +508,7 @@ impl SessionLane {
                 Observation {
                     handle: Some(handle),
                     task: None,
+                    settlement: None,
                     baseline: None,
                     active_command: None,
                     committed_command: None,
@@ -356,6 +532,152 @@ impl SessionLane {
         Ok(())
     }
 
+    fn start_work_check(&mut self, shared: &SessionShared, identity: &SessionIdentity) {
+        if shared.terminal_delivery.is_stopping() { return; }
+        let Some(sender) = shared.completion_handle.get().cloned() else { return; };
+        let mut entries = shared.observations.lock().expect("session observation lock");
+        let Some(entry) = entries.get_mut(&session_identity_lane_key(identity)) else { return; };
+        if entry.recovery.failure().is_some() || entry.closing || entry.baseline.is_some()
+            || !entry.waiting_for_work(self.state.as_ref()) { return; }
+        let Some(handle) = entry.handle.clone() else { return; };
+        let settlement = entry.settlement.get_or_insert_with(|| Settlement {
+            phase: SettlementPhase::Waiting,
+            delay: Duration::from_secs(1), last_check: None, wake: Arc::new(Notify::new()),
+        });
+        if settlement.check_id().is_some() { return; }
+        let Ok(mut producer) = shared.producer() else { return; };
+        let check_id = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        settlement.phase = SettlementPhase::Scheduled(check_id);
+        let delay = settlement.delay;
+        let minimum = settlement.last_check.map(|last| last + Duration::from_secs(1));
+        let wake = Arc::clone(&settlement.wake);
+        let previous = entry.take_task(shared);
+        let generation = entry.generation;
+        let identity = identity.clone();
+        let tasks_owner = shared.clone();
+        let tasks_owner_for_permit = shared.clone();
+        let (task, task_handle) = OwnedTask::spawn(move |cancel| async move {
+            if let Some((_, previous)) = previous { let _ = previous.lock().await.join().await; }
+            let ready = async {
+                tokio::select! { _ = tokio::time::sleep(delay) => {}, _ = wake.notified() => {} }
+                if let Some(minimum) = minimum { tokio::time::sleep_until(minimum.into()).await; }
+                let baseline = loop {
+                    let epoch = producer.retry_epoch();
+                    let (reply, received) = oneshot::channel();
+                    if let Ok(slot) = sender.reserve_control().await {
+                        if slot.send(SessionCommand::Producing {
+                            producer: producer.inherited(),
+                            command: Box::new(SessionCommand::WorkCheckReady {
+                                identity: identity.clone(), generation, check_id, reply,
+                            }),
+                        }).is_ok() { break received.await.ok().flatten(); }
+                    }
+                    producer.wait_retry(epoch).await;
+                };
+                let Some((_, _, endpoint_session_id)) = baseline else { return Err(RuntimeOperationFailure::Unavailable); };
+                tokio::time::timeout(Duration::from_secs(30), handle.check_work_pending(endpoint_session_id.as_deref()))
+                    .await.unwrap_or(Err(RuntimeOperationFailure::Unavailable))
+            };
+            let mut result = tokio::select! {
+                _ = cancel.cancelled() => Err(RuntimeOperationFailure::Unavailable),
+                result = ready => result,
+            };
+            let mut permit = None;
+            loop {
+                if tasks_owner_for_permit.observation_generation(&identity) != Some(generation)
+                    || tasks_owner_for_permit.terminal_delivery.is_stopping() { return; }
+                if cancel.is_cancelled() { result = Err(RuntimeOperationFailure::Unavailable); }
+                let epoch = producer.retry_epoch();
+                let (reply, received) = oneshot::channel();
+                if let Ok(slot) = sender.reserve_control().await {
+                    if slot.send(SessionCommand::Producing {
+                        producer: producer.inherited(),
+                        command: Box::new(SessionCommand::WorkCheckCompleted {
+                            identity: identity.clone(), generation, check_id, result, permit: permit.take(), reply,
+                        }),
+                    }).is_ok() {
+                        match received.await {
+                            Ok(Ok(())) => break,
+                            Ok(Err(count)) => {
+                                permit = tokio::select! {
+                                    permit = tasks_owner_for_permit.terminal_permit(count) => Some(permit),
+                                    _ = cancel.cancelled() => {
+                                        result = Err(RuntimeOperationFailure::Unavailable);
+                                        None
+                                    },
+                                };
+                                continue;
+                            }
+                            _ => {},
+                        }
+                    }
+                }
+                producer.wait_retry(epoch).await;
+            }
+        });
+        let task = Arc::new(tokio::sync::Mutex::new(task));
+        entry.task = Some((task_handle, Arc::clone(&task)));
+        let mut tasks = tasks_owner.read_tasks.lock().expect("session read tasks lock");
+        tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
+        tasks.push(task);
+    }
+
+    pub(super) fn work_check_ready(
+        &self, shared: &SessionShared, identity: &SessionIdentity, generation: u64, check_id: u64,
+    ) -> Option<(u64, u64, Option<String>)> {
+        let state = self.state.as_ref().filter(|state| state.identity() == identity)?;
+        let mut entries = shared.observations.lock().expect("session observation lock");
+        let entry = entries.get_mut(&session_identity_lane_key(identity))?;
+        if entry.generation != generation || entry.closing || entry.baseline.is_some()
+            || !entry.waiting_for_work(Some(state)) { return None; }
+        let settlement = entry.settlement.as_mut()?;
+        if !matches!(settlement.phase, SettlementPhase::Scheduled(id) if id == check_id) { return None; }
+        let baseline = (state.epoch(), state.seq(), state.native_session_id().map(str::to_owned));
+        settlement.phase = SettlementPhase::Checking {
+            check_id, epoch: baseline.0, seq: baseline.1, endpoint_session_id: baseline.2.clone(),
+        };
+        settlement.last_check = Some(Instant::now());
+        Some(baseline)
+    }
+
+    pub(super) async fn work_check_completed(
+        &mut self, shared: &SessionShared, identity: SessionIdentity,
+        generation: u64, check_id: u64, result: Result<bool, RuntimeOperationFailure>,
+        permit: Option<super::terminal::TerminalPermit>,
+    ) -> Result<(), usize> {
+        if shared.terminal_delivery.is_stopping() { return Ok(()); }
+        let custody = self.has_pending_completions();
+        let mut confirmed = {
+            let entries = shared.observations.lock().expect("session observation lock");
+            let Some(entry) = entries.get(&session_identity_lane_key(&identity)) else { return Ok(()); };
+            if entry.generation != generation || entry.closing || entry.baseline.is_some() { return Ok(()); }
+            let demanded = entry.settlement_demanded(self.state.as_ref());
+            let Some(settlement) = &entry.settlement else { return Ok(()); };
+            if settlement.check_id() != Some(check_id) { return Ok(()); }
+            let current = match &settlement.phase {
+                SettlementPhase::Checking { epoch, seq, endpoint_session_id, .. } => self.state.as_ref().is_some_and(|state|
+                    state.identity() == &identity && state.epoch() == *epoch && state.seq() == *seq
+                        && state.native_session_id() == endpoint_session_id.as_deref()),
+                _ => false,
+            };
+            result == Ok(false) && current && demanded && !custody && entry.pending_sends == 0
+        };
+        if confirmed { confirmed = self.collect_settled_request(shared, &identity, permit).await?; }
+        if let Some(entry) = shared.observations.lock().expect("session observation lock")
+            .get_mut(&session_identity_lane_key(&identity)) {
+            let settlement = entry.settlement.as_mut().expect("work check settlement");
+            settlement.phase = if confirmed { SettlementPhase::Confirmed } else { SettlementPhase::Waiting };
+            settlement.delay = (settlement.delay * 2).min(Duration::from_secs(8));
+            if confirmed { entry.unknown_send = false; }
+        }
+        if confirmed {
+            self.publish_work_pending(shared, false).await;
+            shared.terminal_delivery.retry_pending();
+        }
+        self.continue_observation(shared, &identity);
+        Ok(())
+    }
+
     fn start_sync(
         &mut self,
         shared: &SessionShared,
@@ -373,6 +695,10 @@ impl SessionLane {
             return;
         };
         if entry.recovery.failure().is_some() { return; }
+        if entry.settlement.as_ref().is_some_and(|settlement| settlement.check_id().is_some()) {
+            entry.cancel_task();
+            return;
+        }
         if entry.closing || entry.baseline.is_some() {
             if crate::trace::enabled() {
                 crate::trace::log_unscoped("sessions.sync.skip", || serde_json::json!({
@@ -406,6 +732,8 @@ impl SessionLane {
                 "reason": if !entry.waiters.is_empty() { "waiter_request" } else if entry.needs_sync { "needs_sync" } else { "demand_without_committed_view" },
             }));
         }
+        let terminal_read = entry.waiters.iter().any(|waiter| matches!(&waiter.reply, WaiterReply::TerminalRead { .. }));
+        let previous = entry.take_task(shared);
         let Ok(mut producer) = shared.producer() else { return; };
         entry.baseline = Some(baseline);
         entry.active_command = Some(command.clone());
@@ -419,10 +747,18 @@ impl SessionLane {
         entry.terminal_sync.store(true, Ordering::Release);
         let tasks_owner = shared.clone();
         let (task, task_handle) = OwnedTask::spawn(move |cancel| async move {
+            if let Some((_, previous)) = previous { let _ = previous.lock().await.join().await; }
             let started = crate::trace::enabled().then(Instant::now);
             let mut result = tokio::select! {
                 biased;
-                result = handle.sync(command, epoch) => result,
+                result = async {
+                    if terminal_read {
+                        tokio::time::timeout(Duration::from_secs(30), handle.sync(command, epoch)).await
+                            .unwrap_or(Err(RuntimeOperationFailure::Unavailable))
+                    } else {
+                        handle.sync(command, epoch).await
+                    }
+                } => result,
                 _ = cancel.cancelled() => Err(RuntimeOperationFailure::Unavailable),
             };
             if let Some(started) = started {
@@ -452,42 +788,51 @@ impl SessionLane {
                         );
                         (terminal.clone(), bodies)
                     }).collect();
+                    let mut permit = None;
                     loop {
                         let epoch = producer.retry_epoch();
-                        let permit = shared.terminal_permit().await;
                         let (reply, received) = oneshot::channel();
                         if let Ok(slot) = sender.reserve_control().await {
                             let _ = slot.send(SessionCommand::SyncTerminals {
                                 identity: identity.clone(), generation, terminals: terminals.clone(),
-                                publish: !matches!(sync.cut, crate::ports::SessionSyncCut::Restored { .. }), permit, reply,
+                                publish: !matches!(sync.cut, crate::ports::SessionSyncCut::Restored { .. }), permit: permit.take(), reply,
                             });
-                            if let Ok(Some(changes)) = received.await {
-                                if let Some(baseline) = &mut sync.replay_baseline {
-                                    baseline.advance_sync_terminal_baseline(&changes);
+                            match received.await {
+                                Ok(Ok(Some(changes))) => {
+                                    if let Some(baseline) = &mut sync.replay_baseline {
+                                        baseline.advance_sync_terminal_baseline(&changes);
+                                    }
+                                    break;
                                 }
-                                break;
+                                Ok(Err((_, count))) => {
+                                    permit = Some(shared.terminal_permit(count).await);
+                                    continue;
+                                }
+                                _ => {},
                             }
                         }
                         producer.wait_retry(epoch).await;
                     }
                 }
-                if !sync.terminal_runs.is_empty() { drop(shared.terminal_permit().await); }
             }
             loop {
                 let epoch = producer.retry_epoch();
                 if let Ok(slot) = sender.reserve_control().await {
                     if slot.send(SessionCommand::Producing {
                         producer: producer.inherited(),
-                        command: Box::new(SessionCommand::SyncCompleted { identity: identity.clone(), generation, result: result.clone() }),
+                        command: Box::new(SessionCommand::SyncCompleted {
+                            identity: identity.clone(), generation, result: result.clone(),
+                        }),
                     }).is_ok() { break; }
                 }
                 producer.wait_retry(epoch).await;
             }
         });
-        entry.task = Some(task_handle);
+        let task = Arc::new(tokio::sync::Mutex::new(task));
+        entry.task = Some((task_handle, Arc::clone(&task)));
         let mut tasks = tasks_owner.read_tasks.lock().expect("session read tasks lock");
         tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
-        tasks.push(Arc::new(tokio::sync::Mutex::new(task)));
+        tasks.push(task);
     }
 
     fn latest_command(
@@ -521,6 +866,12 @@ impl SessionLane {
             || !crate::state::valid_input_ids(&command.input_ids)
             || command.window.direction() != timeline::Direction::Latest
             || !(1..=200).contains(&command.window.limit())
+        {
+            crate::call::reply(call.as_ref(), reply, SessionObserveOutcome::Rejected).await;
+            return;
+        }
+        if identity.provider() == crate::state::SessionProvider::MatchaAgent
+            && self.bind_matcha_session(shared, &identity, command.endpoint_session_id.as_deref()).await.is_err()
         {
             crate::call::reply(call.as_ref(), reply, SessionObserveOutcome::Rejected).await;
             return;
@@ -607,6 +958,7 @@ impl SessionLane {
             view.approvals = current.approvals;
             view.runtime = current.runtime;
             view.goal = current.goal;
+            view.request_pending = current.request_pending;
             view.window = current.window;
             view.completeness = current.completeness;
             view.epoch = current.epoch;
@@ -697,6 +1049,25 @@ impl SessionLane {
             return;
         }
         let identity = command.identity.clone();
+        if identity.provider() == crate::state::SessionProvider::OpenClaw && self.state.is_none() {
+            self.state = shared.snapshot.load().states.get(&session_identity_lane_key(&identity)).cloned();
+        }
+        let restore_requests = identity.provider() == crate::state::SessionProvider::OpenClaw
+            && (command.endpoint_session_id.is_some()
+                || self.state.as_ref().is_some_and(|state| state.native_session_id().is_some()));
+        if restore_requests {
+            if self.state.is_none() {
+                self.state = SessionState::new(identity.clone(), shared.epoch).ok();
+            }
+            if let Err(failure) = self.prepare_observer(shared, &identity) {
+                let waiter = Waiter {
+                    command: self.latest_command(&identity, timeline::WindowRequest::latest()),
+                    reply: WaiterReply::Send { command, cancellation, reply }, call,
+                };
+                finish_failed_waiter(waiter, failure).await;
+                return;
+            }
+        }
         let waiting = shared
             .observations
             .lock()
@@ -705,6 +1076,8 @@ impl SessionLane {
             .is_some_and(|entry| {
                 entry.closing
                     || entry.waiters.iter().any(|waiter| matches!(&waiter.reply, WaiterReply::Send { .. }))
+                    || (identity.provider() == crate::state::SessionProvider::OpenClaw
+                        && (entry.committed_view.is_none() || entry.needs_sync))
             });
         if !waiting {
             self.resume_send(shared, command, cancellation, reply, call).await;
@@ -739,7 +1112,25 @@ impl SessionLane {
         };
         if let Some(waiter) = rejected {
             finish_failed_waiter(waiter, RuntimeOperationFailure::Unavailable).await;
+        } else {
+            self.continue_observation(shared, &identity);
         }
+    }
+
+    pub(super) fn request_send_allowed(&self, shared: &SessionShared, command: &SessionSendCommand) -> bool {
+        let state = self.state.as_ref();
+        let entries = shared.observations.lock().expect("session observation lock");
+        let entry = entries.get(&session_identity_lane_key(&command.identity));
+        let retry = command.request_run_identity().is_some_and(|id|
+            entry.is_some_and(|entry| entry.runs.contains(id))
+                || state.is_some_and(|state| state.pending_terminals.iter().any(|pending| pending.snapshot.native_run_id == id)));
+        retry || (!self.has_pending_completions()
+            && !state.is_some_and(SessionState::request_pending)
+            && !state.is_some_and(|state| matches!(state.runtime(),
+                SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. }
+                    if !crate::state::terminal_run_phase(runtime.phase) && ordinary_yielded_run_id(state).is_none()))
+            && entry.is_none_or(|entry| entry.pending_sends == 0 && !entry.unknown_send
+                && entry.runs.iter().all(|run_id| state.is_some_and(|state| terminal_observed(state, run_id)))))
     }
 
     pub(super) fn prepare_send_receive(
@@ -770,6 +1161,7 @@ impl SessionLane {
                 entry.pending_sends += 1;
                 true
             };
+            entry.invalidate_settlement();
             (entry.committed_view.is_none() || entry.needs_sync, demand_added)
         };
         if needs_sync {
@@ -814,6 +1206,10 @@ impl SessionLane {
         Ok((lease, native_session_id))
     }
 
+    fn receive_run_id<'a>(&self, run_id: &'a str) -> Option<&'a str> {
+        (self.state.as_ref().and_then(ordinary_yielded_run_id) != Some(run_id)).then_some(run_id)
+    }
+
     pub(super) fn send_receive_run<'a>(
         &self,
         identity: &SessionIdentity,
@@ -821,15 +1217,17 @@ impl SessionLane {
     ) -> Option<&'a str> {
         use crate::send::{SessionSendOutcome::*, SessionSendStatus};
         let active = self.state.as_ref().and_then(SessionState::active_run_id);
-        match outcome {
+        let yielded = self.state.as_ref().and_then(ordinary_yielded_run_id);
+        let run_id = match outcome {
             Queued { run_id } => Some(run_id),
             Succeeded { run_id, status: SessionSendStatus::Started, .. }
                 if identity.provider() != crate::state::SessionProvider::OpenClaw
-                    || active.is_none_or(|active| active == run_id) => Some(run_id),
+                    || active.is_none_or(|active| active == run_id) || yielded.is_some() => Some(run_id),
             Succeeded { run_id, status: SessionSendStatus::InFlight, .. }
-                if active == Some(run_id.as_str()) => Some(run_id),
+                if active == Some(run_id.as_str()) || yielded.is_some() => Some(run_id),
             _ => None,
-        }
+        }?;
+        self.receive_run_id(run_id)
     }
 
     pub(super) fn finish_goal_receive(
@@ -873,10 +1271,15 @@ impl SessionLane {
                 if requested.is_none() {
                     entry.unknown_send = true;
                 }
+                entry.invalidate_settlement();
                 return;
             }
-            if demand_added && let Some(requested) = requested {
-                if self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested) {
+            if let Some(requested) = requested {
+                let acknowledged = identity.provider() == crate::state::SessionProvider::OpenClaw
+                    && matches!(outcome, Queued { run_id } | Succeeded { run_id, .. } if run_id == requested);
+                let retained = self.receive_run_id(requested).is_some_and(|run_id|
+                    self.state.as_ref().and_then(SessionState::active_run_id) == Some(run_id) || acknowledged);
+                if (demand_added || acknowledged) && !retained {
                     entry.runs.remove(requested);
                 }
             }
@@ -885,6 +1288,7 @@ impl SessionLane {
             {
                 entry.runs.insert(run_id.to_owned());
             }
+            entry.invalidate_settlement();
         }
     }
 
@@ -923,7 +1327,7 @@ impl SessionLane {
                     }
                 }
             }
-            if !entry.demanded() && !entry.needs_sync && entry.handle.is_none()
+            if !entry.demanded(self.state.as_ref()) && !entry.needs_sync && entry.handle.is_none()
                 && !entry.closing && entry.baseline.is_none() && entry.recovery.failure().is_none()
             {
                 entries.remove(&session_identity_lane_key(&identity));
@@ -1027,8 +1431,10 @@ impl SessionLane {
             entry.unknown_send = false;
             entry.runs.clear();
             entry.needs_sync = false;
+            entry.settlement = None;
+            entry.cancel_task();
         }
-        self.close_if_idle(shared, identity);
+        self.close_observation(shared, identity, false);
     }
 
     pub(super) fn close_if_idle(&self, shared: &SessionShared, identity: &SessionIdentity) {
@@ -1038,7 +1444,7 @@ impl SessionLane {
             .expect("session observation lock")
             .get(&session_identity_lane_key(identity))
             .is_some_and(|entry| {
-                !entry.demanded() && !entry.needs_sync && entry.baseline.is_none()
+                !entry.demanded(self.state.as_ref()) && !entry.needs_sync && entry.baseline.is_none()
             });
         if idle {
             self.close_observation(shared, identity, false);
@@ -1093,10 +1499,13 @@ impl SessionLane {
         entry.active_command = None;
         entry.committed_view = None;
         entry.committed_command = None;
-        if let Some(previous) = entry.task.take() { previous.cancel(); }
+        if let Some(settlement) = &mut entry.settlement { settlement.phase = SettlementPhase::Waiting; }
+        let previous = entry.take_task(shared);
+        if let Some((task, _)) = &previous { task.cancel(); }
         let identity = identity.clone();
         let generation = entry.generation;
         let (task, task_handle) = OwnedTask::spawn(move |_cancel| async move {
+            if let Some((_, previous)) = previous { let _ = previous.lock().await.cancel_and_join().await; }
             let restarted = if restart {
                 let next_generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
                 if crate::trace::enabled() {
@@ -1129,10 +1538,11 @@ impl SessionLane {
                 producer.wait_retry(epoch).await;
             }
         });
-        entry.task = Some(task_handle);
+        let task = Arc::new(tokio::sync::Mutex::new(task));
+        entry.task = Some((task_handle, Arc::clone(&task)));
         let mut tasks = shared.read_tasks.lock().expect("session read tasks lock");
         tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
-        tasks.push(Arc::new(tokio::sync::Mutex::new(task)));
+        tasks.push(task);
     }
 
     pub(super) async fn observation_closed(
@@ -1176,11 +1586,11 @@ impl SessionLane {
                     "identity": crate::trace::identity_shape(&identity), "oldGeneration": generation,
                     "newGeneration": entry.generation, "closing": entry.closing, "needsSync": entry.needs_sync,
                     "outcome": match restarted { Some(Ok(_)) => "restarted", Some(Err(_)) => "restart_failed", None => "closed" },
-                    "hasHandle": entry.handle.is_some(), "demanded": entry.demanded(),
+                    "hasHandle": entry.handle.is_some(), "demanded": entry.demanded(self.state.as_ref()),
                 }));
             }
             // A failed receive lifecycle must not be recreated by the next observe.
-            if !entry.demanded() && !entry.needs_sync && entry.recovery.failure().is_none() {
+            if !entry.demanded(self.state.as_ref()) && !entry.needs_sync && entry.recovery.failure().is_none() {
                 entries.remove(&key);
                 return;
             }
@@ -1210,13 +1620,14 @@ impl SessionLane {
 
     fn continue_observation(&mut self, shared: &SessionShared, identity: &SessionIdentity) {
         let command = {
-            let entries = shared
+            let mut entries = shared
                 .observations
                 .lock()
                 .expect("session observation lock");
-            let Some(entry) = entries.get(&session_identity_lane_key(identity)) else {
+            let Some(entry) = entries.get_mut(&session_identity_lane_key(identity)) else {
                 return;
             };
+            entry.waiters.retain(|waiter| !matches!(&waiter.reply, WaiterReply::TerminalRead { reply, .. } if reply.is_closed()));
             if entry.recovery.failure().is_some() { return; }
             if entry.closing || entry.baseline.is_some() || entry.handle.is_none() {
                 if crate::trace::enabled() {
@@ -1240,7 +1651,7 @@ impl SessionLane {
                 .or_else(|| {
                     if entry.needs_sync {
                         Some(self.latest_command(identity, timeline::WindowRequest::latest()))
-                    } else if entry.demanded() && entry.committed_view.is_none() {
+                    } else if entry.demanded(self.state.as_ref()) && entry.committed_view.is_none() {
                         Some(entry.committed_command.clone().unwrap_or_else(|| {
                             self.latest_command(identity, timeline::WindowRequest::latest())
                         }))
@@ -1256,8 +1667,8 @@ impl SessionLane {
                     "needsSync": entry.needs_sync, "hasCommittedView": entry.committed_view.is_some(),
                     "waiters": entry.waiters.len(), "leases": entry.leases.len(), "runs": entry.runs.len(), "unknownSend": entry.unknown_send,
                     "reason": if !entry.waiters.is_empty() { "first_waiter" } else if entry.needs_sync { "needs_sync" }
-                        else if entry.demanded() && entry.committed_view.is_none() { "demand_without_committed_view" }
-                        else if entry.demanded() { "demand_satisfied" } else { "idle" },
+                        else if entry.demanded(self.state.as_ref()) && entry.committed_view.is_none() { "demand_without_committed_view" }
+                        else if entry.demanded(self.state.as_ref()) { "demand_satisfied" } else { "idle" },
                     "selection": if !entry.waiters.is_empty() { "first_waiter_request" } else if command.is_none() { "none" }
                         else if entry.committed_command.is_some() { "committed_request" } else { "default_latest_request" },
                 }));
@@ -1267,7 +1678,10 @@ impl SessionLane {
         if let Some(command) = command {
             self.start_sync(shared, identity, command);
         } else {
-            self.close_if_idle(shared, identity);
+            let waiting = shared.observations.lock().expect("session observation lock")
+                .get(&session_identity_lane_key(identity)).is_some_and(|entry| entry.waiting_for_work(self.state.as_ref()));
+            if waiting { self.start_work_check(shared, identity); }
+            else { self.close_if_idle(shared, identity); }
         }
     }
 
@@ -1290,23 +1704,29 @@ impl SessionLane {
             let cursor = next.cursor().checked_add(1)?;
             let binding = crate::state::SessionEventBinding::new(identity.clone(), None)
                 .expect("validated sync identity");
-            let crate::state::SessionApplyResult::Applied(delta) = next.apply_bound(
+            let request_pending = next.request_pending();
+            let crate::state::SessionApplyResult::Applied(mut delta) = next.apply_bound(
                 binding, None, cursor, vec![SessionChange::RunPhaseChanged { run_id: terminal.run_id, phase: terminal.phase }],
             ) else { return None; };
             let snapshots = SessionShared::terminal_snapshots(&delta, &next, |_| assistant_texts.clone());
-            if !self.retain_terminals(shared, &mut next, &snapshots) { return None; }
+            if !self.retain_terminals(shared, &mut next, &snapshots)
+                || !next.project_request_pending(request_pending, &mut delta) { return None; }
             if let Some(pending) = next.pending_terminals.iter_mut().find(|pending| pending.snapshot.native_run_id == run_id) {
                 pending.bodies = bodies;
             }
             committed.push((delta, snapshots));
         }
         let changes = next.sync_terminal_changes(before);
+        let before_seq = before.seq();
+        let after_seq = next.seq();
         self.state = Some(next.clone());
         shared.store_snapshot_state(next).await;
+        if let Some(state) = &self.state { shared.receive_state(state, None); }
+        shared.terminal_delivery.retry_pending();
         if let Some(baseline) = shared.observations.lock().expect("session observation lock")
             .get_mut(&session_identity_lane_key(identity)).and_then(|entry| entry.baseline.as_mut())
         {
-            baseline.advance_sync_terminal_baseline(&changes);
+            baseline.advance_sync_terminal_baseline(&changes, before_seq, after_seq);
         }
         for (delta, snapshots) in committed {
             shared.receive_event(identity, &delta.changes);
@@ -1316,6 +1736,7 @@ impl SessionLane {
                 shared.emit_terminals(snapshots);
             }
         }
+        if let Some(state) = &self.state { shared.receive_state(state, None); }
         Some(changes)
     }
 
@@ -1356,23 +1777,24 @@ impl SessionLane {
                     },
                 }));
             }
-            let Some(baseline) = entry.baseline.take() else {
+            let Some(baseline) = entry.baseline.clone() else {
                 return;
             };
-            let Some(command) = entry.active_command.take() else {
+            let Some(command) = entry.active_command.clone() else {
                 return;
             };
             let handle = Arc::clone(entry.handle.as_ref().expect("sync observation handle"));
             let items_mode = handle.items_sync_mode();
-            entry.task.take();
-            entry.terminal_sync.store(false, Ordering::Release);
-            shared.terminal_delivery.notify();
             (baseline, command, items_mode, handle)
         };
         let failed = shared.observations.lock().expect("session observation lock")
             .get_mut(&session_identity_lane_key(&identity)).is_some_and(|entry| {
                 if entry.recovery.failure().is_none() { return false; }
                 entry.close_after_sync = None;
+                entry.baseline.take();
+                entry.active_command.take();
+                entry.task.take();
+                entry.terminal_sync.store(false, Ordering::Release);
                 true
             });
         if failed {
@@ -1414,6 +1836,7 @@ impl SessionLane {
                 )
                 .await;
                 let mut next = self.state.clone().unwrap_or_else(|| baseline.clone());
+                sync.work_pending = self.effective_work_pending(shared, sync.work_pending, &[], Some(baseline.seq()));
                 let terminal_commit_failed = sync.terminal_runs.iter().any(|terminal| !next.has_terminal_run(&terminal.run_id));
                 let reconciled = if terminal_commit_failed {
                     Err(crate::state::SessionStateError::InvalidFacts)
@@ -1461,12 +1884,16 @@ impl SessionLane {
                             entry.committed_view = Some(view.clone());
                             entry.recovery.renew();
                             for terminal in &sync.terminal_runs {
-                                entry.runs.remove(&terminal.run_id);
+                                if identity.provider() != crate::state::SessionProvider::OpenClaw {
+                                    entry.runs.remove(&terminal.run_id);
+                                }
                                 entry.notified_terminals.insert(terminal.run_id.clone());
                             }
                         }
                         self.state = Some(next.clone());
                         shared.store_snapshot_state(next).await;
+                        if let Some(state) = &self.state { shared.receive_state(state, sync.work_pending); }
+                        shared.terminal_delivery.retry_pending();
                         committed_cut = Some((sync.source_epoch, sync.cut));
                         if crate::trace::enabled() {
                             let trace_started = Instant::now();
@@ -1508,6 +1935,13 @@ impl SessionLane {
                 None
             },
         };
+        if let Some(entry) = shared.observations.lock().expect("session observation lock")
+            .get_mut(&session_identity_lane_key(&identity)) {
+            entry.baseline.take();
+            entry.active_command.take();
+            entry.terminal_sync.store(false, Ordering::Release);
+        }
+        shared.terminal_delivery.notify();
         let deferred_close = shared.observations.lock().expect("session observation lock")
             .get_mut(&session_identity_lane_key(&identity)).and_then(|entry| entry.close_after_sync.take());
         if view.is_none() {
@@ -1520,8 +1954,9 @@ impl SessionLane {
                     let mut entries = shared.observations.lock().expect("session observation lock");
                     let entry = entries.get_mut(&session_identity_lane_key(&identity)).expect("sync observation");
                     if identity.provider() == crate::state::SessionProvider::OpenClaw && entry.committed_view.is_some() {
+                        entry.needs_sync |= entry.waiters.iter().any(|waiter| matches!(&waiter.reply, WaiterReply::TerminalRead { .. }));
                         let waiters = entry.take_failed_waiters();
-                        Some((waiters, entry.demanded()))
+                        Some((waiters, entry.demanded(self.state.as_ref())))
                     } else {
                         None
                     }
@@ -1547,13 +1982,14 @@ impl SessionLane {
                     .get_mut(&session_identity_lane_key(&identity))
                     .expect("sync observation");
                 let restart = failure != RuntimeOperationFailure::TargetRejected
+                    && !entry.waiters.iter().any(|waiter| matches!(&waiter.reply, WaiterReply::TerminalRead { .. }))
                     && matches!(entry.recovery, Recovery::Available)
-                    && entry.demanded();
+                    && entry.demanded(self.state.as_ref());
                 if crate::trace::enabled() {
                     crate::trace::log_unscoped("sessions.sync.failure_close", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "generation": entry.generation,
                         "restart": restart, "recoveryAvailable": matches!(entry.recovery, Recovery::Available),
-                        "needsSync": entry.needs_sync, "closing": entry.closing, "demanded": entry.demanded(),
+                        "needsSync": entry.needs_sync, "closing": entry.closing, "demanded": entry.demanded(self.state.as_ref()),
                     }));
                 }
                 entry.recovery = Recovery::Exhausted;
@@ -1607,6 +2043,52 @@ impl SessionLane {
         self.continue_observation(shared, &identity);
     }
 
+    pub(super) async fn recover_terminal_read(
+        &mut self,
+        shared: &SessionShared,
+        identity: SessionIdentity,
+        run_id: &str,
+        permit: super::terminal::TerminalPermit,
+        reply: oneshot::Sender<Result<(), RuntimeOperationFailure>>,
+    ) {
+        if reply.is_closed() || shared.terminal_delivery.is_stopping() { return; }
+        let Some(state) = &mut self.state else { let _ = reply.send(Err(RuntimeOperationFailure::Unavailable)); return; };
+        let current = state.identity() == &identity;
+        let Some(pending) = state.pending_terminals.first_mut().filter(|pending|
+            current && pending.snapshot.native_run_id == run_id
+                && Arc::ptr_eq(&pending.permit, &permit)
+                && pending.read == crate::state::TerminalRead::Pending)
+        else { let _ = reply.send(Err(RuntimeOperationFailure::TargetRejected)); return; };
+        pending.read = crate::state::TerminalRead::Retried;
+        shared.store_snapshot_state(state.clone()).await;
+        if let Err(failure) = self.prepare_observer(shared, &identity) {
+            let _ = reply.send(Err(failure));
+            return;
+        }
+        let waiter = Waiter {
+            command: self.latest_command(&identity, timeline::WindowRequest::latest()),
+            reply: WaiterReply::TerminalRead { permit, reply },
+            call: None,
+        };
+        let rejected = {
+            let mut entries = shared.observations.lock().expect("session observation lock");
+            let entry = entries.get_mut(&session_identity_lane_key(&identity)).expect("prepared observation");
+            if entry.waiters.len() >= MAX_WAITERS {
+                Some(waiter)
+            } else {
+                entry.waiters.push(waiter);
+                entry.needs_sync = true;
+                entry.recovery = Recovery::Exhausted;
+                None
+            }
+        };
+        if let Some(waiter) = rejected {
+            finish_failed_waiter(waiter, RuntimeOperationFailure::Unavailable).await;
+        } else {
+            self.close_observation(shared, &identity, true);
+        }
+    }
+
     pub(super) fn recover_observation(
         &mut self,
         shared: &SessionShared,
@@ -1651,6 +2133,7 @@ impl SessionLane {
     ) {
         if history_refresh {
             if let Some(entry) = shared.observations.lock().expect("session observation lock").get_mut(&session_identity_lane_key(identity)) {
+                entry.invalidate_settlement();
                 let needs_sync_before = entry.needs_sync;
                 entry.needs_sync = true;
                 if crate::trace::enabled() {
@@ -1682,6 +2165,10 @@ fn observe_failure(failure: RuntimeOperationFailure) -> SessionObserveOutcome {
 
 async fn finish_failed_waiter(waiter: Waiter, failure: RuntimeOperationFailure) {
     match waiter.reply {
+        WaiterReply::TerminalRead { permit, reply } => {
+            drop(permit);
+            let _ = reply.send(Err(failure));
+        }
         WaiterReply::Send { reply, .. } => {
             let outcome = match failure {
                 RuntimeOperationFailure::TargetRejected => SessionSendOutcome::Rejected,
@@ -1720,6 +2207,10 @@ async fn finish_failed_waiter(waiter: Waiter, failure: RuntimeOperationFailure) 
 
 async fn finish_waiter(waiter: Waiter, view: Option<SessionView>) {
     match waiter.reply {
+        WaiterReply::TerminalRead { permit, reply } => {
+            drop(permit);
+            let _ = reply.send(view.map(|_| ()).ok_or(RuntimeOperationFailure::Unavailable));
+        }
         WaiterReply::Send { reply, .. } => {
             crate::call::reply(waiter.call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
         }

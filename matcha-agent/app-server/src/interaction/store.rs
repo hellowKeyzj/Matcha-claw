@@ -131,9 +131,10 @@ impl Store {
         instance_id: Option<String>,
         include_resolved: bool,
     ) -> rpc::Result<Vec<Pending>> {
-        self.database.call(move |connection| {
-            crate::session::assert_live_session(connection, &session_id)?;
-            records(connection,
+        self.database.read(move |connection| {
+            let transaction = connection.transaction().map_err(|source| storage("interaction_records_query", source))?;
+            crate::session::assert_live_session(&transaction, &session_id)?;
+            records(&transaction,
                 "SELECT record_json FROM interactions WHERE session_id=?1 AND family=?2
                     AND (?3 IS NULL OR run_id=?3) AND (?4 IS NULL OR instance_id=?4)
                     AND (?5 OR (availability='pending' AND json_extract(record_json,'$.delivery')='notSent'
@@ -200,9 +201,12 @@ impl Store {
 
     pub(super) async fn answerable(&self, target: Target) -> rpc::Result<bool> {
         self.database
-            .call(move |connection| {
-                crate::session::assert_live_session(connection, &target.session_id)?;
-                Ok(get(connection, &target)?
+            .read(move |connection| {
+                let transaction = connection
+                    .transaction()
+                    .map_err(|source| storage("interaction_record_read", source))?;
+                crate::session::assert_live_session(&transaction, &target.session_id)?;
+                Ok(get(&transaction, &target)?
                     .is_some_and(|pending| pending.availability == super::Availability::Pending))
             })
             .await
@@ -309,8 +313,11 @@ impl Store {
 
     pub(super) async fn fact_sessions(&self) -> rpc::Result<Vec<String>> {
         self.database
-            .call(|connection| {
-                let mut statement = connection
+            .read(|connection| {
+                let transaction = connection
+                    .transaction()
+                    .map_err(|source| storage("interaction_fact_sessions", source))?;
+                let mut statement = transaction
                     .prepare(
                         "SELECT DISTINCT session_id FROM interaction_facts ORDER BY session_id",
                     )
@@ -323,7 +330,7 @@ impl Store {
                     .map_err(|source| storage("interaction_fact_sessions", source))?;
                 sessions
                     .into_iter()
-                    .filter_map(|session_id| match live_session(connection, &session_id) {
+                    .filter_map(|session_id| match live_session(&transaction, &session_id) {
                         Ok(true) => Some(Ok(session_id)),
                         Ok(false) => None,
                         Err(error) => Some(Err(error)),
@@ -334,15 +341,16 @@ impl Store {
     }
 
     pub(super) async fn next_fact(&self, session_id: String) -> rpc::Result<Option<Fact>> {
-        self.database.call(move |connection| {
-            crate::session::assert_live_session(connection, &session_id)?;
-            let row: Option<(i64, String, Option<String>, String, String)> = connection.query_row(
+        self.database.read(move |connection| {
+            let transaction = connection.transaction().map_err(|source| storage("interaction_fact_read", source))?;
+            crate::session::assert_live_session(&transaction, &session_id)?;
+            let row: Option<(i64, String, Option<String>, String, String)> = transaction.query_row(
                 "SELECT id,session_id,run_id,kind,payload_json FROM interaction_facts WHERE session_id=?1 ORDER BY id LIMIT 1",
                 [session_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             ).optional().map_err(|source| storage("interaction_fact_read", source))?;
             row.map(|(id, session_id, run_id, kind, payload)| {
                 let mut payload = serde_json::from_str(&payload).map_err(|source| storage("interaction_fact_decode", source))?;
-                hydrate_requests(connection, std::iter::once((session_id.as_str(), kind.as_str(), &mut payload)))?;
+                hydrate_requests(&transaction, std::iter::once((session_id.as_str(), kind.as_str(), &mut payload)))?;
                 Ok(Fact { id, session_id, run_id, kind, payload })
             }).transpose()
         }).await
@@ -356,7 +364,7 @@ impl Store {
             return Ok(events);
         }
         self.database
-            .call(move |connection| {
+            .read(move |connection| {
                 hydrate_requests(
                     connection,
                     events.iter_mut().map(|event| {

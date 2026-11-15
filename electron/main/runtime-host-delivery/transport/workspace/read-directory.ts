@@ -7,13 +7,13 @@ import {
   sendLoopbackJson,
 } from '../client';
 import {
-  type Endpoint,
   type FileTarget,
-  type AgentScope,
-  isEndpoint,
+  type FileScope,
+  type FileInputIdentity,
   isFileRelativePath,
   isFileTarget,
-  isAgentScope,
+  isFileScope,
+  isFileInput,
 } from './contract';
 
 const ROUTE_PATH = '/api/workspace/files/list-dir';
@@ -25,11 +25,9 @@ const UNAVAILABLE = {
 type WorkspaceDirectoryRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.listDir';
-  scope: AgentScope;
+  scope: FileScope;
   target: FileTarget;
-  input: Readonly<{
-    endpoint: Endpoint;
-    agentId: string;
+  input: FileInputIdentity & Readonly<{
     relativePath: string;
     includeHidden: boolean;
   }>;
@@ -84,19 +82,13 @@ function isWorkspaceDirectoryRequest(value: unknown): value is WorkspaceDirector
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.listDir'
-    && isAgentScope(value.scope)
+    && isFileScope(value.scope)
     && isFileTarget(value.target)
-    && isInput(value.input)
-    && value.scope.agentId === value.input.agentId
-    && value.scope.endpoint.runtimeAdapterId === value.input.endpoint.runtimeAdapterId
-    && value.scope.endpoint.runtimeInstanceId === value.input.endpoint.runtimeInstanceId;
+    && isInput(value.input, value.scope);
 }
 
-function isInput(value: unknown): value is WorkspaceDirectoryRequest['input'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['endpoint', 'agentId', 'relativePath', 'includeHidden'])
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.agentId)
+function isInput(value: unknown, scope: FileScope): value is WorkspaceDirectoryRequest['input'] {
+  return isFileInput(value, scope, ['relativePath', 'includeHidden'])
     && (value.relativePath === '' || isFileRelativePath(value.relativePath))
     && typeof value.includeHidden === 'boolean';
 }

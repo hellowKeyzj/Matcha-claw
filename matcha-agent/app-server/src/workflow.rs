@@ -60,18 +60,19 @@ pub fn capabilities() -> Value {
     json!({
         "methods": ["workflows.list", "workflows.get", "workflows.capabilities"],
         "kinds": {
-            "source": {"source": "agent.workspace/.claude/workflows/<name>.ts|js|mjs", "execution": false},
-            "run": {"source": "agent.workspace/.claude/workflow-runs/<id>/{state.json,journal.jsonl,script.js}"}
+            "source": {"source": "executionWorkspace/.claude/workflows/<name>.ts|js|mjs", "execution": false},
+            "run": {"source": "executionWorkspace/.claude/workflow-runs/<id>/{state.json,journal.jsonl,script.js}"}
         },
+        "workspace": "sessionId selects its persisted execution root; omitted uses Agent workspace",
         "readOnly": true, "nativeAvailability": "unverified",
         "limitations": [
             "WORKFLOW_SCRIPTS构建feature及当前工具可用性未由initialize响应证明。",
-            "只观察当前Agent workspace中原生source/state/journal与实际SDK工作流任务，不重写Workflow engine。",
+            "只观察所选Session执行目录（省略sessionId使用Agent默认目录）中原生source/state/journal与实际SDK工作流任务，不重写Workflow engine。",
             "原生journal记录Agent调用结果而非完整运行终态；缺state.json不表示运行成功、失败或仍活动。",
             "journal resume不是任意执行点pause/resume，也不承诺外部副作用exactly-once。",
             "resumeFromRunId可能与新task_id不同，不凭相同名称或时间猜测映射。",
             "没有确定性外部create/start/update/delete/resume入口，不用prompt伪造。",
-            "不扫描任意scriptPath或workspace外项目根；仅返回指定Agent受控目录的实际资料。"
+            "不扫描任意scriptPath或workspace外项目根；仅返回经Session record或Agent默认绑定的受控目录实际资料。"
         ]
     })
 }
@@ -112,7 +113,14 @@ pub async fn dispatch(
         Kind::Source => ".claude/workflows",
         Kind::Run => ".claude/workflow-runs",
     };
-    let entries = entries(config, &agent_id, directory).await?;
+    let entries = entries(
+        config,
+        sessions,
+        &agent_id,
+        session_id.as_deref(),
+        directory,
+    )
+    .await?;
     let mut response = json!({
         "agentId": agent_id, "kind": match kind {Kind::Source => "source", Kind::Run => "run"},
         "availability": if entries.is_some() {"observed"} else {"absent"}, "readOnly": true,
@@ -127,9 +135,14 @@ pub async fn dispatch(
                     .get(&id)
                     .ok_or_else(|| rpc::Error::not_found("Named workflow source"))?;
                 let filename = format!("{id}{extension}");
-                let bytes =
-                    workspace::read_file(config, &agent_id, &format!("{directory}/{filename}"))
-                        .await?;
+                let bytes = workspace::read_session_file(
+                    config,
+                    sessions,
+                    &agent_id,
+                    session_id.as_deref(),
+                    &format!("{directory}/{filename}"),
+                )
+                .await?;
                 let source = String::from_utf8(bytes).map_err(|_| native_invalid())?;
                 response["workflow"] = json!({"id": id, "file": filename, "source": source});
             } else {
@@ -145,9 +158,16 @@ pub async fn dispatch(
         }
         Kind::Run => {
             if let Some(id) = id {
-                response["workflow"] = read_run(config, &agent_id, &id, true)
-                    .await?
-                    .ok_or_else(|| rpc::Error::not_found("Native workflow run"))?;
+                response["workflow"] = read_run(
+                    config,
+                    sessions,
+                    &agent_id,
+                    session_id.as_deref(),
+                    &id,
+                    true,
+                )
+                .await?
+                .ok_or_else(|| rpc::Error::not_found("Native workflow run"))?;
             } else {
                 let mut runs = Vec::new();
                 for entry in entries
@@ -155,7 +175,16 @@ pub async fn dispatch(
                     .filter(|entry| entry.kind == "directory")
                 {
                     validate_component(&entry.name).map_err(|_| native_invalid())?;
-                    if let Some(run) = read_run(config, &agent_id, &entry.name, false).await? {
+                    if let Some(run) = read_run(
+                        config,
+                        sessions,
+                        &agent_id,
+                        session_id.as_deref(),
+                        &entry.name,
+                        false,
+                    )
+                    .await?
+                    {
                         runs.push(run);
                     }
                 }
@@ -210,16 +239,27 @@ fn sources(entries: Vec<DirectoryEntry>) -> rpc::Result<BTreeMap<String, &'stati
 
 async fn read_run(
     config: &ConfigStore,
+    sessions: &Sessions,
     agent_id: &str,
+    session_id: Option<&str>,
     id: &str,
     detail: bool,
 ) -> rpc::Result<Option<Value>> {
     let directory = format!(".claude/workflow-runs/{id}");
-    if entries(config, agent_id, &directory).await?.is_none() {
+    if entries(config, sessions, agent_id, session_id, &directory)
+        .await?
+        .is_none()
+    {
         return Ok(None);
     }
-    let state = if let Some(bytes) =
-        read_optional(config, agent_id, &format!("{directory}/state.json")).await?
+    let state = if let Some(bytes) = read_optional(
+        config,
+        sessions,
+        agent_id,
+        session_id,
+        &format!("{directory}/state.json"),
+    )
+    .await?
     {
         let state: StateFile = serde_json::from_slice(&bytes).map_err(|_| native_invalid())?;
         if state.schema_version != 1
@@ -236,8 +276,14 @@ async fn read_run(
     } else {
         None
     };
-    let journal = if let Some(bytes) =
-        read_optional(config, agent_id, &format!("{directory}/journal.jsonl")).await?
+    let journal = if let Some(bytes) = read_optional(
+        config,
+        sessions,
+        agent_id,
+        session_id,
+        &format!("{directory}/journal.jsonl"),
+    )
+    .await?
     {
         let text = String::from_utf8(bytes).map_err(|_| native_invalid())?;
         let mut entries = Vec::new();
@@ -268,7 +314,14 @@ async fn read_run(
     } else {
         None
     };
-    let script = read_optional(config, agent_id, &format!("{directory}/script.js")).await?;
+    let script = read_optional(
+        config,
+        sessions,
+        agent_id,
+        session_id,
+        &format!("{directory}/script.js"),
+    )
+    .await?;
     if state.is_none() && journal.is_none() && script.is_none() {
         return Ok(None);
     }
@@ -288,13 +341,16 @@ async fn read_run(
 
 async fn entries(
     config: &ConfigStore,
+    sessions: &Sessions,
     agent_id: &str,
+    session_id: Option<&str>,
     path: &str,
 ) -> rpc::Result<Option<Vec<DirectoryEntry>>> {
     let value = match workspace::dispatch(
         "workspace.list",
-        json!({"agentId": agent_id, "path": path}),
+        json!({"agentId": agent_id, "sessionId": session_id, "path": path}),
         config,
+        sessions,
     )
     .await
     {
@@ -314,10 +370,12 @@ async fn entries(
 
 async fn read_optional(
     config: &ConfigStore,
+    sessions: &Sessions,
     agent_id: &str,
+    session_id: Option<&str>,
     path: &str,
 ) -> rpc::Result<Option<Vec<u8>>> {
-    match workspace::read_file(config, agent_id, path).await {
+    match workspace::read_session_file(config, sessions, agent_id, session_id, path).await {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.code == -32001 => Ok(None),
         Err(error) => Err(error),

@@ -762,6 +762,25 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             .await;
             let _ = reply.send(result);
         }
+        PeerQuery::OpenClawVideoTaskRefresh { request, call, reply } => {
+            if !run_call(
+                call.as_ref(),
+                openclaw::gateway::loopback::GatewayOperation::VideoTaskRefresh,
+            ).await {
+                let _ = reply.send(Ok(openclaw::port::OpenClawGatewayRequestOutcome::Unavailable));
+                return;
+            }
+            let result = match shared.admission().admit_request() {
+                Ok(()) => Ok(shared.open_claw().video_task_refresh(request).await),
+                Err(error) => Err(error),
+            };
+            finish_gateway_call(
+                call,
+                openclaw::gateway::loopback::GatewayOperation::VideoTaskRefresh,
+                &result,
+            ).await;
+            let _ = reply.send(result);
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use serde::{
     de::{Error as _, IgnoredAny},
 };
 use serde_json::{Map, Value, json};
-use std::fmt;
+use std::{fmt, path::{Path, PathBuf}};
 
 pub const CHAT_SEND_METHOD: &str = "chat.send";
 pub const CHAT_ABORT_METHOD: &str = "chat.abort";
@@ -803,6 +803,8 @@ pub struct SessionCreateParams {
     #[serde(rename = "agentId")]
     agent_id: AgentId,
     model: ModelRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<PathBuf>,
 }
 
 impl SessionCreateParams {
@@ -816,7 +818,20 @@ impl SessionCreateParams {
             key,
             agent_id,
             model,
+            cwd: None,
         })
+    }
+
+    pub fn with_cwd(mut self, cwd: PathBuf) -> Result<Self, ValidationError> {
+        if !cwd.is_absolute() || cwd.to_str().is_none_or(|path| path.contains('\0')) {
+            return Err(ValidationError("session cwd must be an absolute path"));
+        }
+        self.cwd = Some(cwd);
+        Ok(self)
+    }
+
+    pub fn cwd(&self) -> Option<&Path> {
+        self.cwd.as_deref()
     }
 
     pub fn key(&self) -> &AgentScopedSessionKey {
@@ -859,9 +874,30 @@ impl fmt::Debug for SessionDeleteParams {
 pub struct SessionCreateResult {
     native_session_id: NativeSessionId,
     model_state: Option<sessions_module::state::SessionModelState>,
+    spawned_cwd: Option<PathBuf>,
+    session_root: Option<PathBuf>,
 }
 
 impl SessionCreateResult {
+    pub(crate) fn identity(&self, key: &AgentScopedSessionKey) -> SessionIdentityReadback {
+        SessionIdentityReadback {
+            key: SessionKey::try_new(key.as_str()).expect("validated agent-scoped session key"),
+            native_session_id: self.native_session_id.clone(),
+            agent_id: AgentId::try_new(key.agent_id()).expect("validated agent-scoped session agent"),
+            spawned_cwd: self.spawned_cwd.clone(),
+            spawned_workspace_dir: None,
+            session_root: self.session_root.clone(),
+        }
+    }
+
+    pub fn spawned_cwd(&self) -> Option<&Path> {
+        self.spawned_cwd.as_deref()
+    }
+
+    pub fn session_root(&self) -> Option<&Path> {
+        self.session_root.as_deref()
+    }
+
     pub fn native_session_id(&self) -> &NativeSessionId {
         &self.native_session_id
     }
@@ -883,9 +919,29 @@ impl fmt::Debug for SessionCreateResult {
 pub struct SessionIdentityReadback {
     key: SessionKey,
     native_session_id: NativeSessionId,
+    agent_id: AgentId,
+    spawned_cwd: Option<PathBuf>,
+    spawned_workspace_dir: Option<PathBuf>,
+    session_root: Option<PathBuf>,
 }
 
 impl SessionIdentityReadback {
+    pub fn agent_id(&self) -> &str {
+        self.agent_id.as_str()
+    }
+
+    pub fn spawned_cwd(&self) -> Option<&Path> {
+        self.spawned_cwd.as_deref()
+    }
+
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.spawned_workspace_dir.as_deref().or(self.spawned_cwd())
+    }
+
+    pub fn session_root(&self) -> Option<&Path> {
+        self.session_root.as_deref()
+    }
+
     pub fn key(&self) -> &SessionKey {
         &self.key
     }
@@ -1374,6 +1430,9 @@ pub struct SessionDescribeRow {
     pub model: Option<String>,
     pub model_provider: Option<String>,
     pub agent_id: Option<AgentId>,
+    spawned_cwd: Option<PathBuf>,
+    spawned_workspace_dir: Option<PathBuf>,
+    session_root: Option<PathBuf>,
     pub model_override_source: Option<SessionModelOverrideSource>,
 }
 impl<'de> Deserialize<'de> for SessionDescribeRow {
@@ -1398,12 +1457,32 @@ impl<'de> Deserialize<'de> for SessionDescribeRow {
             model_provider: serde_json::from_value(read("modelProvider"))
                 .map_err(D::Error::custom)?,
             agent_id: serde_json::from_value(read("agentId")).map_err(D::Error::custom)?,
+            spawned_cwd: decode_native_directory(read("spawnedCwd")).map_err(D::Error::custom)?,
+            spawned_workspace_dir: decode_native_directory(read("spawnedWorkspaceDir")).map_err(D::Error::custom)?,
+            session_root: decode_native_directory(read("sessionRoot")).map_err(D::Error::custom)?,
             model_override_source: serde_json::from_value(read("modelOverrideSource"))
                 .map_err(D::Error::custom)?,
         })
     }
 }
 impl SessionDescribeRow {
+    pub fn identity(&self, expected_key: &AgentScopedSessionKey) -> Result<SessionIdentityReadback, ProtocolError> {
+        if self.key.as_deref() != Some(expected_key.as_str())
+            || self.agent_id.as_ref().is_some_and(|agent| agent.as_str() != expected_key.agent_id())
+        {
+            return Err(ProtocolError::InvalidSessionDescribeResult);
+        }
+        Ok(SessionIdentityReadback {
+            key: SessionKey::try_new(expected_key.as_str()).map_err(|_| ProtocolError::InvalidSessionDescribeResult)?,
+            native_session_id: NativeSessionId::try_new(self.session_id.clone().ok_or(ProtocolError::InvalidSessionDescribeResult)?)
+                .map_err(|_| ProtocolError::InvalidSessionDescribeResult)?,
+            agent_id: AgentId::try_new(expected_key.agent_id()).map_err(|_| ProtocolError::InvalidSessionDescribeResult)?,
+            spawned_cwd: self.spawned_cwd.clone(),
+            spawned_workspace_dir: self.spawned_workspace_dir.clone(),
+            session_root: self.session_root.clone(),
+        })
+    }
+
     /// Rejoins the row's selected model into the canonical `provider/model` runtime ref shared
     /// with [`crate::native_config::ProviderModelRuntimeIdentity::runtime_model_ref`].
     pub fn model_ref(&self) -> Option<String> {
@@ -1951,6 +2030,8 @@ pub fn decode_session_create_result(
         .then_some(SessionCreateResult {
             native_session_id: result.native_session_id,
             model_state: result.model_state,
+            spawned_cwd: result.spawned_cwd,
+            session_root: result.session_root,
         })
         .ok_or(ProtocolError::InvalidSessionCreateResult)
 }
@@ -1984,6 +2065,8 @@ struct PeerSessionCreateResult {
     key: String,
     native_session_id: NativeSessionId,
     model_state: Option<sessions_module::state::SessionModelState>,
+    spawned_cwd: Option<PathBuf>,
+    session_root: Option<PathBuf>,
 }
 
 impl<'de> Deserialize<'de> for PeerSessionCreateResult {
@@ -2049,13 +2132,30 @@ impl<'de> Deserialize<'de> for PeerSessionCreateResult {
             &["nativeSessionId", "sessionId"],
         )
         .ok_or_else(|| D::Error::custom("sessions.create native session id is required"))?;
+        let entry = object.get("entry").and_then(Value::as_object);
+        let read_directory = |name: &str| {
+            decode_native_directory(entry.and_then(|entry| entry.get(name)).cloned().unwrap_or(Value::Null))
+                .map_err(D::Error::custom)
+        };
         Ok(Self {
             ok: serde_json::from_value(ok).map_err(D::Error::custom)?,
             key: serde_json::from_value(key).map_err(D::Error::custom)?,
             native_session_id: serde_json::from_value(native_session_id)
                 .map_err(D::Error::custom)?,
             model_state,
+            spawned_cwd: read_directory("spawnedCwd")?,
+            session_root: read_directory("sessionRoot")?,
         })
+    }
+}
+
+fn decode_native_directory(value: Value) -> Result<Option<PathBuf>, &'static str> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) if !value.is_empty() && !value.contains('\0') && Path::new(&value).is_absolute() => {
+            Ok(Some(PathBuf::from(value)))
+        }
+        _ => Err("native session directory is invalid"),
     }
 }
 
@@ -2163,6 +2263,120 @@ fn status_retry_attempt(value: Option<&Value>) -> Result<u8, ProtocolError> {
         .ok_or(ProtocolError::InvalidSessionEvent)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum DisplayContent {
+    Empty,
+    NonText,
+    Diagnostic,
+    Text([u8; 32]),
+    OtherRole { displayable: bool },
+}
+
+impl DisplayContent {
+    fn new(text: &str, has_nontext: bool) -> Self {
+        if has_nontext { return Self::NonText; }
+        if text.is_empty() { return Self::Empty; }
+        let normalized = normalize_error_text(text);
+        if matches!(normalized.as_str(), "" | "[assistant turn failed before producing content]" | "The agent run failed before producing a reply.") {
+            Self::Diagnostic
+        } else {
+            Self::Text(error_text_identity(&normalized))
+        }
+    }
+
+    pub(super) fn from_display(message: &Value, text: &str, has_nontext: bool) -> Self {
+        if message.get("role").and_then(Value::as_str)
+            .is_some_and(|role| !role.trim_matches(projection_whitespace).eq_ignore_ascii_case("assistant"))
+        {
+            return Self::OtherRole { displayable: !text.is_empty() || has_nontext };
+        }
+        Self::new(text, has_nontext)
+    }
+
+    pub(super) fn has_displayable_content(&self) -> bool {
+        match self { Self::Empty => false, Self::OtherRole { displayable } => *displayable, _ => true }
+    }
+
+    pub(super) fn is_error_message(&self, error_message: Option<&str>) -> bool {
+        match self {
+            Self::Empty | Self::Diagnostic => true,
+            Self::NonText | Self::OtherRole { .. } => false,
+            Self::Text(identity) => *identity == error_text_identity(&normalize_error_text(error_message.unwrap_or_default())),
+        }
+    }
+}
+
+pub(super) fn session_message_display_content(message: &Value) -> (String, bool, bool) {
+    let content = if message.is_string() { message } else { message.get("content").unwrap_or(&Value::Null) };
+    let mut has_nontext = message.get("__openclaw").and_then(|native| native.get("media"))
+        .and_then(Value::as_array).is_some_and(|media| !media.is_empty());
+    let mut texts = Vec::new();
+    for block in content.as_array().map(Vec::as_slice).unwrap_or(std::slice::from_ref(content)) {
+        if block.is_object() && !block.get("type").and_then(Value::as_str).is_some_and(|kind| matches!(kind, "text" | "input_text" | "output_text")) {
+            has_nontext |= !matches!(block.get("type").and_then(Value::as_str), Some("thinking" | "reasoning" | "redacted_thinking"));
+            continue;
+        }
+        if let Some(text) = block.as_str().or_else(|| block.get("text").and_then(Value::as_str))
+            .map(|text| text.trim_matches(projection_whitespace)).filter(|text| !text.is_empty())
+        {
+            texts.push(text);
+        }
+    }
+    let fallback = texts.is_empty().then(|| message.get("text").and_then(Value::as_str)
+        .map(|text| text.trim_matches(projection_whitespace)).filter(|text| !text.is_empty())).flatten();
+    (fallback.map(str::to_owned).unwrap_or_else(|| texts.join("\n")), has_nontext, fallback.is_some())
+}
+
+pub(super) fn session_projection_final_identity(message: &Value, displayable: bool, uses_fallback_text: bool) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    if !displayable { return None; }
+    fn read_string(value: Option<&Value>) -> Option<&str> {
+        value.and_then(Value::as_str).map(|text| text.trim_matches(projection_whitespace)).filter(|text| !text.is_empty())
+    }
+    let role = read_string(message.get("role")).map(str::to_lowercase);
+    let metadata = message.get("__openclaw").and_then(Value::as_object);
+    let source = ["importedFrom", "cliSessionId", "externalId"].map(|field|
+        read_string(metadata.and_then(|metadata| metadata.get(field))));
+    let imported = role.is_some() && source.iter().any(Option::is_some);
+    let id = read_string(metadata.and_then(|metadata| metadata.get("id"))).filter(|_| role.is_some() && !imported);
+    let sequence = metadata.and_then(|metadata| metadata.get("seq")).and_then(Value::as_f64)
+        .filter(|seq| role.is_some() && *seq > 0.0 && *seq <= MAX_SAFE_SEQUENCE as f64 && seq.fract() == 0.0)
+        .map(|seq| seq as u64);
+    let role = role.as_deref().unwrap_or("assistant");
+    let identity = if imported && source.iter().all(Option::is_some) {
+        format!("import:{role}:{}", serde_json::to_string(&source).ok()?)
+    } else if let Some(id) = id {
+        format!("id:{role}:{id}")
+    } else if let Some(sequence) = sequence {
+        format!("seq:{role}:{sequence}")
+    } else {
+        let content = if message.is_string() { message } else { message.get("content").unwrap_or(&Value::Null) };
+        let media = metadata.and_then(|metadata| metadata.get("media")).unwrap_or(&Value::Null);
+        let mut identity = vec![Value::from(role), content.clone(), media.clone(),
+            if imported { json!([metadata.and_then(|metadata| metadata.get("importedFrom")), metadata.and_then(|metadata| metadata.get("cliSessionId")), metadata.and_then(|metadata| metadata.get("externalId"))]) } else { Value::Null }];
+        if uses_fallback_text { identity.push(message.get("text").cloned().unwrap_or(Value::Null)); }
+        format!("content:{}", serde_json::to_string(&identity).ok()?)
+    };
+    Some(Sha256::digest(identity.as_bytes()).into())
+}
+
+pub(super) fn projection_whitespace(ch: char) -> bool {
+    matches!(ch, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
+        | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
+}
+
+fn normalize_error_text(text: &str) -> String {
+    let text = text.trim_matches(projection_whitespace);
+    let text = text.strip_prefix("⚠️").unwrap_or(text).trim_start_matches(projection_whitespace);
+    let text = if text.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("Error:")) { &text[6..] } else { text };
+    text.split(projection_whitespace).filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+fn error_text_identity(text: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).into()
+}
+
 #[derive(Clone, PartialEq)]
 pub struct ChatEvent {
     pub run_id: RunId,
@@ -2177,6 +2391,9 @@ pub struct ChatEvent {
     pub message_text: Option<String>,
     pub message_thinking: Option<String>,
     pub final_message: Option<super::window::Message>,
+    pub(super) projection_content: DisplayContent,
+    pub(super) projection_final_identity: Option<[u8; 32]>,
+    pub(super) has_projection_message: bool,
     pub yielded: bool,
     pub message_absent: bool,
     pub error_kind: Option<SessionErrorKind>,
@@ -2185,6 +2402,16 @@ pub struct ChatEvent {
     pub error_detail: Option<Value>,
 }
 impl ChatEvent {
+    pub(super) fn projection_content(&self) -> &DisplayContent {
+        if self.state != ChatState::Error && let Some(message) = self.final_message.as_ref() { return message.projection_content(); }
+        &self.projection_content
+    }
+    pub(super) fn projection_final_identity(&self) -> Option<[u8; 32]> {
+        if self.state != ChatState::Error && let Some(message) = self.final_message.as_ref() { return message.final_message_identity(); }
+        self.projection_final_identity
+    }
+    pub(super) fn has_projection_message(&self) -> bool { self.has_projection_message }
+
     pub(crate) fn is_yielded(&self) -> bool {
         self.state == ChatState::Final && self.yielded && self.stop_reason.as_deref() == Some("end_turn")
     }
@@ -2320,21 +2547,26 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
     if sequence > MAX_SAFE_SEQUENCE {
         return Err(ProtocolError::InvalidSessionEvent);
     }
-    let final_message = if matches!(state, ChatState::Final | ChatState::Aborted | ChatState::Error) {
-        message.and_then(Value::as_object).filter(|message| {
-            message.get("role").and_then(Value::as_str).is_none_or(|role| role.trim().eq_ignore_ascii_case("assistant"))
-                && (message.contains_key("content") || message.get("text").is_some_and(Value::is_string))
-        }).map(|message| {
-            let mut message = message.clone();
-            message.insert("role".to_owned(), Value::from("assistant"));
-            if !message.contains_key("content") && let Some(text) = message.get("text").cloned() {
-                message.insert("content".to_owned(), serde_json::json!([{ "type": "text", "text": text }]));
-            }
-            let mut envelope = object.clone();
-            envelope.insert("message".to_owned(), Value::Object(message));
-            super::window::decode_event_message(None, &envelope).map_err(|_| ProtocolError::InvalidSessionEvent)
-        }).transpose()?
+    let normalized_final = if matches!(state, ChatState::Final | ChatState::Error) {
+        message.and_then(normalize_final_assistant_message)
     } else { None };
+    let final_message = if matches!(state, ChatState::Final | ChatState::Error) {
+        normalized_final.as_ref().map(|message| decode_chat_message(object, message)).transpose()?
+    } else if state == ChatState::Aborted {
+        message.filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant")
+            && message.get("content").is_some_and(Value::is_array))
+            .map(|message| decode_chat_message(object, message)).transpose()?
+    } else { None };
+    let (projection_content, projection_final_identity) = if state != ChatState::Error && final_message.is_some() {
+        (DisplayContent::Empty, None)
+    } else {
+        let projection = if state == ChatState::Final { normalized_final.as_ref().or(message) } else { message };
+        let projection = projection.unwrap_or(&Value::Null);
+        let (text, has_nontext, uses_fallback_text) = session_message_display_content(projection);
+        let content = DisplayContent::from_display(projection, &text, has_nontext);
+        let identity = session_projection_final_identity(projection, content.has_displayable_content(), uses_fallback_text);
+        (content, identity)
+    };
     let error_message = runtime_detail_text(object.get("errorMessage"))?;
     let stop_reason = object.get("stopReason").and_then(Value::as_str).map(str::trim).filter(|reason| !reason.is_empty())
         .or_else(|| message.and_then(|message| message.get("stopReason")).and_then(Value::as_str).map(str::trim).filter(|reason| !reason.is_empty()))
@@ -2355,6 +2587,9 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
         message_text,
         message_thinking,
         final_message,
+        projection_content,
+        projection_final_identity,
+        has_projection_message: message.is_some(),
         yielded: object.get("yielded").and_then(Value::as_bool) == Some(true),
         message_absent: message.is_none_or(Value::is_null),
         error_kind: object.get("errorKind").and_then(SessionErrorKind::parse),
@@ -2362,6 +2597,33 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
         stop_reason,
         error_detail: safe_error_detail(object.get("errorDetail")),
     })
+}
+
+fn normalize_final_assistant_message(message: &Value) -> Option<Value> {
+    let candidate = message.as_object()?;
+    if candidate.get("role").and_then(Value::as_str)
+        .is_some_and(|role| !role.trim_matches(projection_whitespace).eq_ignore_ascii_case("assistant"))
+        || (!candidate.contains_key("content") && !candidate.get("text").is_some_and(Value::is_string))
+    {
+        return None;
+    }
+    let mut assistant = candidate.clone();
+    if !candidate.get("role").is_some_and(Value::is_string) {
+        assistant.insert("role".to_owned(), Value::from("assistant"));
+    }
+    if !candidate.contains_key("content") && let Some(text) = candidate.get("text").filter(|text| text.is_string()) {
+        assistant.insert("content".to_owned(), json!([{ "type": "text", "text": text }]));
+    }
+    Some(Value::Object(assistant))
+}
+
+fn decode_chat_message(object: &Map<String, Value>, message: &Value) -> Result<super::window::Message, ProtocolError> {
+    let mut envelope = object.iter().filter(|(key, _)| key.as_str() != "message")
+        .map(|(key, value)| (key.clone(), value.clone())).collect::<Map<_, _>>();
+    let mut assistant = message.as_object().ok_or(ProtocolError::InvalidSessionEvent)?.clone();
+    assistant.insert("role".to_owned(), Value::from("assistant"));
+    envelope.insert("message".to_owned(), Value::Object(assistant));
+    super::window::decode_event_message(None, &envelope).map_err(|_| ProtocolError::InvalidSessionEvent)
 }
 
 fn bounded_text(value: Option<&Value>, limit: usize) -> Result<Option<String>, ProtocolError> {
@@ -2551,7 +2813,7 @@ fn tool_result_output(object: &Map<String, Value>) -> Option<&Value> {
         .or_else(|| object.get("output"))
 }
 
-fn tool_details_value(values: [Option<&Value>; 2]) -> Result<Option<Value>, ProtocolError> {
+fn tool_details_value(tool_name: Option<&str>, values: [Option<&Value>; 2]) -> Result<Option<Value>, ProtocolError> {
     let mut details = Map::new();
     for value in values.into_iter().flatten() {
         let Some(object) = value.as_object() else {
@@ -2559,6 +2821,9 @@ fn tool_details_value(values: [Option<&Value>; 2]) -> Result<Option<Value>, Prot
         };
         if let Some(preview) = project_mcp_app_preview_value(value) {
             details.insert("mcpAppPreview".to_owned(), preview);
+        }
+        if let Some(reference) = super::media_tasks::project_task_reference(tool_name, value) {
+            details.extend(reference);
         }
         for key in [
             "browserTab",
@@ -2842,7 +3107,7 @@ fn project_tool_activity(
         ToolActivityPhase::Completed | ToolActivityPhase::Failed => tool_result_output(object),
         ToolActivityPhase::Started => None,
     })?;
-    let details = tool_details_value([
+    let details = tool_details_value(tool_name.as_deref(), [
         object
             .get("result")
             .and_then(|result| result.get("details")),

@@ -44,6 +44,7 @@ export type SessionView = Readonly<{
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
   inputReceipts?: SessionInputReceipt[];
+  requestPending: boolean;
   runTimings: SessionRunTiming[];
   goal: SessionGoalView;
   identity: SessionIdentity;
@@ -151,6 +152,7 @@ export type SessionChange =
   | Readonly<{ kind: 'runtimeChanged'; runtime: RuntimeView }>
   | Readonly<{ kind: 'runtimeNoticeUpdated'; notice: RuntimeNotice }>
   | Readonly<{ kind: 'goalChanged'; goal: SessionGoalView }>
+  | Readonly<{ kind: 'requestPendingChanged'; pending: boolean }>
   | Readonly<{ kind: 'windowChanged'; window: SessionWindow }>
   | Readonly<{ kind: 'recoveryRequired'; reason: SessionRecoveryReason }>;
 
@@ -213,7 +215,7 @@ export function decodeSessionView(value: unknown): SessionView | null {
   if (!isRecord(value)
     || !hasAllowedKeys(value, [
       'sessionKey', 'ownership', 'endpointSessionId', 'modelState', 'goal', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
-      'runtime', 'window', 'completeness',
+      'runtime', 'window', 'completeness', 'requestPending',
     ], ['inputReceipts', 'runTimings'])
     || typeof value.sessionKey !== 'string'
     || !isSessionKey(value.sessionKey)
@@ -222,6 +224,7 @@ export function decodeSessionView(value: unknown): SessionView | null {
     || !isNullableSessionModelState(value.modelState)
     || (Object.hasOwn(value, 'inputReceipts') && !isInputReceipts(value.inputReceipts))
     || (Object.hasOwn(value, 'runTimings') && !isSessionRunTimings(value.runTimings))
+    || typeof value.requestPending !== 'boolean'
     || !tryDecodeSessionGoalView(value.goal)
     || !isSessionIdentity(value.identity)
     || value.identity.sessionKey !== value.sessionKey
@@ -331,6 +334,8 @@ function isChange(value: unknown, outerRunId: string | undefined): boolean {
       if (!hasExactKeys(value, ['kind', 'notice']) || !isRuntimeNotice(value.notice)) return false;
       changeRunId = value.notice.runId;
       break;
+    case 'requestPendingChanged':
+      return hasExactKeys(value, ['kind', 'pending']) && typeof value.pending === 'boolean';
     case 'goalChanged':
       return hasExactKeys(value, ['kind', 'goal']) && tryDecodeSessionGoalView(value.goal) !== null;
     case 'windowChanged':

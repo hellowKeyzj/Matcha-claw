@@ -58,11 +58,18 @@ impl RunningHandler {
                 format!("Bearer {authorization}"),
             ));
         }
-        let response = handle_loopback(
-            "POST".to_owned(),
-            ROUTE.to_owned(),
-            headers,
-            body.as_bytes().to_vec(),
+        let response = handle_request(
+            Request {
+                head: platform::loopback::RequestHead::new(
+                    "POST".to_owned(),
+                    ROUTE.to_owned(),
+                    headers,
+                    false,
+                    None,
+                    Some(body.len()),
+                ),
+                body: body.as_bytes().to_vec(),
+            },
             Arc::clone(&self.verifier),
             self.organization.clone(),
         )

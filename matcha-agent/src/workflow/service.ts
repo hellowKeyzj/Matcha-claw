@@ -105,7 +105,7 @@ export function getWorkflowService(): WorkflowService {
   // The store registers to the bus before this subscription, so when the listener runs store.get(runId) is already terminal.
   attachRunStatePersistence(bus, store)
   // Install the state-change notification bridge (commit 0768d4dc promised "auto-notify on completion" but the old implementation left it unfulfilled)
-  installWorkflowNotifications(service)
+  installWorkflowNotifications(service, (_message, run) => ports.notifyRun(run))
   cached = service
   return cached
 }
@@ -240,14 +240,14 @@ export function makeService(
       })
         .then(result => {
           if (result.status === 'completed') {
-            ports.taskRegistrar.complete(runId)
+            ports.taskRegistrar.complete(runId, undefined, signal)
           } else if (result.status === 'failed') {
-            ports.taskRegistrar.fail(runId, result.error ?? 'failed')
+            ports.taskRegistrar.fail(runId, result.error ?? 'failed', signal)
           } else {
-            ports.taskRegistrar.kill(runId)
+            ports.taskRegistrar.kill(runId, signal)
           }
         })
-        .catch(e => ports.taskRegistrar.fail(runId, (e as Error).message))
+        .catch(e => ports.taskRegistrar.fail(runId, (e as Error).message, signal))
 
       logForDebugging(`workflow launched: ${runId} (${workflowName})`)
       return {

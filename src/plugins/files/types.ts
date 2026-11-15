@@ -111,7 +111,7 @@ function workspacePathSegmentsEqual(left: string[], right: string[], caseInsensi
 /** Resolve a display path to a safe workspace-relative transport path. */
 export function resolveWorkspaceRelativePath(
   displayPath: string,
-  workspaceRoot?: string,
+  workspaceRoot?: string | null,
 ): string | null {
   if (/^~[\\/]/u.test(displayPath)) return null;
   const candidate = parseWorkspacePath(displayPath, true);
@@ -147,7 +147,22 @@ export function resolveWorkspaceRelativePath(
   return candidate.segments.slice(root.segments.length).join('/');
 }
 
-export function resolveArtifactLocalPath(filePath: string, workspaceRoot?: string): string | null {
+export function resolveWorkspaceResourcePath(source: string, documentPath: string): string | null {
+  if (!source.trim() || /^(?:[a-z][a-z0-9+.-]*:|[\\/]|#)/iu.test(source.trim())) return null;
+  const relativePath = resolveWorkspaceRelativePath(documentPath);
+  if (!relativePath) return null;
+  const root = 'https://workspace.invalid/files/';
+  const base = root + relativePath.split('/').map(encodeURIComponent).join('/');
+  try {
+    const url = new URL(source, base);
+    if (!url.href.startsWith(root)) return null;
+    return resolveWorkspaceRelativePath(decodeURIComponent(url.pathname.slice('/files/'.length)));
+  } catch {
+    return null;
+  }
+}
+
+export function resolveArtifactLocalPath(filePath: string, workspaceRoot?: string | null): string | null {
   if (!filePath || filePath.includes('\0')) return null;
   if (/^(?:[A-Za-z]:[\\/]|\/|\\\\|~[\\/])/u.test(filePath)) return filePath;
   const relativePath = resolveWorkspaceRelativePath(filePath);

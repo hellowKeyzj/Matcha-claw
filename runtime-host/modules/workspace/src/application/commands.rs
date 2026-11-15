@@ -12,7 +12,7 @@ use crate::{
         WorkspaceReadFailure, WorkspaceStatFailure, WorkspaceStatReceipt, WorkspaceTextReceipt,
         WorkspaceWriteFailure, WorkspaceWriteReceipt,
     },
-    ports::WorkspaceBinding,
+    ports::{WorkspaceBinding, WorkspaceFileAccess},
     session_images::{SessionImageData, SessionImageFailure, SessionImagePage},
 };
 
@@ -23,44 +23,59 @@ pub(crate) struct WorkspaceCommand {
     pub(crate) call: RecordedCall,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceFileSelection {
+    Agent(String),
+    TeamRun { team_id: String, run_id: String },
+}
+
+impl WorkspaceFileSelection {
+    fn selection(&self, access: WorkspaceFileAccess) -> WorkspaceSelection<'_> {
+        match self {
+            Self::Agent(agent_id) => WorkspaceSelection::Agent(agent_id),
+            Self::TeamRun { team_id, run_id } => WorkspaceSelection::TeamRun { team_id, run_id, access },
+        }
+    }
+}
+
 pub(crate) enum WorkspaceOperation {
     ReadText {
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         limit: usize,
         reply: oneshot::Sender<Result<WorkspaceTextReceipt, WorkspaceReadFailure>>,
     },
     ReadBinary {
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         limit: usize,
         reply: oneshot::Sender<Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure>>,
     },
     StatFile {
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         reply: oneshot::Sender<Result<WorkspaceStatReceipt, WorkspaceStatFailure>>,
     },
     ListDirectory {
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         include_hidden: bool,
         reply: oneshot::Sender<Result<WorkspaceDirectoryReceipt, WorkspaceListFailure>>,
     },
     WriteText {
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         content: String,
         reply: oneshot::Sender<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>>,
     },
     WriteBinary {
         endpoint: RuntimeEndpoint,
-        agent_id: String,
+        selection: WorkspaceFileSelection,
         relative_path: String,
         content: Vec<u8>,
         reply: oneshot::Sender<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>>,
@@ -147,12 +162,14 @@ pub(crate) enum WorkspaceQuery {}
 pub(crate) enum WorkspaceOwnerKey {
     Directory(RuntimeEndpoint, String),
     Agent(RuntimeEndpoint, String),
+    TeamRun(RuntimeEndpoint, String, String),
     Session(RuntimeEndpoint, String),
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum WorkspaceSelection<'a> {
     Agent(&'a str),
+    TeamRun { team_id: &'a str, run_id: &'a str, access: WorkspaceFileAccess },
     Session(&'a str),
 }
 
@@ -160,6 +177,7 @@ impl WorkspaceSelection<'_> {
     pub(crate) fn owner_key(self, endpoint: RuntimeEndpoint) -> WorkspaceOwnerKey {
         match self {
             Self::Agent(agent_id) => WorkspaceOwnerKey::Agent(endpoint, agent_id.to_owned()),
+            Self::TeamRun { team_id, run_id, .. } => WorkspaceOwnerKey::TeamRun(endpoint, team_id.to_owned(), run_id.to_owned()),
             Self::Session(session_key) => WorkspaceOwnerKey::Session(endpoint, session_key.to_owned()),
         }
     }
@@ -168,12 +186,12 @@ impl WorkspaceSelection<'_> {
 impl WorkspaceOperation {
     pub(crate) fn scope(&self) -> (&RuntimeEndpoint, WorkspaceSelection<'_>) {
         match self {
-            Self::ReadText { endpoint, agent_id, .. }
-            | Self::ReadBinary { endpoint, agent_id, .. }
-            | Self::StatFile { endpoint, agent_id, .. }
-            | Self::ListDirectory { endpoint, agent_id, .. }
-            | Self::WriteText { endpoint, agent_id, .. }
-            | Self::WriteBinary { endpoint, agent_id, .. } => (endpoint, WorkspaceSelection::Agent(agent_id)),
+            Self::ReadText { endpoint, selection, .. }
+            | Self::ReadBinary { endpoint, selection, .. }
+            | Self::StatFile { endpoint, selection, .. }
+            | Self::ListDirectory { endpoint, selection, .. } => (endpoint, selection.selection(WorkspaceFileAccess::Read)),
+            Self::WriteText { endpoint, selection, .. }
+            | Self::WriteBinary { endpoint, selection, .. } => (endpoint, selection.selection(WorkspaceFileAccess::Write)),
             Self::PrepareMedia { endpoint, session_key, .. }
             | Self::ResolveMedia { endpoint, session_key, .. }
             | Self::PlaybackMedia { endpoint, session_key, .. }

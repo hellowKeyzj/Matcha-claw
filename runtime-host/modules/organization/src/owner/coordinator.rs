@@ -75,6 +75,9 @@ impl TeamRunCoordinator {
                 }
             }
         }
+        if self.retained.as_ref().is_some_and(super::supervisor::TeamRunSupervisor::join_failed) {
+            return Err(crate::api::OrganizationShutdownError::Join);
+        }
         Ok(())
     }
 

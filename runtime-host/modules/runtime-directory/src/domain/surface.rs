@@ -115,15 +115,11 @@ fn runtime_identity_for_endpoint(endpoint: &Value) -> Option<crate::RuntimeDrive
     }
     let adapter = object.get("runtimeAdapterId").and_then(Value::as_str)?;
     let instance = object.get("runtimeInstanceId").and_then(Value::as_str)?;
-    for identity in [
+    platform::endpoint::runtime_address::RuntimeEndpoint::try_new(adapter, instance).ok()?;
+    [
         crate::RuntimeDriverIdentity::open_claw(),
         crate::RuntimeDriverIdentity::matcha_agent(),
-    ] {
-        if adapter == identity.runtime_adapter_id() && instance == identity.runtime_instance_id() {
-            return Some(identity);
-        }
-    }
-    None
+    ].into_iter().find(|identity| adapter == identity.runtime_adapter_id())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

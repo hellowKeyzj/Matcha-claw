@@ -154,7 +154,6 @@ interface ChatInputProps {
   disabled?: boolean;
   reconnecting?: boolean;
   sending?: boolean;
-  imageGenerationActive?: boolean;
   sendGate: ChatSendGate;
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
@@ -427,7 +426,6 @@ export const ChatInput = memo(function ChatInput({
   disabled = false,
   reconnecting = false,
   sending = false,
-  imageGenerationActive = false,
   sendGate,
   approvalWaiting = false,
   mentionCandidates = [],
@@ -1345,7 +1343,7 @@ export const ChatInput = memo(function ChatInput({
   });
   const invalidGoalAttachments = Boolean(goal?.mode) && attachments.some((attachment) => isUnsupportedGoalStartAttachment(attachment, runtimeAdapterId) || Boolean(goal?.mode?.goalId));
   const editingGoal = Boolean(goal?.mode?.goalId);
-  const effectiveSending = (sending || imageGenerationActive) && !editingGoal;
+  const effectiveSending = sending && !editingGoal;
   const sendPending = Boolean(submission) || pendingSend?.scope === composerScope
     || attachments.some((attachment) => pendingSend?.attachmentIds.has(attachment.stagedAttachmentId));
   const canSend = (payloadGate.canSend || editingGoal && !payloadGate.canSend && (payloadGate.reason === 'active' || payloadGate.reason === 'stopping'))
@@ -1355,10 +1353,9 @@ export const ChatInput = memo(function ChatInput({
     && !disabled
     && !promptEnhancementBusy
     && !composeBusy
-    && (editingGoal || !approvalWaiting)
-    && (editingGoal || !imageGenerationActive);
-  const canStop = (sending || imageGenerationActive) && !stopping && !disabled && !!onStop;
-  const promptEnhancementDisabled = disabled || sending || imageGenerationActive || sendPending || approvalWaiting || Boolean(goal?.busy || goal?.unknown);
+    && (editingGoal || !approvalWaiting);
+  const canStop = sending && !stopping && !disabled && !!onStop;
+  const promptEnhancementDisabled = disabled || sending || sendPending || approvalWaiting || Boolean(goal?.busy || goal?.unknown);
   const handlePromptEnhancementBusyChange = useCallback((busy: boolean) => {
     if (busy) {
       if (!isCurrentScope()) return;
@@ -1429,7 +1426,7 @@ export const ChatInput = memo(function ChatInput({
       disabled, reconnecting, sending, stopping, runPhase, activeRun: summarizeIdentifier(activeRunId), approvalWaiting,
       sendPending, canSend, canStop, sendGateReason: sendGate.canSend ? null : sendGate.reason,
       payloadGateReason: payloadGate.canSend ? null : payloadGate.reason,
-      allAttachmentsReady: allReady, imageGenerationActive,
+      allAttachmentsReady: allReady,
       goal: {
         mode: goal?.mode ? (editingGoal ? 'edit' : 'create') : null, busy: goal?.busy ?? false,
         supported: goal?.supported ?? false, unknown: goal?.unknown ?? false,

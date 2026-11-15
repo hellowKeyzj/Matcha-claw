@@ -360,6 +360,8 @@ export type SDKUserMessage = {
   }
   tool_use_result?: unknown
   source_tool_use_id?: string
+  source_task_id?: string
+  request_message_id?: UUID
   timestamp?: string
   [key: string]: unknown
 }
@@ -398,6 +400,8 @@ export type SDKPartialAssistantMessage = {
 }
 export type SDKResultMessage = {
   type: 'result'
+  input_message_id?: UUID
+  request_message_id?: UUID
   subtype?: string
   errors?: string[]
   result?: string

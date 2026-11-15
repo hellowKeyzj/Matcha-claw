@@ -41,6 +41,9 @@ pub struct PublicArtifactProjection {
     pub title: String,
     pub summary: Option<String>,
     pub evidence_count: usize,
+    pub producer_session_ref: Option<crate::RoleSessionRef>,
+    pub files: Vec<String>,
+    pub created_at: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -146,6 +149,9 @@ pub fn project_public_artifact(record: &ArtifactRecord) -> PublicArtifactProject
         title: record.title().to_owned(),
         summary: record.summary().map(ToOwned::to_owned),
         evidence_count: record.evidence().len(),
+        producer_session_ref: record.producer_session_ref().cloned(),
+        files: record.files().to_vec(),
+        created_at: record.created_at(),
     }
 }
 

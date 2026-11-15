@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Approval, ApprovalDecision, ApprovalEffect, ApprovalOrigin, ApprovalRequest,
     ApprovalResolution, ApprovalStatus, ApprovalSubject, GraphRunId, TeamId,
-    run::approval::{ApprovalDurableSnapshot, ApprovalResolutionCause},
+    run::approval::{ApprovalBinding, ApprovalDurableSnapshot, ApprovalResolutionCause},
     store::{
         StoreFault,
-        content::ContentStore,
+        content::{ContentRef, ContentScope, ContentStore},
         schema::{RecordKey, RecordKind, StoredRecord},
     },
 };
@@ -37,6 +37,8 @@ struct Header {
     reason: String,
     requested_action: String,
     risk_summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<ContentRef>,
     idempotency_key: String,
     requested_at: u64,
     subject: Subject,
@@ -102,25 +104,46 @@ struct Resolution {
 pub(crate) fn encode_approval(
     team: &TeamId,
     approval: &Approval,
-    _contents: &ContentStore,
+    contents: &ContentStore,
 ) -> Result<Vec<StoredRecord>, StoreFault> {
-    encode(team, approval, approval.resolutions())
+    encode(team, approval, approval.resolutions(), contents)
 }
 
 pub(crate) fn encode_approval_changes(
     team: &TeamId,
     approval: &Approval,
-    _contents: &ContentStore,
+    contents: &ContentStore,
 ) -> Result<Vec<StoredRecord>, StoreFault> {
-    encode(team, approval, approval.new_resolutions())
+    encode(team, approval, approval.new_resolutions(), contents)
 }
 
 fn encode(
     team: &TeamId,
     approval: &Approval,
     resolutions: &[ApprovalResolution],
+    contents: &ContentStore,
 ) -> Result<Vec<StoredRecord>, StoreFault> {
     let facts = approval.facts();
+    let (subject, origin, effect, execution_fence) = match facts.binding().ok_or(StoreFault::InvalidFacts)? {
+        ApprovalBinding::StageContinuation(stage_id) => (
+            Subject::Stage(stage_id.to_owned()),
+            Origin::StageContinuation,
+            Effect::ResumeStage,
+            None,
+        ),
+        ApprovalBinding::WorkNode { node_id, execution_fence } => (
+            Subject::WorkNode(node_id.to_owned()),
+            Origin::WorkNode,
+            Effect::KeepNodeWaiting,
+            Some(execution_fence.to_owned()),
+        ),
+        ApprovalBinding::HumanDecision { node_id, execution_fence } => (
+            Subject::HumanDecision(node_id.to_owned()),
+            Origin::HumanDecision,
+            Effect::RouteDecisionPorts,
+            Some(execution_fence.to_owned()),
+        ),
+    };
     let header = Header {
         approval_id: facts.approval_id.clone(),
         run_id: facts.run_id.clone(),
@@ -129,24 +152,16 @@ fn encode(
         reason: facts.reason.clone(),
         requested_action: facts.requested_action.clone(),
         risk_summary: facts.risk_summary.clone(),
+        content: facts.content.as_ref().map(|content| {
+            let bytes = serde_json::to_vec(content).map_err(|_| StoreFault::InvalidFacts)?;
+            contents.put(ContentScope::Run { team, run: &GraphRunId::new(&facts.run_id) }, &bytes)
+        }).transpose()?,
         idempotency_key: facts.idempotency_key.clone(),
         requested_at: facts.requested_at,
-        subject: match &facts.subject {
-            ApprovalSubject::Stage { stage_id } => Subject::Stage(stage_id.clone()),
-            ApprovalSubject::WorkNode { node_id } => Subject::WorkNode(node_id.clone()),
-            ApprovalSubject::HumanDecision { node_id } => Subject::HumanDecision(node_id.clone()),
-        },
-        origin: match facts.origin {
-            ApprovalOrigin::StageContinuation => Origin::StageContinuation,
-            ApprovalOrigin::WorkNode => Origin::WorkNode,
-            ApprovalOrigin::HumanDecision => Origin::HumanDecision,
-        },
-        effect: match facts.effect {
-            ApprovalEffect::ResumeStage => Effect::ResumeStage,
-            ApprovalEffect::KeepNodeWaiting => Effect::KeepNodeWaiting,
-            ApprovalEffect::RouteDecisionPorts => Effect::RouteDecisionPorts,
-        },
-        execution_fence: facts.execution_fence.clone(),
+        subject,
+        origin,
+        effect,
+        execution_fence,
         status: match approval.status() {
             ApprovalStatus::Pending => Status::Pending,
             ApprovalStatus::Approved => Status::Approved,
@@ -196,7 +211,7 @@ fn encode(
     Ok(records)
 }
 
-pub(crate) fn decode_approval_header(record: &StoredRecord) -> Result<ApprovalHeader, StoreFault> {
+pub(crate) fn decode_approval_header(record: &StoredRecord, contents: &ContentStore) -> Result<ApprovalHeader, StoreFault> {
     if record.key.kind != RecordKind::Approval || !record.key.id.is_empty() {
         return Err(StoreFault::CorruptRecord);
     }
@@ -210,12 +225,18 @@ pub(crate) fn decode_approval_header(record: &StoredRecord) -> Result<ApprovalHe
         team: record_team(record)?,
         facts: ApprovalRequest {
             approval_id: row.approval_id,
-            run_id: row.run_id,
+            run_id: row.run_id.clone(),
             stage_id: row.stage_id,
             role_id: row.role_id,
             reason: row.reason,
             requested_action: row.requested_action,
             risk_summary: row.risk_summary,
+            content: row.content.map(|reference| {
+                let bytes = contents.read(ContentScope::Run {
+                    team: &record_team(record)?, run: &GraphRunId::new(&row.run_id),
+                }, &reference)?;
+                serde_json::from_slice(&bytes).map_err(|_| StoreFault::CorruptRecord)
+            }).transpose()?,
             idempotency_key: row.idempotency_key,
             requested_at: row.requested_at,
             subject: match row.subject {
@@ -279,14 +300,14 @@ pub(crate) fn decode_approval_resolution(
 
 pub(crate) fn restore_approvals(
     records: &[StoredRecord],
-    _contents: &ContentStore,
+    contents: &ContentStore,
 ) -> Result<Vec<Approval>, StoreFault> {
     let mut headers = BTreeMap::new();
     let mut resolutions: BTreeMap<String, Vec<ApprovalResolutionRecord>> = BTreeMap::new();
     for record in records {
         match record.key.kind {
             RecordKind::Approval => {
-                let header = decode_approval_header(record)?;
+                let header = decode_approval_header(record, contents)?;
                 if headers
                     .insert(header.facts.approval_id.clone(), header)
                     .is_some()

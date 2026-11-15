@@ -172,6 +172,7 @@ pub struct TeamNodeEvent {
     role_id: Option<OpaqueId>,
     kind: TeamNodeEventKind,
     completion_receipt: Option<TeamNodeCompletionReceipt>,
+    approval_submission: Option<crate::run::approval::ApprovalSubmission>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -307,6 +308,7 @@ impl TeamNodeEvent {
             role_id,
             kind: TeamNodeEventKind::Progress,
             completion_receipt: None,
+            approval_submission: None,
         }
     }
 
@@ -316,6 +318,7 @@ impl TeamNodeEvent {
             role_id,
             kind: TeamNodeEventKind::RequestInput,
             completion_receipt: None,
+            approval_submission: None,
         }
     }
 
@@ -329,7 +332,17 @@ impl TeamNodeEvent {
             role_id,
             kind: TeamNodeEventKind::RequestApproval { action },
             completion_receipt: None,
+            approval_submission: None,
         }
+    }
+
+    pub fn with_approval_submission(mut self, submission: crate::run::approval::ApprovalSubmission) -> Self {
+        self.approval_submission = Some(submission);
+        self
+    }
+
+    pub fn approval_submission(&self) -> Option<&crate::run::approval::ApprovalSubmission> {
+        self.approval_submission.as_ref()
     }
 
     pub fn complete(node_execution_id: OpaqueId, role_id: Option<OpaqueId>) -> Self {
@@ -338,6 +351,7 @@ impl TeamNodeEvent {
             role_id,
             kind: TeamNodeEventKind::Complete,
             completion_receipt: None,
+            approval_submission: None,
         }
     }
 
@@ -351,6 +365,7 @@ impl TeamNodeEvent {
             role_id,
             kind: TeamNodeEventKind::Complete,
             completion_receipt: Some(completion_receipt),
+            approval_submission: None,
         }
     }
 
@@ -364,6 +379,7 @@ impl TeamNodeEvent {
             role_id,
             kind: TeamNodeEventKind::Reject,
             completion_receipt: None,
+            approval_submission: None,
         }
     }
 
@@ -391,14 +407,18 @@ impl TeamNodeEvent {
             TeamNodeEventKind::RequestInput => Some(crate::CommandPayload::NodeProgress(
                 NodeProgressCommand::request_input(self.node_execution_id.clone()),
             )),
-            TeamNodeEventKind::RequestApproval { action } => Some(
-                crate::CommandPayload::ApprovalRequest(ApprovalCommand::new(
+            TeamNodeEventKind::RequestApproval { action } => {
+                let command = ApprovalCommand::new(
                     approval_id.expect("approval requests require an approval identifier"),
                     self.node_execution_id.clone(),
                     resolved_role_id.expect("approval requests require a resolved role"),
                     action,
-                )),
-            ),
+                );
+                Some(crate::CommandPayload::ApprovalRequest(match &self.approval_submission {
+                    Some(submission) => command.with_submission(submission.clone()),
+                    None => command,
+                }))
+            }
             TeamNodeEventKind::Complete | TeamNodeEventKind::Reject => None,
         }
     }

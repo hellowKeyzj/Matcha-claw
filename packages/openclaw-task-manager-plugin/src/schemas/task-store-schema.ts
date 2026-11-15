@@ -269,6 +269,10 @@ The assistant did not use the todo list because this is a single command executi
 
 ## Tool Usage Example
 
+**IMPORTANT**: Every TodoWrite call must include BOTH arrays:
+- oldTodos: The complete todo list before the update.
+- newTodos: The complete todo list after the update, including all tasks to keep.
+
 Here's an example of how to use this tool:
 
 \`\`\`json
@@ -294,7 +298,48 @@ Here's an example of how to use this tool:
 }
 \`\`\`
 
-Here is an example of what was accomplished using this tool:
+Here's an example of updating the todo list after completing the first task:
+
+\`\`\`json
+{
+  "oldTodos": [
+    {
+      "content": "Add dark mode toggle to Settings page",
+      "activeForm": "Adding a dark mode toggle button to the settings page",
+      "status": "in_progress"
+    },
+    {
+      "content": "Update existing components to support theme switching",
+      "activeForm": "Updating existing components to support theme switching",
+      "status": "pending"
+    },
+    {
+      "content": "Run tests and ensure they pass",
+      "activeForm": "Running tests and checking if they pass.",
+      "status": "pending"
+    }
+  ],
+  "newTodos": [
+    {
+      "content": "Add dark mode toggle to Settings page",
+      "activeForm": "Adding a dark mode toggle button to the settings page",
+      "status": "completed"
+    },
+    {
+      "content": "Update existing components to support theme switching",
+      "activeForm": "Updating existing components to support theme switching",
+      "status": "in_progress"
+    },
+    {
+      "content": "Run tests and ensure they pass",
+      "activeForm": "Running tests and checking if they pass.",
+      "status": "pending"
+    }
+  ]
+}
+\`\`\`
+
+Here is an example of clearing the todo list after all tasks have been marked as completed:
 
 \`\`\`json
 {
@@ -364,7 +409,8 @@ Here is an example of what was accomplished using this tool:
 1. **Initial Task Definition**: When creating the todo list, ensure you have identified ALL tasks required to fulfill the user's request. Be thorough and comprehensive—missing tasks is a failure.
 
 2. **Progressive Tracking**: After completing each task, IMMEDIATELY call TodoWrite to:
-   - Move the completed task from pending/in_progress to completed status
+   - Include the previous todo list in oldTodos
+   - Move the completed task from pending/in_progress to completed status in newTodos
    - Update the next task to in_progress in newTodos
    - If no more tasks remain, set newTodos to an empty array
 
@@ -375,14 +421,14 @@ Here is an example of what was accomplished using this tool:
 
 4. **Final Completion**: When all tasks are done:
    - Call TodoWrite one final time with an empty newTodos array
-   - Move ALL completed tasks to oldTodos with "completed" status
+   - Include the previous todo list in oldTodos with its existing statuses unchanged
    - Explicitly confirm to the user: "All tasks have been completed successfully"
    - List what was accomplished
 
 5. **Validation Before Stopping**:
    Before ending your work, verify:
    - ✓ Every task in the original list has been addressed
-   - ✓ Every task is marked as "completed" in oldTodos or "completed" in the final TodoWrite call
+   - ✓ Every TodoWrite call included both oldTodos and newTodos
    - ✓ No task remains in a "pending" or "in_progress" state
    - ✓ You have returned an empty newTodos array to formally conclude the task session
    - ✓ You have informed the user that all work is complete
@@ -400,7 +446,7 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
   properties: {
     oldTodos: {
       type: 'array',
-      description: 'Required. Previous todo list before the update.',
+      description: 'Required on every call. Previous todo list before the update, with its existing statuses unchanged.',
       items: todoItemParameters,
     },
     newTodos: {

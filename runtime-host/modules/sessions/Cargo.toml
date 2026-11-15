@@ -12,6 +12,7 @@ path = "src/lib.rs"
 arc-swap = "1.7"
 connectors = { version = "0.1.0", path = "../connectors" }
 foundation = { version = "0.1.0", path = "../../foundation" }
+futures-util.workspace = true
 getrandom.workspace = true
 organization = { version = "0.1.0", path = "../organization" }
 platform = { version = "0.1.0", path = "../../platform" }

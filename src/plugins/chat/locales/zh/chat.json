@@ -30,6 +30,37 @@
         "process": "执行过程",
         "tools_count": "{{count}} 次工具调用"
     },
+    "mediaTask": {
+        "imageTitle": "图片生成",
+        "videoTitle": "视频生成",
+        "submitting": "正在提交",
+        "submitted": "已提交，正在获取状态",
+        "queued": "排队中",
+        "running": "正在生成",
+        "completed": "生成完成",
+        "deliveryBlocked": "已生成，结果未送达",
+        "delivering": "已生成，正在送达结果",
+        "failed": "生成失败",
+        "timed_out": "本次等待已超时",
+        "cancelled": "已取消",
+        "deleted": "任务已删除",
+        "unconfirmed": "暂未确认任务状态",
+        "waited": "已等待 {{duration}}",
+        "timeoutHint": "云端可能仍在生成。",
+        "failureUnknown": "未收到失败原因。"
+    },
+    "videoTask": {
+        "timeoutHint": "云端可能仍在生成。可查询原任务结果，不会重新生成。",
+        "query": "查询原任务结果",
+        "querying": "正在查询",
+        "queryFailed": "查询失败：{{error}}",
+        "queryUnavailable": "暂时无法查询原任务，请稍后重试。",
+        "missing_job_reference": "该历史任务未保存云端任务编号，无法自动取回结果。",
+        "provider_unsupported": "此提供商暂不支持取回原任务结果。",
+        "task_unavailable": "原任务已不可查询，请确认当前会话。",
+        "query_rejected": "运行时拒绝了原任务查询，请检查视频工具权限和模型配置。",
+        "stillRunning": "原任务仍在排队或生成中，稍后可再次查询。"
+    },
     "toolActivity": {
         "input": "输入",
         "output": "输出",
@@ -597,6 +628,7 @@
         "modified": "修改",
         "deleted": "删除",
         "revealFailed": "在文件管理器中定位失败",
+        "workspacePreparing": "正在准备 Run 共享工作区",
         "workspaceEmpty": "当前没有可浏览的工作区目录。",
         "workspaceLoadError": "暂时无法读取文件",
         "workspaceLoadFailed": "工作区读取失败：{{error}}"

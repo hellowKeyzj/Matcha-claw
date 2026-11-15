@@ -15,7 +15,7 @@ use posix as platform;
 #[cfg(windows)]
 use windows as platform;
 
-pub(super) const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const MAX_TEXT_BYTES: usize = MAX_BINARY_BYTES;
 pub(super) const MAX_BINARY_BYTES: usize = 50 * 1024 * 1024;
 pub(super) const MAX_WRITE_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
@@ -65,6 +65,23 @@ impl WorkspaceFiles {
 
     pub(super) fn resource_key(&self) -> Option<&str> {
         self.resource_key.as_deref()
+    }
+
+    pub(super) fn matches_directory(&self, root: &Path) -> Result<bool, WorkspaceFileError> {
+        let expected = super::directory::workspace_resource_key(root)
+            .map_err(|_| WorkspaceFileError::Unavailable)?;
+        let actual = self.resource_key().ok_or(WorkspaceFileError::Unavailable)?;
+        Ok(actual == expected)
+    }
+
+    pub(super) fn validate_file(&self, relative_path: &str) -> Result<(), WorkspaceFileError> {
+        let path = RelativePath::try_new(relative_path)?;
+        let workspace = self.workspace.as_ref().map_err(|error| *error)?;
+        let entry = platform::stat(workspace, path.components())?;
+        if entry.kind != WorkspaceEntryKind::File {
+            return Err(WorkspaceFileError::NotFile);
+        }
+        Ok(())
     }
 
     pub(super) fn read_text_with_limit(
@@ -229,6 +246,7 @@ pub(super) enum WorkspaceEntryKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkspaceFileError {
     InvalidRelative,
+    Missing,
     Unavailable,
     NotFile,
     NotDirectory,
@@ -241,6 +259,7 @@ impl fmt::Display for WorkspaceFileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidRelative => "invalid relative workspace path",
+            Self::Missing => "workspace file is missing",
             Self::Unavailable => "workspace file is unavailable",
             Self::NotFile => "workspace entry is not a file",
             Self::NotDirectory => "workspace entry is not a directory",

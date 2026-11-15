@@ -91,6 +91,7 @@ import {
   claimConsumableQueuedAutonomyCommands,
   finalizeAutonomyCommandsForTurn,
 } from './utils/autonomyQueueLifecycle.js'
+import { currentRequestMessageId } from './utils/requestExecution.js'
 import { notifyCommandLifecycle } from './utils/commandLifecycle.js'
 import { headlessProfilerCheckpoint } from './utils/headlessProfiler.js'
 import {
@@ -251,6 +252,8 @@ export type QueryParams = {
   querySource: QuerySource
   maxOutputTokensOverride?: number
   maxTurns?: number
+  /** Reports the query loop's turn, not the SDK user-message count. */
+  onTurn?: (turnCount: number) => void
   skipCacheWrite?: boolean
   // API task_budget (output_config.task_budget, beta task-budgets-2026-03-13).
   // Distinct from the tokenBudget +500k auto-continue feature. `total` is the
@@ -487,6 +490,7 @@ async function* queryLoop(
       stopHookActive,
       turnCount,
     } = state
+    params.onTurn?.(turnCount)
 
     // Skill discovery prefetch — per-iteration (uses findWritePivot guard
     // that returns early on non-write iterations). Discovery runs while the
@@ -1879,11 +1883,21 @@ async function* queryLoop(
     const isMainThread =
       querySource.startsWith('repl_main_thread') || querySource === 'sdk'
     const currentAgentId = toolUseContext.agentId
+    const requestMessageId = currentRequestMessageId()
+    const acceptedInput = currentInvestigationScope()
     const queuedCommandsSnapshot = getCommandsByMaxPriority(
       sleepRan ? 'later' : 'next',
     ).filter(cmd => {
       if (cmd.nativeExecution || cmd.nativeBudget || cmd.nativeInputMessage)
         return false
+      if (acceptedInput) return false
+      if (
+        requestMessageId &&
+        (cmd.mode !== 'task-notification' ||
+          cmd.taskNotification?.requestMessageId !== requestMessageId)
+      ) {
+        return false
+      }
       if (isSlashCommand(cmd)) return false
       if (isMainThread) return cmd.agentId === undefined
       // Subagents only drain task-notifications addressed to them — never

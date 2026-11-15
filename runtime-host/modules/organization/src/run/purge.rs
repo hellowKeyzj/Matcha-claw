@@ -99,8 +99,49 @@ pub enum NativeDeletionProofError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeDeletionEvidence {
     Confirmed(NativeDeletionProof),
+    Partial { proof: NativeDeletionProof, failure: NativeDeletionFailure },
     Rejected,
     OutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum NativeDeletionFailure {
+    Rejected,
+    OutcomeUnknown,
+}
+
+impl NativeDeletionEvidence {
+    pub fn from_confirmations(
+        run_id: GraphRunId,
+        confirmations: Vec<RoleSessionDeletionConfirmation>,
+        failure: Option<NativeDeletionFailure>,
+    ) -> Self {
+        let Ok(proof) = NativeDeletionProof::try_new(run_id, confirmations) else {
+            return Self::OutcomeUnknown;
+        };
+        match failure {
+            None => Self::Confirmed(proof),
+            Some(failure) if !proof.confirmations().is_empty() => Self::Partial { proof, failure },
+            Some(NativeDeletionFailure::Rejected) => Self::Rejected,
+            Some(NativeDeletionFailure::OutcomeUnknown) => Self::OutcomeUnknown,
+        }
+    }
+
+    pub fn proof(&self) -> Option<&NativeDeletionProof> {
+        match self {
+            Self::Confirmed(proof) | Self::Partial { proof, .. } => Some(proof),
+            Self::Rejected | Self::OutcomeUnknown => None,
+        }
+    }
+
+    pub fn failure(&self) -> Option<NativeDeletionFailure> {
+        match self {
+            Self::Confirmed(_) => None,
+            Self::Partial { failure, .. } => Some(*failure),
+            Self::Rejected => Some(NativeDeletionFailure::Rejected),
+            Self::OutcomeUnknown => Some(NativeDeletionFailure::OutcomeUnknown),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

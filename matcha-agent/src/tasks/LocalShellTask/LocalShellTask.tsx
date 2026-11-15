@@ -17,6 +17,7 @@ import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { tailFile } from '../../utils/fsOperations.js';
 import { logError } from '../../utils/log.js';
 import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
+import { emitTaskTerminatedSdk } from '../../utils/sdkEventQueue.js';
 import type { ShellCommand } from '../../utils/ShellCommand.js';
 import { evictTaskOutput, getTaskOutputPath } from '../../utils/task/diskOutput.js';
 import { registerTask, updateTaskState } from '../../utils/task/framework.js';
@@ -58,10 +59,17 @@ function startStallWatchdog(
   taskId: string,
   description: string,
   kind: BashTaskKind | undefined,
+  setAppState: SetAppState,
   toolUseId?: string,
   agentId?: AgentId,
 ): () => void {
   if (kind === 'monitor') return () => {};
+  let requestMessageId: string | undefined;
+  updateTaskState(taskId, setAppState, task => {
+    toolUseId = task.toolUseId;
+    requestMessageId = task.requestMessageId;
+    return task;
+  });
   const outputPath = getTaskOutputPath(taskId);
   let lastSize = 0;
   let lastGrowth = Date.now();
@@ -107,6 +115,7 @@ The command is likely blocked on an interactive prompt. Kill this task and re-ru
             enqueuePendingNotification({
               value: message,
               mode: 'task-notification',
+              taskNotification: { taskId, toolUseId, requestMessageId },
               priority: 'next',
               agentId,
             });
@@ -139,11 +148,14 @@ function enqueueShellNotification(
   // If the task was already marked as notified (e.g., by TaskStopTool), skip
   // enqueueing to avoid sending redundant messages to the model.
   let shouldEnqueue = false;
+  let requestMessageId: string | undefined;
   updateTaskState(taskId, setAppState, task => {
     if (task.notified) {
       return task;
     }
     shouldEnqueue = true;
+    toolUseId = task.toolUseId;
+    requestMessageId = task.requestMessageId;
     return { ...task, notified: true };
   });
 
@@ -196,9 +208,16 @@ function enqueueShellNotification(
 <${SUMMARY_TAG}>${escapeXml(summary)}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>`;
 
+  emitTaskTerminatedSdk(taskId, status === 'killed' ? 'stopped' : status, {
+    toolUseId,
+    requestMessageId,
+    summary,
+    outputFile: outputPath,
+  });
   enqueuePendingNotification({
     value: message,
     mode: 'task-notification',
+    taskNotification: { taskId, toolUseId, requestMessageId },
     priority: feature('MONITOR_TOOL') ? 'next' : 'later',
     agentId,
   });
@@ -247,7 +266,7 @@ export async function spawnShellTask(
   // Just transition to backgrounded state so the process keeps running.
   shellCommand.background(taskId);
 
-  const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, toolUseId, agentId);
+  const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, setAppState, toolUseId, agentId);
 
   void shellCommand.result.then(async result => {
     cancelStallWatchdog();
@@ -362,7 +381,7 @@ function backgroundTask(taskId: string, getAppState: () => AppState, setAppState
     };
   });
 
-  const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, toolUseId, agentId);
+  const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, setAppState, toolUseId, agentId);
 
   // Set up result handler
   void shellCommand.result.then(async result => {
@@ -484,7 +503,7 @@ export function backgroundExistingForegroundTask(
     };
   });
 
-  const cancelStallWatchdog = startStallWatchdog(taskId, description, undefined, toolUseId, agentId);
+  const cancelStallWatchdog = startStallWatchdog(taskId, description, undefined, setAppState, toolUseId, agentId);
 
   // Set up result handler (mirrors backgroundTask's handler)
   void shellCommand.result.then(async result => {

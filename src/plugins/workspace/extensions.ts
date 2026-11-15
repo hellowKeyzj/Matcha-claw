@@ -36,6 +36,7 @@ export interface WorkspacePage {
   readonly title: string;
   readonly icon?: ComponentType<{ className?: string; 'aria-hidden'?: boolean }>;
   readonly badge?: 'preview';
+  readonly initialPane?: WorkspacePane;
   readonly render: (props: WorkspacePageProps) => ReactNode;
   readonly mount?: 'active';
   readonly lifetime?: 'workspace';

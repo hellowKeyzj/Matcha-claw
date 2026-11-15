@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures_util::future::BoxFuture;
 use platform::{capability::CapabilityDecisionVerifier, loopback::Response};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -53,20 +54,26 @@ pub(crate) async fn handle_loopback(
         Ok(request) => request,
         Err(error) => return decode_error(error, creation_stage),
     };
-    if matches!(request.operation_id(), "team.provisionAgents" | "team.delete" | "team.runDelete" | "team.roleSessionCreate") {
-        return match owner.admit_team_capability(resolver, request).await {
-            Ok(receipt) => Response::json(202, json!(receipt)),
-            Err(error) => decode_error(error, None),
-        };
-    }
-    let outcome = match owner
-        .execute_team_runtime_capability_request(resolver, request)
-        .await
-    {
-        Ok((_, outcome)) => outcome,
-        Err(error) => return decode_error(error, creation_stage),
+    let execution: BoxFuture<'_, Response> = if matches!(request.operation_id(), "team.provisionAgents" | "team.delete" | "team.runDelete" | "team.roleSessionCreate") {
+        Box::pin(async move {
+            match owner.admit_team_capability(resolver, request).await {
+                Ok(receipt) => Response::json(202, json!(receipt)),
+                Err(error) => decode_error(error, None),
+            }
+        })
+    } else {
+        Box::pin(async move {
+            let outcome = match owner
+                .execute_team_runtime_capability_request(resolver, request)
+                .await
+            {
+                Ok((_, outcome)) => outcome,
+                Err(error) => return decode_error(error, creation_stage),
+            };
+            project_outcome(outcome)
+        })
     };
-    project_outcome(outcome)
+    execution.await
 }
 
 fn project_outcome(outcome: crate::TeamRuntimeControlOutcome) -> Response {

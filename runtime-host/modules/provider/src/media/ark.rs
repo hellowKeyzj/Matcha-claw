@@ -15,79 +15,26 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
     if model.quality().is_some() {
         return Err(Failure::Unsupported);
     }
-    let name = model_name(model.model_id());
     let mut limits = Capabilities {
         max_images: 0,
         max_count: 1,
         mask: false,
+        endpoint_validates_options: true,
         pixel_size: false,
         pixel_size_limits: None,
         sizes: None,
         durations_seconds: None,
         storyboard: false,
     };
-    let sizes: &[&str] = match kind {
+    match kind {
         Kind::Image => {
             if model.aspect_ratio().is_some() {
                 return Err(Failure::Unsupported);
             }
-            match name {
-                "doubao-seedream-5-0-pro" | "doubao-seedream-5-0-flash" => {
-                    limits.max_images = 10;
-                    &["1K", "1.5K", "2K"]
-                }
-                "doubao-seedream-5-0" | "doubao-seedream-5-0-lite" => {
-                    limits.max_images = 14;
-                    &["2K", "3K", "4K"]
-                }
-                "doubao-seedream-4-5" => {
-                    limits.max_images = 14;
-                    &["2K", "4K"]
-                }
-                "doubao-seedream-4-0" => {
-                    limits.max_images = 14;
-                    &["1K", "2K", "4K"]
-                }
-                _ => &[],
-            }
+            limits.max_images = 16;
         }
-        Kind::Video => {
-            let (sizes, durations, max_images): (&[&str], _, _) = match name {
-                "doubao-seedance-2-5" => (&["480p", "720p", "1080p"], 4..=30, 2),
-                "doubao-seedance-2-0" => (&["480p", "720p", "1080p", "4k"], 4..=15, 2),
-                "doubao-seedance-2-0-fast" | "doubao-seedance-2-0-mini" => {
-                    (&["480p", "720p"], 4..=15, 2)
-                }
-                "doubao-seedance-1-0-pro" => (&["480p", "720p", "1080p"], 2..=12, 2),
-                "doubao-seedance-1-0-pro-fast" => (&["480p", "720p", "1080p"], 2..=12, 1),
-                // Custom Endpoint IDs remain selectable, without inferred image/option support.
-                _ => (&[], 0..=0, 0),
-            };
-            limits.max_images = max_images;
-            if !sizes.is_empty() {
-                limits.durations_seconds = Some(durations.collect());
-            }
-            if model.aspect_ratio().is_some_and(|ratio| {
-                sizes.is_empty()
-                    || !matches!(
-                        ratio,
-                        "16:9" | "4:3" | "1:1" | "3:4" | "9:16" | "21:9" | "adaptive"
-                    )
-            }) {
-                return Err(Failure::Unsupported);
-            }
-            sizes
-        }
+        Kind::Video => limits.max_images = 2,
         _ => return Err(Failure::Unsupported),
-    };
-    if model
-        .resolution()
-        .is_some_and(|size| !sizes.contains(&size))
-    {
-        return Err(Failure::Unsupported);
-    }
-    if !sizes.is_empty() {
-        limits.sizes = Some(sizes.iter().map(|size| (*size).to_owned()).collect());
     }
     Ok(limits)
 }
@@ -100,18 +47,7 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
         || request.language.is_some()
         || request.count.unwrap_or(1) != 1
         || request.images.len() > usize::from(limits.max_images)
-        || request.size.as_ref().is_some_and(|size| {
-            !limits
-                .sizes
-                .as_ref()
-                .is_some_and(|sizes| sizes.contains(size))
-        })
-        || request.duration_seconds.is_some_and(|duration| {
-            !limits
-                .durations_seconds
-                .as_ref()
-                .is_some_and(|durations| durations.contains(&duration))
-        })
+        || request.kind == Kind::Image && request.duration_seconds.is_some()
     {
         return Err(Failure::Unsupported);
     }
@@ -123,17 +59,6 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
         .any(|image| image.data.len() >= 40 * 1024 * 1024)
     {
         return Err(Failure::InvalidRequest);
-    }
-    if request.kind == Kind::Video {
-        let name = model_name(model.model_id());
-        if model.aspect_ratio().is_some_and(|ratio| {
-            name == "doubao-seedance-2-5" && !request.images.is_empty() && ratio != "adaptive"
-                || name.starts_with("doubao-seedance-1-0-")
-                    && request.images.is_empty()
-                    && ratio == "adaptive"
-        }) {
-            return Err(Failure::Unsupported);
-        }
     }
     Ok(())
 }
@@ -373,14 +298,6 @@ pub(super) fn is_remote_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
-fn model_name(id: &str) -> &str {
-    id.rsplit_once('-')
-        .filter(|(_, version)| {
-            version.len() == 6 && version.bytes().all(|byte| byte.is_ascii_digit())
-        })
-        .map_or(id, |(name, _)| name)
 }
 
 fn image_uri(image: &Content) -> String {

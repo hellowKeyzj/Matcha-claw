@@ -1,8 +1,8 @@
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use organization::{ActivityExecutionOutcome, ActivityExecutionRequest, RoleSessionIdentityResolver};
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use platform::trace::{identifier_hash, runtime_trace, session_trace, with_session_trace};
-use runtime_directory::RuntimeDriverIdentity;
 use serde_json::json;
 use sessions_module::{
     SessionHandle, SessionRunTerminalSnapshot, SessionTerminalHook,
@@ -77,10 +77,11 @@ pub(crate) struct OrganizationSessionTerminal {
 impl OrganizationSessionTerminal {
     pub(crate) fn start(
         organization: organization::OrganizationHandle,
+        resolver: Arc<dyn RoleSessionIdentityResolver>,
         observation: foundation::execution::ObservationSink,
     ) -> Self {
         Self {
-            inner: organization::OrganizationSessionTerminal::start(organization, observation),
+            inner: organization::OrganizationSessionTerminal::start(organization, resolver, observation),
         }
     }
 
@@ -135,7 +136,7 @@ fn organization_terminal_snapshot(
         "nativeRunHash": identifier_hash(&snapshot.native_run_id),
         "deliveryHash": snapshot.delivery_context.as_ref().map(|context| identifier_hash(context.delivery_id.as_str())),
         "phase": format!("{:?}", snapshot.phase),
-        "candidateCount": snapshot.assistant_texts.len(),
+        "candidateCount": snapshot.assistant_texts.as_ref().ok().map(Vec::len),
         "hasDeliveryContext": snapshot.delivery_context.is_some(),
     }));
     organization::OrganizationRunTerminalSnapshot {
@@ -165,11 +166,12 @@ fn organization_terminal_snapshot(
 
 pub(crate) struct SessionRepairPort {
     session: SessionHandle,
+    preparation: StartGateSessionSendHook,
 }
 
 impl SessionRepairPort {
-    fn new(session: SessionHandle) -> Self {
-        Self { session }
+    fn new(session: SessionHandle, preparation: StartGateSessionSendHook) -> Self {
+        Self { session, preparation }
     }
 }
 
@@ -200,6 +202,10 @@ impl organization::TeamMessageRepairSessionPort<SessionSourceBinding> for Sessio
                     "error": "invalid_repair_command", "elapsedMs": started.map(|start| start.elapsed().as_millis()),
                 }));
                 return organization::TeamMessageRepairSessionOutcome::Rejected;
+            };
+            let command = match self.preparation.prepare_workspace(command).await {
+                Ok(command) => command,
+                Err(()) => return organization::TeamMessageRepairSessionOutcome::NotDelivered,
             };
             let result = self.session.send_session_cancellable(command, cancellation).await;
             runtime_trace("runtime.team_run.repair.send.result", || json!({
@@ -240,8 +246,12 @@ impl organization::TeamMessageRepairSessionPort<SessionSourceBinding> for Sessio
     }
 }
 
-pub(crate) fn repair_port(session: SessionHandle) -> Arc<SessionRepairPort> {
-    Arc::new(SessionRepairPort::new(session))
+pub(crate) fn repair_port(
+    session: SessionHandle,
+    organization: organization::OrganizationHandle,
+    resolver: Arc<dyn RoleSessionIdentityResolver>,
+) -> Arc<SessionRepairPort> {
+    Arc::new(SessionRepairPort::new(session, StartGateSessionSendHook::new(organization, resolver)))
 }
 
 #[derive(Clone)]
@@ -258,6 +268,23 @@ impl StartGateSessionSendHook {
             inner: organization::StartGateSendHook::new(organization, resolver),
         }
     }
+
+    async fn prepare_workspace(&self, command: SessionSendCommand) -> Result<SessionSendCommand, ()> {
+        let request = organization::StartGateSendRequest::new(
+            session_runtime_endpoint(&command.identity)?,
+            command.identity.session_key.clone(),
+            command.identity.agent_id.clone(),
+            command.endpoint_session_id.clone(),
+            true,
+        );
+        let Some(prepared) = self.inner.prepare(request).await? else {
+            return Ok(command);
+        };
+        Ok(match prepared.workspace() {
+            Some(workspace) => command.with_expected_workspace(workspace.root().to_owned()),
+            None => command,
+        })
+    }
 }
 
 impl SessionSendHook for StartGateSessionSendHook {
@@ -268,7 +295,7 @@ impl SessionSendHook for StartGateSessionSendHook {
     ) -> SessionSendHookFuture<'a> {
         Box::pin(with_session_trace(command.trace_id().map(str::to_owned), async move {
             let request = organization::StartGateSendRequest::new(
-                start_gate_native_endpoint(command.identity.provider()),
+                session_runtime_endpoint(&command.identity)?,
                 command.identity.session_key.clone(),
                 command.identity.agent_id.clone(),
                 command.endpoint_session_id.clone(),
@@ -277,14 +304,18 @@ impl SessionSendHook for StartGateSessionSendHook {
             let Some(prepared) = self.inner.prepare(request).await? else {
                 return Ok(SessionSendHookPrepared::unchanged(command));
             };
-            let command = command
-                .with_system_provenance_receipt(prepared.system_provenance_receipt().to_owned())
-                .map_err(|_| {
+            let mut command = command;
+            if let Some(workspace) = prepared.workspace() {
+                command = command.with_expected_workspace(workspace.root().to_owned());
+            }
+            if let Some(receipt) = prepared.system_provenance_receipt() {
+                command = command.with_system_provenance_receipt(receipt.to_owned()).map_err(|_| {
                     session_trace("runtime.start-gate.injected", || json!({
                         "outcome": "error", "reason": "invalid_provenance_receipt",
                     }));
                 })?;
-            session_trace("runtime.start-gate.injected", || json!({ "outcome": "injected" }));
+                session_trace("runtime.start-gate.injected", || json!({ "outcome": "injected" }));
+            }
             Ok(SessionSendHookPrepared::unchanged(command))
         }))
     }
@@ -295,6 +326,7 @@ pub(in crate::composition::host) struct TeamSessionExecutor {
     admission: Arc<HostAdmission>,
     session: sessions_module::SessionHandle,
     runtime_directory: Arc<RuntimeDriverDirectory>,
+    preparation: StartGateSessionSendHook,
 }
 
 impl TeamSessionExecutor {
@@ -302,10 +334,12 @@ impl TeamSessionExecutor {
         admission: Arc<HostAdmission>,
         session: sessions_module::SessionHandle,
         runtime_directory: Arc<RuntimeDriverDirectory>,
+        organization: organization::OrganizationHandle,
     ) -> Self {
         Self {
             admission,
             session,
+            preparation: StartGateSessionSendHook::new(organization, runtime_directory.clone()),
             runtime_directory,
         }
     }
@@ -320,10 +354,10 @@ impl TeamSessionExecutor {
             }));
             None
         };
-        let Some(identity) = RuntimeDriverIdentity::from_reference(binding.endpoint().as_str()) else {
+        let Some(endpoint) = runtime_directory::endpoint_from_reference(binding.endpoint().as_str()) else {
             return failed("invalid_runtime_reference");
         };
-        let Some(driver) = self.runtime_directory.lookup(&identity.endpoint()) else {
+        let Some(driver) = self.runtime_directory.lookup(&endpoint) else {
             return failed("driver_not_found");
         };
         let Some(session_ops) = driver.session_ops() else {
@@ -332,12 +366,17 @@ impl TeamSessionExecutor {
         let Some(session_key) = session_ops.agent_scoped_session_key(binding.agent().as_str(), binding.endpoint_session_id().as_str()) else {
             return failed("session_key_unresolved");
         };
+        let provider = match endpoint.runtime_adapter_id() {
+            "openclaw" => SessionProvider::OpenClaw,
+            "matcha-agent" => SessionProvider::MatchaAgent,
+            _ => return failed("runtime_unsupported"),
+        };
         let Ok(session_identity) = SessionIdentity::with_endpoint(
             session_key.clone(),
             SessionEndpoint {
                 kind: "native-runtime".to_owned(),
-                runtime_adapter_id: session_provider_from_identity(identity),
-                runtime_instance_id: identity.runtime_instance_id().to_owned(),
+                runtime_adapter_id: provider,
+                runtime_instance_id: endpoint.runtime_instance_id().to_owned(),
             },
             binding.agent().as_str().to_owned(),
         ) else {
@@ -400,21 +439,12 @@ const fn run_phase(phase: RunPhase) -> organization::OrganizationRunPhase {
     }
 }
 
-const fn start_gate_native_endpoint(
-    provider: SessionProvider,
-) -> organization::StartGateNativeEndpoint {
-    match provider {
-        SessionProvider::OpenClaw => organization::StartGateNativeEndpoint::OpenClawLocal,
-        SessionProvider::MatchaAgent => organization::StartGateNativeEndpoint::MatchaAgentLocal,
+fn session_runtime_endpoint(identity: &SessionIdentity) -> Result<RuntimeEndpoint, ()> {
+    if identity.endpoint.kind != "native-runtime" {
+        return Err(());
     }
-}
-
-fn session_provider_from_identity(identity: RuntimeDriverIdentity) -> SessionProvider {
-    if identity == RuntimeDriverIdentity::open_claw() {
-        SessionProvider::OpenClaw
-    } else {
-        SessionProvider::MatchaAgent
-    }
+    RuntimeEndpoint::try_new(identity.provider().as_str(), identity.endpoint.runtime_instance_id.clone())
+        .map_err(|_| ())
 }
 
 impl organization::TeamActivityExecutor for TeamSessionExecutor {
@@ -488,8 +518,8 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
             if cancellation.is_cancelled() || executor.admission.admit_request().is_err() {
                 return Err(ActivityExecutionOutcome::Rejected { rejection: organization::DeliveryRejection::Retryable });
             }
-            let ready = RuntimeDriverIdentity::from_reference(request.binding().endpoint().as_str())
-                .and_then(|identity| executor.runtime_directory.lookup(&identity.endpoint()))
+            let ready = runtime_directory::endpoint_from_reference(request.binding().endpoint().as_str())
+                .and_then(|endpoint| executor.runtime_directory.lookup(&endpoint))
                 .is_some_and(|driver| driver.session_ops().is_some()
                     && driver.host_lifecycle_ops().is_some_and(|ops| ops.readiness()));
             if !ready {
@@ -503,7 +533,9 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
                 "activityHash": identifier_hash(request.delivery_request().delivery_id.as_str()),
                 "outcome": "begin",
             }));
-            let result = executor.session.ensure_bound_session(identity, SessionSourceBinding::team_from_receipt(request.binding())).await;
+            let endpoint_session_id = (identity.provider() == SessionProvider::MatchaAgent)
+                .then(|| request.binding().endpoint_session_id().as_str().to_owned());
+            let result = executor.session.ensure_bound_session(identity, endpoint_session_id, SessionSourceBinding::team_from_receipt(request.binding())).await;
             runtime_trace("runtime.team_run.activity.ensure", || json!({
                 "runHash": identifier_hash(&request.delivery_request().run_id),
                 "activityHash": identifier_hash(request.delivery_request().delivery_id.as_str()),
@@ -591,6 +623,12 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
             let command = match request.execution_context() {
                 Some(context) => command.with_execution_context(context.clone()),
                 None => command,
+            };
+            let command = match executor.preparation.prepare_workspace(command).await {
+                Ok(command) => command,
+                Err(()) => return ActivityExecutionOutcome::Rejected {
+                    rejection: organization::DeliveryRejection::Retryable,
+                },
             };
             trace("runtime.team_run.activity.send", "begin", "send");
             let result = session.send_session_cancellable(command, cancellation).await;

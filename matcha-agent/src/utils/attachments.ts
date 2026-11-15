@@ -598,6 +598,7 @@ export type Attachment =
       imagePasteIds?: number[]
       /** Original queue mode — 'prompt' for user messages, 'task-notification' for system events */
       commandMode?: string
+      taskNotification?: QueuedCommand['taskNotification']
       /** Provenance carried from QueuedCommand so mid-turn drains preserve it */
       origin?: MessageOrigin
       /** Carried from QueuedCommand.isMeta — distinguishes human-typed from system-injected */
@@ -1173,6 +1174,7 @@ export async function getQueuedCommandAttachments(
         source_uuid: _.uuid,
         imagePasteIds: getImagePasteIds(_.pastedContents),
         commandMode: _.mode,
+        taskNotification: _.taskNotification,
         origin: _.origin,
         isMeta: _.isMeta,
       }

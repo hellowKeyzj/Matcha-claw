@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use crate::{ApprovalStatus, GraphRunId, OrganizationFacts, TeamId};
+use crate::{
+    ApprovalStatus, GraphRunId, OrganizationFacts, TeamId, run::approval::ApprovalBinding,
+};
 
 /// The fixed renderer projection for TeamRun approvals. It intentionally omits approval notes,
 /// resolution history, native session data, workspace bindings, and command/effect receipts.
@@ -94,31 +96,33 @@ pub(crate) fn query_team_pending_approvals(
         return TeamPendingApprovalsQueryOutcome::Unavailable;
     }
 
-    let approvals = facts
-        .approvals()
-        .filter(|approval| {
-            approval.facts().run_id == run_id.as_str()
-                && approval.status() == ApprovalStatus::Pending
-        })
-        .map(|approval| {
-            let facts = approval.facts();
-            let (subject, node_id) = match &facts.subject {
-                crate::ApprovalSubject::Stage { .. } => ("stage", None),
-                crate::ApprovalSubject::WorkNode { node_id } => ("work_node", Some(node_id.clone())),
-                crate::ApprovalSubject::HumanDecision { node_id } => ("human_decision", Some(node_id.clone())),
-            };
-            TeamPendingApproval {
-                approval_id: facts.approval_id.clone(),
-                stage_id: facts.stage_id.clone(),
-                subject,
-                node_id,
-                role_id: facts.role_id.clone(),
-                reason: facts.reason.clone(),
-                requested_action: facts.requested_action.clone(),
-                created_at: facts.requested_at,
+    let can_resolve = facts.require_started_run(run_id).is_ok();
+    let mut approvals = Vec::new();
+    for approval in facts.approvals_for_run(run_id.as_str())
+        .filter(|approval| can_resolve && approval.status() == ApprovalStatus::Pending)
+    {
+        let facts = approval.facts();
+        let (subject, node_id) = match facts.binding() {
+            Some(ApprovalBinding::StageContinuation(_)) => ("stage", None),
+            Some(ApprovalBinding::WorkNode { node_id, .. }) => {
+                ("work_node", Some(node_id.to_owned()))
             }
-        })
-        .collect();
+            Some(ApprovalBinding::HumanDecision { node_id, .. }) => {
+                ("human_decision", Some(node_id.to_owned()))
+            }
+            None => return TeamPendingApprovalsQueryOutcome::Unavailable,
+        };
+        approvals.push(TeamPendingApproval {
+            approval_id: facts.approval_id.clone(),
+            stage_id: facts.stage_id.clone(),
+            subject,
+            node_id,
+            role_id: facts.role_id.clone(),
+            reason: facts.reason.clone(),
+            requested_action: facts.requested_action.clone(),
+            created_at: facts.requested_at,
+        });
+    }
 
     TeamPendingApprovalsQueryOutcome::Available(TeamPendingApprovals {
         team_id: team_id.as_str().to_owned(),
@@ -290,6 +294,7 @@ mod tests {
             reason: "Review required".to_owned(),
             requested_action: "Approve publication".to_owned(),
             risk_summary: "private risk summary".to_owned(),
+            content: None,
             idempotency_key: "private idempotency key".to_owned(),
             requested_at: 7,
             subject: crate::ApprovalSubject::Stage {

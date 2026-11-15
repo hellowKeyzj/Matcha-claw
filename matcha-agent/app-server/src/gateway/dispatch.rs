@@ -203,7 +203,7 @@ pub(super) async fn dispatch(gateway: &Gateway, method: &str, params: Value) -> 
         Some("config") => config::dispatch(method, params, config).await,
         Some("search") => search::dispatch(method, params, config, sessions).await,
         Some("agents") => agent::dispatch(method, params, config, sessions).await,
-        Some("workspace") => workspace::dispatch(method, params, config).await,
+        Some("workspace") => workspace::dispatch(method, params, config, sessions).await,
         Some("memory") => memory::dispatch(method, params, config).await,
         Some("prompts" | "instructions") => {
             prompt::dispatch(method, params, config, sessions).await

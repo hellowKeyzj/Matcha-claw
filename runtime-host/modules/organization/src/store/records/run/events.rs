@@ -2,12 +2,13 @@ use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use super::Metadata;
 use crate::{
     ApprovalDecision, ApprovalStatus, GraphRunId, TeamId,
     run::event::{
         ApprovalAction, ApprovalCommand, CommandPayload, CommandRecord, CommandRejection,
         CommandStatus, GraphEdgeAction, GraphNodeKind, GraphPatch, GraphPatchOperation,
-        MetadataValue, NodeEventKind, NodeProgressCommand, OpaqueId, RunCommand, TeamEvent,
+        NodeEventKind, NodeProgressCommand, OpaqueId, RunCommand, TeamEvent,
         TeamEventDurableInput, TeamEventPayload, TeamEventType,
     },
     store::{
@@ -43,11 +44,19 @@ enum Payload {
         operations: Vec<Operation>,
         content_fingerprint: Option<String>,
     },
+    ReworkContinue {
+        batch_id: u64,
+        source_node_id: String,
+        source_port: String,
+        source_node_execution_id: String,
+        max_reworks: u32,
+        expected_graph_version: String,
+    },
     GraphReplace(serde_json::Value),
     HistoricalGraphReplace {
         schema: u8,
         definition: serde_json::Value,
-        encoded_definition: Body,
+        encoded_definition: ContentRef,
     },
     NodeProgress {
         node_execution_id: String,
@@ -60,14 +69,9 @@ enum Payload {
         role_id: String,
         #[serde(with = "Action")]
         action: ApprovalAction,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        submission: Option<ContentRef>,
     },
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Body {
-    sha256: [u8; 32],
-    byte_len: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,6 +107,11 @@ enum Operation {
     RemoveEdge {
         edge_id: String,
     },
+    SetReworkLimit {
+        source_node_id: String,
+        source_port: String,
+        max_reworks: u32,
+    },
     SetNodePosition {
         node_id: String,
         x: i64,
@@ -112,13 +121,6 @@ enum Operation {
         key: String,
         value: Metadata,
     },
-}
-
-#[derive(Serialize, Deserialize)]
-enum Metadata {
-    Enabled(bool),
-    Revision(u64),
-    OpaqueId(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -226,6 +228,7 @@ enum Action {
 enum EventType {
     GraphPatchAccepted,
     GraphReplaced,
+    ReworkContinued,
     NodeProgressed,
     ApprovalRequested,
     ApprovalResolved,
@@ -270,6 +273,14 @@ enum EventPayload {
         base_graph_id: String,
         base_workflow_plan_id: String,
         operation_count: u64,
+    },
+    ReworkContinued {
+        batch_id: u64,
+        source_node_id: String,
+        source_port: String,
+        source_node_execution_id: String,
+        max_reworks: u32,
+        expected_graph_version: String,
     },
     GraphReplaced {
         graph_id: String,
@@ -372,7 +383,7 @@ fn encode_payload(
             Payload::GraphReplace(definition_value(team, &run, definition, contents)?)
         }
         CommandPayload::HistoricalGraphReplace(historical) => {
-            if !matches!(historical.schema(), 25 | 26) {
+            if !matches!(historical.schema(), 1 | 25 | 26 | 27) {
                 return Err(StoreFault::InvalidFacts);
             }
             let definition = definition_value(team, &run, historical.definition(), contents)?;
@@ -383,12 +394,24 @@ fn encode_payload(
             Payload::HistoricalGraphReplace {
                 schema: historical.schema(),
                 definition,
-                encoded_definition: Body {
-                    sha256: reference.sha256,
-                    byte_len: reference.byte_len,
-                },
+                encoded_definition: reference,
             }
         }
+        CommandPayload::ReworkContinue {
+            batch_id,
+            source_node_id,
+            source_port,
+            source_node_execution_id,
+            max_reworks,
+            expected_graph_version,
+        } => Payload::ReworkContinue {
+            batch_id: *batch_id,
+            source_node_id: source_node_id.clone(),
+            source_port: source_port.clone(),
+            source_node_execution_id: source_node_execution_id.clone(),
+            max_reworks: *max_reworks,
+            expected_graph_version: expected_graph_version.clone(),
+        },
         CommandPayload::NodeProgress(progress) => Payload::NodeProgress {
             node_execution_id: progress.node_execution_id().as_str().to_owned(),
             event: progress.event(),
@@ -398,6 +421,10 @@ fn encode_payload(
             node_execution_id: approval.node_execution_id().as_str().to_owned(),
             role_id: approval.role_id().as_str().to_owned(),
             action: approval.action(),
+            submission: approval.submission().map(|submission| {
+                let bytes = serde_json::to_vec(submission).map_err(|_| StoreFault::InvalidFacts)?;
+                contents.put(ContentScope::Run { team, run: &run }, &bytes)
+            }).transpose()?,
         },
     })
 }
@@ -408,8 +435,8 @@ fn definition_value(
     definition: &crate::GraphDefinition,
     contents: &ContentStore,
 ) -> Result<serde_json::Value, StoreFault> {
-    let payload = super::definition::encode_definition(team, run, definition, contents)?;
-    serde_json::from_slice(&payload).map_err(|_| StoreFault::InvalidFacts)
+    let row = super::definition::build_definition(team, run, definition, contents)?;
+    serde_json::to_value(row).map_err(|_| StoreFault::InvalidFacts)
 }
 
 fn decode_payload(
@@ -440,26 +467,61 @@ fn decode_payload(
             CommandPayload::GraphPatch(patch)
         }
         Payload::GraphReplace(value) => {
+            if value
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|nodes| nodes.iter().any(|node| node.get("max_attempts").is_some()))
+            {
+                let raw = serde_json::to_vec(&value).map_err(|_| StoreFault::InvalidFacts)?;
+                let definition = super::definition::decode_historical_sqlite_definition(
+                    team, run, &raw, contents,
+                )?;
+                CommandPayload::historical_graph_replace(1, definition, raw)
+            } else {
             CommandPayload::GraphReplace(restore_definition(team, run, value, contents)?)
+            }
         }
         Payload::HistoricalGraphReplace {
             schema,
             definition,
             encoded_definition,
         } => {
-            let definition = restore_definition(team, run, definition, contents)?;
-            let raw = contents.read(
-                ContentScope::Run { team, run },
-                &ContentRef {
-                    sha256: encoded_definition.sha256,
-                    byte_len: encoded_definition.byte_len,
-                },
-            )?;
-            if crate::store::codec::decode_historical_definition(schema, &raw)? != definition {
+            let definition = if definition
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|nodes| nodes.iter().any(|node| node.get("max_attempts").is_some()))
+            {
+                let bytes = serde_json::to_vec(&definition).map_err(|_| StoreFault::InvalidFacts)?;
+                super::definition::decode_historical_sqlite_definition(team, run, &bytes, contents)?
+            } else {
+                restore_definition(team, run, definition, contents)?
+            };
+            let raw = contents.read(ContentScope::Run { team, run }, &encoded_definition)?;
+            let restored = if schema == 1 {
+                super::definition::decode_historical_sqlite_definition(team, run, &raw, contents)?
+            } else {
+                crate::store::codec::decode_historical_definition(schema, &raw)?
+            };
+            if restored != definition {
                 return Err(StoreFault::InvalidFacts);
             }
             CommandPayload::historical_graph_replace(schema, definition, raw)
         }
+        Payload::ReworkContinue {
+            batch_id,
+            source_node_id,
+            source_port,
+            source_node_execution_id,
+            max_reworks,
+            expected_graph_version,
+        } => CommandPayload::ReworkContinue {
+            batch_id,
+            source_node_id,
+            source_port,
+            source_node_execution_id,
+            max_reworks,
+            expected_graph_version,
+        },
         Payload::NodeProgress {
             node_execution_id,
             event,
@@ -472,12 +534,19 @@ fn decode_payload(
             node_execution_id,
             role_id,
             action,
-        } => CommandPayload::ApprovalRequest(ApprovalCommand::new(
-            opaque(approval_id)?,
-            opaque(node_execution_id)?,
-            opaque(role_id)?,
-            action,
-        )),
+            submission,
+        } => {
+            let command = ApprovalCommand::new(
+                opaque(approval_id)?, opaque(node_execution_id)?, opaque(role_id)?, action,
+            );
+            CommandPayload::ApprovalRequest(match submission {
+                Some(reference) => {
+                    let bytes = contents.read(ContentScope::Run { team, run }, &reference)?;
+                    command.with_submission(serde_json::from_slice(&bytes).map_err(|_| StoreFault::CorruptRecord)?)
+                }
+                None => command,
+            })
+        }
     })
 }
 
@@ -487,8 +556,8 @@ fn restore_definition(
     value: serde_json::Value,
     contents: &ContentStore,
 ) -> Result<crate::GraphDefinition, StoreFault> {
-    let payload = serde_json::to_vec(&value).map_err(|_| StoreFault::InvalidFacts)?;
-    super::definition::decode_definition(team, run, &payload, contents)
+    let row = serde_json::from_value(value).map_err(|_| StoreFault::CorruptRecord)?;
+    super::definition::restore_definition(row, team, run, contents)
 }
 
 fn encode_operation(operation: &GraphPatchOperation) -> Operation {
@@ -539,6 +608,15 @@ fn encode_operation(operation: &GraphPatchOperation) -> Operation {
         GraphPatchOperation::RemoveEdge { edge_id } => Operation::RemoveEdge {
             edge_id: edge_id.clone(),
         },
+        GraphPatchOperation::SetReworkLimit {
+            source_node_id,
+            source_port,
+            max_reworks,
+        } => Operation::SetReworkLimit {
+            source_node_id: source_node_id.clone(),
+            source_port: source_port.clone(),
+            max_reworks: *max_reworks,
+        },
         GraphPatchOperation::SetNodePosition { node_id, x, y } => Operation::SetNodePosition {
             node_id: node_id.clone(),
             x: *x,
@@ -546,11 +624,7 @@ fn encode_operation(operation: &GraphPatchOperation) -> Operation {
         },
         GraphPatchOperation::SetMetadata { key, value } => Operation::SetMetadata {
             key: key.as_str().to_owned(),
-            value: match value {
-                MetadataValue::Enabled(value) => Metadata::Enabled(*value),
-                MetadataValue::Revision(value) => Metadata::Revision(*value),
-                MetadataValue::OpaqueId(value) => Metadata::OpaqueId(value.as_str().to_owned()),
-            },
+            value: Metadata::from_domain(value),
         },
     }
 }
@@ -599,16 +673,21 @@ fn decode_operation(operation: Operation) -> Result<GraphPatchOperation, StoreFa
             action: action.map(Into::into),
         },
         Operation::RemoveEdge { edge_id } => GraphPatchOperation::RemoveEdge { edge_id },
+        Operation::SetReworkLimit {
+            source_node_id,
+            source_port,
+            max_reworks,
+        } => GraphPatchOperation::SetReworkLimit {
+            source_node_id,
+            source_port,
+            max_reworks,
+        },
         Operation::SetNodePosition { node_id, x, y } => {
             GraphPatchOperation::SetNodePosition { node_id, x, y }
         }
         Operation::SetMetadata { key, value } => GraphPatchOperation::SetMetadata {
             key: opaque(key)?,
-            value: match value {
-                Metadata::Enabled(value) => MetadataValue::Enabled(value),
-                Metadata::Revision(value) => MetadataValue::Revision(value),
-                Metadata::OpaqueId(value) => MetadataValue::OpaqueId(opaque(value)?),
-            },
+            value: value.into_domain()?,
         },
     })
 }
@@ -623,6 +702,21 @@ pub(crate) fn encode_event(team: &TeamId, event: &TeamEvent) -> Result<StoredRec
             base_graph_id: base_graph_id.clone(),
             base_workflow_plan_id: base_workflow_plan_id.clone(),
             operation_count: operation_count.get(),
+        },
+        TeamEventPayload::ReworkContinued {
+            batch_id,
+            source_node_id,
+            source_port,
+            source_node_execution_id,
+            max_reworks,
+            expected_graph_version,
+        } => EventPayload::ReworkContinued {
+            batch_id: *batch_id,
+            source_node_id: source_node_id.clone(),
+            source_port: source_port.clone(),
+            source_node_execution_id: source_node_execution_id.clone(),
+            max_reworks: *max_reworks,
+            expected_graph_version: expected_graph_version.clone(),
         },
         TeamEventPayload::GraphReplaced {
             graph_id,
@@ -689,6 +783,24 @@ pub(crate) fn decode_event(record: &StoredRecord) -> Result<TeamEvent, StoreFaul
                 base_graph_id,
                 base_workflow_plan_id,
                 operation_count: nonzero(operation_count)?,
+            },
+        ),
+        EventPayload::ReworkContinued {
+            batch_id,
+            source_node_id,
+            source_port,
+            source_node_execution_id,
+            max_reworks,
+            expected_graph_version,
+        } => (
+            TeamEventType::ReworkContinued,
+            TeamEventPayload::ReworkContinued {
+                batch_id,
+                source_node_id,
+                source_port,
+                source_node_execution_id,
+                max_reworks,
+                expected_graph_version,
             },
         ),
         EventPayload::GraphReplaced {

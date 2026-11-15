@@ -50,6 +50,7 @@ import type { createTeamTaskBoardTransport } from './teams/task-board';
 import type { createTeamRoleSessionsTransport } from './teams/role-sessions';
 import type { createTeamApprovalsTransport } from './teams/approvals';
 import type { createTeamGraphTransport } from './teams/graph';
+import type { createTeamPromptsTransport } from './teams/prompts';
 import type { createTeamSkillTransport } from './teams/skill';
 import type { createTeamTriggerTransport } from './teams/trigger';
 import type { createTeamWebhookAuthTransport } from './teams/webhook-auth';
@@ -132,6 +133,7 @@ export type RuntimeHostTransports = Readonly<{
   teamRoleSessionsTransport: ReturnType<typeof createTeamRoleSessionsTransport>;
   teamApprovalsTransport: ReturnType<typeof createTeamApprovalsTransport>;
   teamGraphTransport: ReturnType<typeof createTeamGraphTransport>;
+  teamPromptsTransport: ReturnType<typeof createTeamPromptsTransport>;
   teamSkillTransport: ReturnType<typeof createTeamSkillTransport>;
   teamTriggerTransport: ReturnType<typeof createTeamTriggerTransport>;
   teamWebhookAuthTransport: ReturnType<typeof createTeamWebhookAuthTransport>;

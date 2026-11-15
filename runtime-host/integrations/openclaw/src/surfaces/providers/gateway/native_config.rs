@@ -18,7 +18,6 @@ use crate::{
         wire::{self, GatewayResponse},
     },
     native_config::{
-        agent_models::sort_models_by_id,
         config_store::OpenClawConfigDocument,
         provider_models::{
             ProviderModelProjection, ProviderModelProjectionError, canonical_provider_keys,
@@ -955,6 +954,14 @@ fn canonical_provider_configuration(document: &Value, provider_keys: &BTreeSet<S
                     .insert("compaction".into(), compaction);
             }
         }
+        if let Some(backends) = defaults
+            .get_mut("cliBackends")
+            .and_then(Value::as_object_mut)
+        {
+            for backend in backends.values_mut() {
+                sort_string_members(backend.get_mut("clearEnv"));
+            }
+        }
         let list = agents
             .get("list")
             .and_then(Value::as_array)
@@ -982,10 +989,9 @@ fn canonical_provider_configuration(document: &Value, provider_keys: &BTreeSet<S
         );
     }
     if let Some(plugins) = document.get("plugins").and_then(Value::as_object) {
-        result.insert(
-            "mediaPluginAllow".into(),
-            plugins.get("allow").cloned().unwrap_or(Value::Null),
-        );
+        let mut allow = plugins.get("allow").cloned().unwrap_or(Value::Null);
+        sort_string_members(Some(&mut allow));
+        result.insert("mediaPluginAllow".into(), allow);
         if let Some(entries) = plugins.get("entries").and_then(Value::as_object) {
             let providers = entries
                 .iter()
@@ -1061,9 +1067,25 @@ fn canonical_provider_entry(value: &Value) -> Value {
                 )
             });
         }
-        sort_models_by_id(models);
+    }
+    if let Some(models) = entry
+        .get_mut("media")
+        .and_then(|media| media.get_mut("models"))
+        .and_then(Value::as_array_mut)
+    {
+        for model in models {
+            sort_string_members(model.get_mut("capabilities"));
+        }
     }
     Value::Object(entry)
+}
+
+fn sort_string_members(value: Option<&mut Value>) {
+    if let Some(Value::Array(values)) = value
+        && values.iter().all(Value::is_string)
+    {
+        values.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    }
 }
 
 fn remove_unowned_model_metadata(observed: &mut Value, expected: &Value) {
@@ -1293,6 +1315,9 @@ fn next_request_id(operation: &str) -> String {
         NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
     )
 }
+
+#[cfg(test)]
+mod comparison_tests;
 
 #[cfg(test)]
 mod tests {

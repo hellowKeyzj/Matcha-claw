@@ -1,8 +1,8 @@
-import { memo, useCallback, useId, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { lazy, memo, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Trans, useTranslation } from 'react-i18next';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Plus, Search, Server, SquarePen, Trash2, Users, X } from 'lucide-react';
+import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Plus, Search, Server, SquarePen, Trash2, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
@@ -23,6 +23,8 @@ import {
 import { buildSwitchboardAgentKey, type AgentSessionSwitchboardAgentResult } from './agent-session-switchboard-model';
 import { TeamSessionsSidebar } from './TeamSessionsSidebar';
 import { showWorkspaceChat } from '@/plugins/workspace/actions';
+
+const TeamCreateDialog = lazy(() => import('@/plugins/teams/TeamCreateDialog'));
 
 const iconClass = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40';
 const runtimeStatusLabels = {
@@ -152,11 +154,17 @@ const AgentGroup = memo(function AgentGroup({
 export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const { t } = useTranslation('common');
   const navigate = useNavigate();
+  const location = useLocation();
   const { sessionEntries, sessionsError, currentConversation, runtimeEndpoints, currentSessionKey,
     switchSession, newSessionForScope, renameSession, deleteSession, deleteAgentSessions } = useChatStore(useShallow(selectAgentSessionsPaneState));
   const agentsByRuntime = useSubagentsStore((state) => state.agentsByRuntime);
   const pane = useAgentSessionsPaneViewModel({ agentsByRuntime, sessionEntries, sessionsError, runtimeEndpoints });
-  const [mode, setMode] = useState<SidebarMode>('agents');
+  const [mode, setMode] = useState<SidebarMode>(() => location.state?.teamDesignSurface || location.state?.teamsSidebar ? 'teams' : 'agents');
+  useEffect(() => {
+    if (location.state?.teamDesignSurface || location.state?.teamsSidebar) setMode('teams');
+  }, [location.key, location.state]);
+  const [createTeamOpen, setCreateTeamOpen] = useState(false);
+  const [createTeamMounted, setCreateTeamMounted] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
@@ -249,9 +257,12 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
           aria-expanded={searchOpen} title={t('switchboard.searchSessions')} onClick={() => {
             if (searchOpen) { setSearchOpen(false); setQuery(''); } else { setSearchOpen(true); }
           }}><Search className="h-3.5 w-3.5" /></button>
-        <button type="button" className={iconClass} aria-label={t(mode === 'agents' ? 'switchboard.addAgent' : 'sidebar.teams')}
-          title={t(mode === 'agents' ? 'switchboard.addAgent' : 'sidebar.teams')} onClick={() => navigate(mode === 'agents' ? '/subagents' : '/teams')}>
-          {mode === 'agents' ? <Plus className="h-4 w-4" /> : <Users className="h-4 w-4" />}
+        <button type="button" className={iconClass} aria-label={t(mode === 'agents' ? 'switchboard.addAgent' : 'teams:create.openCreateDialog')}
+          title={t(mode === 'agents' ? 'switchboard.addAgent' : 'teams:create.openCreateDialog')} onClick={() => {
+            if (mode === 'agents') navigate('/subagents');
+            else { setCreateTeamMounted(true); setCreateTeamOpen(true); }
+          }}>
+          <Plus className="h-4 w-4" />
         </button>
       </header>
       {searchOpen && <div className="px-3 pb-2">
@@ -307,6 +318,9 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
         </TabsContent>
         <TabsContent value="teams" className="mt-0"><TeamSessionsSidebar query={query} /></TabsContent>
       </div>
+      {createTeamMounted && <Suspense fallback={null}>
+        <TeamCreateDialog open={createTeamOpen} onOpenChange={setCreateTeamOpen} />
+      </Suspense>}
       <Dialog.Root open={mutation !== null} onOpenChange={(open) => { if (!open && !pending) setMutation(null); }}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/40" />

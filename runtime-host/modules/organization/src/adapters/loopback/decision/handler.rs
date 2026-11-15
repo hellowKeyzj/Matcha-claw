@@ -1,4 +1,7 @@
-use platform::capability::CapabilityDecisionVerifier;
+use platform::{
+    capability::CapabilityDecisionVerifier,
+    loopback::{Request, Response},
+};
 
 use std::{
     sync::Arc,
@@ -8,108 +11,38 @@ use std::{
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::{DecodeError, Delivery, decode, handle};
+use super::{DecodeError, decode, handle};
 
 pub(crate) const ROUTE: &str = "/api/team/decision";
 
-pub(crate) async fn handle_loopback(
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::OrganizationHandle,
-) -> platform::loopback::Response {
-    handle_request(
-        Request {
-            method,
-            path,
-            headers,
-            body,
-        },
-        verifier,
-        owner,
-    )
-    .await
-    .into_loopback()
-}
-
-async fn handle_request(
+pub(crate) async fn handle_request(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::OrganizationHandle,
 ) -> Response {
-    if request.method != "POST" || request.path != ROUTE {
-        return Response::not_found();
+    if request.method() != "POST" || request.path() != ROUTE {
+        return Response::error(404, "Team human decision route is not available");
     }
-    let Some(authorization) = request
-        .headers
-        .iter()
-        .find(|(name, _)| name == "authorization")
-        .and_then(|(_, value)| value.strip_prefix("Bearer "))
-    else {
-        return Response::unauthorized();
+    let Some(authorization) = request.bearer_authorization() else {
+        return Response::error(401, "Team human decision authorization is invalid");
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
-        Err(_) => return Response::bad_request(),
+        Err(_) => return Response::error(400, "Team human decision request is invalid"),
     };
     let mut verifier = verifier.lock().await;
     let request = match decode(value, authorization, &mut verifier, now_millis()) {
         Ok(request) => request,
-        Err(DecodeError::Unauthorized) => return Response::unauthorized(),
-        Err(DecodeError::Invalid) => return Response::bad_request(),
+        Err(DecodeError::Unauthorized) => {
+            return Response::error(401, "Team human decision authorization is invalid");
+        }
+        Err(DecodeError::Invalid) => {
+            return Response::error(400, "Team human decision request is invalid");
+        }
     };
     drop(verifier);
-    Response::from_delivery(handle(&owner, request, now_millis()).await)
-}
-
-struct Request {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-struct Response {
-    status: u16,
-    body: Value,
-}
-
-impl Response {
-    fn from_delivery(delivery: Delivery) -> Self {
-        Self {
-            status: delivery.status_code(),
-            body: delivery.body(),
-        }
-    }
-
-    fn into_loopback(self) -> platform::loopback::Response {
-        platform::loopback::Response::json(self.status, self.body)
-    }
-
-    fn bad_request() -> Self {
-        Self::fixed(400, "Team human decision request is invalid")
-    }
-
-    fn unauthorized() -> Self {
-        Self::fixed(401, "Team human decision authorization is invalid")
-    }
-
-    fn deadline() -> Self {
-        Self::from_delivery(Delivery::OutcomeUnknown)
-    }
-
-    fn not_found() -> Self {
-        Self::fixed(404, "Team human decision route is not available")
-    }
-
-    fn fixed(status: u16, error: &'static str) -> Self {
-        Self {
-            status,
-            body: serde_json::json!({ "success": false, "error": error }),
-        }
-    }
+    let delivery = handle(&owner, request, now_millis()).await;
+    Response::json(delivery.status_code(), delivery.body())
 }
 
 fn now_millis() -> u64 {
@@ -124,15 +57,17 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::Delivery;
 
     #[test]
     fn deadline_is_an_explicit_unknown_failure() {
-        let response = Response::deadline();
+        let delivery = Delivery::OutcomeUnknown;
+        let response = Response::json(delivery.status_code(), delivery.body());
 
-        assert_eq!(response.status, 409);
+        assert_eq!(response.status(), 409);
         assert_eq!(
-            response.body,
-            serde_json::json!({
+            response.body(),
+            &serde_json::json!({
                 "success": false,
                 "outcome": "outcome-unknown",
                 "error": "Team approval outcome is unknown",

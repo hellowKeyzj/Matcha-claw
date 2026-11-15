@@ -221,7 +221,6 @@ pub fn compile_workflow_plan(
             NodeDefinition::work(
                 NodeId::new(workflow_task_node_id(task.task_id())),
                 task.title().to_owned(),
-                std::num::NonZeroU32::MIN,
                 WorkAssignment::typed(
                     task.task_id().to_owned(),
                     task.prompt().to_owned(),

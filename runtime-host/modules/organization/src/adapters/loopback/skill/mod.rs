@@ -1,3 +1,4 @@
+use futures_util::future::BoxFuture;
 use platform::capability::CapabilityDecisionVerifier;
 
 use std::path::PathBuf;
@@ -200,8 +201,8 @@ impl Delivery {
     pub(crate) fn body(&self) -> Value {
         match self {
             Self::Authorized(selection_id) => json!({ "selectionId": selection_id.as_str() }),
-            Self::Validation(validation) => validation_body(validation),
-            Self::DependencyPlan(plan) => dependency_plan_body(plan),
+            Self::Validation(validation) => json!(validation),
+            Self::DependencyPlan(plan) => json!(plan),
             Self::Materialized => json!({ "status": "materialized" }),
             Self::Rejected => json!({ "status": "rejected" }),
             Self::OutcomeUnknown => json!({ "status": "outcome_unknown" }),
@@ -213,131 +214,51 @@ impl Delivery {
     }
 }
 
-fn validation_body(validation: &organization::package::TeamSkillPackageValidation) -> Value {
-    match validation {
-        organization::package::TeamSkillPackageValidation::Valid { package } => json!({
-            "status": "valid",
-            "package": {
-                "selectionId": package.selection_id().as_str(),
-                "name": package.name(),
-                "version": package.version(),
-                "kind": "team-skill",
-                "description": package.description(),
-            },
-        }),
-        organization::package::TeamSkillPackageValidation::Invalid => {
-            json!({ "status": "invalid" })
-        }
-        organization::package::TeamSkillPackageValidation::Unavailable => {
-            json!({ "status": "unavailable" })
-        }
-    }
-}
-
-fn dependency_plan_body(plan: &organization::package::TeamSkillDependencyPlanResult) -> Value {
-    match plan {
-        organization::package::TeamSkillDependencyPlanResult::Available { plan } => json!({
-            "status": "available",
-            "plan": dependency_plan_value(plan),
-        }),
-        organization::package::TeamSkillDependencyPlanResult::Invalid => {
-            json!({ "status": "invalid" })
-        }
-        organization::package::TeamSkillDependencyPlanResult::Unavailable => {
-            json!({ "status": "unavailable" })
-        }
-    }
-}
-
-fn dependency_plan_value(plan: &organization::package::TeamSkillDependencyPlan) -> Value {
-    json!({
-        "selectionId": plan.selection_id().as_str(),
-        "packageName": plan.package_name(),
-        "packageVersion": plan.package_version(),
-        "items": plan
-            .items()
-            .iter()
-            .map(dependency_plan_item_value)
-            .collect::<Vec<_>>(),
-        "canProceed": plan.can_proceed(),
-    })
-}
-
-fn dependency_plan_item_value(item: &organization::package::TeamSkillDependencyPlanItem) -> Value {
-    json!({
-        "kind": dependency_kind_code(item.kind()),
-        "name": item.name(),
-        "required": item.required(),
-        "purpose": item.purpose(),
-        "status": dependency_status_code(item.status()),
-        "severity": dependency_severity_code(item.severity()),
-        "installable": item.installable(),
-    })
-}
-
-fn dependency_kind_code(kind: organization::package::TeamSkillDependencyKind) -> &'static str {
-    match kind {
-        organization::package::TeamSkillDependencyKind::Skill => "skill",
-        organization::package::TeamSkillDependencyKind::Tool => "tool",
-    }
-}
-
-fn dependency_status_code(
-    status: organization::package::TeamSkillDependencyStatus,
-) -> &'static str {
-    match status {
-        organization::package::TeamSkillDependencyStatus::Available => "available",
-        organization::package::TeamSkillDependencyStatus::Missing => "missing",
-    }
-}
-
-fn dependency_severity_code(
-    severity: organization::package::TeamSkillDependencySeverity,
-) -> &'static str {
-    match severity {
-        organization::package::TeamSkillDependencySeverity::Ok => "ok",
-        organization::package::TeamSkillDependencySeverity::Warning => "warning",
-        organization::package::TeamSkillDependencySeverity::Blocker => "blocker",
-    }
-}
-
-pub(crate) async fn dispatch(owner: &OrganizationHandle, request: Request) -> Delivery {
+pub(crate) fn dispatch(owner: &OrganizationHandle, request: Request) -> BoxFuture<'_, Delivery> {
     match request {
-        Request::Authorize { package_root } => owner
-            .team_skill_authorize(package_root)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .map_or(Delivery::Unavailable, Delivery::Authorized),
-        Request::Validate { selection_id } => owner
-            .team_skill_selection_validate(selection_id)
-            .await
-            .map_or(Delivery::Unavailable, Delivery::Validation),
-        Request::DependencyPlan { selection_id, endpoint, source_agent } => owner
-            .team_skill_selection_dependency_plan(selection_id, endpoint, source_agent)
-            .await
-            .map_or(Delivery::Unavailable, Delivery::DependencyPlan),
+        Request::Authorize { package_root } => crate::future::boxed(move || async move {
+            owner
+                .team_skill_authorize(package_root)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map_or(Delivery::Unavailable, Delivery::Authorized)
+        }),
+        Request::Validate { selection_id } => crate::future::boxed(move || async move {
+            owner
+                .team_skill_selection_validate(selection_id)
+                .await
+                .map_or(Delivery::Unavailable, Delivery::Validation)
+        }),
+        Request::DependencyPlan { selection_id, endpoint, source_agent } => crate::future::boxed(move || async move {
+            owner
+                .team_skill_selection_dependency_plan(selection_id, endpoint, source_agent)
+                .await
+                .map_or(Delivery::Unavailable, Delivery::DependencyPlan)
+        }),
         Request::Materialize {
             selection_id,
             endpoint,
             source_agent,
             team_id,
             idempotency_key,
-        } => match owner
-            .team_skill_materialize(selection_id, endpoint, source_agent, team_id, idempotency_key)
-            .await
-        {
-            Ok(crate::TeamMaterializationCommandOutcome::Materialized { .. }) => {
-                Delivery::Materialized
+        } => crate::future::boxed(move || async move {
+            match owner
+                .team_skill_materialize(selection_id, endpoint, source_agent, team_id, idempotency_key)
+                .await
+            {
+                Ok(crate::TeamMaterializationCommandOutcome::Materialized { .. }) => {
+                    Delivery::Materialized
+                }
+                Ok(crate::TeamMaterializationCommandOutcome::Rejected) => Delivery::Rejected,
+                Ok(crate::TeamMaterializationCommandOutcome::OutcomeUnknown) => {
+                    Delivery::OutcomeUnknown
+                }
+                Ok(crate::TeamMaterializationCommandOutcome::Unavailable) | Err(_) => {
+                    Delivery::Unavailable
+                }
             }
-            Ok(crate::TeamMaterializationCommandOutcome::Rejected) => Delivery::Rejected,
-            Ok(crate::TeamMaterializationCommandOutcome::OutcomeUnknown) => {
-                Delivery::OutcomeUnknown
-            }
-            Ok(crate::TeamMaterializationCommandOutcome::Unavailable) | Err(_) => {
-                Delivery::Unavailable
-            }
-        },
+        }),
     }
 }
 

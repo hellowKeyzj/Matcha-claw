@@ -11,9 +11,8 @@ import {
   logEvent,
 } from '../services/analytics/index.js'
 import {
-  completeWorkflowTask,
-  failWorkflowTask,
   killWorkflowTask,
+  type LocalWorkflowTaskState,
   registerLocalWorkflowTask,
 } from '../tasks/LocalWorkflowTask/LocalWorkflowTask.js'
 import {
@@ -27,6 +26,15 @@ import type { ProgressBus } from './progress/bus.js'
 import type { ProgressStore } from './progress/store.js'
 import type { SetAppState } from '../Task.js'
 import type { AssistantMessage } from '../types/message.js'
+import { updateTaskState } from '../utils/task/framework.js'
+import {
+  enqueueWorkflowNotification,
+  type WorkflowNotificationRun,
+} from './notifications.js'
+
+export type HostWorkflowPorts = WorkflowPorts & {
+  notifyRun(run: WorkflowNotificationRun): void
+}
 
 type RunBinding = {
   runId: string
@@ -71,8 +79,40 @@ function makeHostFactory(): WorkflowPorts['hostFactory'] {
 export function createWorkflowPorts(opts: {
   bus: ProgressBus
   store: ProgressStore
-}): WorkflowPorts {
+}): HostWorkflowPorts {
   const bindings = new Map<string, RunBinding>()
+  const notifyRun = (binding: RunBinding, run: WorkflowNotificationRun): void => {
+    if (run.status === 'running') return
+    let notificationTask: LocalWorkflowTaskState | undefined
+    updateTaskState<LocalWorkflowTaskState>(
+      binding.taskId,
+      binding.setAppState,
+      task => {
+        if (task.notified) return task
+        notificationTask = {
+          ...task,
+          status: task.status === 'killed' ? 'killed' : run.status,
+          endTime: task.endTime ?? Date.now(),
+          abortController: undefined,
+          ...(run.error !== undefined ? { error: run.error } : {}),
+        }
+        return notificationTask
+      },
+    )
+    if (!notificationTask) return
+    enqueueWorkflowNotification(
+      {
+        ...run,
+        status: notificationTask.status === 'killed' ? 'killed' : run.status,
+      },
+      notificationTask,
+    )
+    updateTaskState<LocalWorkflowTaskState>(
+      binding.taskId,
+      binding.setAppState,
+      task => ({ ...task, notified: true }),
+    )
+  }
   const runsDir = getRunsDir()
   const registry = buildRegistry()
 
@@ -104,36 +144,59 @@ export function createWorkflowPorts(opts: {
         abortController,
       })
       const runId = regOpts.runId ?? taskId
-      bindings.set(runId, {
+      const binding: RunBinding = {
         runId,
         taskId,
         setAppState,
         abortController,
         workflowName: regOpts.workflowName,
         agentAbortControllers: new Map(),
-      })
+      }
+      bindings.set(runId, binding)
+      abortController.signal.addEventListener(
+        'abort',
+        () => {
+          queueMicrotask(() =>
+            notifyRun(binding, {
+              runId,
+              workflowName: binding.workflowName,
+              status: 'killed',
+            }),
+          )
+        },
+        { once: true },
+      )
       logForDebugging(
         `workflow task registered: ${runId} (${regOpts.workflowName})`,
       )
       return { runId, signal: abortController.signal }
     },
-    complete(runId, summary) {
+    complete(runId, summary, signal) {
       const b = bindings.get(runId)
-      if (!b) return
-      completeWorkflowTask(b.taskId, b.setAppState)
+      if (!b || (signal && b.abortController.signal !== signal)) return
+      notifyRun(b, {
+        runId,
+        workflowName: b.workflowName,
+        status: 'completed',
+      })
       logForDebugging(`workflow ${runId} completed: ${summary ?? ''}`)
-      bindings.delete(runId)
+      if (bindings.get(runId) === b) bindings.delete(runId)
     },
-    fail(runId, error) {
+    fail(runId, error, signal) {
       const b = bindings.get(runId)
-      if (!b) return
-      failWorkflowTask(b.taskId, b.setAppState, error)
+      if (!b || (signal && b.abortController.signal !== signal)) return
+      notifyRun(b, {
+        runId,
+        workflowName: b.workflowName,
+        status: 'failed',
+        error,
+      })
       logForDebugging(`workflow ${runId} failed: ${error}`)
-      bindings.delete(runId)
+      if (bindings.get(runId) === b) bindings.delete(runId)
     },
-    kill(runId) {
+    kill(runId, signal) {
       const b = bindings.get(runId)
-      if (!b) return
+      if (!b || (signal && b.abortController.signal !== signal)) return
       killWorkflowTask(b.taskId, b.setAppState) // internal abort controller
       // Killing the run also aborts all in-flight agents (guards against the edge timing where the backend misses the task abort)
       for (const ac of b.agentAbortControllers.values()) {
@@ -144,16 +207,17 @@ export function createWorkflowPorts(opts: {
         }
       }
       b.agentAbortControllers.clear()
-      bindings.delete(runId)
+      notifyRun(b, { runId, workflowName: b.workflowName, status: 'killed' })
+      if (signal && bindings.get(runId) === b) bindings.delete(runId)
     },
-    registerAgentAbort(runId, agentId, ac) {
+    registerAgentAbort(runId, agentId, ac, signal) {
       const b = bindings.get(runId)
-      if (!b) return
+      if (!b || (signal && b.abortController.signal !== signal)) return
       b.agentAbortControllers.set(agentId, ac)
     },
-    unregisterAgentAbort(runId, agentId) {
+    unregisterAgentAbort(runId, agentId, signal) {
       const b = bindings.get(runId)
-      if (!b) return
+      if (!b || (signal && b.abortController.signal !== signal)) return
       b.agentAbortControllers.delete(agentId)
     },
     killAgent(runId, agentId) {
@@ -175,6 +239,10 @@ export function createWorkflowPorts(opts: {
   }
 
   return {
+    notifyRun(run) {
+      const binding = bindings.get(run.runId)
+      if (binding) notifyRun(binding, run)
+    },
     hostFactory: makeHostFactory(),
     agentAdapterRegistry: registry,
     agentRunner: {
@@ -186,7 +254,11 @@ export function createWorkflowPorts(opts: {
       },
     },
     progressEmitter: {
-      emit(event) {
+      emit(event, signal) {
+        if (
+          signal &&
+          bindings.get(event.runId)?.abortController.signal !== signal
+        ) return
         opts.bus.emit(event) // → store reducer + telemetry
       },
     },

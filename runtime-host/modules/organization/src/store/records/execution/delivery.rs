@@ -1,10 +1,11 @@
 use super::*;
 use crate::run::delivery::{
-    TerminalObservationResolution, TerminalObservationSnapshot, TerminalObservationSnapshotInput,
+    TerminalObservation, TerminalObservationResolution, TerminalObservationSnapshot,
+    TerminalObservationSnapshotInput,
 };
 use crate::{
     AuthorizedGraphOutcome, AuthorizedGraphResolution, AuthorizedGraphResolutionReceipt,
-    DeliveryClaimSnapshot, DeliveryFailure, DeliveryId, DeliveryPhaseSnapshot,
+    DeliveryClaimSnapshot, DeliveryFailure, DeliveryId, DeliveryPhase, DeliveryPhaseSnapshot,
     DeliveryReceiptReference, DeliveryRequest, DeliverySnapshot, EndpointSessionId,
     NativeDeliveryCorrelation, NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
 };
@@ -165,6 +166,8 @@ struct Output {
     business_messages: Option<Vec<Body>>,
     summary: Body,
     decision: String,
+    #[serde(default)]
+    files: Vec<String>,
 }
 #[derive(Serialize, Deserialize)]
 enum Resolution {
@@ -196,7 +199,8 @@ struct Terminal {
 }
 impl Terminal {
     fn from_domain(
-        value: &TerminalObservationSnapshot,
+        value: &TerminalObservation,
+        previous: Option<&Output>,
         bodies: &Bodies<'_>,
     ) -> Result<Self, StoreFault> {
         let status = match value.native_terminal() {
@@ -224,11 +228,15 @@ impl Terminal {
             .output()
             .map(|value| -> Result<Output, StoreFault> {
                 Ok(Output {
-                    text: bodies.put(value.final_assistant_text())?,
-                    business_messages: Some(value.business_messages().iter()
-                        .map(|text| bodies.put(text)).collect::<Result<_, _>>()?),
-                    summary: bodies.put(value.summary())?,
+                    text: bodies.put_reusing(value.final_assistant_text(), previous.map(|output| &output.text))?,
+                    business_messages: Some(value.business_messages().iter().enumerate()
+                        .map(|(index, text)| bodies.put_reusing(text, previous
+                            .and_then(|output| output.business_messages.as_ref())
+                            .and_then(|messages| messages.get(index))))
+                        .collect::<Result<_, _>>()?),
+                    summary: bodies.put_reusing(value.summary(), previous.map(|output| &output.summary))?,
                     decision: value.decision().to_owned(),
+                    files: value.files().to_vec(),
                 })
             })
             .transpose()?;
@@ -290,6 +298,7 @@ impl Terminal {
                     bodies.read(value.summary)?,
                     value.decision,
                 ))?;
+                let output = valid(output.with_files(value.files))?;
                 match value.business_messages {
                     Some(messages) => {
                         let messages = messages.into_iter().map(|body| bodies.read(body)).collect::<Result<Vec<_>, _>>()?;
@@ -322,14 +331,65 @@ impl Terminal {
     }
 }
 
-pub(super) fn encode(value: &Delivery, bodies: &Bodies<'_>) -> Result<Vec<u8>, StoreFault> {
-    let snapshot = value.snapshot();
-    let facts = snapshot.facts();
+pub(crate) fn encode(
+    team: &TeamId,
+    value: &Delivery,
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    encode_with_previous(team, value, None, None, contents)
+}
+
+pub(crate) fn encode_change(
+    team: &TeamId,
+    value: &Delivery,
+    previous: Option<&Delivery>,
+    record: Option<&StoredRecord>,
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let facts = value.facts();
+    let row = match (previous, record) {
+        (Some(previous), Some(record))
+            if previous.facts() == facts
+                && record.key.kind == RecordKind::Delivery
+                && record.key.scope.is_empty()
+                && record.key.id == facts.delivery_id.as_str()
+                && record.team_id.as_deref() == Some(team.as_str())
+                && record.run_id.as_deref() == Some(facts.run_id.as_str()) =>
+        {
+            let row: Row = deserialize(&record.payload)?;
+            (row.id == facts.delivery_id.as_str()
+                && row.team == facts.team_id
+                && row.run == facts.run_id).then_some(row)
+        }
+        _ => None,
+    };
+    let output = row.as_ref().and_then(|row| match (previous?.phase(), value.phase(), &row.phase) {
+        (DeliveryPhase::TerminalObserved { observation: old },
+            DeliveryPhase::TerminalObserved { observation: current }, Phase::TerminalObserved(terminal))
+            if old.matches_native_fact(current) && old.output() == current.output() => terminal.output.as_ref(),
+        _ => None,
+    });
+    encode_with_previous(team, value, row.as_ref().map(|row| &row.message), output, contents)
+}
+
+fn encode_with_previous(
+    team: &TeamId,
+    value: &Delivery,
+    previous_message: Option<&Body>,
+    previous_output: Option<&Output>,
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let facts = value.facts();
+    let bodies = Bodies {
+        contents,
+        team,
+        run: GraphRunId::new(&facts.run_id),
+    };
     if facts.team_id != bodies.team.as_str() || facts.run_id != bodies.run.as_str() {
         return Err(StoreFault::InvalidFacts);
     }
-    use DeliveryPhaseSnapshot as P;
-    let phase = match snapshot.phase() {
+    use DeliveryPhase as P;
+    let phase = match value.phase() {
         P::Pending => Phase::Pending,
         P::Delivering(value) => Phase::Delivering {
             id: value.delivery_id().as_str().to_owned(),
@@ -351,7 +411,7 @@ pub(super) fn encode(value: &Delivery, bodies: &Bodies<'_>) -> Result<Vec<u8>, S
             correlation: native_correlation.as_ref().map(Correlation::from_domain),
         },
         P::TerminalObserved { observation } => {
-            Phase::TerminalObserved(Terminal::from_domain(observation, bodies)?)
+            Phase::TerminalObserved(Terminal::from_domain(observation, previous_output, &bodies)?)
         }
         P::Failed { failed_at, failure } => Phase::Failed {
             failed_at: *failed_at,
@@ -360,7 +420,7 @@ pub(super) fn encode(value: &Delivery, bodies: &Bodies<'_>) -> Result<Vec<u8>, S
         P::OutcomeUnknown { observed_at } => Phase::OutcomeUnknown(*observed_at),
         P::Cancelled { cancelled_at } => Phase::Cancelled(*cancelled_at),
     };
-    serialize(&Row {
+    let payload = serialize(&Row {
         id: facts.delivery_id.as_str().to_owned(),
         team: facts.team_id.clone(),
         run: facts.run_id.clone(),
@@ -370,13 +430,23 @@ pub(super) fn encode(value: &Delivery, bodies: &Bodies<'_>) -> Result<Vec<u8>, S
         role: facts.role_id.clone(),
         session: facts.session_ref.clone(),
         idempotency: facts.idempotency_key.clone(),
-        message: bodies.put(&facts.message)?,
+        message: bodies.put_reusing(&facts.message, previous_message)?,
         requested_at: facts.requested_at,
         max_attempts: facts.max_attempts,
         phase,
-        completed_attempts: snapshot.completed_attempts(),
-        next_generation: snapshot.next_claim_generation(),
-        task_native_execution: snapshot.task_native_execution().cloned(),
+        completed_attempts: value.completed_attempts(),
+        next_generation: value.next_claim_generation(),
+        task_native_execution: value.task_native_execution().cloned(),
+    })?;
+    Ok(StoredRecord {
+        key: RecordKey {
+            kind: RecordKind::Delivery,
+            scope: String::new(),
+            id: facts.delivery_id.as_str().to_owned(),
+        },
+        team_id: Some(team.as_str().to_owned()),
+        run_id: Some(facts.run_id.clone()),
+        payload,
     })
 }
 

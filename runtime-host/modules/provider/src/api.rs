@@ -1142,10 +1142,9 @@ impl ProviderQuery {
             | Self::ListMediaModels { .. }
             | Self::SubmitVideo { .. }
             | Self::QueryVideo { .. }
-            | Self::CollectVideo { .. } => QueryRoute::Direct,
-            Self::SelectSessionModel { .. } | Self::SelectMatchaSessionModelRuntime { .. } => {
-                QueryRoute::Global
-            }
+            | Self::CollectVideo { .. }
+            | Self::SelectSessionModel { .. }
+            | Self::SelectMatchaSessionModelRuntime { .. } => QueryRoute::Direct,
         }
     }
 }

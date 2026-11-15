@@ -144,7 +144,7 @@ pub(super) async fn set(
     )?;
 
     // The shared per-agent guard orders commit and short native ACK, not model execution.
-    let _guard = sessions.agent_guard(&target.agent_id).await;
+    let _guard = sessions.agent_scope(&target.agent_id).await;
     let native = settings::native_settings(&target, sessions).await?;
     let states = config
         .update(|config| {

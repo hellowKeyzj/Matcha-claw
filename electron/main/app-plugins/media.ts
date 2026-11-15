@@ -103,10 +103,11 @@ export async function listPluginMediaModels(
       if (!isRecord(model) || !hasExactKeys(model, ['selectionId', 'name', 'capabilities']) || !isSelectionId(model.selectionId)
         || typeof model.name !== 'string' || !model.name.length || !isRecord(model.capabilities)) return false;
       const capabilities = model.capabilities;
-      return Object.keys(capabilities).every((key) => ['maxImages', 'maxCount', 'mask', 'pixelSize', 'pixelSizeLimits', 'sizes', 'durationsSeconds', 'storyboard'].includes(key))
+      return Object.keys(capabilities).every((key) => ['maxImages', 'maxCount', 'mask', 'endpointValidatesOptions', 'pixelSize', 'pixelSizeLimits', 'sizes', 'durationsSeconds', 'storyboard'].includes(key))
         && Number.isSafeInteger(capabilities.maxImages) && (capabilities.maxImages as number) >= 0 && (capabilities.maxImages as number) <= 16
         && Number.isSafeInteger(capabilities.maxCount) && (capabilities.maxCount as number) >= 1 && (capabilities.maxCount as number) <= 10
-        && typeof capabilities.mask === 'boolean' && typeof capabilities.pixelSize === 'boolean' && capabilities.storyboard === false
+        && typeof capabilities.mask === 'boolean' && typeof capabilities.endpointValidatesOptions === 'boolean'
+        && typeof capabilities.pixelSize === 'boolean' && capabilities.storyboard === false
         && (capabilities.pixelSize ? isPixelSizeLimits(capabilities.pixelSizeLimits) : capabilities.pixelSizeLimits === undefined)
         && (capabilities.sizes === undefined || (Array.isArray(capabilities.sizes) && capabilities.sizes.every((size) => typeof size === 'string' && size.length > 0 && size.length <= 128)))
         && (capabilities.durationsSeconds === undefined || (Array.isArray(capabilities.durationsSeconds) && capabilities.durationsSeconds.every((duration) => Number.isSafeInteger(duration) && duration > 0)));

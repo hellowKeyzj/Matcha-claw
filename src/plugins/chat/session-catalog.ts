@@ -60,6 +60,18 @@ export function normalizeAutomaticSessionTitle(value: string | null | undefined)
   return title?.startsWith('<team_run_context>') ? null : title;
 }
 
+function readCatalogSessionLabel(meta: ChatSessionMetaState, value: string | null | undefined = meta.label): string | null {
+  const endpoint = meta.sessionIdentity?.endpoint;
+  const ownership = meta.ownership;
+  if (meta.manualLabel !== true && meta.titleSource !== 'user'
+    && endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'matcha-agent'
+    && ownership?.kind === 'team'
+    && value?.trim() === `${ownership.teamRunId} · ${ownership.roleId} · ${ownership.sessionRef}`) {
+    return null;
+  }
+  return value ?? null;
+}
+
 export function resolveSessionListLabel(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
@@ -72,7 +84,7 @@ export function resolveSessionListLabel(
   if (explicit) {
     return explicit;
   }
-  const automaticLabel = normalizeAutomaticSessionTitle(meta.label ?? fallbackLabel);
+  const automaticLabel = normalizeAutomaticSessionTitle(readCatalogSessionLabel(meta, meta.label ?? fallbackLabel));
   if (automaticLabel) {
     return automaticLabel;
   }
@@ -80,10 +92,12 @@ export function resolveSessionListLabel(
   if (displayName && displayName !== sessionKey && displayName !== meta.sessionIdentity?.sessionKey) {
     return displayName;
   }
-  return resolveLatestUserTitle(getSessionItems(state, sessionKey));
+  return resolveLatestUserTitle(getSessionItems(state, sessionKey), meta);
 }
 
-function resolveLatestUserTitle(items: ChatSessionRecord['items']): string | null {
+function resolveLatestUserTitle(items: ChatSessionRecord['items'], meta: ChatSessionMetaState): string | null {
+  const endpoint = meta.sessionIdentity?.endpoint;
+  const nativeProseOnly = endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'matcha-agent';
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
     if (item?.kind !== 'user-message') continue;
@@ -93,7 +107,8 @@ function resolveLatestUserTitle(items: ChatSessionRecord['items']): string | nul
       title = normalizeAutomaticSessionTitle(item.text);
       if (isControlledSessionRenderItem(item)) automaticTitleByItem.set(item, title);
     }
-    if (title) return title;
+    // Matcha native title eligibility excludes XML control envelopes from user prose.
+    if (title && (!nativeProseOnly || !/^<[a-z][a-zA-Z0-9_-]*(?:\p{White_Space}|>)/u.test(title))) return title;
   }
   return null;
 }
@@ -106,7 +121,7 @@ export function readSessionTitlesFromState(state: Pick<ChatStoreState, 'loadedSe
   for (const key of keys) {
     const record = state.loadedSessions[key];
     const meta = record.meta;
-    const label = meta.label;
+    const label = readCatalogSessionLabel(meta);
     const explicit = meta.manualLabel === true || meta.titleSource === 'user';
     const displayName = meta.displayName;
     const previous = cachedTitleInputs.get(key);
@@ -116,7 +131,7 @@ export function readSessionTitlesFromState(state: Pick<ChatStoreState, 'loadedSe
       ? previous.normalizedDisplayName : normalizeAutomaticSessionTitle(displayName);
     const title = normalizedLabel || (normalizedDisplayName && normalizedDisplayName !== key
       && normalizedDisplayName !== meta.sessionIdentity?.sessionKey ? normalizedDisplayName : null)
-      || resolveLatestUserTitle(record.items);
+      || resolveLatestUserTitle(record.items, meta);
     nextInputs.set(key, previous && previous.label === label && previous.explicit === explicit && previous.displayName === displayName
       ? previous : { label, explicit, displayName, normalizedLabel, normalizedDisplayName });
     if (!Object.hasOwn(titles, key) || titles[key] !== title) {
@@ -172,7 +187,7 @@ export function readSessionsFromState(state: Pick<ChatStoreState, 'loadedSession
     const previous = cachedSessionInputs.get(sessionKey);
     const sameIdentity = previous && identityValues.length === previous.identityValues.length
       && identityValues.every((value, index) => value === previous.identityValues[index]);
-    const rawLabel = meta.label;
+    const rawLabel = readCatalogSessionLabel(meta);
     const explicit = meta.manualLabel === true || meta.titleSource === 'user';
     const displayName = meta.displayName;
     const sameValues = previous && values.length === previous.values.length && values.every((value, index) => Object.is(value, previous.values[index]));

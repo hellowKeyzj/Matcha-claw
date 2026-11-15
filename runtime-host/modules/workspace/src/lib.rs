@@ -44,7 +44,7 @@ pub use domain::model::{
 };
 pub use owner::actor::WorkspaceOwnerInput;
 pub use ports::{
-    WorkspaceBinding, WorkspaceOps, WorkspaceRequestAdmission, WorkspaceRequestAdmissionClosed,
+    TeamRunWorkspaceReader, WorkspaceBinding, WorkspaceOps, WorkspaceRequestAdmission, WorkspaceRequestAdmissionClosed,
     WorkspaceRuntimeDirectory,
 };
 

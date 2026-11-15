@@ -1,4 +1,4 @@
-import type { AgentScope, RuntimeInstanceScope } from '@/types/desktop/runtime-address';
+import type { AgentScope, NativeRuntimeEndpointRef, RuntimeInstanceScope } from '@/types/desktop/runtime-address';
 import type { OrganizationProvisionProgress, TeamCreationFailure } from '@/types/call-log/organization';
 
 export interface TeamSkillPackage {
@@ -10,6 +10,7 @@ export interface TeamSkillPackage {
 }
 
 export interface ManualTeamMemberProvisionRecord {
+  endpoint: NativeRuntimeEndpointRef;
   agentId: string;
   agentName: string;
   workspace: string;

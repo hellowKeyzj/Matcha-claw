@@ -1,13 +1,21 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
-import { Bot, CheckCircle2, FileCode2, Flag, GitMerge, Maximize2, Minus, Plus, UserCheck, Zap, type LucideIcon } from 'lucide-react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Bot, Check, CheckCircle2, Circle, CircleDot, CircleX, Clock3, Columns3, FileCode2, FileText, Flag, GitMerge, Hand, Maximize2, Minus, MousePointer2, Plus, Rows3, UserCheck, Zap, type LucideIcon } from 'lucide-react';
 import { StableScrollArea } from '@/components/scroll';
-import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeTeamGraphPort } from '@/lib/session-trace';
-import { Sheet } from '@/components/ui/sheet';
-import { createGraphLayoutEngine, routeGraphEdges } from '@/plugins/teams/pages/team-graph-layout';
+import { createGraphEdgeRouter, createGraphLayoutEngine } from '@/plugins/teams/pages/team-graph-layout';
+import { graphPortPosition, graphPositionForDirection } from '@/plugins/teams/pages/team-graph-geometry';
 import { edgeActionCandidates, TeamGraphPortRepair } from '@/plugins/teams/pages/TeamGraphPortRepair';
-import { TeamEdgeInspector } from '@/plugins/teams/pages/TeamEdgeInspector';
-import type { GraphLayoutInput, GraphLayoutResult, GraphPoint } from '@/plugins/teams/pages/team-graph-layout-types';
-import type { TeamDesignFailure, TeamGraphNodeConfigRecord, TeamScriptReviewRule } from '@/types/team-design';
+import { TeamGraphNodeEditor } from '@/plugins/teams/pages/TeamGraphNodeEditor';
+import { TeamGraphEdgeEditor } from '@/plugins/teams/pages/TeamGraphEdgeEditor';
+import { TeamNodeDeliveries } from '@/plugins/teams/pages/TeamNodeDeliveries';
+import { TeamFilePreview } from '@/plugins/teams/pages/TeamFilePreview';
+import { TeamGraphNodeDetails } from '@/plugins/teams/pages/TeamGraphNodeDetails';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import { selectAgentsResource, useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import type { TeamArtifactRecord, RunWorkspaceProjection } from '@/types/team-workspace';
+import type { TeamRunScope } from '@/types/desktop/runtime-address';
+import type { GraphEdgeRoute, GraphLayoutDirection, GraphLayoutInput, GraphLayoutResult, GraphPoint } from '@/plugins/teams/pages/team-graph-layout-types';
+import type { TeamDesignFailure, TeamGraphEditBase, TeamLayoutSave, TeamScriptReviewRule } from '@/types/team-design';
 import type {
   TeamGraphEdgeAction,
   TeamGraphEdgeRecord,
@@ -18,14 +26,11 @@ import type {
   TeamWebhookAuthProjection,
 } from '@/plugins/teams/services/team-runtime-client';
 
-import { TeamNodeInspector } from '@/plugins/teams/pages/TeamNodeInspector';
-import { TeamAssignmentEditor } from '@/plugins/teams/pages/TeamAssignmentEditor';
-import { TeamStartEditor, DEFAULT_CRON_SCHEDULE, readStartTrigger, buildCronExpression, normalizeWebhookPathInput, buildWebhookPublicUrl, readPositiveIntegerInRange } from '@/plugins/teams/pages/TeamStartEditor';
-import { TeamScriptReviewEditor } from '@/plugins/teams/pages/TeamScriptReviewEditor';
-import { TeamControlNodeDetails } from '@/plugins/teams/pages/TeamControlNodeDetails';
-import type { TeamGraphCanvasNodeKind, TeamGraphStartTriggerMode, TeamGraphCronPresetId, TeamGraphCronCustomKind, CronScheduleDraft } from '@/plugins/teams/pages/team-node-editor-types';
-const TEAM_GRAPH_EDGE_ACTIONS: TeamGraphEdgeAction[] = ['activate', 'rework', 'gate', 'finish'];
+import type { TeamGraphCanvasNodeKind, TeamGraphCronPresetId, TeamGraphCronCustomKind, TeamGraphNodeTab, TeamGraphNodeDetailTab, TeamNodeDeliverySelection } from '@/plugins/teams/pages/team-node-editor-types';
 const EMPTY_PORTS: readonly string[] = [];
+const EMPTY_ROLES: TeamRoleBindingRecord[] = [];
+const EMPTY_ARTIFACTS: TeamArtifactRecord[] = [];
+const GraphPortRepair = memo(TeamGraphPortRepair);
 
 export type TeamRunGraphCanvasLabels = {
   cancelEdge: string;
@@ -33,9 +38,6 @@ export type TeamRunGraphCanvasLabels = {
   edgeActionDescriptions: Record<TeamGraphEdgeAction, string>;
   cancelNode: string;
   closeNode: string;
-  nodeTechnicalDetails: string;
-  executionSettings: string;
-  executionLimitSummary: string;
   workMember: string;
   reviewMember: string;
   nodeKindLabels: Record<TeamGraphCanvasNodeKind, string>;
@@ -43,19 +45,18 @@ export type TeamRunGraphCanvasLabels = {
   collapsePrompt: string;
   optionalOutput: string;
   scriptReviewRuleDescriptions: Record<TeamScriptReviewRule, string>;
-  humanDecisionHint: string;
   nodeIncomingConnections: string;
   nodeOutgoingConnections: string;
   nodeNoConnections: string;
   nodeDetails?: string;
   nodeDetailsDescription?: string;
-  task?: string;
   zoomIn?: string;
   zoomOut?: string;
   fitToView?: string;
   autoLayout?: string;
-  layoutPending?: string;
   layoutFailed?: string;
+  layoutSaveFailed?: string;
+  retryLayoutSave?: string;
   workflowCanvas: string;
   workflowEdges: string;
   nodePalette: string;
@@ -98,9 +99,10 @@ export type TeamRunGraphCanvasLabels = {
   edgeFallback: string;
   canvasMinimap: string;
   nodeTitle: string;
-  nodeMaxAttempts: string;
-  nodeMaxAttemptsHint: string;
-  nodeMaxAttemptsInvalid: string;
+  reworkLimit: string;
+  reworkLimitHint: string;
+  reworkLimitInvalid: string;
+  reworkUsage: string;
   reworkLimitExceeded: string;
   roleId: string;
   sessionRef: string;
@@ -126,7 +128,6 @@ export type TeamRunGraphCanvasLabels = {
   joinConfigurationHint: string;
   endConfigurationHint: string;
   saveGraphUnavailable: string;
-  connectionDraft: string;
   runStatusLabel: string;
   graphStatusLabel: string;
   statusValues: Record<string, string>;
@@ -173,29 +174,35 @@ export type TeamRunGraphCanvasLabels = {
 };
 
 export type TeamRunGraphCanvasProps = {
+  teamId?: string;
   mode?: 'readonly' | 'editable';
   compact?: boolean;
   mutationPending?: boolean;
+  mutationDisabled?: boolean;
+  layoutSave?: TeamLayoutSave;
+  onRetryLayoutSave?: () => Promise<void> | void;
   graph: TeamGraphSnapshotRecord | null | undefined;
-  runStatus?: string;
   roles?: TeamRoleBindingRecord[];
+  artifacts?: TeamArtifactRecord[];
+  deliveriesLoading?: boolean;
+  fileScope?: TeamRunScope;
+  workspaceStatus?: RunWorkspaceProjection['status'];
   headerActions?: ReactNode;
+  renderNodeApprovals?: (nodeId: string, onReveal: () => void) => ReactNode;
   emptyLabel: string;
   titleLabel: string;
   executorLabel: string;
   webhookAuth?: TeamWebhookAuthProjection | null;
   labels: TeamRunGraphCanvasLabels;
-  onPatchGraph?: (operations: TeamGraphPatchOperation[]) => Promise<void> | void;
+  onPatchGraph?: (operations: TeamGraphPatchOperation[], base?: TeamGraphEditBase) => Promise<void> | void;
   onCreateSession?: (roleId: string, requestId: string) => Promise<TeamRoleBindingRecord>;
+  createSessionDisabledReason?: string;
   graphVersion?: string;
   runtimeError?: TeamDesignFailure | null;
   onRepairGraph?: (operations: TeamGraphPatchOperation[]) => Promise<void> | void;
 };
 
-type PositionedNode = TeamGraphNodeRecord & {
-  x: number;
-  y: number;
-};
+type PositionedNode = GraphPoint & { nodeId: string };
 
 type DragState = {
   nodeId: string;
@@ -212,9 +219,20 @@ type DragState = {
   canvasBottom: number;
   currentX: number;
   currentY: number;
+  draftPosition?: GraphPoint;
   panX: number;
   panY: number;
   frameTime: number | null;
+  moved: boolean;
+};
+
+type CanvasPanState = GraphPoint & {
+  pointerId: number | null;
+  startX: number;
+  startY: number;
+  pointerX: number;
+  pointerY: number;
+  pendingPosition: GraphPoint | null;
   moved: boolean;
 };
 
@@ -224,19 +242,9 @@ type ConnectionDraft = {
 };
 
 type ConfigurationSheet =
-  | { kind: 'node'; nodeId: string }
+  | { kind: 'node'; nodeId: string; tab: TeamGraphNodeTab; selection?: TeamNodeDeliverySelection }
   | { kind: 'edge'; edgeId: string }
   | null;
-
-type TeamGraphNodeVisual = {
-  Icon: LucideIcon;
-  iconShape: string;
-  accentClassName: string;
-  canvasClassName: string;
-  handleClassName: string;
-  iconClassName: string;
-  paletteClassName: string;
-};
 
 type TeamGraphEdgeVisual = {
   markerId: string;
@@ -245,21 +253,11 @@ type TeamGraphEdgeVisual = {
   dashArray?: string;
 };
 
-const NODE_WIDTH = 220;
+const NODE_WIDTH = 206;
 const NODE_HEIGHT = 118;
 const CANVAS_PADDING = 72;
 const DRAG_THRESHOLD = 3;
-const DEFAULT_NODE_MAX_ATTEMPTS = 3;
-const NODE_MAX_ATTEMPTS_LIMIT = 0xffff_ffff;
-const NODE_PALETTE: Array<{ kind: TeamGraphCanvasNodeKind; title: string }> = [
-  { kind: 'start', title: 'Trigger' },
-  { kind: 'work', title: 'Role step' },
-  { kind: 'review', title: 'Review' },
-  { kind: 'human_decision', title: 'Decision' },
-  { kind: 'script_review', title: 'Script check' },
-  { kind: 'join', title: 'Join' },
-  { kind: 'end', title: 'Finish' },
-];
+const NODE_PALETTE: TeamGraphCanvasNodeKind[] = ['start', 'work', 'review', 'human_decision', 'script_review', 'join', 'end'];
 
 const EDGE_VISUALS: Record<string, TeamGraphEdgeVisual> = {
   rework: {
@@ -290,91 +288,37 @@ const EDGE_VISUALS: Record<string, TeamGraphEdgeVisual> = {
 
 const FALLBACK_EDGE_VISUAL: TeamGraphEdgeVisual = {
   markerId: 'team-graph-arrow-default',
-  stroke: '#64748b',
+  stroke: 'currentColor',
   labelClassName: 'border-border bg-background/95 text-muted-foreground',
 };
 
-const NODE_VISUALS: Record<TeamGraphCanvasNodeKind, TeamGraphNodeVisual> = {
-  start: {
-    Icon: Zap,
-    iconShape: 'rounded-full',
-    accentClassName: 'bg-teal-500',
-    canvasClassName: 'border-teal-500/45 bg-card text-foreground',
-    handleClassName: 'border-teal-500/50 bg-teal-500',
-    iconClassName: 'bg-teal-500/15 text-teal-700 dark:text-teal-300',
-    paletteClassName: 'border-border/80 bg-card hover:border-teal-500/50 hover:bg-muted/60',
-  },
-  work: {
-    Icon: Bot,
-    iconShape: 'rounded-full',
-    accentClassName: 'bg-primary',
-    canvasClassName: 'border-primary/45 bg-card text-foreground',
-    handleClassName: 'border-primary/50 bg-primary',
-    iconClassName: 'bg-primary/15 text-primary',
-    paletteClassName: 'border-border/80 bg-card hover:border-primary/50 hover:bg-muted/60',
-  },
-  review: {
-    Icon: CheckCircle2,
-    iconShape: 'rounded-xl',
-    accentClassName: 'bg-violet-500',
-    canvasClassName: 'border-violet-500/45 bg-card text-foreground',
-    handleClassName: 'border-violet-500/50 bg-violet-500',
-    iconClassName: 'bg-violet-500/15 text-violet-700 dark:text-violet-300',
-    paletteClassName: 'border-border/80 bg-card hover:border-violet-500/50 hover:bg-muted/60',
-  },
-  human_decision: {
-    Icon: UserCheck,
-    iconShape: 'rounded-xl',
-    accentClassName: 'bg-amber-500',
-    canvasClassName: 'border-amber-500/50 bg-card text-foreground',
-    handleClassName: 'border-amber-500/50 bg-amber-500',
-    iconClassName: 'bg-amber-500/15 text-amber-700 dark:text-amber-300',
-    paletteClassName: 'border-border/80 bg-card hover:border-amber-500/55 hover:bg-muted/60',
-  },
-  script_review: {
-    Icon: FileCode2,
-    iconShape: 'rounded-xl',
-    accentClassName: 'bg-emerald-500',
-    canvasClassName: 'border-emerald-500/45 bg-card text-foreground',
-    handleClassName: 'border-emerald-500/50 bg-emerald-500',
-    iconClassName: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300',
-    paletteClassName: 'border-border/80 bg-card hover:border-emerald-500/50 hover:bg-muted/60',
-  },
-  join: {
-    Icon: GitMerge,
-    iconShape: 'rounded-lg rotate-45',
-    accentClassName: 'bg-sky-500',
-    canvasClassName: 'border-sky-500/45 bg-card text-foreground',
-    handleClassName: 'border-sky-500/50 bg-sky-500',
-    iconClassName: 'bg-sky-500/15 text-sky-700 dark:text-sky-300',
-    paletteClassName: 'border-border/80 bg-card hover:border-sky-500/50 hover:bg-muted/60',
-  },
-  end: {
-    Icon: Flag,
-    iconShape: 'rounded-full',
-    accentClassName: 'bg-muted-foreground',
-    canvasClassName: 'border-border/90 bg-card text-foreground',
-    handleClassName: 'border-muted-foreground/50 bg-muted-foreground',
-    iconClassName: 'bg-muted text-foreground',
-    paletteClassName: 'border-border/80 bg-card hover:bg-muted/60',
-  },
+const NODE_ICONS: Record<TeamGraphCanvasNodeKind, LucideIcon> = {
+  start: Zap,
+  work: Bot,
+  review: CheckCircle2,
+  human_decision: UserCheck,
+  script_review: FileCode2,
+  join: GitMerge,
+  end: Flag,
 };
 
-function statusDotTone(status: string | undefined): string {
+function renderStatusIcon(status: string | undefined): ReactNode {
+  const className = 'h-[13px] w-[13px] shrink-0';
   switch (status) {
     case 'running':
     case 'queued':
-      return 'bg-primary';
+    case 'ready':
+      return <CircleDot aria-hidden="true" className={className} strokeWidth={1.65} />;
     case 'completed':
     case 'passed':
-    case 'ready':
-      return 'bg-emerald-500';
+      return <CheckCircle2 aria-hidden="true" className={className} strokeWidth={1.65} />;
     case 'failed':
-      return 'bg-destructive';
+      return <CircleX aria-hidden="true" className={className} strokeWidth={1.65} />;
     case 'waiting_for_user':
-      return 'bg-amber-500';
+    case 'waiting':
+      return <Clock3 aria-hidden="true" className={className} strokeWidth={1.65} />;
     default:
-      return 'bg-muted-foreground';
+      return <Circle aria-hidden="true" className={className} strokeWidth={1.65} />;
   }
 }
 
@@ -385,12 +329,12 @@ function statusTextTone(status: string | undefined): string {
       return 'text-primary';
     case 'completed':
     case 'passed':
-    case 'ready':
       return 'text-emerald-600 dark:text-emerald-400';
     case 'failed':
       return 'text-destructive';
     case 'waiting_for_user':
-      return 'text-amber-600 dark:text-amber-400';
+    case 'waiting':
+      return 'text-amber-700 dark:text-amber-300';
     default:
       return 'text-muted-foreground';
   }
@@ -413,10 +357,92 @@ function edgeDisplayLabel(edge: TeamGraphEdgeRecord): string {
   return edge.sourcePort || '';
 }
 
+type TeamGraphEdgeProps = {
+  edge: TeamGraphEdgeRecord;
+  route: GraphEdgeRoute;
+  sourceTitle: string;
+  targetTitle: string;
+  selected: boolean;
+  hovered: boolean;
+  canvasId: string;
+  onOpen: (edgeId: string) => void;
+  onHover: (edgeId: string | null) => void;
+  onLeave: (edgeId: string) => void;
+};
+
+const TeamGraphEdge = memo(function TeamGraphEdge({ edge, route, sourceTitle, targetTitle, selected, hovered, canvasId, onOpen, onHover, onLeave }: TeamGraphEdgeProps) {
+  const path = useMemo(() => route.points.map((point, index, points) => {
+    if (index === 0) return `M ${point.x} ${point.y}`;
+    const next = points[index + 1];
+    if (!next) return `L ${point.x} ${point.y}`;
+    const previous = points[index - 1];
+    const incoming = Math.hypot(point.x - previous.x, point.y - previous.y);
+    const outgoing = Math.hypot(next.x - point.x, next.y - point.y);
+    const radius = Math.min(12, incoming / 2, outgoing / 2);
+    return `L ${point.x + (previous.x - point.x) * radius / incoming} ${point.y + (previous.y - point.y) * radius / incoming} Q ${point.x} ${point.y} ${point.x + (next.x - point.x) * radius / outgoing} ${point.y + (next.y - point.y) * radius / outgoing}`;
+  }).join(' '), [route]);
+  const edgeVisual = edgeVisualForEdge(edge);
+  const edgeLabel = edgeDisplayLabel(edge);
+  const shouldShowEdgeLabel = Boolean(edgeLabel && (selected || hovered));
+  return (
+    <g onMouseEnter={() => onHover(edge.edgeId)} onMouseLeave={() => onLeave(edge.edgeId)}>
+      <path
+        d={path}
+        fill="none"
+        stroke="transparent"
+        strokeWidth="14"
+        strokeLinecap="round"
+        className="cursor-pointer"
+        role="button"
+        tabIndex={0}
+        aria-label={`${sourceTitle} → ${targetTitle}: ${edge.sourcePort ?? edge.action ?? ''}`}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          event.stopPropagation();
+          onOpen(edge.edgeId);
+        }}
+        onFocus={() => onHover(edge.edgeId)}
+        onBlur={() => onHover(null)}
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpen(edge.edgeId);
+        }}
+      />
+      <path
+        d={path}
+        fill="none"
+        stroke={edgeVisual.stroke}
+        strokeWidth={selected ? '2' : '1.4'}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeDasharray={edgeVisual.dashArray}
+        markerEnd={`url(#${canvasId}-${edgeVisual.markerId})`}
+        className="pointer-events-none"
+      />
+      {shouldShowEdgeLabel ? (
+        <foreignObject x={route.label.x - 54} y={route.label.y - 12} width="108" height="26">
+          <button
+            type="button"
+            aria-label={edgeLabel}
+            className={`w-full truncate rounded-full border px-2 py-1 text-center text-[10px] shadow-sm ${edgeVisual.labelClassName}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen(edge.edgeId);
+            }}
+          >
+            {edgeLabel}
+          </button>
+        </foreignObject>
+      ) : null}
+    </g>
+  );
+});
+
 function useGraphLayout(scope: string, input: GraphLayoutInput, measured: boolean, dragging: boolean) {
   const [layout, setLayout] = useState<{ scope: string; shapeKey: string; result: GraphLayoutResult } | null>(null);
   const [status, setStatus] = useState<'idle' | 'pending' | 'failed'>('idle');
-  const shapeKey = useMemo(() => JSON.stringify([input.nodes, input.edges]), [input]);
+  const shapeKey = useMemo(() => JSON.stringify([input.direction, input.nodes, input.edges]), [input]);
   const contextRef = useRef({ scope, input, dragging, shapeKey });
   const requestRef = useRef<((arrange: boolean) => Promise<GraphLayoutResult | null>) | null>(null);
   const acceptRef = useRef<((result: GraphLayoutResult) => void) | null>(null);
@@ -429,7 +455,7 @@ function useGraphLayout(scope: string, input: GraphLayoutInput, measured: boolea
     const engine = createGraphLayoutEngine();
     let disposed = false;
     let running = false;
-    let previous: { scope: string; shapeKey: string; result: GraphLayoutResult } | null = null;
+    let previous: typeof layout = null;
     type Request = { arrange: boolean; context: typeof contextRef.current; resolve: (result: GraphLayoutResult | null) => void };
     let pending: Request | null = null;
     const drain = async () => {
@@ -439,6 +465,10 @@ function useGraphLayout(scope: string, input: GraphLayoutInput, measured: boolea
         const request = pending;
         pending = null;
         const { context } = request;
+        if (context !== contextRef.current) {
+          request.resolve(null);
+          continue;
+        }
         try {
           const result = await engine.layout(request.arrange
             ? { ...context.input, fixedPositions: {}, previousPositions: undefined }
@@ -504,7 +534,7 @@ function useGraphLayout(scope: string, input: GraphLayoutInput, measured: boolea
 }
 
 type NodePaletteControlProps = {
-  labels: Pick<TeamRunGraphCanvasLabels, 'nodePalette' | 'nodePaletteTitle' | 'nodePaletteDescriptions'>;
+  labels: Pick<TeamRunGraphCanvasLabels, 'nodePalette' | 'nodeKindLabels' | 'nodePaletteDescriptions'>;
   isOpen: boolean;
   isSaving: boolean;
   onToggle: () => void;
@@ -512,7 +542,7 @@ type NodePaletteControlProps = {
   onAddNode: (kind: TeamGraphCanvasNodeKind) => void | Promise<void>;
 };
 
-function NodePaletteControl({ labels, isOpen, isSaving, onToggle, onClose, onAddNode }: NodePaletteControlProps) {
+const NodePaletteControl = memo(function NodePaletteControl({ labels, isOpen, isSaving, onToggle, onClose, onAddNode }: NodePaletteControlProps) {
   return (
     <div className="pointer-events-none absolute left-4 top-4 z-30">
       <div
@@ -526,37 +556,30 @@ function NodePaletteControl({ labels, isOpen, isSaving, onToggle, onClose, onAdd
       >
         <button
           type="button"
-          className="flex h-9 items-center gap-2 rounded-full border border-border/80 bg-card/95 px-3 text-xs font-medium text-foreground shadow-lg shadow-slate-950/15 transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex h-9 items-center gap-2 rounded-lg border border-border bg-card px-3 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
           onClick={onToggle}
           disabled={isSaving}
           aria-expanded={isOpen}
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus aria-hidden="true" className="h-3.5 w-3.5" />
           <span>{labels.nodePalette}</span>
         </button>
         {isOpen ? (
-          <div className="mt-2 w-[19rem] rounded-2xl border border-border/80 bg-card p-1.5 shadow-xl shadow-slate-950/20">
-            <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">{labels.nodePaletteTitle}</div>
+          <div className="mt-2 w-[min(19rem,calc(100vw-4rem))] rounded-xl border border-border bg-card p-1.5 shadow-lg">
             <div className="grid gap-0.5">
-              {NODE_PALETTE.map((item) => {
-                const visual = NODE_VISUALS[item.kind];
-                const PaletteIcon = visual.Icon;
+              {NODE_PALETTE.map((kind) => {
+                const PaletteIcon = NODE_ICONS[kind];
                 return (
                   <button
-                    key={item.kind}
+                    key={kind}
                     type="button"
-                    title={`${item.title}: ${labels.nodePaletteDescriptions[item.kind]}`}
-                    className="group flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-foreground transition hover:bg-muted/70 disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={() => { void onAddNode(item.kind); }}
+                    title={labels.nodePaletteDescriptions[kind]}
+                    className="group flex w-full items-center gap-3 rounded-lg px-2.5 py-2.5 text-left text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => { void onAddNode(kind); }}
                     disabled={isSaving}
                   >
-                    <span className={`grid h-8 w-8 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
-                      <PaletteIcon className={`h-3.5 w-3.5 ${item.kind === 'join' ? '-rotate-45' : ''}`} />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-xs font-semibold tracking-tight">{item.title}</span>
-                      <span className="mt-0.5 block text-[10px] leading-snug text-muted-foreground">{labels.nodePaletteDescriptions[item.kind]}</span>
-                    </span>
+                    <PaletteIcon aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate text-xs font-medium">{labels.nodeKindLabels[kind]}</span>
                   </button>
                 );
               })}
@@ -566,12 +589,7 @@ function NodePaletteControl({ labels, isOpen, isSaving, onToggle, onClose, onAdd
       </div>
     </div>
   );
-}
-
-function readNodePrompt(node: TeamGraphNodeRecord | null): string {
-  const prompt = node?.config?.prompt;
-  return typeof prompt === 'string' ? prompt : '';
-}
+});
 
 function graphPatchRecord(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
@@ -585,8 +603,8 @@ function graphPatchNode(node: TeamGraphNodeRecord): Record<string, unknown> {
     title: node.title?.trim() || node.nodeId,
     roleId: kind === 'work' || kind === 'review' ? node.roleId : undefined,
     taskId: kind === 'work' ? node.taskId : undefined,
-    maxAttempts: node.maxAttempts,
-    config: kind === 'start' || kind === 'work' || kind === 'review' || kind === 'script_review' ? node.config : undefined,
+    reworkLimits: node.reworkLimits,
+    config: kind === 'start' || kind === 'work' || kind === 'review' || kind === 'human_decision' || kind === 'script_review' ? node.config : undefined,
   });
 }
 
@@ -625,6 +643,7 @@ const EMPTY_TEAM_GRAPH: TeamGraphSnapshotRecord = {
   layout: { nodePositions: {} },
   nodes: [],
   edges: [],
+  rework: { counters: [], blocked: [] },
   status: 'draft',
 };
 
@@ -684,7 +703,7 @@ function nextNodePosition(
   };
   const occupiedRects = nodes.map((node) => nodeRect(
     { x: node.x, y: node.y },
-    nodeSizes[node.nodeId] ?? newNodeSize,
+    Object.hasOwn(nodeSizes, node.nodeId) ? nodeSizes[node.nodeId] : newNodeSize,
     CANVAS_PADDING / 4,
   ));
   const maxNodeWidth = Math.max(newNodeSize.width, ...Object.values(nodeSizes).map((size) => size.width));
@@ -707,20 +726,8 @@ function nextNodePosition(
   }
 
   if (nodes.length === 0) return start;
-  const bottom = Math.max(...nodes.map((node) => node.y + (nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT)));
+  const bottom = Math.max(...nodes.map((node) => node.y + (Object.hasOwn(nodeSizes, node.nodeId) ? nodeSizes[node.nodeId].height : NODE_HEIGHT)));
   return { x: start.x, y: Math.max(minY, bottom + CANVAS_PADDING / 2) };
-}
-
-function summarizeGraphEdge(edge: TeamGraphEdgeRecord, sourceNode: TeamGraphNodeRecord | null, runId: string) {
-  return {
-    runHash: summarizeIdentifier(runId).hash,
-    edgeHash: summarizeIdentifier(edge.edgeId).hash,
-    sourceNodeHash: summarizeIdentifier(edge.sourceNodeId).hash,
-    targetNodeHash: summarizeIdentifier(edge.targetNodeId).hash,
-    nodeKind: NODE_PALETTE.find((item) => item.kind === sourceNode?.kind)?.kind ?? 'unknown',
-    canonicalSourcePort: summarizeTeamGraphPort(edge.sourcePort),
-    action: TEAM_GRAPH_EDGE_ACTIONS.find((action) => action === edge.action) ?? null,
-  };
 }
 
 function formatTemplate(template: string, values: Record<string, string | number>): string {
@@ -746,91 +753,248 @@ function visualKindForNodeKind(kind: string | undefined): TeamGraphCanvasNodeKin
   }
 }
 
-function visualForNodeKind(kind: string | undefined): TeamGraphNodeVisual {
-  return NODE_VISUALS[visualKindForNodeKind(kind)];
-}
+type TeamGraphNodeEvents = {
+  register: (nodeId: string, element: HTMLDivElement | null) => void;
+  open: (nodeId: string, keyboard?: boolean) => void;
+  openOutput: (nodeId: string, selection?: TeamNodeDeliverySelection) => void;
+  pointerDown: (event: PointerEvent<HTMLDivElement>, nodeId: string) => void;
+  pointerMove: (event: PointerEvent<HTMLDivElement>) => void;
+  pointerUp: (event: PointerEvent<HTMLDivElement>) => void;
+  pointerCancel: (event: PointerEvent<HTMLDivElement>) => void;
+  startConnection: (nodeId: string, sourcePort: string) => void;
+  finishConnection: (nodeId: string) => void;
+};
 
-export function TeamRunGraphCanvas({
+type TeamGraphNodeCardProps = {
+  node: TeamGraphNodeRecord;
+  x: number;
+  y: number;
+  geometry: GraphLayoutInput['nodes'][number];
+  direction: GraphLayoutDirection;
+  visible: boolean;
+  selected: boolean;
+  editable: boolean;
+  canConnectTo: boolean;
+  connectionTargetActive: boolean;
+  activeSourcePort: string | null;
+  labels: TeamRunGraphCanvasLabels;
+  executorLabel: string;
+  binding?: TeamRoleBindingRecord;
+  artifacts: TeamArtifactRecord[];
+  events: TeamGraphNodeEvents;
+};
+
+const TeamGraphNodeCard = memo(function TeamGraphNodeCard({ node, x, y, geometry, direction, visible, selected, editable, canConnectTo, connectionTargetActive, activeSourcePort, labels, executorLabel, binding, artifacts, events }: TeamGraphNodeCardProps) {
+  const { t } = useTranslation('teams');
+  const kind = visualKindForNodeKind(node.kind);
+  const NodeIcon = NODE_ICONS[kind];
+  const waitingForApproval = kind === 'human_decision' && (node.status === 'waiting_for_user' || node.status === 'waiting');
+  const agent = useSubagentsStore((state) => binding ? selectAgentsResource(state, binding.endpointRef).data?.find((entry) => entry.id === binding.agentId) : undefined);
+  const agentName = agent?.name || agent?.identity?.name || binding?.agentId;
+  const outputEntries = useMemo(() => artifacts.flatMap<{ label: string; selection: TeamNodeDeliverySelection }>((artifact) => artifact.files.length > 0
+    ? artifact.files.map((filePath) => ({ label: filePath.split(/[\\/]/).pop() || filePath, selection: { artifactId: artifact.artifactId, filePath } }))
+    : [{ label: artifact.title, selection: { artifactId: artifact.artifactId } }]), [artifacts]);
+  const connectionSources = node.sourcePorts ?? EMPTY_PORTS;
+  const isCompactStart = kind === 'start' && outputEntries.length === 0;
+  const inputPort = graphPortPosition(geometry, direction);
+  const register = useCallback((element: HTMLDivElement | null) => events.register(node.nodeId, element), [events, node.nodeId]);
+  return (
+    <div
+      ref={register}
+      data-node-id={node.nodeId}
+      role="button"
+      tabIndex={0}
+      aria-label={`${node.title ?? node.nodeId}: ${t('workspace.config')}${isCompactStart && node.status ? `, ${statusLabel(node.status, labels)}` : ''}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        events.open(node.nodeId);
+      }}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          event.stopPropagation();
+          events.open(node.nodeId, true);
+        }
+      }}
+      onPointerDown={(event) => events.pointerDown(event, node.nodeId)}
+      onPointerMove={events.pointerMove}
+      onPointerUp={events.pointerUp}
+      onPointerCancel={events.pointerCancel}
+      onLostPointerCapture={events.pointerCancel}
+      className={`group/node absolute select-none ${editable ? 'cursor-grab active:cursor-grabbing touch-none' : 'cursor-pointer'} text-left text-foreground transition-[border-color,box-shadow] motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${isCompactStart ? 'flex items-center rounded-[10px] border border-border bg-card hover:border-muted-foreground/50 dark:bg-muted' : `rounded-[14px] border ${waitingForApproval ? 'border-amber-600/55 bg-amber-50/80 shadow-[0_3px_9px_rgb(24_35_51_/_0.03)] hover:border-amber-600/80 dark:border-amber-300/35 dark:bg-amber-300/[0.05] dark:shadow-[0_4px_10px_rgb(0_0_0_/_0.07)] dark:hover:border-amber-300/60' : kind === 'end' ? 'border-dashed border-border bg-transparent text-muted-foreground shadow-none hover:border-muted-foreground/50' : 'border-border bg-card shadow-[0_3px_9px_rgb(24_35_51_/_0.03)] hover:border-muted-foreground/50 dark:bg-muted dark:shadow-[0_4px_10px_rgb(0_0_0_/_0.07)]'}`} ${selected ? 'ring-2 ring-ring/30 ring-offset-2 ring-offset-background' : ''}`}
+      style={{ left: x, top: y, width: isCompactStart || kind === 'end' ? 110 : NODE_WIDTH, minHeight: isCompactStart ? 48 : kind === 'end' ? 96 : undefined, visibility: visible ? 'visible' : 'hidden' }}
+    >
+      {editable ? <div className="pointer-events-none absolute -inset-px z-20">
+      {canConnectTo ? <button
+        type="button"
+        aria-label={formatTemplate(labels.connectToNode, { title: node.title ?? node.nodeId })}
+        className="pointer-events-auto group/port absolute grid h-10 w-10 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        style={{ left: inputPort.x, top: inputPort.y }}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => { event.stopPropagation(); events.finishConnection(node.nodeId); }}
+      >
+        <span className={`h-2 w-2 rounded-full border transition-[opacity,box-shadow] motion-reduce:transition-none group-hover/node:opacity-100 group-focus-within/node:opacity-100 group-hover/port:ring-4 group-hover/port:ring-ring/10 group-focus-visible/port:ring-4 group-focus-visible/port:ring-ring/10 ${connectionTargetActive ? 'border-primary bg-primary opacity-100' : 'border-muted-foreground/50 bg-card opacity-0'}`} />
+      </button> : null}
+      {connectionSources.map((source) => {
+        const port = graphPortPosition(geometry, direction, source);
+        return <button
+          key={source}
+          type="button"
+          aria-label={`${formatTemplate(labels.connectFromNode, { title: node.title ?? node.nodeId })}: ${labels.portLabels[source] ?? source}`}
+          title={labels.portLabels[source] ?? source}
+          className="pointer-events-auto group/port absolute grid h-10 w-10 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          style={{ left: port.x, top: port.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); events.startConnection(node.nodeId, source); }}
+        >
+          <span className={`h-2 w-2 rounded-full border transition-[opacity,box-shadow] motion-reduce:transition-none group-hover/node:opacity-100 group-focus-within/node:opacity-100 group-hover/port:ring-4 group-hover/port:ring-ring/10 group-focus-visible/port:ring-4 group-focus-visible/port:ring-ring/10 ${activeSourcePort === source ? 'border-primary bg-primary opacity-100' : 'border-muted-foreground/50 bg-card opacity-0'}`} />
+        </button>;
+      })}
+      </div> : null}
+      {isCompactStart ? <div className="flex min-w-0 items-center gap-2 px-3 py-3">
+        <span className={`grid h-5 w-5 shrink-0 place-items-center ${statusTextTone(node.status)}`} title={statusLabel(node.status, labels)}>
+          {node.status === 'completed' || node.status === 'passed' ? <Check aria-hidden="true" className="h-[13px] w-[13px]" strokeWidth={1.65} /> : node.status ? renderStatusIcon(node.status) : <NodeIcon aria-hidden="true" className="h-[13px] w-[13px]" strokeWidth={1.65} />}
+        </span>
+        <span className="min-w-0 break-words text-[12px] font-medium leading-[18px]">{node.title ?? node.nodeId}</span>
+      </div> : <div className={kind === 'end' ? 'p-[14px]' : 'px-4 pb-[13px] pt-[15px]'}>
+        <div className={`flex min-w-0 items-center justify-between gap-2 ${kind === 'end' ? 'leading-[14px]' : 'leading-4'}`}>
+          <span className="flex min-w-0 items-center gap-[7px] text-[10px] text-muted-foreground"><NodeIcon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" strokeWidth={1.65} /><span className="truncate">{labels.nodeKindLabels[kind]}</span></span>
+          {node.status && kind !== 'end' ? <span className={`flex max-w-[60%] shrink-0 items-center gap-[5px] whitespace-nowrap text-[11px] ${statusTextTone(node.status)}`} title={statusLabel(node.status, labels)}>
+            {renderStatusIcon(node.status)}
+            <span className="truncate">{statusLabel(node.status, labels)}</span>
+          </span> : null}
+        </div>
+        <div className={`mt-3 break-words font-[550] tracking-[0.2px] ${kind === 'end' ? 'text-[12px] leading-[18px] text-muted-foreground' : 'text-[14px] leading-[21px]'}`}>{node.title ?? node.nodeId}</div>
+        {kind === 'end' && node.status ? <div className={`mt-[5px] flex items-start gap-[5px] text-[10px] leading-4 ${statusTextTone(node.status)}`}>
+          {renderStatusIcon(node.status)}
+          <span className="min-w-0 break-words">{statusLabel(node.status, labels)}</span>
+        </div> : null}
+        {binding && agentName ? <div className="mt-[5px] flex min-w-0 items-center gap-1.5 text-[11px] leading-4 text-muted-foreground" aria-label={executorLabel} title={agentName}>
+          <AgentAvatar agentId={binding.agentId} agentName={agentName} avatarSeed={agent?.avatarSeed} avatarStyle={agent?.avatarStyle} alt="" className="h-4 w-4" />
+          <span className="min-w-0 truncate">{agentName}</span>
+        </div> : node.roleId ? <p className="mt-[5px] text-[11px] leading-4 text-muted-foreground" title={node.roleId}>{labels.sessionUnavailable}</p> : null}
+      </div>}
+      {outputEntries.length > 0 ? <div className={`overflow-hidden rounded-b-[13px] [&>button]:border-t ${waitingForApproval ? '[&>button]:border-amber-600/20 dark:[&>button]:border-amber-300/15' : '[&>button]:border-border/70'}`}>
+        {outputEntries.slice(0, 3).map(({ label, selection }) => <button
+          key={JSON.stringify([selection.artifactId, selection.filePath])}
+          type="button"
+          aria-label={`${t('workspace.openOutput')}: ${selection.filePath ?? label}`}
+          title={selection.filePath ?? label}
+          className="flex h-[39px] w-full items-center gap-[7px] px-[14px] text-left text-[11px] leading-4 text-foreground/80 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring dark:hover:bg-background/25"
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); events.openOutput(node.nodeId, selection); }}
+        >
+          <FileText aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-muted-foreground" strokeWidth={1.65} />
+          <span className="truncate">{label}</span>
+        </button>)}
+        {outputEntries.length > 3 ? <button
+          type="button"
+          className="h-[39px] w-full px-[14px] text-left text-[11px] leading-4 text-muted-foreground hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring dark:hover:bg-background/25"
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); events.openOutput(node.nodeId); }}
+        >{t('workspace.moreArtifacts', { count: outputEntries.length - 3 })}</button> : null}
+      </div> : null}
+    </div>
+  );
+});
+
+export const TeamRunGraphCanvas = memo(function TeamRunGraphCanvas({
+  teamId,
   graph,
-  runStatus,
-  roles = [],
+  roles = EMPTY_ROLES,
+  artifacts = EMPTY_ARTIFACTS,
+  deliveriesLoading = false,
+  fileScope,
+  workspaceStatus,
   headerActions,
+  renderNodeApprovals,
   emptyLabel,
   titleLabel,
   executorLabel,
   webhookAuth,
   labels,
   onPatchGraph,
+  layoutSave,
+  onRetryLayoutSave,
   onCreateSession,
+  createSessionDisabledReason,
   graphVersion,
   runtimeError,
   onRepairGraph,
   mode = onPatchGraph ? 'editable' : 'readonly',
   compact = false,
   mutationPending = false,
+  mutationDisabled = false,
 }: TeamRunGraphCanvasProps) {
+  const { t } = useTranslation('teams');
+  const graphRunId = graph?.runId ?? '';
+  const runArtifacts = useMemo(() => artifacts.filter((artifact) => artifact.runId === graphRunId), [artifacts, graphRunId]);
+  const deliveriesByNode = useMemo(() => {
+    const byNode = new Map<string, TeamArtifactRecord[]>();
+    for (const artifact of runArtifacts) {
+      const records = byNode.get(artifact.nodeId) ?? [];
+      records.push(artifact);
+      byNode.set(artifact.nodeId, records);
+    }
+    return byNode;
+  }, [runArtifacts]);
   const canEdit = mode === 'editable' && Boolean(onPatchGraph);
   const repairGraph = onRepairGraph ?? (canEdit ? onPatchGraph : undefined);
   const canvasId = useId();
+  const [direction, setDirection] = useState<GraphLayoutDirection>('vertical');
   const [zoom, setZoom] = useState<number | null>(null);
+  const [canvasTool, setCanvasTool] = useState<'select' | 'pan'>('select');
   const [readyScope, setReadyScope] = useState<string | null>(null);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [configurationSheet, setConfigurationSheet] = useState<ConfigurationSheet>(null);
-  const [nodeTitle, setNodeTitle] = useState('');
-  const [nodeMaxAttempts, setNodeMaxAttempts] = useState('');
-  const [roleId, setRoleId] = useState('');
-  const [sessionRef, setSessionRef] = useState('');
-  const [bindingRequired, setBindingRequired] = useState(false);
-  const [sessionCreation, setSessionCreation] = useState<'idle' | 'pending' | 'failed'>('idle');
-  const sessionRequestRef = useRef<{ requestId: string | null; pending: boolean } | null>(null);
-  const nodeDraftScopeRef = useRef<string | null>(null);
   const [newNode, setNewNode] = useState<{ node: TeamGraphNodeRecord; position: GraphPoint } | null>(null);
-  const [prompt, setPrompt] = useState('');
-  const [outputArtifactKind, setOutputArtifactKind] = useState('');
-  const [scriptReviewRule, setScriptReviewRule] = useState<TeamScriptReviewRule | ''>('');
-  const [startTriggerMode, setStartTriggerMode] = useState<TeamGraphStartTriggerMode>('manual');
-  const [startWebhookPath, setStartWebhookPath] = useState('');
-  const [startWebhookPublicBaseUrl, setStartWebhookPublicBaseUrl] = useState('');
-  const [startCronSchedule, setStartCronSchedule] = useState<CronScheduleDraft>(DEFAULT_CRON_SCHEDULE);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
-  const [edgeSourcePort, setEdgeSourcePort] = useState('');
-  const [edgeTargetPort, setEdgeTargetPort] = useState('');
   const [newEdge, setNewEdge] = useState<TeamGraphEdgeRecord | null>(null);
-  const [edgeAction, setEdgeAction] = useState<TeamGraphEdgeAction | ''>('');
-  const [edgeIncludeUpstreamResult, setEdgeIncludeUpstreamResult] = useState(true);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [canvasError, setCanvasError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [copiedWebhookPublicUrl, setCopiedWebhookPublicUrl] = useState(false);
+  const [isArranging, setIsArranging] = useState(false);
+  const [layoutSubmitFailed, setLayoutSubmitFailed] = useState(false);
   const [connectionDraft, setConnectionDraft] = useState<ConnectionDraft | null>(null);
   const [isNodePaletteOpen, setNodePaletteOpen] = useState(false);
   const [draftPositions, setDraftPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const dragFrameRef = useRef<number | null>(null);
+  const canvasPanRef = useRef<CanvasPanState | null>(null);
+  const canvasPanFrameRef = useRef<number | null>(null);
+  const layoutEditRevisionRef = useRef(0);
+  const layoutLifetimeRef = useRef<object | null>(null);
   const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
   const canvasScrollerRef = useRef<HTMLDivElement | null>(null);
   const canvasSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const nodeElementsRef = useRef<Record<string, HTMLDivElement | null>>({});
+  const nodeElementsRef = useRef<Record<string, HTMLDivElement | null>>(Object.create(null));
   const suppressClickNodeIdRef = useRef<string | null>(null);
 
   const effectiveGraph = useMemo<TeamGraphSnapshotRecord>(() => graph ?? EMPTY_TEAM_GRAPH, [graph]);
-  const graphRunId = effectiveGraph.runId ?? '';
-  const layoutScope = JSON.stringify([graphRunId, effectiveGraph.graphId]);
+  const measurementScope = JSON.stringify([graphRunId, effectiveGraph.graphId]);
+  const layoutScope = JSON.stringify([graphRunId, effectiveGraph.graphId, direction]);
   const layoutScopeRef = useRef(layoutScope);
+  const measurementScopeRef = useRef(measurementScope);
   const [arrangedView, setArrangedView] = useState<{ scope: string; positions: Record<string, GraphPoint> } | null>(null);
   const draftScope = layoutScopeRef.current;
   const activeDrafts = useMemo(() => draftScope === layoutScope ? draftPositions : {}, [draftScope, layoutScope, draftPositions]);
   const viewPositions = !canEdit && arrangedView?.scope === layoutScope ? arrangedView.positions : undefined;
+  const savedPositions = useMemo(() => Object.fromEntries(Object.entries({ ...effectiveGraph.layout?.nodePositions, ...layoutSave?.positions })
+    .map(([nodeId, position]) => [nodeId, graphPositionForDirection(position, direction)])), [effectiveGraph.layout?.nodePositions, layoutSave?.positions, direction]);
   const geometryKey = useMemo(() => {
     const sourcePortsByNode = new Map(effectiveGraph.nodes.map((node) => [node.nodeId, new Set(node.sourcePorts)]));
     for (const edge of effectiveGraph.edges) sourcePortsByNode.get(edge.sourceNodeId)?.add(edge.sourcePort ?? '');
     return JSON.stringify({
+      direction,
       nodes: effectiveGraph.nodes.map((node) => ({
         id: node.nodeId,
-        width: nodeSizes[node.nodeId]?.width ?? NODE_WIDTH,
-        height: nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT,
+        width: Object.hasOwn(nodeSizes, node.nodeId) ? nodeSizes[node.nodeId].width : NODE_WIDTH,
+        height: Object.hasOwn(nodeSizes, node.nodeId) ? nodeSizes[node.nodeId].height : NODE_HEIGHT,
         sourcePorts: [...sourcePortsByNode.get(node.nodeId)!],
       })).sort((a, b) => a.id.localeCompare(b.id)),
       edges: effectiveGraph.edges.map((edge) => ({
@@ -839,40 +1003,46 @@ export function TeamRunGraphCanvas({
         rework: edge.action === 'rework' || edge.sourcePort === 'rework',
       })).sort((a, b) => a.id.localeCompare(b.id)),
       fixedPositions: Object.fromEntries(effectiveGraph.nodes.flatMap((node) => {
-        const position = viewPositions?.[node.nodeId] ?? effectiveGraph.layout?.nodePositions?.[node.nodeId];
+        const position = viewPositions && Object.hasOwn(viewPositions, node.nodeId) ? viewPositions[node.nodeId]
+          : Object.hasOwn(savedPositions, node.nodeId) ? savedPositions[node.nodeId] : undefined;
         return position ? [[node.nodeId, position]] : [];
       }).sort(([a], [b]) => String(a).localeCompare(String(b)))),
     });
-  }, [effectiveGraph.nodes, effectiveGraph.edges, effectiveGraph.layout?.nodePositions, nodeSizes, viewPositions]);
+  }, [direction, effectiveGraph.nodes, effectiveGraph.edges, savedPositions, nodeSizes, viewPositions]);
   const layoutInput = useMemo(() => JSON.parse(geometryKey) as GraphLayoutInput, [geometryKey]);
-  const nodesMeasured = effectiveGraph.nodes.every((node) => Boolean(nodeSizes[node.nodeId]));
+  const nodesMeasured = effectiveGraph.nodes.every((node) => Object.hasOwn(nodeSizes, node.nodeId));
   const currentGraphRef = useRef({ scope: layoutScope, input: layoutInput });
   useLayoutEffect(() => { currentGraphRef.current = { scope: layoutScope, input: layoutInput }; }, [layoutScope, layoutInput]);
   const { layout, shapeKey, status: layoutStatus, requestLayout, acceptLayout } = useGraphLayout(layoutScope, layoutInput, nodesMeasured, Boolean(dragNodeId) || isSaving);
-  const positions = useMemo(() => {
-    const next = { ...layout?.result.positions, ...layoutInput.fixedPositions, ...activeDrafts };
-    return layout && Object.entries(next).every(([id, point]) => point.x === layout.result.positions[id]?.x && point.y === layout.result.positions[id]?.y)
-      ? layout.result.positions : next;
-  }, [layout, layoutInput, activeDrafts]);
-  const positionedNodes = useMemo(() => effectiveGraph.nodes.map((node) => ({
-    ...node, ...(positions[node.nodeId] ?? { x: 0, y: 0 }),
-  })), [effectiveGraph.nodes, positions]);
-  const visibleGeometry = useMemo(() => {
-    if (layout?.shapeKey === shapeKey && positions === layout.result.positions) return layout.result;
-    return routeGraphEdges({
-      ...layoutInput,
-      nodes: layoutInput.nodes.filter((node) => positions[node.id]),
-      edges: layoutInput.edges.filter((edge) => positions[edge.source] && positions[edge.target]),
-    }, positions);
-  }, [layout, layoutInput, positions, shapeKey]);
+  const geometryShape = useMemo(() => {
+    const [layoutDirection, nodes, edges] = JSON.parse(shapeKey) as [GraphLayoutDirection, GraphLayoutInput['nodes'], GraphLayoutInput['edges']];
+    return { direction: layoutDirection, nodes, edges };
+  }, [shapeKey]);
+  const nodeGeometryById = useMemo(() => new Map(geometryShape.nodes.map((node) => [node.id, node])), [geometryShape]);
+  const positionKey = JSON.stringify({ ...layout?.result.positions, ...layoutInput.fixedPositions, ...activeDrafts });
+  const edgeRouter = useMemo(() => ({ scope: layoutScope, route: createGraphEdgeRouter() }), [layoutScope]);
+  const visibleGeometry = useMemo<GraphLayoutResult>(() => {
+    const positions = JSON.parse(positionKey) as Record<string, GraphPoint>;
+    if (layout?.shapeKey === shapeKey && Object.entries(positions).every(([id, point]) => Object.hasOwn(layout.result.positions, id) && point.x === layout.result.positions[id].x && point.y === layout.result.positions[id].y)) return layout.result;
+    return { positions, ...edgeRouter.route({
+      direction: geometryShape.direction,
+      nodes: geometryShape.nodes.filter((node) => Object.hasOwn(positions, node.id)),
+      edges: geometryShape.edges.filter((edge) => Object.hasOwn(positions, edge.source) && Object.hasOwn(positions, edge.target)),
+      fixedPositions: positions,
+    }, positions) };
+  }, [edgeRouter, layout, positionKey, shapeKey, geometryShape]);
   const nodeById = useMemo(
-    () => new Map(positionedNodes.map((node) => [node.nodeId, node])),
-    [positionedNodes],
+    () => new Map(effectiveGraph.nodes.map((node) => [node.nodeId, node])),
+    [effectiveGraph.nodes],
   );
   const selectedNode = useMemo(() => (
     newNode?.node ?? effectiveGraph.nodes.find((node) => node.nodeId === selectedNodeId) ?? null
   ), [newNode, effectiveGraph.nodes, selectedNodeId]);
   const selectedNodeKind = selectedNode ? visualKindForNodeKind(selectedNode.kind) : null;
+  const selectedNodeArtifacts = useMemo(() => runArtifacts.filter((artifact) => artifact.nodeId === selectedNode?.nodeId), [runArtifacts, selectedNode?.nodeId]);
+  const detailTabs = useMemo<TeamGraphNodeDetailTab[]>(() => [
+    'output', ...(teamId ? ['input', 'activity'] as const : []), ...(renderNodeApprovals ? ['approval'] as const : []),
+  ], [teamId, renderNodeApprovals]);
   const selectedEdge = useMemo(() => (
     newEdge ?? effectiveGraph.edges.find((edge) => edge.edgeId === selectedEdgeId) ?? null
   ), [newEdge, effectiveGraph.edges, selectedEdgeId]);
@@ -882,64 +1052,81 @@ export function TeamRunGraphCanvas({
   const selectedEdgeTargetNode = useMemo(() => (
     selectedEdge ? effectiveGraph.nodes.find((node) => node.nodeId === selectedEdge.targetNodeId) ?? null : null
   ), [effectiveGraph.nodes, selectedEdge]);
-  const sourcePorts = selectedEdgeSourceNode?.sourcePorts ?? EMPTY_PORTS;
-  const targetPorts = selectedEdgeTargetNode?.targetPorts ?? EMPTY_PORTS;
-  const patchSourcePort = sourcePorts.length === 1 ? sourcePorts[0] : edgeSourcePort;
-  const patchTargetPort = targetPorts.length === 1 ? targetPorts[0] : edgeTargetPort;
-  const edgePortsValid = sourcePorts.includes(patchSourcePort) && targetPorts.includes(patchTargetPort);
-  const edgeActions = edgeActionCandidates(selectedEdgeSourceNode, patchSourcePort, selectedEdgeTargetNode);
-  const edgeActionValid = edgeAction !== '' && edgeActions.includes(edgeAction);
   const roleBindings = useMemo(() => roles.filter((role) => role.runId === graphRunId && Boolean(role.sessionRef)), [roles, graphRunId]);
-  const members = useMemo(() => [...new Map(roles.map((role) => [role.roleId, role])).values()], [roles]);
-  const roleSessions = roleBindings.filter((role) => role.roleId === roleId);
-  const selectedSessionRef = sessionRef || (roleSessions.length === 1 ? roleSessions[0].sessionRef! : '');
-  const roleBindingValid = roleSessions.some((role) => role.sessionRef === selectedSessionRef);
-  const changeRoleBinding = (role: string, session: string) => {
-    if (role !== roleId) sessionRequestRef.current = null;
-    setRoleId(role);
-    setSessionRef(session);
-    setBindingRequired(false);
-  };
-  const [origin, setOrigin] = useState({ scope: layoutScope, x: 0, y: 0 });
+  const bindingsByNode = useMemo(() => {
+    const bindings = new Map(roleBindings.map((role) => [JSON.stringify([role.roleId, role.sessionRef]), role]));
+    const byNode = new Map<string, TeamRoleBindingRecord>();
+    for (const node of effectiveGraph.nodes) {
+      const binding = bindings.get(JSON.stringify([node.roleId, node.config?.sessionRef]));
+      if (binding) byNode.set(node.nodeId, binding);
+    }
+    return byNode;
+  }, [roleBindings, effectiveGraph.nodes]);
+  const [canvasExtent, setCanvasExtent] = useState({ scope: layoutScope, x: 0, y: 0, right: -Infinity, bottom: -Infinity });
   const activeDrag = dragNodeId ? dragRef.current : null;
-  const canvasOrigin = {
-    x: Math.min(origin.scope === layoutScope ? origin.x : 0, visibleGeometry.bounds.x - CANVAS_PADDING, activeDrag?.canvasLeft ?? Infinity),
-    y: Math.min(origin.scope === layoutScope ? origin.y : 0, visibleGeometry.bounds.y - CANVAS_PADDING, activeDrag?.canvasTop ?? Infinity),
+  const fitWidth = Math.max(NODE_WIDTH + CANVAS_PADDING * 2, visibleGeometry.bounds.width + CANVAS_PADDING * 2);
+  const fitHeight = Math.max(NODE_HEIGHT + CANVAS_PADDING * 2, visibleGeometry.bounds.height + CANVAS_PADDING * 2);
+  const fitScale = Math.min(1, viewportSize.width > 0 ? viewportSize.width / fitWidth : 1, viewportSize.height > 0 ? viewportSize.height / fitHeight : 1);
+  const fittingView = zoom === null || readyScope !== layoutScope;
+  const canvasScale = readyScope === layoutScope ? zoom ?? fitScale : fitScale;
+  const fittedWidth = Math.max(fitWidth, viewportSize.width / canvasScale);
+  const fittedHeight = Math.max(fitHeight, viewportSize.height / canvasScale);
+  // Center the actual graph in graph coordinates; drag and edge-pan keep one surface origin.
+  const fittedOrigin = {
+    x: visibleGeometry.bounds.x + visibleGeometry.bounds.width / 2 - fittedWidth / 2,
+    y: visibleGeometry.bounds.y + visibleGeometry.bounds.height / 2 - fittedHeight / 2,
   };
-  const canvasWidth = Math.max(NODE_WIDTH + CANVAS_PADDING * 2, visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING - canvasOrigin.x, (activeDrag?.canvasRight ?? canvasOrigin.x) - canvasOrigin.x);
-  const canvasHeight = Math.max(NODE_HEIGHT + CANVAS_PADDING * 2, visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING - canvasOrigin.y, (activeDrag?.canvasBottom ?? canvasOrigin.y) - canvasOrigin.y);
-  const fitScale = Math.min(1, viewportSize.width > 0 ? viewportSize.width / canvasWidth : 1, viewportSize.height > 0 ? viewportSize.height / canvasHeight : 1);
-  const canvasScale = zoom ?? fitScale;
-  const canvasViewRef = useRef({ x: canvasOrigin.x, y: canvasOrigin.y, scale: canvasScale });
-  const canvasReady = readyScope === layoutScope || effectiveGraph.nodes.length === 0;
-  const webhookPublicUrl = buildWebhookPublicUrl(startWebhookPublicBaseUrl, startWebhookPath);
+  // Match the scroller's pixel rounding so origin compensation cannot accumulate drift.
+  const canvasOrigin = {
+    x: Math.floor((fittingView ? fittedOrigin.x : Math.min(canvasExtent.x, visibleGeometry.bounds.x - CANVAS_PADDING, activeDrag?.canvasLeft ?? Infinity)) * canvasScale) / canvasScale,
+    y: Math.floor((fittingView ? fittedOrigin.y : Math.min(canvasExtent.y, visibleGeometry.bounds.y - CANVAS_PADDING, activeDrag?.canvasTop ?? Infinity)) * canvasScale) / canvasScale,
+  };
+  const canvasRight = fittingView ? canvasOrigin.x + fittedWidth : Math.max(canvasOrigin.x + NODE_WIDTH + CANVAS_PADDING * 2, visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING, activeDrag?.canvasRight ?? -Infinity, canvasExtent.right);
+  const canvasBottom = fittingView ? canvasOrigin.y + fittedHeight : Math.max(canvasOrigin.y + NODE_HEIGHT + CANVAS_PADDING * 2, visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING, activeDrag?.canvasBottom ?? -Infinity, canvasExtent.bottom);
+  const canvasWidth = canvasRight - canvasOrigin.x;
+  const canvasHeight = canvasBottom - canvasOrigin.y;
+  const canvasViewRef = useRef({ x: canvasOrigin.x, y: canvasOrigin.y, right: canvasRight, bottom: canvasBottom, scale: canvasScale });
+  const canvasReady = readyScope === layoutScope;
 
   useLayoutEffect(() => {
-    const sameScope = origin.scope === layoutScope;
+    const sameScope = canvasExtent.scope === layoutScope;
     const drag = dragRef.current;
     const scroller = canvasScrollerRef.current;
-    canvasViewRef.current = { x: canvasOrigin.x, y: canvasOrigin.y, scale: canvasScale };
-    if (sameScope && scroller && zoom !== null) {
-      scroller.scrollLeft += (origin.x - canvasOrigin.x) * canvasScale + (drag?.panX ?? 0);
-      scroller.scrollTop += (origin.y - canvasOrigin.y) * canvasScale + (drag?.panY ?? 0);
+    canvasViewRef.current = { x: canvasOrigin.x, y: canvasOrigin.y, right: canvasRight, bottom: canvasBottom, scale: canvasScale };
+    const pan = canvasPanRef.current;
+    if (sameScope && scroller && pan?.pendingPosition) {
+      scroller.scrollLeft = Math.round((pan.pendingPosition.x - canvasOrigin.x) * canvasScale);
+      scroller.scrollTop = Math.round((pan.pendingPosition.y - canvasOrigin.y) * canvasScale);
+      pan.pendingPosition = null;
+      if (pan.pointerId === null) canvasPanRef.current = null;
+    } else if (sameScope && scroller && !fittingView) {
+      scroller.scrollLeft += (canvasExtent.x - canvasOrigin.x) * canvasScale + (drag?.panX ?? 0);
+      scroller.scrollTop += (canvasExtent.y - canvasOrigin.y) * canvasScale + (drag?.panY ?? 0);
     }
     if (drag) {
       drag.panX = 0;
       drag.panY = 0;
     }
-    if (!sameScope || origin.x !== canvasOrigin.x || origin.y !== canvasOrigin.y) {
-      setOrigin({ scope: layoutScope, x: canvasOrigin.x, y: canvasOrigin.y });
+    if (!sameScope || canvasExtent.x !== canvasOrigin.x || canvasExtent.y !== canvasOrigin.y || canvasExtent.right !== canvasRight || canvasExtent.bottom !== canvasBottom) {
+      setCanvasExtent({ scope: layoutScope, x: canvasOrigin.x, y: canvasOrigin.y, right: canvasRight, bottom: canvasBottom });
     }
-  }, [origin, layoutScope, canvasOrigin.x, canvasOrigin.y, canvasScale, zoom, draftPositions]);
+  }, [canvasExtent, layoutScope, canvasOrigin.x, canvasOrigin.y, canvasRight, canvasBottom, canvasScale, fittingView, draftPositions]);
 
   useEffect(() => {
     const element = canvasScrollerRef.current;
     if (!element) return;
+    let width = element.offsetWidth;
+    let height = element.offsetHeight;
     const measure = () => {
+      if (width !== element.offsetWidth || height !== element.offsetHeight) {
+        width = element.offsetWidth;
+        height = element.offsetHeight;
+        setZoom(null);
+      }
       const style = getComputedStyle(element);
       setViewportSize({
-        width: element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
-        height: element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+        width: element.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0),
+        height: element.clientHeight - (parseFloat(style.paddingTop) || 0) - (parseFloat(style.paddingBottom) || 0),
       });
     };
     measure();
@@ -950,24 +1137,47 @@ export function TeamRunGraphCanvas({
   }, []);
 
   useLayoutEffect(() => {
-    if (layout?.shapeKey !== shapeKey || layoutStatus !== 'idle' || !nodesMeasured || layoutInput.nodes.length === 0 || viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    if (zoom === null || readyScope !== layoutScope) setZoom(fitScale);
+    if (layout?.shapeKey !== shapeKey || layoutStatus !== 'idle' || !nodesMeasured || viewportSize.width <= 0 || viewportSize.height <= 0) return;
+    if (fittingView) {
+      setZoom(fitScale);
+      const scroller = canvasScrollerRef.current;
+      if (scroller) {
+        scroller.scrollLeft = 0;
+        scroller.scrollTop = 0;
+      }
+    }
     if (readyScope !== layoutScope) setReadyScope(layoutScope);
-  }, [zoom, layout, shapeKey, layoutStatus, nodesMeasured, layoutInput.nodes.length, viewportSize, fitScale, readyScope, layoutScope]);
+  }, [fittingView, layout, shapeKey, layoutStatus, nodesMeasured, viewportSize, fitScale, readyScope, layoutScope]);
 
   const cancelDragFrame = useCallback(() => {
     if (dragFrameRef.current !== null) cancelAnimationFrame(dragFrameRef.current);
     dragFrameRef.current = null;
   }, []);
 
+  const cancelCanvasPan = useCallback(() => {
+    if (canvasPanFrameRef.current !== null) cancelAnimationFrame(canvasPanFrameRef.current);
+    canvasPanFrameRef.current = null;
+    const pointerId = canvasPanRef.current?.pointerId;
+    canvasPanRef.current = null;
+    const scroller = canvasScrollerRef.current;
+    scroller?.style.removeProperty('cursor');
+    if (pointerId != null && scroller?.hasPointerCapture(pointerId)) scroller.releasePointerCapture(pointerId);
+  }, []);
+
   useLayoutEffect(() => {
+    layoutLifetimeRef.current = {};
+    setIsArranging(false);
+    setLayoutSubmitFailed(false);
     setDragNodeId(null);
     setDraftPositions((current) => hasRecordEntries(current) ? {} : current);
     return () => {
+      layoutLifetimeRef.current = null;
+      layoutEditRevisionRef.current += 1;
       cancelDragFrame();
+      cancelCanvasPan();
       dragRef.current = null;
     };
-  }, [layoutScope, canEdit, cancelDragFrame]);
+  }, [layoutScope, canEdit, cancelDragFrame, cancelCanvasPan]);
 
   useEffect(() => {
     setZoom(null);
@@ -980,23 +1190,26 @@ export function TeamRunGraphCanvas({
     setConfigurationSheet(null);
     setConnectionDraft(null);
     setNodePaletteOpen(false);
-    setFormError(null);
+    setCanvasError(null);
   }, [layoutScope, canEdit]);
 
   useEffect(() => {
     if (layoutScopeRef.current !== layoutScope) {
       layoutScopeRef.current = layoutScope;
       setArrangedView(null);
-      setNodeSizes({});
+      if (measurementScopeRef.current !== measurementScope) {
+        measurementScopeRef.current = measurementScope;
+        setNodeSizes({});
+      }
       return;
     }
     setDraftPositions((current) => {
       const activeNodeIds = new Set(effectiveGraph.nodes.map((node) => node.nodeId));
       let changed = false;
-      const next: Record<string, { x: number; y: number }> = {};
+      const next: Record<string, { x: number; y: number }> = Object.create(null);
       for (const [nodeId, position] of Object.entries(current)) {
-        const saved = effectiveGraph.layout?.nodePositions?.[nodeId];
-        if (activeNodeIds.has(nodeId) && (dragNodeId === nodeId || saved?.x !== position.x || saved?.y !== position.y)) {
+        const saved = Object.hasOwn(savedPositions, nodeId) ? savedPositions[nodeId] : undefined;
+        if (activeNodeIds.has(nodeId) && (dragRef.current?.nodeId === nodeId || saved?.x !== position.x || saved?.y !== position.y)) {
           next[nodeId] = position;
         } else {
           changed = true;
@@ -1004,7 +1217,11 @@ export function TeamRunGraphCanvas({
       }
       return changed ? next : current;
     });
-  }, [effectiveGraph.nodes, effectiveGraph.layout?.nodePositions, layoutScope, dragNodeId]);
+  }, [effectiveGraph.nodes, savedPositions, layoutScope, measurementScope, dragNodeId]);
+
+  useEffect(() => {
+    if (layoutSubmitFailed && !hasRecordEntries(draftPositions)) setLayoutSubmitFailed(false);
+  }, [draftPositions, layoutSubmitFailed]);
 
   const nodeIdsKey = useMemo(() => JSON.stringify(effectiveGraph.nodes.map((node) => node.nodeId).sort()), [effectiveGraph.nodes]);
   useEffect(() => {
@@ -1012,13 +1229,17 @@ export function TeamRunGraphCanvas({
     for (const nodeId of Object.keys(nodeElementsRef.current)) {
       if (!activeNodeIds.has(nodeId)) delete nodeElementsRef.current[nodeId];
     }
+    setNodeSizes((current) => {
+      const active = Object.entries(current).filter(([nodeId]) => activeNodeIds.has(nodeId));
+      return active.length === Object.keys(current).length ? current : Object.fromEntries(active);
+    });
   }, [nodeIdsKey]);
 
   useEffect(() => {
     if (typeof ResizeObserver === 'undefined') {
       setNodeSizes((current) => {
         let changed = false;
-        const next = { ...current };
+        const next: Record<string, NodeSize> = Object.assign(Object.create(null), current);
         for (const [nodeId, element] of Object.entries(nodeElementsRef.current)) {
           if (!element) continue;
           const size = { width: element.offsetWidth || NODE_WIDTH, height: element.offsetHeight || NODE_HEIGHT };
@@ -1034,7 +1255,7 @@ export function TeamRunGraphCanvas({
     const observer = new ResizeObserver((entries) => {
       setNodeSizes((current) => {
         let changed = false;
-        const next = { ...current };
+        const next: Record<string, NodeSize> = Object.assign(Object.create(null), current);
         for (const entry of entries) {
           const nodeId = entry.target.getAttribute('data-node-id');
           if (!nodeId) continue;
@@ -1053,178 +1274,102 @@ export function TeamRunGraphCanvas({
       if (element) observer.observe(element, { box: 'border-box' });
     }
     return () => observer.disconnect();
-  }, [nodeIdsKey, layoutScope]);
-
-  useEffect(() => {
-    setCopiedWebhookPublicUrl(false);
-  }, [startWebhookPath, startWebhookPublicBaseUrl]);
-
-  const resetNodeDraft = useCallback(() => {
-    if (!selectedNode) {
-      setNodeTitle('');
-      setNodeMaxAttempts('');
-      setRoleId('');
-      setSessionRef('');
-      setPrompt('');
-      setOutputArtifactKind('');
-      setScriptReviewRule('');
-      return;
-    }
-    setNodeTitle(selectedNode.title ?? '');
-    setNodeMaxAttempts(selectedNode.maxAttempts === undefined ? '' : String(selectedNode.maxAttempts));
-    setRoleId((selectedNode?.roleId ?? ''));
-    setSessionRef(selectedNode.config?.sessionRef ?? '');
-    setPrompt(readNodePrompt(selectedNode));
-    setOutputArtifactKind(selectedNode.config?.outputArtifactKind ?? '');
-    setScriptReviewRule(selectedNode.config?.rule ?? '');
-    const trigger = readStartTrigger(selectedNode);
-    setStartTriggerMode(trigger.mode);
-    setStartWebhookPath(trigger.path);
-    setStartWebhookPublicBaseUrl('');
-    setStartCronSchedule(trigger.cron);
-    setFormError(null);
-  }, [selectedNode]);
-
-  const nodeEditorScope = configurationSheet?.kind === 'node' && selectedNode
-    ? JSON.stringify([layoutScope, selectedNode.nodeId, canEdit]) : null;
-  useLayoutEffect(() => {
-    // Snapshot refreshes replace node objects, not the user's open draft.
-    if (nodeDraftScopeRef.current !== nodeEditorScope) {
-      nodeDraftScopeRef.current = nodeEditorScope;
-      resetNodeDraft();
-      setBindingRequired(false);
-    } else if (canEdit && nodeEditorScope && !sessionRef && selectedSessionRef) {
-      setSessionRef(selectedSessionRef);
-    }
-  }, [nodeEditorScope, resetNodeDraft, canEdit, sessionRef, selectedSessionRef]);
-
-  const canCreateSession = canEdit && Boolean(onCreateSession);
-  useLayoutEffect(() => {
-    sessionRequestRef.current = nodeEditorScope ? { requestId: null, pending: false } : null;
-    setSessionCreation('idle');
-    return () => { sessionRequestRef.current = null; };
-  }, [nodeEditorScope, roleId]);
-
-  const handleCreateSession = async (): Promise<void> => {
-    const request = sessionRequestRef.current;
-    if (!request || request.pending || !canCreateSession || !onCreateSession || roleSessions.length === 0 || isSaving || mutationPending) return;
-    request.requestId ??= crypto.randomUUID();
-    request.pending = true;
-    setSessionCreation('pending');
-    try {
-      const binding = await onCreateSession(roleId, request.requestId);
-      if (sessionRequestRef.current !== request) return;
-      setSessionRef(binding.sessionRef!);
-      setBindingRequired(false);
-      request.requestId = null;
-      setSessionCreation('idle');
-    } catch {
-      if (sessionRequestRef.current === request) setSessionCreation('failed');
-    } finally {
-      request.pending = false;
-    }
-  };
+  }, [nodeIdsKey, measurementScope]);
 
   const closeNodeEditor = () => {
-    sessionRequestRef.current = null;
     setConfigurationSheet(null);
     setNewNode(null);
   };
 
-  const resetEdgeDraft = useCallback(() => {
-    if (!selectedEdge) {
-      setEdgeSourcePort('');
-      setEdgeTargetPort('');
-      setEdgeAction('');
-      setEdgeIncludeUpstreamResult(true);
-      return;
-    }
-    const nextSourcePort = selectedEdge.sourcePort ?? '';
-    setEdgeSourcePort(nextSourcePort);
-    setEdgeTargetPort(selectedEdge.targetPort ?? '');
-    setEdgeAction(selectedEdge.action ?? '');
-    setEdgeIncludeUpstreamResult(selectedEdge.payload?.includeUpstreamResult !== false);
-    setFormError(null);
-  }, [selectedEdge]);
-
-  useEffect(resetEdgeDraft, [resetEdgeDraft, selectedEdgeSourceNode]);
-
   const closeEdgeEditor = () => {
-    resetEdgeDraft();
     setConfigurationSheet(null);
     setNewEdge(null);
   };
 
-  useEffect(() => {
-    if (configurationSheet?.kind !== 'edge' || !selectedEdge) return;
-    logSessionTrace('renderer.team_run.edge.configuration.observed', createSessionTraceId('team-edge-config'), () => ({
-      ...summarizeGraphEdge(selectedEdge, selectedEdgeSourceNode, graphRunId),
-      editable: canEdit,
-      canonicalSourcePortMissing: selectedEdge.sourcePort == null,
-      uiSourcePort: summarizeTeamGraphPort(edgeSourcePort),
-      uiSourcePortInOptions: sourcePorts.includes(edgeSourcePort),
-      uiTargetPort: summarizeTeamGraphPort(edgeTargetPort),
-      uiTargetPortInOptions: targetPorts.includes(edgeTargetPort),
-      patchSourcePort: summarizeTeamGraphPort(patchSourcePort),
-      patchTargetPort: summarizeTeamGraphPort(patchTargetPort),
-      uiAction: TEAM_GRAPH_EDGE_ACTIONS.find((action) => action === edgeAction) ?? null,
-    }));
-  }, [configurationSheet, selectedEdge, selectedEdgeSourceNode, graphRunId, canEdit, edgeSourcePort, edgeTargetPort, edgeAction, sourcePorts, targetPorts, patchSourcePort, patchTargetPort]);
-
-  const submitGraphPatch = async (operations: TeamGraphPatchOperation[]): Promise<boolean> => {
-    if (!canEdit || !onPatchGraph || isSaving || mutationPending) return false;
-    const scope = currentGraphRef.current.scope;
-    setIsSaving(true);
-    setFormError(null);
+  const submitGraphPatch = async (operations: TeamGraphPatchOperation[], base?: TeamGraphEditBase): Promise<boolean> => {
+    if (!canEdit || mutationDisabled || !onPatchGraph) return false;
+    const layoutOnly = operations.length > 0 && operations.every((operation) => operation.op === 'set_node_position');
+    if (!layoutOnly && (isSaving || mutationPending)) return false;
+    const lifetime = layoutLifetimeRef.current;
     try {
-      await onPatchGraph(operations);
-      return currentGraphRef.current.scope === scope;
+      await onPatchGraph(operations.map((operation) => operation.op === 'set_node_position'
+        ? { ...operation, position: graphPositionForDirection(operation.position, direction) } : operation), base);
+      return layoutLifetimeRef.current === lifetime;
     } catch (error) {
-      if (currentGraphRef.current.scope === scope) setFormError(error instanceof Error ? error.message : String(error));
+      if (!layoutOnly) throw error;
+      if (layoutLifetimeRef.current === lifetime) setLayoutSubmitFailed(true);
+      return false;
+    }
+  };
+
+  const submitCanvasPatch = async (operations: TeamGraphPatchOperation[]): Promise<boolean> => {
+    if (isSaving || mutationPending || mutationDisabled) return false;
+    const lifetime = layoutLifetimeRef.current;
+    setIsSaving(true);
+    setCanvasError(null);
+    try {
+      return await submitGraphPatch(operations);
+    } catch (error) {
+      if (layoutLifetimeRef.current === lifetime) setCanvasError(error instanceof Error ? error.message : String(error));
       return false;
     } finally {
-      if (currentGraphRef.current.scope === scope) setIsSaving(false);
+      if (layoutLifetimeRef.current === lifetime) setIsSaving(false);
+    }
+  };
+
+  const handleRetryLayoutSave = async (): Promise<void> => {
+    if (!canEdit || mutationDisabled || isSaving || mutationPending || dragRef.current) return;
+    if (hasRecordEntries(activeDrafts)) {
+      await submitGraphPatch(Object.entries(activeDrafts).map(([nodeId, position]) => ({ op: 'set_node_position', nodeId, position })));
+    } else if (onRetryLayoutSave) {
+      await Promise.resolve().then(onRetryLayoutSave).catch(() => {});
     }
   };
 
   const handleAutoLayout = async (): Promise<void> => {
+    if (isArranging || canEdit && mutationDisabled) return;
+    const lifetime = layoutLifetimeRef.current;
     const context = currentGraphRef.current;
-    const result = await requestLayout(true);
-    if (!result || currentGraphRef.current !== context) return;
-    if (!canEdit) {
-      acceptLayout(result);
-      setArrangedView({ scope: layoutScope, positions: result.positions });
-      setOrigin({ scope: layoutScope, x: Math.min(0, result.bounds.x - CANVAS_PADDING), y: Math.min(0, result.bounds.y - CANVAS_PADDING) });
-      setZoom(null);
-      return;
-    }
-    setDraftPositions(result.positions);
-    const saved = await submitGraphPatch(Object.entries(result.positions).map(([nodeId, position]) => ({
-      op: 'set_node_position', nodeId, position,
-    })));
-    if (currentGraphRef.current.scope !== context.scope) return;
-    setDraftPositions({});
-    if (saved && JSON.stringify([context.input.nodes, context.input.edges]) === JSON.stringify([currentGraphRef.current.input.nodes, currentGraphRef.current.input.edges])) {
-      acceptLayout(result);
-      setOrigin({ scope: layoutScope, x: Math.min(0, result.bounds.x - CANVAS_PADDING), y: Math.min(0, result.bounds.y - CANVAS_PADDING) });
-      setZoom(null);
+    const revision = ++layoutEditRevisionRef.current;
+    setIsArranging(true);
+    try {
+      const result = await requestLayout(true);
+      if (!result || currentGraphRef.current !== context || layoutEditRevisionRef.current !== revision || dragRef.current) return;
+      if (!canEdit) {
+        acceptLayout(result);
+        setArrangedView({ scope: layoutScope, positions: result.positions });
+        setZoom(null);
+        return;
+      }
+      setDraftPositions(result.positions);
+      const saved = await submitGraphPatch(Object.entries(result.positions).map(([nodeId, position]) => ({
+        op: 'set_node_position', nodeId, position,
+      })));
+      if (!saved || currentGraphRef.current.scope !== context.scope || layoutEditRevisionRef.current !== revision || dragRef.current) return;
+      if (JSON.stringify([context.input.direction, context.input.nodes, context.input.edges]) === JSON.stringify([currentGraphRef.current.input.direction, currentGraphRef.current.input.nodes, currentGraphRef.current.input.edges])) {
+        acceptLayout(result);
+        setZoom(null);
+      }
+    } finally {
+      if (layoutLifetimeRef.current === lifetime) setIsArranging(false);
     }
   };
 
   const appendEdge = async (input: { sourceNodeId: string; targetNodeId: string; sourcePort: string }): Promise<void> => {
+    if (!canEdit || mutationDisabled) return;
     if (!input.sourceNodeId || !input.targetNodeId || input.sourceNodeId === input.targetNodeId) {
-      setFormError(`${labels.sourceNode} / ${labels.targetNode}`);
+      setCanvasError(`${labels.sourceNode} / ${labels.targetNode}`);
       return;
     }
     const source = nodeById.get(input.sourceNodeId);
     const target = nodeById.get(input.targetNodeId);
     if (!source?.sourcePorts?.includes(input.sourcePort) || target?.targetPorts?.length !== 1) {
-      setFormError(labels.noPort);
+      setCanvasError(labels.noPort);
       return;
     }
     const actions = edgeActionCandidates(source, input.sourcePort, target);
     if (actions.length === 0) {
-      setFormError(labels.noEdgeAction);
+      setCanvasError(labels.noEdgeAction);
       return;
     }
     const nextEdge: TeamGraphEdgeRecord = {
@@ -1241,147 +1386,18 @@ export function TeamRunGraphCanvas({
       setConfigurationSheet({ kind: 'edge', edgeId: nextEdge.edgeId });
       return;
     }
-    if (await submitGraphPatch([{ op: 'add_edge', edge: graphPatchEdge(nextEdge) }])) {
+    if (await submitCanvasPatch([{ op: 'add_edge', edge: graphPatchEdge(nextEdge) }])) {
       setSelectedEdgeId(nextEdge.edgeId);
       setConfigurationSheet({ kind: 'edge', edgeId: nextEdge.edgeId });
     }
   };
 
-  const copyTextToClipboard = async (value: string, onCopied: (copied: boolean) => void): Promise<void> => {
-    const text = value.trim();
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      onCopied(true);
-      window.setTimeout(() => onCopied(false), 1500);
-    } catch (error) {
-      setFormError(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const buildStartConfig = (): TeamGraphNodeConfigRecord | null => {
-    if (startTriggerMode === 'manual') return {};
-    const normalizedWebhookPath = normalizeWebhookPathInput(startWebhookPath);
-    if (startTriggerMode === 'webhook' && !normalizedWebhookPath) {
-      setFormError(labels.startWebhookPathRequired);
-      return null;
-    }
-    if (startTriggerMode === 'webhook' && normalizedWebhookPath.includes('..')) {
-      setFormError(labels.startWebhookPathInvalid);
-      return null;
-    }
-    const cronExpression = buildCronExpression(startCronSchedule);
-    if (startTriggerMode === 'cron' && !cronExpression) {
-      setFormError(labels.startCronCustomValueRequired);
-      return null;
-    }
-    return { trigger: startTriggerMode === 'cron'
-      ? { mode: 'cron', cron: cronExpression! }
-      : { mode: 'webhook', path: normalizedWebhookPath } };
-  };
-
-  const handleSaveNode = async (): Promise<void> => {
-    if (!selectedNode || sessionRequestRef.current?.pending) return;
-    setFormError(null);
-    setBindingRequired(true);
-    const maxAttempts = readPositiveIntegerInRange(nodeMaxAttempts, 1, NODE_MAX_ATTEMPTS_LIMIT);
-    if (maxAttempts === null) {
-      setFormError(labels.nodeMaxAttemptsInvalid);
-      return;
-    }
-    let config: TeamGraphNodeConfigRecord | undefined;
-    if (selectedNode.kind === 'start') {
-      const startConfig = buildStartConfig();
-      if (!startConfig) return;
-      config = startConfig;
-    }
-    if (selectedNode.kind === 'script_review') {
-      if (!scriptReviewRule) {
-        setFormError(labels.scriptReviewRuleRequired);
-        return;
-      }
-      config = { rule: scriptReviewRule };
-    }
-    if (selectedNode.kind === 'work' || selectedNode.kind === 'review') {
-      if (!roleBindingValid) return;
-      config = { prompt, sessionRef: selectedSessionRef, ...(selectedNode.kind === 'work' && outputArtifactKind.trim() ? { outputArtifactKind: outputArtifactKind.trim() } : {}) };
-    }
-    const nextNode = graphPatchNode({
-      ...selectedNode,
-      title: nodeTitle.trim() || undefined,
-      maxAttempts,
-      roleId,
-      config,
-    });
-    const operations: TeamGraphPatchOperation[] = newNode
-      ? [{ op: 'add_node', node: nextNode }, { op: 'set_node_position', nodeId: selectedNode.nodeId, position: newNode.position }]
-      : [{ op: 'replace_node', node: nextNode }];
-    if (await submitGraphPatch(operations)) {
-      setNewNode(null);
-      setSelectedNodeId(selectedNode.nodeId);
-      setConfigurationSheet(null);
-    }
-  };
-
-  const handleSaveEdge = async (): Promise<void> => {
-    if (!selectedEdge) return;
-    if (!edgePortsValid) {
-      setFormError(labels.noPort);
-      return;
-    }
-    if (!edgeActionValid || !edgeAction) {
-      setFormError(edgeActions.length === 0 ? labels.noEdgeAction : labels.selectEdgeAction);
-      return;
-    }
-    const nextEdge = graphPatchEdge({
-      ...selectedEdge,
-      sourcePort: patchSourcePort,
-      targetPort: patchTargetPort,
-      action: edgeAction,
-      payload: { includeUpstreamResult: edgeIncludeUpstreamResult },
-    });
-    logSessionTrace('renderer.team_run.edge.patch.requested', createSessionTraceId('team-edge-patch'), () => ({
-      ...summarizeGraphEdge(selectedEdge, selectedEdgeSourceNode, graphRunId),
-      operation: newEdge ? 'add_edge' : 'replace_edge',
-      canonicalSourcePortMissing: selectedEdge.sourcePort == null,
-      uiSourcePort: summarizeTeamGraphPort(edgeSourcePort),
-      uiTargetPort: summarizeTeamGraphPort(edgeTargetPort),
-      patchSourcePort: summarizeTeamGraphPort(patchSourcePort),
-      patchTargetPort: summarizeTeamGraphPort(patchTargetPort),
-      patchAction: TEAM_GRAPH_EDGE_ACTIONS.find((action) => action === nextEdge.action) ?? null,
-      sourcePortAutomaticallyCorrected: patchSourcePort !== edgeSourcePort,
-      targetPortAutomaticallyCorrected: patchTargetPort !== edgeTargetPort,
-      canEdit, isSaving, mutationPending,
-    }));
-    if (await submitGraphPatch([{ op: newEdge ? 'add_edge' : 'replace_edge', edge: nextEdge }])) {
-      setNewEdge(null);
-      setConfigurationSheet(null);
-    }
-  };
-
-  const handleDeleteNode = async (): Promise<void> => {
-    if (!selectedNode) return;
-    if (newNode) { setNewNode(null); setConfigurationSheet(null); return; }
-    if (await submitGraphPatch([{ op: 'remove_node', nodeId: selectedNode.nodeId }])) {
-      setSelectedNodeId(null);
-      setConfigurationSheet(null);
-    }
-  };
-
-  const handleDeleteEdge = async (): Promise<void> => {
-    if (!selectedEdge) return;
-    if (newEdge) { setNewEdge(null); setConfigurationSheet(null); return; }
-    if (await submitGraphPatch([{ op: 'remove_edge', edgeId: selectedEdge.edgeId }])) {
-      setSelectedEdgeId(null);
-      setConfigurationSheet(null);
-    }
-  };
-
-  const handleAddNode = async (kind: TeamGraphCanvasNodeKind): Promise<void> => {
-    const paletteItem = NODE_PALETTE.find((item) => item.kind === kind)!;
+  const handleAddNode = (kind: TeamGraphCanvasNodeKind): void => {
+    if (!canEdit || mutationDisabled) return;
+    const title = labels.nodeKindLabels[kind];
     const nodeId = createProjectionNodeId(kind);
     const viewport = readCanvasViewport(canvasScrollerRef.current);
-    const rawPosition = nextNodePosition(positionedNodes, nodeSizes, viewport ? {
+    const rawPosition = nextNodePosition(effectiveGraph.nodes.map((node) => ({ nodeId: node.nodeId, ...(Object.hasOwn(visibleGeometry.positions, node.nodeId) ? visibleGeometry.positions[node.nodeId] : { x: 0, y: 0 }) })), nodeSizes, viewport ? {
       scrollLeft: viewport.scrollLeft / canvasScale + canvasOrigin.x,
       scrollTop: viewport.scrollTop / canvasScale + canvasOrigin.y,
       clientWidth: viewport.clientWidth / canvasScale,
@@ -1392,58 +1408,156 @@ export function TeamRunGraphCanvas({
     const node: TeamGraphNodeRecord = {
       nodeId,
       kind,
-      title: paletteItem.title,
-      maxAttempts: DEFAULT_NODE_MAX_ATTEMPTS,
+      title,
+      reworkLimits: {},
       sourcePortActions: {},
       status: 'pending',
       ...(kind === 'work' || kind === 'review' ? { roleId: binding?.roleId } : {}),
       ...(kind === 'work' ? { taskId: nodeId } : {}),
-      config: kind === 'work' || kind === 'review' ? { prompt: paletteItem.title, sessionRef: binding?.sessionRef } : undefined,
+      config: kind === 'work' || kind === 'review' ? { prompt: title, sessionRef: binding?.sessionRef } : undefined,
     };
-    if (kind === 'start' || kind === 'work' || kind === 'review' || kind === 'script_review' || kind === 'join') {
-      setNewNode({ node, position });
-      setConfigurationSheet({ kind: 'node', nodeId });
-      setNodePaletteOpen(false);
-      return;
-    }
-    if (await submitGraphPatch([
-      { op: 'add_node', node: graphPatchNode(node) },
-      { op: 'set_node_position', nodeId, position },
-    ])) {
-      setSelectedNodeId(nodeId);
-      setNodePaletteOpen(false);
-    }
+    setNewNode({ node, position });
+    setConfigurationSheet({ kind: 'node', nodeId, tab: 'config' });
+    setNodePaletteOpen(false);
   };
 
 
-  const handleNodePointerDown = (event: PointerEvent<HTMLDivElement>, node: PositionedNode): void => {
-    if (!canEdit || isSaving || mutationPending || dragRef.current || event.button !== 0) return;
+  const advanceCanvasPan = (): void => {
+    canvasPanFrameRef.current = null;
+    const pan = canvasPanRef.current;
+    const scroller = canvasScrollerRef.current;
+    if (!pan?.moved || !scroller) return;
+    const view = canvasViewRef.current;
+    const x = pan.x - (pan.pointerX - pan.startX) / view.scale;
+    const y = pan.y - (pan.pointerY - pan.startY) / view.scale;
+    const originX = Math.floor(Math.min(view.x, x) * view.scale) / view.scale;
+    const originY = Math.floor(Math.min(view.y, y) * view.scale) / view.scale;
+    const right = Math.max(view.right, x + viewportSize.width / view.scale);
+    const bottom = Math.max(view.bottom, y + viewportSize.height / view.scale);
+    if (originX === view.x && originY === view.y && right === view.right && bottom === view.bottom) {
+      scroller.scrollLeft = Math.round((x - view.x) * view.scale);
+      scroller.scrollTop = Math.round((y - view.y) * view.scale);
+      pan.pendingPosition = null;
+      return;
+    }
+    pan.pendingPosition = { x, y };
+    setCanvasExtent({ scope: layoutScope, x: originX, y: originY, right, bottom });
+  };
+
+  const handleCanvasPointerDown = (event: PointerEvent<HTMLDivElement>): void => {
+    const scroller = canvasScrollerRef.current;
+    if (!scroller || canvasTool !== 'pan' || !event.isPrimary || event.button !== 0 || dragRef.current || canvasPanRef.current?.pointerId != null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const view = canvasViewRef.current;
+    canvasPanRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      x: view.x + scroller.scrollLeft / view.scale,
+      y: view.y + scroller.scrollTop / view.scale,
+      pendingPosition: null,
+      moved: false,
+    };
+    scroller.setPointerCapture(event.pointerId);
+    scroller.style.cursor = 'grabbing';
+  };
+
+  const handleCanvasPointerMove = (event: PointerEvent<HTMLDivElement>): void => {
+    const pan = canvasPanRef.current;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    pan.pointerX = event.clientX;
+    pan.pointerY = event.clientY;
+    pan.moved ||= Math.abs(pan.pointerX - pan.startX) > DRAG_THRESHOLD || Math.abs(pan.pointerY - pan.startY) > DRAG_THRESHOLD;
+    if (pan.moved && canvasPanFrameRef.current === null) canvasPanFrameRef.current = requestAnimationFrame(advanceCanvasPan);
+  };
+
+  const handleCanvasPointerUp = (event: PointerEvent<HTMLDivElement>): void => {
+    const pan = canvasPanRef.current;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    handleCanvasPointerMove(event);
+    if (canvasPanFrameRef.current !== null) cancelAnimationFrame(canvasPanFrameRef.current);
+    advanceCanvasPan();
+    pan.pointerId = null;
+    event.currentTarget.style.removeProperty('cursor');
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (!pan.pendingPosition) canvasPanRef.current = null;
+  };
+
+  const handleCanvasPointerCancel = (event: PointerEvent<HTMLDivElement>): void => {
+    if (canvasPanRef.current?.pointerId !== event.pointerId) return;
+    cancelCanvasPan();
+  };
+
+  const cancelNodeDrag = useCallback((): void => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    cancelDragFrame();
+    dragRef.current = null;
+    setDraftPositions((current) => drag.draftPosition ? { ...current, [drag.nodeId]: drag.draftPosition }
+      : Object.fromEntries(Object.entries(current).filter(([id]) => id !== drag.nodeId)));
+    setDragNodeId(null);
+    const element = nodeElementsRef.current[drag.nodeId];
+    if (element?.hasPointerCapture?.(drag.pointerId)) element.releasePointerCapture(drag.pointerId);
+  }, [cancelDragFrame]);
+
+  useLayoutEffect(() => {
+    if (!mutationDisabled) return;
+    layoutEditRevisionRef.current += 1;
+    cancelNodeDrag();
+    setConnectionDraft(null);
+    setNodePaletteOpen(false);
+  }, [mutationDisabled, cancelNodeDrag]);
+
+  const handleSelectCanvasTool = (tool: 'select' | 'pan'): void => {
+    cancelCanvasPan();
+    cancelNodeDrag();
+    setCanvasTool(tool);
+    setConnectionDraft(null);
+    setNodePaletteOpen(false);
+  };
+
+  const handleSelectDirection = (nextDirection: GraphLayoutDirection): void => {
+    if (direction === nextDirection || isSaving || mutationPending) return;
+    handleSelectCanvasTool(canvasTool);
+    setDirection(nextDirection);
+  };
+
+  const handleNodePointerDown = (event: PointerEvent<HTMLDivElement>, nodeId: string): void => {
+    if (canvasTool !== 'select' || !event.isPrimary || canvasPanRef.current || !canEdit || mutationDisabled || isSaving || mutationPending || dragRef.current || event.button !== 0) return;
     const surface = canvasSurfaceRef.current;
-    if (!surface) return;
+    const position = Object.hasOwn(visibleGeometry.positions, nodeId) ? visibleGeometry.positions[nodeId] : undefined;
+    if (!surface || !position) return;
+    layoutEditRevisionRef.current += 1;
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
     const rect = surface.getBoundingClientRect();
     dragRef.current = {
-      nodeId: node.nodeId,
+      nodeId,
       pointerId: event.pointerId,
       pointerStartX: event.clientX,
       pointerStartY: event.clientY,
       pointerX: event.clientX,
       pointerY: event.clientY,
-      offsetX: canvasOrigin.x + (event.clientX - rect.left) / canvasScale - node.x,
-      offsetY: canvasOrigin.y + (event.clientY - rect.top) / canvasScale - node.y,
+      offsetX: canvasOrigin.x + (event.clientX - rect.left) / canvasScale - position.x,
+      offsetY: canvasOrigin.y + (event.clientY - rect.top) / canvasScale - position.y,
       canvasLeft: canvasOrigin.x,
       canvasTop: canvasOrigin.y,
-      canvasRight: canvasOrigin.x + canvasWidth,
-      canvasBottom: canvasOrigin.y + canvasHeight,
-      currentX: node.x,
-      currentY: node.y,
+      canvasRight,
+      canvasBottom,
+      currentX: position.x,
+      currentY: position.y,
+      draftPosition: Object.hasOwn(activeDrafts, nodeId) ? activeDrafts[nodeId] : undefined,
       panX: 0,
       panY: 0,
       frameTime: null,
       moved: false,
     };
-    setDragNodeId(node.nodeId);
+    setDragNodeId(nodeId);
   };
 
   const updateDragPosition = (drag: DragState): void => {
@@ -1489,11 +1603,11 @@ export function TeamRunGraphCanvas({
     // Expand before scrolling; negative graph coordinates are valid, scroll offsets are not.
     drag.canvasLeft = Math.min(drag.canvasLeft, view.x + Math.min(0, scroller.scrollLeft + drag.panX) / view.scale);
     drag.canvasTop = Math.min(drag.canvasTop, view.y + Math.min(0, scroller.scrollTop + drag.panY) / view.scale);
-    drag.canvasRight = Math.max(drag.canvasRight, view.x + (scroller.scrollLeft + scroller.clientWidth + drag.panX) / view.scale);
-    drag.canvasBottom = Math.max(drag.canvasBottom, view.y + (scroller.scrollTop + scroller.clientHeight + drag.panY) / view.scale);
+    drag.canvasRight = Math.max(drag.canvasRight, view.x + (scroller.scrollLeft + viewportSize.width + drag.panX) / view.scale);
+    drag.canvasBottom = Math.max(drag.canvasBottom, view.y + (scroller.scrollTop + viewportSize.height + drag.panY) / view.scale);
     updateDragPosition(drag);
     const position = { x: drag.currentX, y: drag.currentY };
-    setDraftPositions((current) => current[drag.nodeId]?.x === position.x && current[drag.nodeId]?.y === position.y
+    setDraftPositions((current) => Object.hasOwn(current, drag.nodeId) && current[drag.nodeId].x === position.x && current[drag.nodeId].y === position.y
       ? current : { ...current, [drag.nodeId]: position });
     const panning = drag.panX !== 0 || drag.panY !== 0;
     drag.frameTime = panning ? time : null;
@@ -1505,144 +1619,175 @@ export function TeamRunGraphCanvas({
     requestDragFrame();
   };
 
-  const handleNodePointerUp = async (event: PointerEvent<HTMLDivElement>): Promise<void> => {
+  const handleNodePointerUp = (event: PointerEvent<HTMLDivElement>): void => {
     const finishedDrag = updateDragPointer(event);
     if (!finishedDrag) return;
     updateDragPosition(finishedDrag);
     cancelDragFrame();
     dragRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
-    const scope = currentGraphRef.current.scope;
     setDragNodeId(null);
     if (finishedDrag.moved) {
       const position = { x: Math.round(finishedDrag.currentX), y: Math.round(finishedDrag.currentY) };
       setDraftPositions((current) => ({ ...current, [finishedDrag.nodeId]: position }));
       suppressClickNodeIdRef.current = finishedDrag.nodeId;
       window.setTimeout(() => { suppressClickNodeIdRef.current = null; }, 0);
-      await submitGraphPatch([{ op: 'set_node_position', nodeId: finishedDrag.nodeId, position }]);
-      if (currentGraphRef.current.scope === scope) {
-        setDraftPositions((current) => Object.fromEntries(Object.entries(current).filter(([nodeId]) => nodeId !== finishedDrag.nodeId)));
-      }
+      void submitGraphPatch([{ op: 'set_node_position', nodeId: finishedDrag.nodeId, position }]);
     }
   };
 
   const handleNodePointerCancel = (event: PointerEvent<HTMLDivElement>): void => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    cancelDragFrame();
-    dragRef.current = null;
-    setDraftPositions((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== drag.nodeId)));
-    setDragNodeId(null);
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    cancelNodeDrag();
   };
 
-  const handleStartConnection = (event: MouseEvent<HTMLButtonElement>, node: TeamGraphNodeRecord, sourcePort: string): void => {
-    event.stopPropagation();
-    setConnectionDraft({ sourceNodeId: node.nodeId, sourcePort });
+  const handleStartConnection = (nodeId: string, sourcePort: string): void => {
+    if (!canEdit || mutationDisabled) return;
+    setConnectionDraft({ sourceNodeId: nodeId, sourcePort });
   };
 
-  const handleFinishConnection = (event: MouseEvent<HTMLButtonElement>, target: TeamGraphNodeRecord): void => {
-    event.stopPropagation();
+  const handleFinishConnection = (nodeId: string): void => {
     if (!connectionDraft) return;
     void appendEdge({
       sourceNodeId: connectionDraft.sourceNodeId,
-      targetNodeId: target.nodeId,
+      targetNodeId: nodeId,
       sourcePort: connectionDraft.sourcePort,
     });
     setConnectionDraft(null);
   };
 
-  return (
-    <div className={compact ? 'flex min-h-0 min-w-0 flex-1 flex-col gap-3' : 'min-w-0 space-y-3'}>
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/80 bg-card p-3 shadow-sm">
-        <div>
-          <div className="text-sm font-medium">{titleLabel}</div>
-          <div className="text-xs text-muted-foreground">
-            {formatTemplate(labels.nodeCount, { count: effectiveGraph.nodes.length })} · {formatTemplate(labels.edgeCount, { count: effectiveGraph.edges.length })}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {members.length > 0 ? (
-            <div className="flex -space-x-2" aria-label={labels.teamRoles}>
-              {members.slice(0, 4).map((role) => (
-                <div key={role.roleId} title={`${role.roleId} · ${role.agentId}`} className="grid h-8 w-8 place-items-center rounded-full border-2 border-background bg-primary/15 text-[10px] font-semibold text-primary">
-                  {role.roleId.slice(0, 2).toUpperCase()}
-                </div>
-              ))}
-              {members.length > 4 ? <div className="grid h-8 min-w-8 place-items-center rounded-full border-2 border-background bg-muted px-2 text-[10px] font-semibold text-muted-foreground">+{members.length - 4}</div> : null}
-            </div>
-          ) : null}
-          {headerActions}
-          {connectionDraft ? <div className="rounded-full border border-primary/20 bg-primary/10 px-2 py-1 text-xs text-primary">{labels.connectionDraft}: {labels.portLabels[connectionDraft.sourcePort] ?? connectionDraft.sourcePort}</div> : null}
-          <div className="flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/35 px-2.5 py-1 text-xs text-muted-foreground shadow-sm">
-            {runStatus ? (
-              <span className={`flex items-center gap-1.5 ${statusTextTone(runStatus)}`} title={`${labels.runStatusLabel}: ${statusLabel(runStatus, labels)}`}>
-                <span className={`h-1.5 w-1.5 rounded-full ${statusDotTone(runStatus)}`} />
-                <span>{statusLabel(runStatus, labels)}</span>
-              </span>
-            ) : null}
-            {runStatus ? <span className="h-3 w-px bg-border" aria-hidden="true" /> : null}
-            <span className={`flex items-center gap-1.5 ${statusTextTone(effectiveGraph.status)}`} title={`${labels.graphStatusLabel}: ${statusLabel(effectiveGraph.status, labels)}`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${statusDotTone(effectiveGraph.status)}`} />
-              <span>{statusLabel(effectiveGraph.status, labels)}</span>
-            </span>
-          </div>
-        </div>
-      </div>
+  const handleOpenNode = (nodeId: string, keyboard = false) => {
+    if (!keyboard && suppressClickNodeIdRef.current === nodeId) return;
+    setCanvasError(null);
+    setSelectedNodeId(nodeId);
+    setConfigurationSheet({ kind: 'node', nodeId, tab: 'config' });
+  };
+  const handleOpenOutput = (nodeId: string, selection?: TeamNodeDeliverySelection) => {
+    setCanvasError(null);
+    setSelectedNodeId(nodeId);
+    setConfigurationSheet({ kind: 'node', nodeId, tab: 'output', selection });
+  };
+  const handleRepairGraph = async (operations: TeamGraphPatchOperation[]) => {
+    if (!repairGraph || mutationDisabled || isSaving || mutationPending) return;
+    const lifetime = layoutLifetimeRef.current;
+    setIsSaving(true);
+    try {
+      await repairGraph(operations);
+    } finally {
+      if (layoutLifetimeRef.current === lifetime) setIsSaving(false);
+    }
+  };
+  // Memoized leaves dispatch through the latest committed handlers, not captured drag geometry.
+  const eventHandlersRef = useRef({
+    pointerDown: handleNodePointerDown, pointerMove: handleNodePointerMove,
+    pointerUp: handleNodePointerUp, pointerCancel: handleNodePointerCancel,
+    startConnection: handleStartConnection, finishConnection: handleFinishConnection,
+    open: handleOpenNode, openOutput: handleOpenOutput, addNode: handleAddNode, repair: handleRepairGraph,
+  });
+  useLayoutEffect(() => {
+    eventHandlersRef.current = {
+      pointerDown: handleNodePointerDown, pointerMove: handleNodePointerMove,
+      pointerUp: handleNodePointerUp, pointerCancel: handleNodePointerCancel,
+      startConnection: handleStartConnection, finishConnection: handleFinishConnection,
+      open: handleOpenNode, openOutput: handleOpenOutput, addNode: handleAddNode, repair: handleRepairGraph,
+    };
+  });
+  const nodeEvents = useMemo<TeamGraphNodeEvents>(() => ({
+    register: (nodeId, element) => { nodeElementsRef.current[nodeId] = element; },
+    open: (nodeId, keyboard) => eventHandlersRef.current.open(nodeId, keyboard),
+    openOutput: (nodeId, selection) => eventHandlersRef.current.openOutput(nodeId, selection),
+    pointerDown: (event, nodeId) => eventHandlersRef.current.pointerDown(event, nodeId),
+    pointerMove: (event) => eventHandlersRef.current.pointerMove(event),
+    pointerUp: (event) => eventHandlersRef.current.pointerUp(event),
+    pointerCancel: (event) => eventHandlersRef.current.pointerCancel(event),
+    startConnection: (nodeId, sourcePort) => eventHandlersRef.current.startConnection(nodeId, sourcePort),
+    finishConnection: (nodeId) => eventHandlersRef.current.finishConnection(nodeId),
+  }), []);
+  const openEdge = useCallback((edgeId: string) => {
+    setSelectedEdgeId(edgeId);
+    setConfigurationSheet({ kind: 'edge', edgeId });
+  }, []);
+  const leaveEdge = useCallback((edgeId: string) => setHoveredEdgeId((current) => current === edgeId ? null : current), []);
+  const addNode = useCallback((kind: TeamGraphCanvasNodeKind) => eventHandlersRef.current.addNode(kind), []);
+  const savePortRepair = useCallback((operations: TeamGraphPatchOperation[]) => eventHandlersRef.current.repair(operations), []);
+  const toggleNodePalette = useCallback(() => setNodePaletteOpen((open) => !open), []);
+  const closeNodePalette = useCallback(() => setNodePaletteOpen(false), []);
 
-      {repairGraph ? <TeamGraphPortRepair
+  return (
+    <div className={compact ? 'mx-3 mb-3 flex min-h-0 min-w-0 flex-1 flex-col gap-2' : 'min-w-0 space-y-2'}>
+
+      {repairGraph ? <GraphPortRepair
         key={`${layoutScope}:${graphVersion ?? ''}`}
         graph={effectiveGraph}
         runtimeError={runtimeError}
         edgePatch={graphPatchEdge}
         labels={labels}
-        pending={isSaving || mutationPending}
-        onSave={async (operations) => {
-          if (isSaving || mutationPending) return;
-          const scope = currentGraphRef.current.scope;
-          setIsSaving(true);
-          try {
-            await repairGraph(operations);
-          } finally {
-            if (currentGraphRef.current.scope === scope) setIsSaving(false);
-          }
-        }}
+        pending={isSaving || mutationPending || mutationDisabled}
+        onSave={savePortRepair}
       /> : null}
-      {formError ? <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{formError}</div> : null}
+      {canvasError ? <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{canvasError}</div> : null}
+      {(layoutSubmitFailed && hasRecordEntries(activeDrafts)) || layoutSave?.status === 'failed' ? <div role="alert" className="flex flex-wrap items-center gap-2 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+        <span>{labels.layoutSaveFailed ?? labels.saveGraphUnavailable}</span>
+        {canEdit && (layoutSubmitFailed || onRetryLayoutSave) ? <button type="button" className="rounded border border-destructive/40 px-2 py-1 hover:bg-destructive/10 disabled:opacity-50" disabled={isSaving || mutationPending || mutationDisabled || Boolean(dragNodeId)} onClick={() => { void handleRetryLayoutSave(); }}>
+          {labels.retryLayoutSave ?? labels.saveGraphUnavailable}
+        </button> : null}
+      </div> : null}
 
-      <div className={compact ? 'relative flex min-h-0 flex-1 flex-col gap-2' : 'relative'} aria-busy={!canvasReady && layoutStatus !== 'failed'}>
-          {!canvasReady && layoutStatus !== 'failed' ? <span role="status" className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">{labels.layoutPending ?? 'Arranging…'}</span> : null}
-          <div className="flex items-center justify-end gap-1 pb-2 text-xs" style={{ visibility: canvasReady || layoutStatus === 'failed' ? 'visible' : 'hidden' }}>
-            {layoutStatus === 'pending' ? <span role="status" className="mr-2 text-muted-foreground">{labels.layoutPending ?? 'Arranging…'}</span> : null}
-            {layoutStatus === 'failed' ? <span role="alert" className="mr-2 text-destructive">{labels.layoutFailed ?? 'Layout failed. Try arranging again.'}</span> : null}
-            <button type="button" className="rounded border px-2 py-1.5 hover:bg-muted disabled:opacity-50" onClick={() => { void handleAutoLayout(); }} disabled={isSaving || mutationPending || Boolean(dragNodeId) || !nodesMeasured || effectiveGraph.nodes.length === 0}>
+      <div className={`relative isolate overflow-hidden rounded-xl border border-border/80 bg-[hsl(var(--shell-surface-muted))] ${compact ? 'flex min-h-0 flex-1 flex-col' : ''}`} aria-busy={isArranging || layoutStatus === 'pending' || !canvasReady && layoutStatus !== 'failed'}>
+        <div className="pointer-events-none absolute bottom-5 left-1/2 z-30 flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 flex-col items-center justify-center gap-1 text-[11px]" style={{ visibility: canvasReady || layoutStatus === 'failed' ? 'visible' : 'hidden' }}>
+          {layoutStatus === 'failed' ? <span role="alert" className="rounded-[6px] bg-card px-2 py-1.5 text-destructive">{labels.layoutFailed ?? 'Layout failed. Try arranging again.'}</span> : null}
+          <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-[5px] rounded-[10px] border border-border bg-card p-1 shadow-[0_3px_9px_rgb(24_35_51_/_0.03)] dark:bg-muted dark:shadow-[0_3px_10px_rgb(0_0_0_/_0.07)]">
+            <button type="button" className={`grid h-7 w-7 place-items-center rounded-[6px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${canvasTool === 'select' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} aria-label={t('run.graphCanvas.selectTool')} title={t('run.graphCanvas.selectTool')} aria-pressed={canvasTool === 'select'} onClick={() => handleSelectCanvasTool('select')}>
+              <MousePointer2 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.65} />
+            </button>
+            <button type="button" className={`grid h-7 w-7 place-items-center rounded-[6px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${canvasTool === 'pan' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} aria-label={t('run.graphCanvas.panTool')} title={t('run.graphCanvas.panTool')} aria-pressed={canvasTool === 'pan'} onClick={() => handleSelectCanvasTool('pan')}>
+              <Hand aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.65} />
+            </button>
+            <span aria-hidden="true" className="mx-0.5 h-[17px] w-px bg-border" />
+            <button type="button" className="h-7 rounded-[6px] px-2 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" onClick={() => { void handleAutoLayout(); }} aria-busy={isArranging} disabled={isArranging || isSaving || mutationPending || canEdit && mutationDisabled || Boolean(dragNodeId) || !nodesMeasured || effectiveGraph.nodes.length === 0}>
               {labels.autoLayout ?? 'Auto layout'}
             </button>
-            <div className="flex items-center gap-1" style={{ visibility: canvasReady ? 'visible' : 'hidden' }}>
-            <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.zoomOut ?? '−'} title={labels.zoomOut} onClick={() => setZoom(canvasScale / 1.2)}>
-              <Minus className="h-3.5 w-3.5" />
+            <button type="button" className={`grid h-7 w-7 place-items-center rounded-[6px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${direction === 'vertical' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} aria-label={t('run.graphCanvas.verticalLayout')} title={t('run.graphCanvas.verticalLayout')} aria-pressed={direction === 'vertical'} disabled={isSaving || mutationPending || Boolean(dragNodeId)} onClick={() => handleSelectDirection('vertical')}>
+              <Rows3 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.65} />
             </button>
-            <span className="min-w-10 text-center tabular-nums text-muted-foreground">{Math.round(canvasScale * 100)}%</span>
-            <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.zoomIn ?? '+'} title={labels.zoomIn} onClick={() => setZoom(Math.min(2, canvasScale * 1.2))}>
-              <Plus className="h-3.5 w-3.5" />
+            <button type="button" className={`grid h-7 w-7 place-items-center rounded-[6px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${direction === 'horizontal' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} aria-label={t('run.graphCanvas.horizontalLayout')} title={t('run.graphCanvas.horizontalLayout')} aria-pressed={direction === 'horizontal'} disabled={isSaving || mutationPending || Boolean(dragNodeId)} onClick={() => handleSelectDirection('horizontal')}>
+              <Columns3 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.65} />
             </button>
-            <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.fitToView ?? labels.workflowCanvas} title={labels.fitToView} onClick={() => {
-              const x = Math.min(0, visibleGeometry.bounds.x - CANVAS_PADDING);
-              const y = Math.min(0, visibleGeometry.bounds.y - CANVAS_PADDING);
-              setOrigin({ scope: layoutScope, x, y });
-              setZoom(Math.min(1, viewportSize.width / (visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING - x), viewportSize.height / (visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING - y)));
-              canvasScrollerRef.current?.scrollTo({ left: 0, top: 0 });
-            }}>
-              <Maximize2 className="h-3.5 w-3.5" />
-            </button>
+            <div className="flex items-center gap-[5px]" style={{ visibility: canvasReady ? 'visible' : 'hidden' }}>
+              <span aria-hidden="true" className="mx-0.5 h-[17px] w-px bg-border" />
+              <button type="button" className="grid h-7 w-7 place-items-center rounded-[6px] text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={labels.zoomOut ?? '−'} title={labels.zoomOut} onClick={() => setZoom(canvasScale / 1.2)}>
+                <Minus aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.65} />
+              </button>
+              <span className="w-[39px] text-center tabular-nums text-muted-foreground">{Math.round(canvasScale * 100)}%</span>
+              <button type="button" className="grid h-7 w-7 place-items-center rounded-[6px] text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={labels.zoomIn ?? '+'} title={labels.zoomIn} onClick={() => setZoom(Math.min(2, canvasScale * 1.2))}>
+                <Plus aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.65} />
+              </button>
+              <span aria-hidden="true" className="mx-0.5 h-[17px] w-px bg-border" />
+              <button type="button" className="grid h-7 w-7 place-items-center rounded-[6px] text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={labels.fitToView ?? labels.workflowCanvas} title={labels.fitToView} onClick={() => setZoom(null)}>
+                <Maximize2 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.65} />
+              </button>
             </div>
           </div>
+        </div>
         <div className={compact ? 'relative flex min-h-0 flex-1 flex-col' : 'relative'}>
-        <StableScrollArea ref={canvasScrollerRef} onScroll={requestDragFrame} data-team-graph-canvas="true" inert={!canvasReady} style={{ opacity: canvasReady ? 1 : 0 }} className={`relative overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner ${compact ? 'min-h-[240px] max-h-[60vh] flex-1' : 'h-[520px]'}`}>
-          <div className="overflow-hidden" style={{ width: canvasWidth * canvasScale, height: canvasHeight * canvasScale }}>
+        <StableScrollArea ref={canvasScrollerRef} onScroll={requestDragFrame} data-team-graph-canvas="true" inert={!canvasReady} style={{ opacity: canvasReady ? 1 : 0 }} className={`relative overflow-auto p-4 text-foreground ${canvasTool === 'pan' ? 'cursor-grab select-none touch-none [&_*]:!cursor-[inherit]' : ''} ${compact ? 'min-h-[240px] flex-1' : 'h-[520px]'}`}
+          onPointerMoveCapture={handleCanvasPointerMove}
+          onPointerUpCapture={handleCanvasPointerUp}
+          onPointerCancelCapture={handleCanvasPointerCancel}
+          onLostPointerCapture={handleCanvasPointerCancel}
+          onClickCapture={(event) => {
+            if (canvasTool === 'pan' && event.detail > 0) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }}
+        >
+          <div className="overflow-clip" style={{ width: canvasWidth * canvasScale, height: canvasHeight * canvasScale }}>
           <div
             ref={canvasSurfaceRef}
             aria-label={labels.workflowCanvas}
             className="relative rounded-xl"
+            onPointerDownCapture={handleCanvasPointerDown}
             onClick={() => {
               setNodePaletteOpen(false);
               setSelectedEdgeId(null);
@@ -1654,15 +1799,21 @@ export function TeamRunGraphCanvas({
               height: canvasHeight,
               transform: `scale(${canvasScale})`,
               transformOrigin: 'top left',
-              backgroundImage: 'radial-gradient(circle at 1px 1px, hsl(var(--border)) 1px, transparent 0)',
-              backgroundSize: '22px 22px',
             }}
           >
-            <svg className="absolute inset-0" width={canvasWidth} height={canvasHeight} viewBox={`${canvasOrigin.x} ${canvasOrigin.y} ${canvasWidth} ${canvasHeight}`} role="img" aria-label={labels.workflowEdges}>
+            <svg className="pointer-events-none absolute inset-0 text-muted-foreground/25 dark:text-muted-foreground/20" width={canvasWidth} height={canvasHeight} viewBox={`${canvasOrigin.x} ${canvasOrigin.y} ${canvasWidth} ${canvasHeight}`} aria-hidden="true">
+              <defs>
+                <pattern id={`${canvasId}-dots`} width="24" height="24" patternUnits="userSpaceOnUse">
+                  <circle cx="1" cy="1" r="0.8" fill="currentColor" />
+                </pattern>
+              </defs>
+              <rect x={canvasOrigin.x} y={canvasOrigin.y} width={canvasWidth} height={canvasHeight} fill={`url(#${canvasId}-dots)`} />
+            </svg>
+            <svg className="absolute inset-0 text-muted-foreground/85 dark:text-muted-foreground/35" width={canvasWidth} height={canvasHeight} viewBox={`${canvasOrigin.x} ${canvasOrigin.y} ${canvasWidth} ${canvasHeight}`} role="img" aria-label={labels.workflowEdges}>
               <defs>
                 {[...Object.values(EDGE_VISUALS), FALLBACK_EDGE_VISUAL].map((visual) => (
-                  <marker key={visual.markerId} id={`${canvasId}-${visual.markerId}`} markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-                    <path d="M0,0 L0,6 L9,3 z" fill={visual.stroke} />
+                  <marker key={visual.markerId} id={`${canvasId}-${visual.markerId}`} markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+                    <path d="m1 1 4 2-4 2" fill="none" stroke={visual.stroke} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
                   </marker>
                 ))}
               </defs>
@@ -1672,288 +1823,153 @@ export function TeamRunGraphCanvas({
                 if (!source || !target) {
                   return null;
                 }
-                const route = visibleGeometry.routes[edge.edgeId];
+                const route = Object.hasOwn(visibleGeometry.routes, edge.edgeId) ? visibleGeometry.routes[edge.edgeId] : undefined;
                 if (!route || !nodesMeasured) return null;
-                const path = route.points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
-                const labelX = route.label.x;
-                const labelY = route.label.y;
-                const edgeVisual = edgeVisualForEdge(edge);
-                const edgeLabel = edgeDisplayLabel(edge);
-                const isSelectedEdge = selectedEdgeId === edge.edgeId;
-                const isHoveredEdge = hoveredEdgeId === edge.edgeId;
-                const shouldShowEdgeLabel = Boolean(edgeLabel && (isSelectedEdge || isHoveredEdge));
-                return (
-                  <g key={edge.edgeId} onMouseEnter={() => setHoveredEdgeId(edge.edgeId)} onMouseLeave={() => setHoveredEdgeId((current) => current === edge.edgeId ? null : current)}>
-                    <path
-                      d={path}
-                      fill="none"
-                      stroke="transparent"
-                      strokeWidth="14"
-                      strokeLinecap="round"
-                      className="cursor-pointer"
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`${source.title ?? source.nodeId} → ${target.title ?? target.nodeId}: ${edge.sourcePort ?? edge.action ?? ''}`}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Enter' && event.key !== ' ') return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        setSelectedEdgeId(edge.edgeId);
-                        setConfigurationSheet({ kind: 'edge', edgeId: edge.edgeId });
-                      }}
-                      onFocus={() => setHoveredEdgeId(edge.edgeId)}
-                      onBlur={() => setHoveredEdgeId(null)}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setSelectedEdgeId(edge.edgeId);
-                        setConfigurationSheet({ kind: 'edge', edgeId: edge.edgeId });
-                      }}
-                    />
-                    <path
-                      d={path}
-                      fill="none"
-                      stroke={edgeVisual.stroke}
-                      strokeWidth={isSelectedEdge ? '3.5' : '2.5'}
-                      strokeLinecap="round"
-                      strokeDasharray={edgeVisual.dashArray}
-                      markerEnd={`url(#${canvasId}-${edgeVisual.markerId})`}
-                      className="pointer-events-none"
-                    />
-                    {shouldShowEdgeLabel ? (
-                      <foreignObject x={labelX - 54} y={labelY - 12} width="108" height="26">
-                        <button
-                          type="button"
-                          aria-label={edgeLabel}
-                          className={`w-full truncate rounded-full border px-2 py-1 text-center text-[10px] shadow-sm ${edgeVisual.labelClassName}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setSelectedEdgeId(edge.edgeId);
-                            setConfigurationSheet({ kind: 'edge', edgeId: edge.edgeId });
-                          }}
-                        >
-                          {edgeLabel}
-                        </button>
-                      </foreignObject>
-                    ) : null}
-                  </g>
-                );
+                return <TeamGraphEdge
+                  key={edge.edgeId}
+                  edge={edge}
+                  route={route}
+                  sourceTitle={source.title ?? source.nodeId}
+                  targetTitle={target.title ?? target.nodeId}
+                  selected={selectedEdgeId === edge.edgeId}
+                  hovered={hoveredEdgeId === edge.edgeId}
+                  canvasId={canvasId}
+                  onOpen={openEdge}
+                  onHover={setHoveredEdgeId}
+                  onLeave={leaveEdge}
+                />;
               })}
             </svg>
 
             {effectiveGraph.nodes.length === 0 ? (
-              <div className="absolute left-1/2 top-1/2 w-[22rem] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-dashed border-border bg-background/90 p-5 text-center shadow-sm">
-                <div className="text-sm font-semibold text-foreground">{titleLabel}</div>
+              <div className="absolute left-1/2 top-1/2 w-[22rem] max-w-full -translate-x-1/2 -translate-y-1/2 p-5 text-center">
+                <div className="text-sm font-medium text-foreground">{titleLabel}</div>
                 <div className="mt-2 text-xs text-muted-foreground">{emptyLabel}</div>
               </div>
             ) : null}
 
-            {positionedNodes.map((node) => {
-              const isSelected = selectedNode?.nodeId === node.nodeId;
-              const visual = visualForNodeKind(node.kind);
-              const NodeIcon = visual.Icon;
-              const connectionSources = node.sourcePorts ?? EMPTY_PORTS;
-              return (
-                <div
-                  key={node.nodeId}
-                  ref={(element) => { nodeElementsRef.current[node.nodeId] = element; }}
-                  data-node-id={node.nodeId}
-                  role="button"
-                  tabIndex={0}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (suppressClickNodeIdRef.current === node.nodeId) return;
-                    setSelectedNodeId(node.nodeId);
-                    setConfigurationSheet({ kind: 'node', nodeId: node.nodeId });
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setSelectedNodeId(node.nodeId);
-                      setConfigurationSheet({ kind: 'node', nodeId: node.nodeId });
-                    }
-                  }}
-                  onPointerDown={(event) => handleNodePointerDown(event, node)}
-                  onPointerMove={handleNodePointerMove}
-                  onPointerUp={(event) => { void handleNodePointerUp(event); }}
-                  onPointerCancel={handleNodePointerCancel}
-                  onLostPointerCapture={handleNodePointerCancel}
-                  className={`absolute select-none ${canEdit ? 'cursor-grab active:cursor-grabbing touch-none' : 'cursor-pointer'} rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
-                  style={{ left: node.x - canvasOrigin.x, top: node.y - canvasOrigin.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT, visibility: positions[node.nodeId] && nodeSizes[node.nodeId] ? 'visible' : 'hidden' }}
-                >
-                  <div className={`h-1 w-full rounded-t-[17px] ${visual.accentClassName}`} />
-                  {canEdit ? <>
-                  {node.targetPorts?.length === 1 && (!connectionDraft || edgeActionCandidates(nodeById.get(connectionDraft.sourceNodeId), connectionDraft.sourcePort, node).length > 0) ? <button
-                    type="button"
-                    aria-label={formatTemplate(labels.connectToNode, { title: node.title ?? node.nodeId })}
-                    className="group absolute -left-5 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => handleFinishConnection(event, node)}
-                  >
-                    <span className={`h-4 w-4 rounded-full border shadow-sm transition group-hover:ring-4 group-hover:ring-primary/10 group-focus-visible:ring-4 group-focus-visible:ring-primary/10 ${connectionDraft ? visual.handleClassName : 'border-border bg-background'}`} />
-                  </button> : null}
-                  <div className="absolute -right-5 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-1">
-                    {connectionSources.map((source) => (
-                      <button
-                        key={source}
-                        type="button"
-                        aria-label={`${formatTemplate(labels.connectFromNode, { title: node.title ?? node.nodeId })}: ${labels.portLabels[source] ?? source}`}
-                        title={labels.portLabels[source] ?? source}
-                        className="group grid h-8 w-10 place-items-center rounded-full"
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => handleStartConnection(event, node, source)}
-                      >
-                        <span className={`h-4 w-4 rounded-full border shadow-sm transition group-hover:ring-4 group-hover:ring-primary/10 group-focus-visible:ring-4 group-focus-visible:ring-primary/10 ${connectionDraft?.sourceNodeId === node.nodeId && connectionDraft.sourcePort === source ? visual.handleClassName : 'border-border bg-background'}`} />
-                      </button>
-                    ))}
-                  </div>
-                  </> : null}
-                  <div className="space-y-3 p-3">
-                    <div className="flex items-start gap-3">
-                      <div className={`grid h-10 w-10 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
-                        <NodeIcon className={`h-4 w-4 ${visualKindForNodeKind(node.kind) === 'join' ? '-rotate-45' : ''}`} />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-semibold tracking-tight text-foreground">{node.title ?? node.nodeId}</div>
-                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] uppercase tracking-wide opacity-80">
-                          <span className="rounded-full border border-border/80 bg-muted/70 px-1.5 py-0.5 text-muted-foreground">{node.kind ?? 'node'}</span>
-                          <span className="rounded-full border border-border/80 bg-muted/70 px-1.5 py-0.5 text-muted-foreground">{statusLabel(node.status, labels)}</span>
-                        </div>
-                      </div>
-                    </div>
-                    {(node.roleId ?? '') ? (
-                      <div className="flex items-center justify-between rounded-xl border border-border/80 bg-muted/50 px-2 py-1.5 text-[11px]">
-                        <span className="truncate text-muted-foreground">{executorLabel}</span>
-                        <span className="ml-2 truncate font-medium text-foreground">{(node.roleId ?? '')}</span>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              );
+            <div className="pointer-events-none absolute inset-0 [&>*]:pointer-events-auto" style={{ transform: `translate(${-canvasOrigin.x}px, ${-canvasOrigin.y}px)` }}>
+            {effectiveGraph.nodes.map((node) => {
+              const position = Object.hasOwn(visibleGeometry.positions, node.nodeId) ? visibleGeometry.positions[node.nodeId] : undefined;
+              const canConnectTo = node.targetPorts?.length === 1 && (!connectionDraft || edgeActionCandidates(nodeById.get(connectionDraft.sourceNodeId), connectionDraft.sourcePort, node).length > 0);
+              return <TeamGraphNodeCard
+                key={node.nodeId}
+                node={node}
+                x={position?.x ?? 0}
+                y={position?.y ?? 0}
+                geometry={nodeGeometryById.get(node.nodeId)!}
+                direction={direction}
+                visible={Boolean(position) && Object.hasOwn(nodeSizes, node.nodeId)}
+                selected={selectedNode?.nodeId === node.nodeId}
+                editable={canEdit && !mutationDisabled}
+                canConnectTo={canConnectTo}
+                connectionTargetActive={canConnectTo && Boolean(connectionDraft)}
+                activeSourcePort={connectionDraft?.sourceNodeId === node.nodeId ? connectionDraft.sourcePort : null}
+                labels={labels}
+                executorLabel={executorLabel}
+                binding={bindingsByNode.get(node.nodeId)}
+                artifacts={deliveriesByNode.get(node.nodeId) ?? EMPTY_ARTIFACTS}
+                events={nodeEvents}
+              />;
             })}
+            </div>
           </div>
           </div>
         </StableScrollArea>
 
+        {headerActions ? <div className={`pointer-events-none absolute top-4 z-20 flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-end gap-3 text-xs text-muted-foreground ${canEdit ? 'left-40 right-4' : 'left-4 right-4'}`}>
+          <div className="pointer-events-auto">{headerActions}</div>
+        </div> : null}
         {canEdit ? <NodePaletteControl
           labels={labels}
           isOpen={isNodePaletteOpen}
-          isSaving={isSaving || mutationPending}
-          onToggle={() => setNodePaletteOpen((open) => !open)}
-          onClose={() => setNodePaletteOpen(false)}
-          onAddNode={(kind) => { void handleAddNode(kind); }}
+          isSaving={isSaving || mutationPending || mutationDisabled}
+          onToggle={toggleNodePalette}
+          onClose={closeNodePalette}
+          onAddNode={addNode}
         /> : null}
         </div>
       </div>
 
-      <Sheet open={configurationSheet !== null} onOpenChange={(open) => {
-        if (!open && !isSaving && !mutationPending && sessionCreation !== 'pending') {
-          if (configurationSheet?.kind === 'node') closeNodeEditor();
-          else closeEdgeEditor();
-        }
-      }}>
-        {configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind ? (
-          <TeamNodeInspector
-            key={selectedNode.nodeId}
-            node={selectedNode}
-            kind={selectedNodeKind}
-            editable={canEdit}
-            pending={isSaving || mutationPending || sessionCreation === 'pending'}
-            isNew={Boolean(newNode)}
-            title={nodeTitle}
-            maxAttempts={nodeMaxAttempts}
-            maxAttemptsLimit={NODE_MAX_ATTEMPTS_LIMIT}
-            status={newNode ? '' : statusLabel(selectedNode.status, labels)}
-            statusClassName={statusTextTone(selectedNode.status)}
-            labels={labels}
-            error={formError}
-            onTitleChange={setNodeTitle}
-            onMaxAttemptsChange={setNodeMaxAttempts}
-            onSave={() => { void handleSaveNode(); }}
-            onDelete={() => { void handleDeleteNode(); }}
-            onClose={closeNodeEditor}
-          >
-            {selectedNodeKind === 'work' || selectedNodeKind === 'review' ? <TeamAssignmentEditor
-              kind={selectedNodeKind}
-              editable={canEdit}
-              disabled={isSaving || mutationPending || sessionCreation === 'pending'}
-              labels={labels}
-              roleId={canEdit ? roleId : selectedNode.roleId ?? ''}
-              sessionRef={canEdit ? selectedSessionRef : selectedNode.config?.sessionRef ?? ''}
-              roles={roleBindings}
-              bindingRequired={bindingRequired}
-              sessionCreation={sessionCreation}
-              onCreateSession={canCreateSession ? () => { void handleCreateSession(); } : undefined}
-              prompt={canEdit ? prompt : readNodePrompt(selectedNode)}
-              outputArtifactKind={canEdit ? outputArtifactKind : selectedNode.config?.outputArtifactKind ?? ''}
-              onBindingChange={changeRoleBinding}
-              onPromptChange={setPrompt}
-              onOutputArtifactKindChange={setOutputArtifactKind}
-            /> : null}
-            {selectedNodeKind === 'start' ? <TeamStartEditor
-              editable={canEdit}
-              disabled={isSaving || mutationPending}
-              labels={labels}
-              triggerMode={canEdit ? startTriggerMode : readStartTrigger(selectedNode).mode}
-              webhookPath={canEdit ? startWebhookPath : readStartTrigger(selectedNode).path}
-              webhookPublicBaseUrl={startWebhookPublicBaseUrl}
-              cronSchedule={canEdit ? startCronSchedule : readStartTrigger(selectedNode).cron}
-              webhookAuth={webhookAuth}
-              copiedWebhookPublicUrl={copiedWebhookPublicUrl}
-              onTriggerModeChange={setStartTriggerMode}
-              onWebhookPathChange={setStartWebhookPath}
-              onWebhookPublicBaseUrlChange={setStartWebhookPublicBaseUrl}
-              onCronScheduleChange={setStartCronSchedule}
-              onCopyWebhookPublicUrl={() => { void copyTextToClipboard(webhookPublicUrl, setCopiedWebhookPublicUrl); }}
-            /> : null}
-            {selectedNodeKind === 'script_review' ? <TeamScriptReviewEditor
-              editable={canEdit}
-              disabled={isSaving || mutationPending}
-              labels={labels}
-              rule={canEdit ? scriptReviewRule : selectedNode.config?.rule ?? ''}
-              onRuleChange={setScriptReviewRule}
-            /> : null}
-            {selectedNodeKind === 'human_decision' || selectedNodeKind === 'join' || selectedNodeKind === 'end' || selectedNodeKind === 'review' || selectedNodeKind === 'script_review' ? <TeamControlNodeDetails
-              kind={selectedNodeKind}
+      {configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind ? (
+        <TeamGraphNodeEditor
+          key={JSON.stringify([layoutScope, selectedNode.nodeId, canEdit])}
+          node={selectedNode}
+          kind={selectedNodeKind}
+          initialPosition={newNode?.position}
+          nodes={effectiveGraph.nodes}
+          edges={effectiveGraph.edges}
+          roles={roleBindings}
+          editable={canEdit}
+          mutationPending={isSaving || mutationPending}
+          mutationDisabled={mutationDisabled}
+          status={newNode ? '' : statusLabel(selectedNode.status, labels)}
+          statusClassName={statusTextTone(selectedNode.status)}
+          labels={labels}
+          webhookAuth={webhookAuth}
+          initialTab={configurationSheet.tab}
+          detailTabs={!newNode ? detailTabs : undefined}
+          renderDetails={!newNode ? (tab, onClose, pending) => tab === 'approval'
+            ? renderNodeApprovals?.(selectedNode.nodeId, onClose)
+            : teamId ? <TeamGraphNodeDetails
+              teamId={teamId}
+              runId={graphRunId}
               node={selectedNode}
               nodes={effectiveGraph.nodes}
               edges={effectiveGraph.edges}
-              labels={labels}
-            /> : null}
-          </TeamNodeInspector>
-        ) : configurationSheet?.kind === 'edge' && selectedEdge ? (
-          <TeamEdgeInspector
-            key={selectedEdge.edgeId}
-            edge={selectedEdge}
-            sourceNode={selectedEdgeSourceNode}
-            targetNode={selectedEdgeTargetNode}
-            editable={canEdit}
-            pending={isSaving || mutationPending}
-            isNew={Boolean(newEdge)}
-            sourcePort={canEdit ? edgeSourcePort : selectedEdge.sourcePort ?? ''}
-            targetPort={canEdit ? edgeTargetPort : selectedEdge.targetPort ?? ''}
-            action={canEdit ? edgeAction : selectedEdge.action ?? ''}
-            actions={canEdit ? edgeActions : edgeActionCandidates(selectedEdgeSourceNode, selectedEdge.sourcePort ?? '', selectedEdgeTargetNode)}
-            includeUpstreamResult={canEdit ? edgeIncludeUpstreamResult : selectedEdge.payload?.includeUpstreamResult !== false}
-            canSave={edgePortsValid && edgeActionValid}
-            status={newEdge ? '' : statusLabel(selectedEdge.status, labels)}
-            statusClassName={statusTextTone(selectedEdge.status)}
-            labels={labels}
-            error={formError}
-            onSourcePortChange={(sourcePort) => {
-              setEdgeSourcePort(sourcePort);
-              const actions = edgeActionCandidates(selectedEdgeSourceNode, sourcePort, selectedEdgeTargetNode);
-              if (actions.length === 1) setEdgeAction(actions[0]);
-            }}
-            onTargetPortChange={setEdgeTargetPort}
-            onActionChange={setEdgeAction}
-            onIncludeUpstreamResultChange={setEdgeIncludeUpstreamResult}
-            onSave={() => { void handleSaveEdge(); }}
-            onDelete={() => { void handleDeleteEdge(); }}
-            onClose={closeEdgeEditor}
-          />
-        ) : null}
-      </Sheet>
+              roles={roleBindings}
+              artifacts={runArtifacts}
+              loading={deliveriesLoading}
+              fileScope={fileScope}
+              workspaceStatus={workspaceStatus}
+              tab={tab}
+              initialSelection={configurationSheet.selection}
+              disabled={pending || mutationDisabled}
+              onReveal={onClose}
+            /> : tab === 'output' ? <TeamFilePreview artifacts={selectedNodeArtifacts} fileScope={fileScope} workspaceStatus={workspaceStatus} initialSelection={configurationSheet.selection} disabled={pending || mutationDisabled}>
+              <TeamNodeDeliveries
+                contextTitle={selectedNode.title}
+                artifacts={selectedNodeArtifacts}
+                loading={deliveriesLoading}
+                roles={roleBindings}
+                disabled={pending || mutationDisabled}
+                onReveal={onClose}
+              />
+            </TeamFilePreview> : null : undefined}
+          nodePatch={graphPatchNode}
+          onPatchGraph={submitGraphPatch}
+          onCreateSession={onCreateSession}
+          createSessionDisabledReason={createSessionDisabledReason}
+          onSaved={(nodeId) => {
+            setNewNode(null);
+            setSelectedNodeId(nodeId);
+            setConfigurationSheet(null);
+          }}
+          onDeleted={() => { setSelectedNodeId(null); closeNodeEditor(); }}
+          onClose={closeNodeEditor}
+        />
+      ) : configurationSheet?.kind === 'edge' && selectedEdge ? (
+        <TeamGraphEdgeEditor
+          key={JSON.stringify([layoutScope, selectedEdge.edgeId, canEdit])}
+          edge={selectedEdge}
+          sourceNode={selectedEdgeSourceNode}
+          targetNode={selectedEdgeTargetNode}
+          runId={graphRunId}
+          rework={effectiveGraph.rework}
+          isNew={Boolean(newEdge)}
+          editable={canEdit}
+          mutationPending={isSaving || mutationPending}
+          mutationDisabled={mutationDisabled}
+          status={newEdge ? '' : statusLabel(selectedEdge.status, labels)}
+          statusClassName={statusTextTone(selectedEdge.status)}
+          labels={labels}
+          edgePatch={graphPatchEdge}
+          onPatchGraph={submitGraphPatch}
+          onSaved={closeEdgeEditor}
+          onDeleted={() => { setSelectedEdgeId(null); closeEdgeEditor(); }}
+          onClose={closeEdgeEditor}
+        />
+      ) : null}
     </div>
   );
-}
+});

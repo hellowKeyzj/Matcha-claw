@@ -21,15 +21,31 @@ impl OrganizationFacts {
         if changes.is_empty() {
             return Ok(());
         }
+        let workspace_changed = changes.iter().any(|change| {
+            let key = match change {
+                RecordChange::Put(record) => &record.key,
+                RecordChange::Delete(key) => key,
+            };
+            matches!(key.kind, RecordKind::Team | RecordKind::RunHeader)
+        });
         let mut graphs: BTreeMap<String, Vec<RecordChange>> = BTreeMap::new();
+        let mut decision_changes = Vec::new();
         let mut puts = Vec::new();
         let mut deletes = Vec::new();
         for change in changes {
+            if let RecordChange::Put(record) = &change {
+                if record.key.kind == RecordKind::TeamPrompts {
+                    self.team_prompts = crate::store::records::prompts::decode(record)?;
+                    continue;
+                }
+            }
             let key = match &change {
                 RecordChange::Put(record) => &record.key,
                 RecordChange::Delete(key) => key,
             };
-            if graph_record(key.kind) {
+            if matches!(key.kind, RecordKind::Decision | RecordKind::DecisionEvent) {
+                decision_changes.push(change);
+            } else if graph_record(key.kind) {
                 graphs.entry(key.scope.clone()).or_default().push(change);
             } else {
                 match change {
@@ -38,6 +54,7 @@ impl OrganizationFacts {
                 }
             }
         }
+        execution::decision::apply_changes(&mut self.decisions, decision_changes, contents)?;
         let mut replaced_approvals = BTreeSet::new();
         for record in &puts {
             match record.key.kind {
@@ -53,18 +70,14 @@ impl OrganizationFacts {
                         ActivityId::new(&record.key.id).map_err(|_| StoreFault::CorruptRecord)?;
                     self.activities.remove_record(&id);
                 }
-                RecordKind::Decision => self
-                    .decisions
-                    .remove_decision(&record.key.scope, &record.key.id),
-                RecordKind::DecisionEvent => self.decisions.remove_event(&record.key.id),
                 RecordKind::Approval => {
-                    let header = run::decode_approval_header(record)?;
+                    let header = run::decode_approval_header(record, contents)?;
                     if self
                         .approvals
                         .get(&header.facts.approval_id)
                         .is_some_and(|current| current.facts() != &header.facts)
                     {
-                        self.approvals.remove(&header.facts.approval_id);
+                        self.remove_approval(&header.facts.approval_id);
                         replaced_approvals.insert(record.key.scope.as_str());
                     }
                 }
@@ -104,6 +117,10 @@ impl OrganizationFacts {
         for record in puts.iter().filter(|record| team_record(record.key.kind)) {
             match team::decode(record, contents)? {
                 TeamRecord::Team(value) => {
+                    if self.teams.get(value.team_id().as_str()).and_then(TeamFacts::workspace_directory_name)
+                        .is_some_and(|name| value.workspace_directory_name() != Some(name)) {
+                        return Err(StoreFault::CorruptRecord);
+                    }
                     self.teams
                         .insert(value.team_id().as_str().to_owned(), value);
                 }
@@ -128,6 +145,20 @@ impl OrganizationFacts {
                         .insert(value.run_id().as_str().to_owned(), value);
                 }
             }
+        }
+        for record in puts.iter().filter(|record| record.key.kind == RecordKind::Materialization) {
+            let team_id = TeamId::try_new(record.key.id.clone()).map_err(|_| StoreFault::CorruptRecord)?;
+            let groups = self.materializations.get(team_id.as_str()).ok_or(StoreFault::CorruptRecord)?;
+            validate_materialization(&self.teams, &team_id, groups).map_err(|_| StoreFault::CorruptRecord)?;
+        }
+        let header_runs = graphs.iter().filter(|(_, changes)| changes.iter().any(|change| {
+            match change {
+                RecordChange::Put(record) => record.key.kind == RecordKind::RunHeader,
+                RecordChange::Delete(key) => key.kind == RecordKind::RunHeader,
+            }
+        })).map(|(run_id, _)| run_id.clone()).collect::<Vec<_>>();
+        for run_id in &header_runs {
+            self.remove_run_delivery_indexes(run_id).map_err(|_| StoreFault::CorruptRecord)?;
         }
         for (run_id, changes) in graphs {
             if changes.iter().any(|change| {
@@ -163,11 +194,12 @@ impl OrganizationFacts {
             }
         }
 
+        for run_id in &header_runs {
+            self.insert_run_delivery_indexes(run_id).map_err(|_| StoreFault::CorruptRecord)?;
+        }
         let mut resolutions = Vec::new();
         let mut commands = Vec::new();
         let mut events = Vec::new();
-        let mut decisions = Vec::new();
-        let mut decision_events = Vec::new();
         let mut tasks = Vec::new();
         let mut runners = Vec::new();
         let mut mailbox = Vec::new();
@@ -177,9 +209,7 @@ impl OrganizationFacts {
         {
             if !matches!(
                 record.key.kind,
-                RecordKind::Decision
-                    | RecordKind::DecisionEvent
-                    | RecordKind::Task
+                RecordKind::Task
                     | RecordKind::Runner
                     | RecordKind::Mailbox
             ) {
@@ -191,11 +221,12 @@ impl OrganizationFacts {
                     .control_resolutions
                     .import_record(run::decode_control(&record)?),
                 RecordKind::Approval => {
-                    let header = run::decode_approval_header(&record)?;
-                    let approval = self
-                        .approvals
-                        .entry(header.facts.approval_id.clone())
-                        .or_insert_with(|| Approval::request(header.facts.clone()));
+                    let header = run::decode_approval_header(&record, contents)?;
+                    if !self.approvals.contains_key(&header.facts.approval_id) {
+                        self.insert_approval(Approval::request(header.facts.clone()));
+                    }
+                    let approval = self.approvals.get_mut(&header.facts.approval_id)
+                        .expect("imported approval exists");
                     approval
                         .import_header(header.facts, header.status)
                         .map_err(|_| StoreFault::CorruptRecord)?;
@@ -209,8 +240,6 @@ impl OrganizationFacts {
                 | RecordKind::Delivery
                 | RecordKind::Evidence
                 | RecordKind::Artifact
-                | RecordKind::Decision
-                | RecordKind::DecisionEvent
                 | RecordKind::Task
                 | RecordKind::Runner
                 | RecordKind::Mailbox => match execution::decode(&record, contents)? {
@@ -227,8 +256,9 @@ impl OrganizationFacts {
                     }
                     ExecutionRecord::Evidence(value) => self.evidence.restore_record(value),
                     ExecutionRecord::Artifact(value) => self.artifacts.restore_record(value),
-                    ExecutionRecord::Decision(value) => decisions.push(value),
-                    ExecutionRecord::DecisionEvent(value) => decision_events.push(value),
+                    ExecutionRecord::Decision(_) | ExecutionRecord::DecisionEvent(_) => {
+                        return Err(StoreFault::CorruptRecord);
+                    }
                     ExecutionRecord::Task { ordinal, record } => tasks.push((ordinal, record)),
                     ExecutionRecord::Runner { ordinal, record } => runners.push((ordinal, record)),
                     ExecutionRecord::Mailbox { ordinal, record } => mailbox.push((ordinal, record)),
@@ -273,26 +303,6 @@ impl OrganizationFacts {
                 .import_event(event)
                 .map_err(|_| StoreFault::CorruptRecord)?;
         }
-        decisions.sort_by(|left, right| {
-            left.run_id()
-                .cmp(right.run_id())
-                .then(left.sequence().cmp(&right.sequence()))
-        });
-        for decision in decisions {
-            self.decisions
-                .restore_decision(decision)
-                .map_err(|_| StoreFault::CorruptRecord)?;
-        }
-        decision_events.sort_by(|left, right| {
-            left.run_id()
-                .cmp(right.run_id())
-                .then(left.sequence().cmp(&right.sequence()))
-        });
-        for event in decision_events {
-            self.decisions
-                .restore_event(event)
-                .map_err(|_| StoreFault::CorruptRecord)?;
-        }
         tasks.sort_by_key(|(ordinal, _)| *ordinal);
         for (ordinal, record) in tasks {
             self.task_board
@@ -310,6 +320,15 @@ impl OrganizationFacts {
             self.task_board
                 .restore_mailbox(ordinal, record)
                 .map_err(|_| StoreFault::CorruptRecord)?;
+        }
+        if workspace_changed {
+            let mut workspace_names = BTreeSet::new();
+            for team in self.teams.values() {
+                if team.workspace_directory_name().is_some_and(|name| !workspace_names.insert(name.to_lowercase())) {
+                    return Err(StoreFault::CorruptRecord);
+                }
+            }
+            for run in self.runs.values() { self.validate_workspace(run).map_err(|_| StoreFault::CorruptRecord)?; }
         }
         Ok(())
     }
@@ -344,7 +363,7 @@ impl OrganizationFacts {
                 self.purged_runs.remove(&key.id);
             }
             RecordKind::Approval => {
-                self.approvals.remove(&key.scope);
+                self.remove_approval(&key.scope);
             }
             RecordKind::Trigger => self.triggers.remove_record(&key.scope, &key.id),
             RecordKind::ControlResolution => self.control_resolutions.remove_record(&key.id),
@@ -364,10 +383,8 @@ impl OrganizationFacts {
                 &crate::run::artifact::ArtifactId::new(&key.id)
                     .map_err(|_| StoreFault::CorruptRecord)?,
             ),
-            RecordKind::Decision => self.decisions.remove_decision(&key.scope, &key.id),
-            RecordKind::DecisionEvent => self.decisions.remove_event(&key.id),
             RecordKind::Task | RecordKind::Runner | RecordKind::Mailbox => {
-                let (team, run) = task_scope(&key.scope)?;
+                let (team, run) = execution::split_scope(&key.scope)?;
                 match key.kind {
                     RecordKind::Task => self.task_board.remove_task(team, run, &key.id),
                     RecordKind::Runner => self.task_board.remove_runner(team, run, &key.id),
@@ -402,14 +419,4 @@ fn team_record(kind: RecordKind) -> bool {
             | RecordKind::WorkflowAdmission
             | RecordKind::PurgedRun
     )
-}
-
-fn task_scope(scope: &str) -> Result<(&str, &str), StoreFault> {
-    let (length, identity) = scope.split_once(':').ok_or(StoreFault::CorruptRecord)?;
-    let length = length
-        .parse::<usize>()
-        .map_err(|_| StoreFault::CorruptRecord)?;
-    identity
-        .split_at_checked(length)
-        .ok_or(StoreFault::CorruptRecord)
 }

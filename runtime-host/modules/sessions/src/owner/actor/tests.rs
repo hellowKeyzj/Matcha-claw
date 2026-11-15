@@ -281,7 +281,7 @@ impl Harness {
         let handle = SessionHandle::new(owner.clone(), directory, shared.clone());
         assert!(matches!(
             handle
-                .ensure_bound_session(identity(), source())
+                .ensure_bound_session(identity(), None, source())
                 .await
                 .unwrap(),
             SessionEnsureOutcome::Created(_)
@@ -408,14 +408,13 @@ async fn send_binds_actual_native_run_before_early_terminal_and_preserves_option
             let mut harness = Harness::new().await;
             let mut accepted = harness.begin_send(Some(context())).await;
             let (reply, terminal) = oneshot::channel();
-            let permit = harness.shared.terminal_permit().await;
             // Ingress is admitted while native send is still awaiting its acceptance receipt.
             harness
                 .owner
-                .command(SessionCommand::TerminalIngest {
+                .command(SessionCommand::Ingest {
                     identity: identity(),
                     event: event(phase, text),
-                    permit,
+                    permit: None,
                     reply,
                 })
                 .await
@@ -432,10 +431,12 @@ async fn send_binds_actual_native_run_before_early_terminal_and_preserves_option
                 }
             );
             assert!(matches!(
-                terminal.await.unwrap(),
+                terminal.await.unwrap().unwrap_or_else(|_| panic!("terminal admission backpressured")),
                 SessionIngestOutcome::Applied(_)
             ));
-            drop(harness.shared.terminal_permit().await);
+            while !harness.state().pending_terminals.is_empty() {
+                tokio::task::yield_now().await;
+            }
             {
                 let terminals = harness.terminals.0.lock().unwrap();
                 assert_eq!(terminals.len(), 1);
@@ -541,7 +542,7 @@ async fn hydrated_terminal_uses_pending_context_once_and_history_keeps_none() {
         vec!["hydrated answer"]
     );
     let mut lane = harness.shared.open_lane(&session_identity_lane_key(&identity()));
-    lane.terminal_permit = Some(harness.shared.terminal_permit().await);
+    lane.terminal_permit = Some(harness.shared.terminal_permit(1).await);
     assert!(lane.retain_terminals(&harness.shared, &mut state, &first));
     lane.state = Some(state);
     assert!(lane.terminal_delivered(&harness.shared, identity(), NATIVE_RUN.into(), None).await);

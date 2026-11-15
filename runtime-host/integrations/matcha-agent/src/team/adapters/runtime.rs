@@ -121,15 +121,17 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
     fn confirm_team_run_receipt(
         &self,
         receipt: organization::RunRuntimeReceipt,
+        workspace: Option<organization::RunWorkspace>,
     ) -> OwnedRuntimeFuture<organization::RuntimeReceiptOutcome> {
         let confirmation =
-            self.confirm_team_run_receipt_cancellable(receipt, CancellationToken::new());
+            self.confirm_team_run_receipt_cancellable(receipt, workspace, CancellationToken::new());
         Box::pin(async move { confirmation.await.0 })
     }
 
     fn confirm_team_run_receipt_cancellable(
         &self,
         receipt: organization::RunRuntimeReceipt,
+        workspace: Option<organization::RunWorkspace>,
         cancellation: CancellationToken,
     ) -> OwnedRuntimeFuture<(
         organization::RuntimeReceiptOutcome,
@@ -137,13 +139,14 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
     )> {
         let client = self.native_client();
         Box::pin(async move {
-            native_effects::confirm(client, receipt, cancellation, &mut organization::RoleSessionSubmission::Settled).await
+            native_effects::confirm(client, receipt, workspace, cancellation, &mut organization::RoleSessionSubmission::Settled).await
         })
     }
 
     fn create_team_role_session_cancellable(
         &self,
         binding: organization::RoleSessionReceipt,
+        workspace: Option<organization::RunWorkspace>,
         cancellation: CancellationToken,
     ) -> OwnedRuntimeFuture<organization::RoleSessionCreationOutcome> {
         let client = self.native_client();
@@ -151,7 +154,7 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
             let receipt = organization::RunRuntimeReceipt::try_new(binding.team_run().clone(), vec![binding])
                 .expect("one binding is a valid run receipt");
             let mut submission = organization::RoleSessionSubmission::Settled;
-            let (outcome, failure) = native_effects::confirm(client, receipt, cancellation, &mut submission).await;
+            let (outcome, failure) = native_effects::confirm(client, receipt, workspace, cancellation, &mut submission).await;
             organization::RoleSessionCreationOutcome { outcome, failure, submission }
         })
     }
@@ -159,12 +162,25 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
     fn readback_team_role_session_cancellable(
         &self,
         binding: organization::RoleSessionReceipt,
+        workspace: Option<organization::RunWorkspace>,
         cancellation: CancellationToken,
     ) -> OwnedRuntimeFuture<(
         organization::RuntimeReceiptOutcome,
         Option<organization::TeamCreationFailure>,
     )> {
-        Box::pin(native_effects::readback(self.native_client(), binding, cancellation))
+        Box::pin(native_effects::readback(self.native_client(), binding, workspace, cancellation))
+    }
+
+    fn validate_run_files(
+        &self,
+        binding: organization::RoleSessionReceipt,
+        workspace: organization::RunWorkspace,
+        paths: Vec<String>,
+        cancellation: CancellationToken,
+    ) -> OwnedRuntimeFuture<Result<(), organization::RunFileValidationError>> {
+        Box::pin(native_effects::validate_run_files(
+            self.native_client(), binding, workspace, paths, cancellation,
+        ))
     }
 
     fn abort_role_sessions(
@@ -179,9 +195,23 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
         bindings: Vec<organization::RoleSessionReceipt>,
         cancellation: CancellationToken,
     ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
-        Box::pin(native_effects::abort(
+        Box::pin(native_effects::confirm_cancellation(
             self.native_client(),
             bindings,
+            true,
+            cancellation,
+        ))
+    }
+
+    fn readback_role_cancellation_cancellable(
+        &self,
+        bindings: Vec<organization::RoleSessionReceipt>,
+        cancellation: CancellationToken,
+    ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
+        Box::pin(native_effects::confirm_cancellation(
+            self.native_client(),
+            bindings,
+            false,
             cancellation,
         ))
     }

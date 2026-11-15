@@ -107,6 +107,7 @@ async fn handle_request(
             return Response::bad_request();
         }
     };
+    drop(verifier);
     let command = match request.into_command(trace_id.map(str::to_owned)) {
         Ok(command) => command,
         Err(_) => {
@@ -140,7 +141,6 @@ async fn handle_request(
         session.record_boundary_outcome("sessions.model", crate::call::SessionsCallOutcome::Unsupported).await;
         return Response::from_delivery(SessionModelSelectionDelivery::Unsupported);
     }
-    drop(verifier);
     let outcome = match session.select_model(command).await {
         Ok(outcome) => outcome,
         Err(_) => {

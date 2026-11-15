@@ -1,3 +1,5 @@
+use std::{collections::HashMap, sync::Arc};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -85,12 +87,43 @@ impl std::fmt::Debug for TeamRunPublicMessage {
     }
 }
 
-struct Message<'a> {
-    id: String,
-    index: usize,
-    terminal: &'a crate::run::delivery::TerminalObservation,
-    output: &'a crate::TeamNodeOutput,
-    body: &'a str,
+#[derive(Default)]
+pub(crate) struct TeamRunMessageProjectionCache {
+    current: Option<MessageProjection>,
+}
+
+impl TeamRunMessageProjectionCache {
+    pub(crate) fn clear(&mut self) {
+        self.current = None;
+    }
+}
+
+struct MessageProjection {
+    // Revalidate current attempts and eligible terminal metadata before reusing locators.
+    dependencies: [u8; 32],
+    // Pin immutable bodies so removed outputs cannot reuse their allocation identity.
+    contents: Vec<Arc<[String]>>,
+    revision_prefix: Sha256,
+    messages: Vec<MessageLocation>,
+    by_id: HashMap<String, usize>,
+    missing: bool,
+}
+
+pub(super) struct MessageLocation {
+    pub(super) id: String,
+    pub(super) terminal_index: usize,
+    pub(super) body_index: usize,
+}
+
+impl MessageLocation {
+    fn output<'a>(
+        &self,
+        terminals: &[&'a crate::run::delivery::TerminalObservation],
+    ) -> &'a crate::TeamNodeOutput {
+        terminals[self.terminal_index]
+            .output()
+            .expect("message location has a validated output")
+    }
 }
 
 pub(super) fn project_messages(
@@ -98,6 +131,7 @@ pub(super) fn project_messages(
     run: &GraphRunFacts,
     artifacts: &[TeamRunPublicArtifact],
     cursor: Option<&TeamRunMessageCursor>,
+    cache: &mut TeamRunMessageProjectionCache,
 ) -> (Vec<TeamRunPublicMessage>, TeamRunMessagePage, bool) {
     let run_id = run.graph().definition().run_id().as_str();
     let mut digest = Sha256::new();
@@ -123,10 +157,15 @@ pub(super) fn project_messages(
             completed.insert(attempt.fence().node_execution_id().as_str());
         }
     }
-    let mut messages = Vec::new();
-    for delivery in facts.deliveries().deliveries().filter(|delivery| {
-        delivery.facts().run_id == run_id && delivery.facts().team_id == run.team().as_str()
-    }) {
+    let mut dependencies = Sha256::new();
+    dependencies.update(digest.clone().finalize());
+    let mut terminals = Vec::new();
+    let mut content_index = 0;
+    let mut contents_match = cache.current.is_some();
+    for delivery in facts
+        .deliveries_for_run(run_id)
+        .filter(|delivery| delivery.facts().team_id == run.team().as_str())
+    {
         let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
             continue;
         };
@@ -146,33 +185,98 @@ pub(super) fn project_messages(
             continue;
         }
         completed.remove(observation.fence().node_execution_id().as_str());
-        hash_field(&mut digest, observation.delivery_id().as_str().as_bytes());
+        hash_field(
+            &mut dependencies,
+            observation.delivery_id().as_str().as_bytes(),
+        );
+        hash_field(&mut dependencies, observation.node_id().as_bytes());
+        hash_field(
+            &mut dependencies,
+            observation.fence().attempt_id().as_str().as_bytes(),
+        );
+        hash_field(
+            &mut dependencies,
+            observation.fence().node_execution_id().as_str().as_bytes(),
+        );
+        hash_field(&mut dependencies, observation.role_id().as_bytes());
+        dependencies.update(observation.observed_at().to_le_bytes());
+        dependencies.update([u8::from(observation.output().is_some())]);
+        terminals.push(observation);
         let Some(output) = observation.output() else {
             missing = true;
             continue;
         };
+        contents_match &= cache
+            .current
+            .as_ref()
+            .and_then(|current| current.contents.get(content_index))
+            .is_some_and(|content| Arc::ptr_eq(content, output.business_messages_identity()));
+        content_index += 1;
         if output.business_messages().is_empty() {
             missing = true;
         }
-        for (index, body) in output.business_messages().iter().enumerate() {
-            let mut identity = Sha256::new();
-            hash_field(&mut identity, run_id.as_bytes());
-            hash_field(&mut identity, observation.delivery_id().as_str().as_bytes());
-            identity.update((index as u64).to_le_bytes());
-            let id = format!("team-result-{:x}", identity.finalize());
-            hash_field(&mut digest, id.as_bytes());
-            hash_field(&mut digest, body.as_bytes());
-            messages.push(Message {
-                id,
-                index,
-                terminal: observation,
-                output,
-                body,
-            });
-        }
     }
     missing |= !completed.is_empty();
-    digest.update([u8::from(missing)]);
+    dependencies.update((terminals.len() as u64).to_le_bytes());
+    dependencies.update([u8::from(missing)]);
+    let dependencies: [u8; 32] = dependencies.finalize().into();
+    if !contents_match
+        || cache.current.as_ref().is_none_or(|current| {
+            current.dependencies != dependencies || current.contents.len() != content_index
+        })
+    {
+        let mut messages = Vec::new();
+        let mut contents = Vec::with_capacity(content_index);
+        for (terminal_index, observation) in terminals.iter().enumerate() {
+            hash_field(&mut digest, observation.delivery_id().as_str().as_bytes());
+            let Some(output) = observation.output() else {
+                continue;
+            };
+            contents.push(Arc::clone(output.business_messages_identity()));
+            for (body_index, body) in output.business_messages().iter().enumerate() {
+                let id = message_id(run_id, observation, body_index);
+                hash_field(&mut digest, id.as_bytes());
+                hash_field(&mut digest, body.as_bytes());
+                messages.push(MessageLocation {
+                    id,
+                    terminal_index,
+                    body_index,
+                });
+            }
+        }
+        digest.update([u8::from(missing)]);
+        messages.sort_by(|left, right| {
+            let left_terminal = terminals[left.terminal_index];
+            let right_terminal = terminals[right.terminal_index];
+            left_terminal
+                .observed_at()
+                .cmp(&right_terminal.observed_at())
+                .then_with(|| {
+                    left_terminal
+                        .delivery_id()
+                        .cmp(right_terminal.delivery_id())
+                })
+                .then_with(|| left.body_index.cmp(&right.body_index))
+        });
+        let mut by_id = HashMap::with_capacity(messages.len());
+        for (index, message) in messages.iter().enumerate() {
+            by_id.entry(message.id.clone()).or_insert(index);
+        }
+        cache.current = Some(MessageProjection {
+            dependencies,
+            contents,
+            revision_prefix: digest,
+            messages,
+            by_id,
+            missing,
+        });
+    }
+    let projection = cache
+        .current
+        .as_ref()
+        .expect("message projection was rebuilt or validated");
+    // Preserve the original revision bytes; only the immutable message prefix is reused.
+    let mut digest = projection.revision_prefix.clone();
     for artifact in artifacts {
         // This fixed DTO contains no maps or fallible custom serializers.
         hash_field(
@@ -181,29 +285,37 @@ pub(super) fn project_messages(
         );
     }
     let revision = format!("{:x}", digest.finalize());
-    messages.sort_by(|left, right| {
-        left.terminal
-            .observed_at()
-            .cmp(&right.terminal.observed_at())
-            .then_with(|| {
-                left.terminal
-                    .delivery_id()
-                    .cmp(right.terminal.delivery_id())
-            })
-            .then_with(|| left.index.cmp(&right.index))
-    });
+    page_messages(
+        run_id,
+        &terminals,
+        &projection.messages,
+        &projection.by_id,
+        revision,
+        cursor,
+        projection.missing,
+    )
+}
+
+pub(super) fn page_messages(
+    run_id: &str,
+    terminals: &[&crate::run::delivery::TerminalObservation],
+    messages: &[MessageLocation],
+    by_id: &HashMap<String, usize>,
+    revision: String,
+    cursor: Option<&TeamRunMessageCursor>,
+    missing: bool,
+) -> (Vec<TeamRunPublicMessage>, TeamRunMessagePage, bool) {
     let start = match cursor {
         None => Some((0, 0)),
-        Some(cursor) if cursor.revision == revision => messages
-            .iter()
-            .position(|message| message.id == cursor.message_id)
+        Some(cursor) if cursor.revision == revision => by_id
+            .get(&cursor.message_id)
+            .copied()
             .and_then(|index| {
+                let message = &messages[index];
+                let body = &message.output(terminals).business_messages()[message.body_index];
                 usize::try_from(cursor.body_offset)
                     .ok()
-                    .filter(|offset| {
-                        *offset < messages[index].body.len()
-                            && messages[index].body.is_char_boundary(*offset)
-                    })
+                    .filter(|offset| *offset < body.len() && body.is_char_boundary(*offset))
                     .map(|offset| (index, offset))
             }),
         Some(_) => None,
@@ -223,8 +335,11 @@ pub(super) fn project_messages(
     let mut remaining = PAGE_BODY_BYTES;
     while index < messages.len() && page.len() < PAGE_MESSAGES && remaining > 0 {
         let message = &messages[index];
-        let mut end = message.body.len().min(offset + remaining);
-        while !message.body.is_char_boundary(end) {
+        let terminal = terminals[message.terminal_index];
+        let output = message.output(terminals);
+        let body = &output.business_messages()[message.body_index];
+        let mut end = body.len().min(offset + remaining);
+        while !body.is_char_boundary(end) {
             end -= 1;
         }
         if end == offset {
@@ -233,28 +348,23 @@ pub(super) fn project_messages(
         page.push(TeamRunPublicMessage {
             message_id: message.id.clone(),
             run_id: run_id.to_owned(),
-            node_id: message.terminal.node_id().to_owned(),
-            node_execution_id: message
-                .terminal
-                .fence()
-                .node_execution_id()
-                .as_str()
-                .to_owned(),
-            attempt_id: message.terminal.fence().attempt_id().as_str().to_owned(),
+            node_id: terminal.node_id().to_owned(),
+            node_execution_id: terminal.fence().node_execution_id().as_str().to_owned(),
+            attempt_id: terminal.fence().attempt_id().as_str().to_owned(),
             kind: "note",
-            from_role_id: message.terminal.role_id().to_owned(),
+            from_role_id: terminal.role_id().to_owned(),
             to_role_id: "",
-            summary: message.output.summary().to_owned(),
-            body: message.body[offset..end].to_owned(),
+            summary: output.summary().to_owned(),
+            body: body[offset..end].to_owned(),
             body_offset: offset,
-            body_bytes: message.body.len(),
-            body_complete: end == message.body.len(),
+            body_bytes: body.len(),
+            body_complete: end == body.len(),
             failure_items: Vec::new(),
             idempotency_key: "",
-            created_at: message.terminal.observed_at(),
+            created_at: terminal.observed_at(),
         });
         remaining -= end - offset;
-        if end == message.body.len() {
+        if end == body.len() {
             index += 1;
             offset = 0;
         } else {
@@ -284,7 +394,19 @@ pub(super) fn project_messages(
     )
 }
 
-fn hash_field(digest: &mut Sha256, bytes: &[u8]) {
+pub(super) fn message_id(
+    run_id: &str,
+    observation: &crate::run::delivery::TerminalObservation,
+    body_index: usize,
+) -> String {
+    let mut identity = Sha256::new();
+    hash_field(&mut identity, run_id.as_bytes());
+    hash_field(&mut identity, observation.delivery_id().as_str().as_bytes());
+    identity.update((body_index as u64).to_le_bytes());
+    format!("team-result-{:x}", identity.finalize())
+}
+
+pub(super) fn hash_field(digest: &mut Sha256, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_le_bytes());
     digest.update(bytes);
 }

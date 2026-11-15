@@ -16,19 +16,21 @@ use crate::{
         WorkspaceBinaryFailure, WorkspaceListFailure, WorkspaceMediaFailure, WorkspaceReadFailure,
         WorkspaceStatFailure, WorkspaceWriteFailure,
     },
-    ports::{WorkspaceBinding, WorkspaceRequestAdmission, WorkspaceRuntimeDirectory},
+    ports::{TeamRunWorkspaceReader, WorkspaceBinding, WorkspaceRequestAdmission, WorkspaceRuntimeDirectory},
     session_images::SessionImageFailure,
 };
 
 pub struct WorkspaceOwnerInput {
     pub admission: Arc<dyn WorkspaceRequestAdmission>,
     pub runtime_directory: Arc<dyn WorkspaceRuntimeDirectory>,
+    pub team_runs: Arc<dyn TeamRunWorkspaceReader>,
 }
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceShared {
     admission: Arc<dyn WorkspaceRequestAdmission>,
     runtime_directory: Arc<dyn WorkspaceRuntimeDirectory>,
+    team_runs: Arc<dyn TeamRunWorkspaceReader>,
     pub(crate) ingress: Arc<Mutex<()>>,
     effects: Arc<Mutex<Effects>>,
 }
@@ -51,6 +53,7 @@ impl WorkspaceOwner {
             shared: WorkspaceShared {
                 admission: input.admission,
                 runtime_directory: input.runtime_directory,
+                team_runs: input.team_runs,
                 ingress: Arc::new(Mutex::new(())),
                 effects: Arc::new(Mutex::new(Effects {
                     tasks: Some(JoinSet::new()),
@@ -571,6 +574,7 @@ impl WorkspaceShared {
         }
         match selection {
             WorkspaceSelection::Agent(agent_id) => ops.bind_agent_workspace(agent_id).await.ok(),
+            WorkspaceSelection::TeamRun { team_id, run_id, access } => self.team_runs.bind(endpoint, team_id, run_id, access).await.ok(),
             WorkspaceSelection::Session(session_key) => ops.bind_workspace(session_key).await.ok(),
         }
     }

@@ -231,7 +231,7 @@ pub(super) async fn set(
     let _: Sandbox =
         serde_json::from_value(request.sandbox.clone()).map_err(|_| SandboxError::Shape)?;
     let (platform, wsl1) = platform().await?;
-    let _guard = sessions.agent_guard(&target.agent_id).await;
+    let _guard = sessions.agent_scope(&target.agent_id).await;
     // Binding is checked without changing the running process or asking it to enable isolation.
     if let Some(session_id) = &target.session_id {
         let snapshot = sessions.native_snapshot(session_id).await?;

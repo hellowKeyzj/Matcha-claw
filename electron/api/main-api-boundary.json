@@ -60,6 +60,7 @@
     "team-graph.ts",
     "team-lifecycle.ts",
     "team-public.ts",
+    "team-prompts.ts",
     "team-task-board.ts",
     "toolchain.ts",
     "team-role-sessions.ts",
@@ -357,6 +358,7 @@
     "/api/team/lifecycle",
     "/api/team/manual-materialize-and-create",
     "/api/team/public",
+    "/api/team/prompts",
     "/api/team/skill",
     "/api/team/task-board",
     "/api/team/trigger",
@@ -1550,6 +1552,10 @@
     [
       "POST",
       "/api/team/public"
+    ],
+    [
+      "POST",
+      "/api/team/prompts"
     ],
     [
       "POST",

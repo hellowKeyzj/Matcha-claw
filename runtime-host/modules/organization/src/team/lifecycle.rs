@@ -1,10 +1,64 @@
 use crate::{
     MaterializationOperationOutcome, MaterializationReceipt, MaterializationRejection,
-    RoleMaterializationAgent, RoleMaterializationOwnership, TeamMaterializationRemoval,
-    TeamMaterializationRequest,
+    RoleMaterializationAgent, RoleMaterializationOwnership, RoleMaterializationReceipt,
+    RuntimeEndpointReference, TeamId, TeamMaterializationRemoval, TeamMaterializationRequest,
 };
 
-/// The durable Organization-owned state for one Team's provider materialization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TeamMaterializationGroups {
+    pub(crate) requests: Option<Vec<TeamMaterializationRequest>>,
+    pub(crate) groups: Vec<TeamMaterializationLifecycle>,
+}
+
+impl TeamMaterializationGroups {
+    pub(crate) fn team(&self) -> Option<&TeamId> {
+        self.groups.first().and_then(TeamMaterializationLifecycle::team)
+    }
+
+    pub(crate) fn groups(&self) -> &[TeamMaterializationLifecycle] {
+        &self.groups
+    }
+
+    pub(crate) fn confirmed(&self) -> Option<ConfirmedTeamMaterialization<'_>> {
+        (!self.groups.is_empty() && self.groups.iter().all(|group| {
+            matches!(group, TeamMaterializationLifecycle::Confirmed(_))
+        })).then_some(ConfirmedTeamMaterialization { groups: &self.groups })
+    }
+
+    pub(crate) fn retained_receipts(&self) -> Option<ConfirmedTeamMaterialization<'_>> {
+        (!self.groups.is_empty() && self.groups.iter().all(|group| group.receipt().is_some()))
+            .then_some(ConfirmedTeamMaterialization { groups: &self.groups })
+    }
+
+    pub(crate) fn can_transition_from(&self, previous: &Self) -> bool {
+        self.requests == previous.requests && self.groups.len() == previous.groups.len()
+            && previous.groups.iter().all(|old| self.groups.iter().find(|group| {
+                group.endpoint() == old.endpoint()
+            }).is_some_and(|group| group.can_transition_from(old)))
+    }
+}
+
+/// A borrowed complete Team view; each receipt retains its single native endpoint.
+#[derive(Clone, Copy, Debug)]
+pub struct ConfirmedTeamMaterialization<'a> {
+    groups: &'a [TeamMaterializationLifecycle],
+}
+
+impl<'a> ConfirmedTeamMaterialization<'a> {
+    pub fn team(&self) -> &'a TeamId {
+        self.groups[0].team().expect("a confirmed Team has a native receipt")
+    }
+
+    pub fn receipts(self) -> impl Iterator<Item = &'a MaterializationReceipt> + 'a {
+        self.groups.iter().filter_map(TeamMaterializationLifecycle::receipt)
+    }
+
+    pub fn roles(self) -> impl Iterator<Item = &'a RoleMaterializationReceipt> + 'a {
+        self.receipts().flat_map(|receipt| receipt.roles())
+    }
+}
+
+/// The durable Organization-owned state for one Team's endpoint materialization.
 ///
 /// This records intent and verified facts separately. Provider acceptance is not a
 /// materialization receipt: without a provider-owned fact it becomes `OutcomeUnknown`.
@@ -75,6 +129,28 @@ impl TeamMaterializationLifecycle {
             Self::Tombstoned(TombstonedMaterialization::None(request)) => {
                 Some(request.intent().team())
             }
+        }
+    }
+
+    pub(crate) fn request(&self) -> Option<&TeamMaterializationRequest> {
+        match self {
+            Self::Requested(request) | Self::OutcomeUnknown(request)
+            | Self::Rejected { request, .. }
+            | Self::Tombstoned(TombstonedMaterialization::None(request))
+            | Self::Tombstoned(TombstonedMaterialization::OutcomeUnknown(request)) => Some(request),
+            Self::Confirmed(_)
+            | Self::Tombstoned(TombstonedMaterialization::Confirmed { .. }) => None,
+        }
+    }
+
+    pub fn endpoint(&self) -> &RuntimeEndpointReference {
+        match self {
+            Self::Requested(request) | Self::OutcomeUnknown(request)
+            | Self::Rejected { request, .. }
+            | Self::Tombstoned(TombstonedMaterialization::None(request))
+            | Self::Tombstoned(TombstonedMaterialization::OutcomeUnknown(request)) => request.intent().endpoint(),
+            Self::Confirmed(receipt)
+            | Self::Tombstoned(TombstonedMaterialization::Confirmed { receipt, .. }) => receipt.endpoint(),
         }
     }
 
@@ -336,7 +412,7 @@ fn cleanup_outcome(
     }
 }
 
-fn materialization_matches_request(
+pub(crate) fn materialization_matches_request(
     receipt: &MaterializationReceipt,
     request: &TeamMaterializationRequest,
 ) -> bool {

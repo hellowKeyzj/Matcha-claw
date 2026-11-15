@@ -89,6 +89,19 @@ impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
                 .map_err(|_| ())
         })
     }
+
+    fn video_task_refresh(
+        &self,
+        request: openclaw::gateway::request::OpenClawVideoTaskRefreshGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
+    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
+        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
+    > {
+        let peer = self.clone();
+        Box::pin(async move {
+            peer.open_claw_video_task_refresh(request, call).await.map_err(|_| ())
+        })
+    }
 }
 
 impl RuntimeControlLifecyclePort for PeerHandle {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { isAppPixelSizeSupported, type AppMediaModelList } from '@matcha/app-plugins-sdk';
-import type { AnglePreset, Asset, GenerationRecord, GenerationRequest, ImageLayer, Layer } from '../document';
+import { MAX_MEDIA_DURATION_SECONDS, type AnglePreset, type Asset, type GenerationRecord, type GenerationRequest, type ImageLayer, type Layer } from '../document';
 import type { LoadedAsset } from './useAssets';
 import { call, errorMessage, isExternalApp } from './api';
 import i18n, { useTranslation } from './i18n';
@@ -90,12 +90,14 @@ export function Generation({ tool, documentId, layers, initialRecord, load, onCo
     : tool === 'angle' && sourceIds.length !== 1 ? t('变换视角需要且仅使用 1 张图片。')
     : referenceAssetIds.some((id) => sourceLayers.some((layer) => layer.assetId === id && !layer.crop)) ? t('独立参考与画布参考重复，请移除重复图片。')
     : caps && (direct ? sourceIds.length > 0 && caps.maxImages < 1 : referenceCount > maxImages) ? t('当前模型最多接收 {count} 张参考图（含画布、人物或 Logo）。', { count: maxImages }) : '';
+  const endpointValidatesOptions = caps?.endpointValidatesOptions === true;
   const allowedDurations = caps?.durationsSeconds;
-  const selectedDuration = duration ?? allowedDurations?.[0];
-  const selectedSize = size.trim() || (video ? caps?.sizes?.[0] ?? '' : '');
-  const durationError = caps && tool === 'storyboard' && scenes.some((scene) => scene.durationSeconds !== undefined && !allowedDurations?.includes(scene.durationSeconds))
+  const defaultDuration = endpointValidatesOptions ? undefined : allowedDurations?.[0];
+  const selectedDuration = duration ?? defaultDuration;
+  const selectedSize = size.trim() || (video && !endpointValidatesOptions ? caps?.sizes?.[0] ?? '' : '');
+  const durationError = caps && !endpointValidatesOptions && tool === 'storyboard' && scenes.some((scene) => scene.durationSeconds !== undefined && !allowedDurations?.includes(scene.durationSeconds))
     ? t('原分镜时长不受当前模型支持，请重新选择每个镜头的时长。')
-    : caps && video && tool !== 'storyboard' && duration !== undefined && !allowedDurations?.includes(duration) ? t('原视频时长不受当前模型支持，请重新选择时长。') : '';
+    : caps && !endpointValidatesOptions && video && tool !== 'storyboard' && duration !== undefined && !allowedDurations?.includes(duration) ? t('原视频时长不受当前模型支持，请重新选择时长。') : '';
   const canSubmit = !!caps && !busy && !referenceError && !recommendationError && !durationError && (!needsSource || sourceIds.length > 0);
 
   useEffect(() => {
@@ -155,7 +157,7 @@ export function Generation({ tool, documentId, layers, initialRecord, load, onCo
     if (recommendationKind && !recommendedPrompt.trim()) { setError(t('请先选择一条图片推荐。')); return; }
     if ((tool === 'image' || tool === 'video') && !prompt.trim()) { setError(t('请输入创作要求。')); return; }
     if (tool === 'storyboard' && (scenes.length < 1 || scenes.length > 24 || scenes.some((scene) => !scene.prompt.trim()))) { setError(t('请填写 1 至 24 个镜头的内容。')); return; }
-    if (selectedSize && !caps.sizes?.includes(selectedSize) && !(caps.pixelSize && caps.pixelSizeLimits && isAppPixelSizeSupported(selectedSize, caps.pixelSizeLimits))) {
+    if (!endpointValidatesOptions && selectedSize && !caps.sizes?.includes(selectedSize) && !(caps.pixelSize && caps.pixelSizeLimits && isAppPixelSizeSupported(selectedSize, caps.pixelSizeLimits))) {
       setError(t('请选择模型支持的尺寸，或输入宽x高像素。')); return;
     }
     if (!Number.isInteger(count) || count < 1 || count > Math.min(8, caps.maxCount)) { setError(t('生成数量超出当前模型支持范围。')); return; }
@@ -172,7 +174,7 @@ export function Generation({ tool, documentId, layers, initialRecord, load, onCo
       ...(tool === 'recolor' ? { colors } : {}),
       ...(selectedSize ? { size: selectedSize } : {}),
       ...(tool === 'storyboard' ? { count: 1, scenes: scenes.map((scene) => ({ prompt: scene.prompt.trim(),
-        ...((scene.durationSeconds ?? allowedDurations?.[0]) !== undefined ? { durationSeconds: scene.durationSeconds ?? allowedDurations?.[0] } : {}) })) }
+        ...((scene.durationSeconds ?? defaultDuration) !== undefined ? { durationSeconds: scene.durationSeconds ?? defaultDuration } : {}) })) }
         : { count, ...(video && selectedDuration !== undefined ? { durationSeconds: selectedDuration } : {}) }),
     };
     submitting.current = true;
@@ -225,12 +227,12 @@ export function Generation({ tool, documentId, layers, initialRecord, load, onCo
           </>}
           {recommendationKind && <Recommendations key={sourceKey} documentId={documentId} sourceLayerIds={recommendationSources} referenceAssetIds={recommendationReferences} kind={recommendationKind} disabled={busy} onSelect={selectRecommendation} load={load} />}
           {!direct && <label className="field ic-prompt"><span>{t(tool === 'storyboard' ? '整体风格' : recommendationKind ? '补充要求（可选）' : '创作要求')}</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={t(video ? '描述画面、主体动作和镜头运动…' : '描述你想对图片做的修改…')} rows={tool === 'storyboard' ? 2 : 3} disabled={busy} required={tool === 'image' || tool === 'video'} maxLength={20000} /></label>}
-          {tool === 'storyboard' && <StoryboardEditor scenes={scenes} durations={allowedDurations} disabled={busy} onChange={setScenes} />}
+          {tool === 'storyboard' && <StoryboardEditor scenes={scenes} durations={allowedDurations} endpointValidatesOptions={endpointValidatesOptions} disabled={busy} onChange={setScenes} />}
           {!direct && caps && <details className="ic-output-options"><summary>{t('输出设置')}</summary><div className="field-grid">
-            {(caps.pixelSize || !!caps.sizes?.length || !!size) && <label className="field"><span>{t('尺寸（可选）')}</span>{caps.pixelSize ? <><input value={selectedSize} onChange={(event) => setSize(event.target.value)} placeholder={t('模型默认，或宽x高')} disabled={busy} list="generation-sizes" /><datalist id="generation-sizes">{caps.sizes?.map((value) => <option key={value} value={value} />)}</datalist></> : <select value={selectedSize} disabled={busy} onChange={(event) => setSize(event.target.value)}><option value="">{t('模型默认')}</option>{size && !caps.sizes?.includes(size) && <option value={size} disabled>{t('原尺寸不可用，请重新选择')}</option>}{caps.sizes?.map((value) => <option key={value} value={value}>{t(value)}</option>)}</select>}</label>}
-            {caps.pixelSizeLimits && <p className="quiet">{t('精确尺寸：边长须为 {step} 的倍数，最长边 {maxEdge}，像素总数 {minPixels}–{maxPixels}，长宽比不超过 {maxAspectRatio}:1。', { ...caps.pixelSizeLimits })}</p>}
-            {caps.pixelSizeLimits && isAppPixelSizeSupported(selectedSize, caps.pixelSizeLimits) && selectedSize.split('x').map(Number).reduce((width, height) => width * height, 1) > caps.pixelSizeLimits.experimentalAbovePixels && <p className="quiet" role="status">{t('此尺寸超出常规分辨率范围，属于实验性支持；以实际返回尺寸为准。')}</p>}
-            {video && tool !== 'storyboard' && !!allowedDurations?.length && <label className="field"><span>{t('时长')}</span><select value={selectedDuration} disabled={busy} onChange={(event) => setDuration(Number(event.target.value))}>{duration !== undefined && !allowedDurations.includes(duration) && <option value={duration} disabled>{t('原时长不可用')}</option>}{allowedDurations.map((value) => <option key={value} value={value}>{t('{value} 秒', { value })}</option>)}</select></label>}
+            {(endpointValidatesOptions || caps.pixelSize || !!caps.sizes?.length || !!size) && <label className="field"><span>{t('尺寸（可选）')}</span>{endpointValidatesOptions || caps.pixelSize ? <><input value={selectedSize} onChange={(event) => setSize(event.target.value)} placeholder={t(endpointValidatesOptions ? '模型默认' : '模型默认，或宽x高')} disabled={busy} list={endpointValidatesOptions ? undefined : 'generation-sizes'} />{!endpointValidatesOptions && <datalist id="generation-sizes">{caps.sizes?.map((value) => <option key={value} value={value} />)}</datalist>}</> : <select value={selectedSize} disabled={busy} onChange={(event) => setSize(event.target.value)}><option value="">{t('模型默认')}</option>{size && !caps.sizes?.includes(size) && <option value={size} disabled>{t('原尺寸不可用，请重新选择')}</option>}{caps.sizes?.map((value) => <option key={value} value={value}>{t(value)}</option>)}</select>}</label>}
+            {!endpointValidatesOptions && caps.pixelSizeLimits && <p className="quiet">{t('精确尺寸：边长须为 {step} 的倍数，最长边 {maxEdge}，像素总数 {minPixels}–{maxPixels}，长宽比不超过 {maxAspectRatio}:1。', { ...caps.pixelSizeLimits })}</p>}
+            {!endpointValidatesOptions && caps.pixelSizeLimits && isAppPixelSizeSupported(selectedSize, caps.pixelSizeLimits) && selectedSize.split('x').map(Number).reduce((width, height) => width * height, 1) > caps.pixelSizeLimits.experimentalAbovePixels && <p className="quiet" role="status">{t('此尺寸超出常规分辨率范围，属于实验性支持；以实际返回尺寸为准。')}</p>}
+            {video && tool !== 'storyboard' && (endpointValidatesOptions || !!allowedDurations?.length) && <label className="field"><span>{t('时长')}</span>{endpointValidatesOptions ? <input type="number" min={1} max={MAX_MEDIA_DURATION_SECONDS} step={1} value={duration ?? ''} placeholder={t('模型默认')} disabled={busy} onChange={(event) => setDuration(event.target.value === '' ? undefined : Number(event.target.value))} /> : <select value={selectedDuration} disabled={busy} onChange={(event) => setDuration(Number(event.target.value))}>{duration !== undefined && !allowedDurations!.includes(duration) && <option value={duration} disabled>{t('原时长不可用')}</option>}{allowedDurations!.map((value) => <option key={value} value={value}>{t('{value} 秒', { value })}</option>)}</select>}</label>}
             {tool !== 'storyboard' && caps.maxCount > 1 && <label className="field"><span>{t(video ? '生成数量' : '生成张数')}</span><input type="number" min={1} max={Math.min(8, caps.maxCount)} step={1} value={count} required disabled={busy} onChange={(event) => setCount(Number(event.target.value))} /></label>}
           </div></details>}
         </div>

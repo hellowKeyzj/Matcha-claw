@@ -386,17 +386,6 @@ pub(crate) fn validate_assignments(
     Ok(())
 }
 
-pub(crate) fn start_gate_json(run: &GraphRunFacts) -> Result<Value, StoreFault> {
-    let version = crate::store::codec::graph_version(run.graph().definition())?;
-    Ok(match run.start_gate() {
-        RunStartGate::Intake => json!({"status":"intake"}),
-        RunStartGate::Started => json!({"status":"started"}),
-        RunStartGate::Designing { design_epoch, .. } => {
-            json!({"status":"designing","designEpoch":design_epoch,"graphVersion":version})
-        }
-    })
-}
-
 pub(crate) fn snapshot(
     facts: &OrganizationFacts,
     team_id: &TeamId,
@@ -407,42 +396,64 @@ pub(crate) fn snapshot(
         .run(run_id)
         .filter(|run| run.team() == team_id)
         .ok_or(StoreFault::InvalidFacts)?;
-    let public = crate::run::public_projection::graph_projection(facts, run.graph());
+    let public = crate::run::public_projection::graph_projection(run.graph());
     let mut graph =
         super::team_runtime_control::team_public_graph_legacy_json(run_id.as_str(), &public);
-    let roles = run
-        .runtime()
-        .map(|runtime| {
-            super::team_runtime_control::team_role_session_receipts_legacy_json(
-                runtime.bindings(),
-                resolver,
-            )
-        })
-        .unwrap_or_default();
+    let roles = match run.runtime() {
+        Some(runtime) => super::team_runtime_control::team_role_session_receipts_legacy_json(
+            runtime.bindings(),
+            resolver,
+        )
+        .ok_or(StoreFault::InvalidFacts)?,
+        None => Vec::new(),
+    };
     let definition = run.graph().definition();
-    let nodes = definition.nodes().iter().zip(graph["nodes"].as_array().expect("graph node projection")).map(|(node, projected)| {
-        let prompt = node.work_assignment().map(|work| work.prompt()).or_else(|| node.review_assignment().map(|review| review.prompt()));
-        let mut config = projected["config"].clone();
-        if let Some(prompt) = prompt { config["prompt"] = json!(prompt); }
+    for (node, projected) in definition.nodes().iter().zip(
+        graph["nodes"]
+            .as_array_mut()
+            .expect("graph node projection"),
+    ) {
+        let prompt = node
+            .work_assignment()
+            .map(|work| work.prompt())
+            .or_else(|| node.review_assignment().map(|review| review.prompt()))
+            .or_else(|| node.approval_prompt());
+        let config = &mut projected["config"];
+        if let Some(prompt) = prompt {
+            config["prompt"] = json!(prompt);
+        }
         if let Some(work) = node.work_assignment() {
-            if let Some(kind) = work.output_artifact_kind() { config["outputArtifactKind"] = json!(kind); }
+            if let Some(kind) = work.output_artifact_kind() {
+                config["outputArtifactKind"] = json!(kind);
+            }
             config["sessionRef"] = json!(work.session_ref().as_str());
         }
-        if let Some(review) = node.review_assignment() { config["sessionRef"] = json!(review.session_ref().as_str()); }
-        if let Some(trigger) = node.trigger() { config["trigger"] = match trigger { crate::StartTrigger::Webhook { path } => json!({"mode":"webhook","path":path}), crate::StartTrigger::Cron { expression } => json!({"mode":"cron","cron":expression}) }; }
-        let mut projected = projected.clone();
-        projected["config"] = config;
-        projected["roleId"] = json!(node.work_assignment().map(|work|work.role_id()).or_else(||node.review_assignment().map(|review|review.role_id())));
-        projected
-    }).collect::<Vec<_>>();
-    let edges = definition.edges().iter().zip(graph["edges"].as_array().expect("graph edge projection")).map(|(edge, projected)| {
-        let mut projected = projected.clone();
-        projected["payload"] = json!({"includeUpstreamResult":edge.payload().include_upstream_result()});
+        if let Some(review) = node.review_assignment() {
+            config["sessionRef"] = json!(review.session_ref().as_str());
+        }
+        if let Some(trigger) = node.trigger() {
+            config["trigger"] = match trigger {
+                crate::StartTrigger::Webhook { path } => json!({"mode":"webhook","path":path}),
+                crate::StartTrigger::Cron { expression } => {
+                    json!({"mode":"cron","cron":expression})
+                }
+            };
+        }
+        projected["roleId"] = json!(
+            node.work_assignment()
+                .map(|work| work.role_id())
+                .or_else(|| node.review_assignment().map(|review| review.role_id()))
+        );
+    }
+    for (edge, projected) in definition.edges().iter().zip(
+        graph["edges"]
+            .as_array_mut()
+            .expect("graph edge projection"),
+    ) {
+        projected["payload"] =
+            json!({"includeUpstreamResult":edge.payload().include_upstream_result()});
         projected["dependency"] = json!(edge.dependency().map(|dependency|json!({"dependencyTaskId":dependency.dependency_task_id(),"taskId":dependency.task_id()})));
-        projected
-    }).collect::<Vec<_>>();
-    graph["nodes"] = json!(nodes);
-    graph["edges"] = json!(edges);
+    }
     let epoch = match run.start_gate() {
         RunStartGate::Designing { design_epoch, .. } => Some(design_epoch),
         _ => None,
@@ -451,7 +462,15 @@ pub(crate) fn snapshot(
         .map(|(node_id, code, message)| {
             json!({"success":false,"error":message,"errorCode":code,"nodeId":node_id.as_str()})
         });
+    let version = crate::store::codec::graph_version(definition)?;
+    let start_gate = match run.start_gate() {
+        RunStartGate::Intake => json!({"status":"intake"}),
+        RunStartGate::Started => json!({"status":"started"}),
+        RunStartGate::Designing { design_epoch, .. } => {
+            json!({"status":"designing","designEpoch":design_epoch,"graphVersion":version})
+        }
+    };
     Ok(
-        json!({"success":true,"runtimeError":runtime_error,"teamId":team_id.as_str(),"runId":run_id.as_str(),"startGate":start_gate_json(run)?,"graphVersion":crate::store::codec::graph_version(definition)?,"designEpoch":epoch,"graph":graph,"roles":roles}),
+        json!({"success":true,"workspace":crate::run::public_projection::TeamRunPublicWorkspace::from_run(run),"runtimeError":runtime_error,"teamId":team_id.as_str(),"runId":run_id.as_str(),"startGate":start_gate,"graphVersion":version,"designEpoch":epoch,"graph":graph,"roles":roles}),
     )
 }

@@ -283,9 +283,11 @@ impl SessionCommand {
                 "sessions.release",
                 SessionsCallDetail::session(identity.provider(), identity.session_key(), None),
             ),
-            Ensure { .. } | Ingest { .. } | TerminalIngest { .. } | SyncTerminals { .. } | TerminalDelivered { .. }
+            Ensure { .. } | Ingest { .. } | SyncTerminals { .. } | TerminalDelivered { .. }
+            | RecoverTerminalRead { .. } | TerminalReadCompleted { .. }
             | SendCompleted { .. } | GoalCompleted { .. } | SyncCompleted { .. } | ObservationClosed { .. }
             | ObservationFailed { .. } | ObserveReplyCompleted { .. }
+            | WorkCheckReady { .. } | WorkCheckCompleted { .. }
             | ConfigurePrivateResolver { .. } | Audited { .. } | Producing { .. } => {
                 return None;
             }

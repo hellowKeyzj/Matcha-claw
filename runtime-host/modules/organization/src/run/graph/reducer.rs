@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64},
 };
 
 use super::{
@@ -45,6 +45,14 @@ pub enum GraphEvent {
         node_id: NodeId,
         requested_at: u64,
     },
+    ContinueRework {
+        source_node_id: NodeId,
+        source_port: String,
+        batch_id: NonZeroU64,
+        source_fence: ExecutionFence,
+        max_reworks: u32,
+        continued_at: u64,
+    },
     TriggerFired {
         node_id: NodeId,
         fired_at: u64,
@@ -73,10 +81,14 @@ pub enum ReduceError {
         node_id: NodeId,
         status: AttemptStatus,
     },
-    AttemptLimitExceeded {
-        node_id: NodeId,
-        max_attempts: NonZeroU32,
-    },
+    AttemptNumberOverflow { node_id: NodeId },
+    BatchNumberOverflow,
+    BatchMismatch { node_id: NodeId },
+    TriggerScopeBusy { node_id: NodeId },
+    InvalidReworkPort { node_id: NodeId, source_port: String },
+    ReworkNotBlocked { node_id: NodeId },
+    InvalidReworkContinuation { node_id: NodeId },
+    ReworkLimitNotIncreased { node_id: NodeId },
 }
 
 pub fn reduce(mut state: GraphState, event: GraphEvent) -> Result<GraphState, ReduceError> {
@@ -91,12 +103,16 @@ pub(super) fn reduce_in_place(mut state: &mut GraphState, event: GraphEvent) -> 
             fence,
             started_at,
         } => {
+            let blocked = state.is_rework_blocked(&node_id);
             let attempt = require_current_fence_mut(&mut state, &node_id, &fence)?;
             if attempt.status() != AttemptStatus::Ready {
                 return Err(ReduceError::InvalidTransition {
                     node_id,
                     status: attempt.status(),
                 });
+            }
+            if blocked {
+                return Err(ReduceError::InvalidReworkContinuation { node_id });
             }
             attempt.transition_to(AttemptStatus::Running, started_at);
             state.remove_ready_item(&node_id);
@@ -151,6 +167,9 @@ pub(super) fn reduce_in_place(mut state: &mut GraphState, event: GraphEvent) -> 
             node_id,
             requested_at,
         } => super::rework::request(&mut state, &node_id, requested_at)?,
+        GraphEvent::ContinueRework { source_node_id, source_port, batch_id, source_fence, max_reworks, continued_at } => {
+            super::rework::continue_blocked(state, &source_node_id, &source_port, batch_id, &source_fence, max_reworks, continued_at)?;
+        }
         GraphEvent::TriggerFired { node_id, fired_at } => {
             fire_trigger(&mut state, &node_id, fired_at)?
         }
@@ -273,6 +292,14 @@ fn apply_graph_patch(
                 };
                 nodes[index] = node.clone();
             }
+            GraphPatchOperation::SetReworkLimit { source_node_id, source_port, max_reworks } => {
+                let node = nodes.iter_mut().find(|node| node.id() == source_node_id)
+                    .ok_or_else(|| ReduceError::UnknownNode(source_node_id.clone()))?;
+                if !node.kind().accepts_edge_action(source_port, EdgeAction::Rework) {
+                    return Err(ReduceError::InvalidReworkPort { node_id: source_node_id.clone(), source_port: source_port.clone() });
+                }
+                node.set_rework_limit(source_port.clone(), *max_reworks);
+            }
             GraphPatchOperation::RemoveNode(node_id) => {
                 let Some(index) = nodes.iter().position(|node| node.id() == node_id) else {
                     return Err(ReduceError::InvalidGraphPatch);
@@ -325,14 +352,10 @@ fn apply_graph_patch(
         edges,
     )
     .map_err(ReduceError::InvalidDefinition)?;
-    for node in definition.nodes() {
-        if state.executions().get(node.id()).is_some_and(|history| {
-            history.attempts().iter().any(|attempt| attempt.number() > node.max_attempts())
-        }) {
-            return Err(ReduceError::AttemptLimitExceeded {
-                node_id: node.id().clone(),
-                max_attempts: node.max_attempts(),
-            });
+    let initial_batches = super::patch::initial_batches(state, &definition, operations)?;
+    for (node_id, batch_id) in &initial_batches {
+        if state.current_attempt(node_id).is_some_and(|attempt| attempt.batch_id() != *batch_id) {
+            state.current_attempt_mut(node_id).expect("assignable initial attempt").assign_batch(*batch_id);
         }
     }
     let root_ids = definition.execution_root_ids();
@@ -362,7 +385,9 @@ fn apply_graph_patch(
         let history = state.take_history(node.id()).unwrap_or_else(|| {
             state.remember_new_history(node.id());
             NodeExecutionHistory::initial(NodeAttempt::create(
-                node.id().clone(), node.kind(), NonZeroU32::MIN, initial_status,
+                node.id().clone(), node.kind(), NonZeroU32::MIN,
+                initial_batches[node.id()],
+                if node.kind() == NodeKind::Start { initial_status } else { AttemptStatus::Pending },
                 AttemptReason::Initial, Vec::new(), patched_at,
             )
             .in_namespace(namespace.as_deref()))
@@ -400,6 +425,7 @@ fn apply_graph_patch(
             .then_with(|| left.node_id().cmp(right.node_id()))
     });
     state.finish_patch(definition, metadata, layout, executions, ready_queue);
+    super::execution_control::validate(state).map_err(|_| ReduceError::InvalidGraphPatch)?;
     Ok(())
 }
 
@@ -450,6 +476,9 @@ fn resolve_outcome(
         attempt.resolve(terminal_status, output_port.clone(), now);
     }
     state.remove_ready_item(&node_id);
+    if state.is_rework_blocked(&node_id) {
+        return Ok(());
+    }
 
     let source_attempt = state
         .current_attempt(&source_node.id().clone())
@@ -461,23 +490,25 @@ fn resolve_outcome(
         .filter(|edge| edge.source_port() == output_port)
         .cloned()
         .collect::<Vec<_>>();
-    if let Err(error) = super::rework::reopen(state, &source_attempt, &edges, now) {
-        if !matches!(error, ReduceError::AttemptLimitExceeded { .. }) {
-            return Err(error);
-        }
-        state
-            .current_attempt_mut(&node_id)
-            .expect("source node remains present")
-            .resolve(AttemptStatus::Failed, output_port, now);
-        return Ok(());
+    match super::rework::reopen(state, &source_attempt, &edges, now)? {
+        super::rework::ReworkRouting::Blocked => Ok(()),
+        super::rework::ReworkRouting::Continue => route_edges(state, &source_attempt, &edges, now),
     }
+}
+
+pub(super) fn route_edges(
+    state: &mut GraphState,
+    source: &NodeAttempt,
+    edges: &[EdgeDefinition],
+    now: u64,
+) -> Result<(), ReduceError> {
     for edge in edges {
-        let receipt = receipt_for(&edge, &source_attempt, now);
+        let receipt = receipt_for(edge, source, now);
         match edge.action() {
             EdgeAction::Activate | EdgeAction::Finish => {
-                activate_node(state, edge.target_node_id(), receipt, now)?
+                activate_node(state, edge.target_node_id(), source, receipt, now)?
             }
-            EdgeAction::Gate => activate_gate_if_satisfied(state, edge.target_node_id(), now)?,
+            EdgeAction::Gate => activate_gate_if_satisfied(state, edge.target_node_id(), source, receipt, now)?,
             EdgeAction::Rework => {}
         }
     }
@@ -485,80 +516,25 @@ fn resolve_outcome(
 }
 
 fn fire_trigger(state: &mut GraphState, node_id: &NodeId, now: u64) -> Result<(), ReduceError> {
-    let node = state
-        .definition()
-        .node(node_id)
-        .cloned()
-        .ok_or_else(|| ReduceError::UnknownNode(node_id.clone()))?;
-    if !node.is_armed_start() {
-        return Err(ReduceError::TriggerNotArmed(node_id.clone()));
+    let scope = state.trigger_scope(node_id)?;
+    if let Some(busy) = state.trigger_busy_nodes(node_id)?.into_iter().next() {
+        return Err(ReduceError::TriggerScopeBusy { node_id: busy });
     }
-    let current = state
-        .current_attempt(node_id)
-        .expect("definition nodes always have an execution history")
-        .clone();
-    let reset_ids = if current.status() == AttemptStatus::Pending {
-        vec![node_id.clone()]
-    } else {
-        let mut ids = state
-            .definition()
-            .reachable_from(node_id)
-            .into_iter()
-            .collect::<Vec<_>>();
-        ids.push(node_id.clone());
-        ids
-    };
-    state.remove_ready_items(&reset_ids);
-
-    let start_number = if current.status() == AttemptStatus::Pending {
-        current.number()
-    } else {
-        next_attempt_number(&node, current.number())?
-    };
-    let start_attempt = NodeAttempt::create(
-        node_id.clone(),
-        node.kind(),
-        start_number,
-        AttemptStatus::Ready,
-        AttemptReason::Trigger,
-        Vec::new(),
-        now,
-    )
-    .in_namespace(state.replacement_namespace());
-    if current.status() == AttemptStatus::Pending {
-        let current_mut = state
-            .current_attempt_mut(node_id)
-            .expect("definition nodes always have an execution history");
-        *current_mut = start_attempt.clone();
-    } else {
-        state.append_attempt(node_id, start_attempt.clone());
-    }
-    state.enqueue(&start_attempt, now);
-
-    for reset_id in reset_ids.into_iter().filter(|id| id != node_id) {
-        let reset_node = state
-            .definition()
-            .node(&reset_id)
-            .cloned()
-            .expect("reachable graph node exists");
-        let previous = state
-            .current_attempt(&reset_id)
-            .expect("definition nodes always have an execution history")
-            .clone();
-        if previous.status() == AttemptStatus::Pending {
-            continue;
-        }
-        let pending = NodeAttempt::create(
-            reset_id.clone(),
-            reset_node.kind(),
-            next_attempt_number(&reset_node, previous.number())?,
-            AttemptStatus::Pending,
-            AttemptReason::Trigger,
-            Vec::new(),
-            now,
-        )
-        .in_namespace(state.replacement_namespace());
-        state.append_attempt(&reset_id, pending);
+    let attempts = scope.iter().map(|id| {
+        let node = state.definition().node(id).expect("trigger scope node exists");
+        let current = state.current_attempt(id).expect("trigger scope has history");
+        Ok((id.clone(), node.kind(), next_attempt_number(node, current.number())?))
+    }).collect::<Result<Vec<_>, ReduceError>>()?;
+    let batch_id = state.allocate_batch()?;
+    for (id, kind, number) in attempts {
+        let attempt = NodeAttempt::create(
+            id.clone(), kind, number, batch_id,
+            if &id == node_id { AttemptStatus::Ready } else { AttemptStatus::Pending },
+            AttemptReason::Trigger, Vec::new(), now,
+        ).in_namespace(state.replacement_namespace());
+        state.remove_ready_item(&id);
+        state.append_attempt(&id, attempt.clone());
+        if &id == node_id { state.enqueue(&attempt, now); }
     }
     Ok(())
 }
@@ -566,6 +542,7 @@ fn fire_trigger(state: &mut GraphState, node_id: &NodeId, now: u64) -> Result<()
 fn activate_node(
     state: &mut GraphState,
     node_id: &NodeId,
+    source: &NodeAttempt,
     receipt: InputReceipt,
     now: u64,
 ) -> Result<(), ReduceError> {
@@ -573,7 +550,7 @@ fn activate_node(
         .current_attempt(node_id)
         .expect("edge endpoint has an execution history")
         .clone();
-    if current.status() != AttemptStatus::Pending {
+    if current.status() != AttemptStatus::Pending || current.batch_id() != source.batch_id() {
         return Ok(());
     }
     let attempt = state
@@ -592,13 +569,18 @@ fn activate_node(
 fn activate_gate_if_satisfied(
     state: &mut GraphState,
     node_id: &NodeId,
+    outcome_source: &NodeAttempt,
+    receipt: InputReceipt,
     now: u64,
 ) -> Result<(), ReduceError> {
+    let batch_id = outcome_source.batch_id();
     let current = state
         .current_attempt(node_id)
         .expect("edge endpoint has an execution history")
         .clone();
-    if current.status() != AttemptStatus::Pending {
+    if current.status() != AttemptStatus::Pending || current.batch_id() != batch_id
+        || outcome_source.status() != AttemptStatus::Completed
+    {
         return Ok(());
     }
     let gate_edges = state
@@ -607,24 +589,26 @@ fn activate_gate_if_satisfied(
         .filter(|edge| edge.action() == EdgeAction::Gate)
         .cloned()
         .collect::<Vec<_>>();
-    if gate_edges.is_empty() {
-        return Ok(());
-    }
-    let receipts = gate_edges
-        .iter()
-        .map(|edge| {
-            let source = state.current_attempt(edge.source_node_id())?;
-            (source.status() == AttemptStatus::Completed
-                && source.output_port() == Some(edge.source_port()))
-                .then(|| receipt_for(edge, source, now))
-        })
-        .collect::<Option<Vec<_>>>();
-    let Some(receipts) = receipts else {
-        return Ok(());
-    };
+    let mut inputs = current.inputs().iter().cloned()
+        .map(|input| (input.edge_id().clone(), input)).collect::<BTreeMap<_, _>>();
+    inputs.entry(receipt.edge_id().clone()).or_insert(receipt);
+    let receipts = gate_edges.iter().map(|edge| {
+        if let Some(input) = inputs.get(edge.id()) { return Some(input.clone()); }
+        if state.is_rework_blocked(edge.source_node_id()) { return None; }
+        let source = state.current_attempt(edge.source_node_id())?;
+        (source.status() == AttemptStatus::Completed
+            && source.batch_id() == batch_id
+            && source.output_port() == Some(edge.source_port()))
+            .then(|| receipt_for(edge, source, now))
+    }).collect::<Option<Vec<_>>>();
     let attempt = state
         .current_attempt_mut(node_id)
         .expect("edge endpoint has an execution history");
+    let Some(receipts) = receipts else {
+        let inputs = gate_edges.iter().filter_map(|edge| inputs.remove(edge.id())).collect();
+        attempt.record_gate_inputs(inputs, now);
+        return Ok(());
+    };
     attempt.activate(
         AttemptReason::Edge(gate_edges[0].id().clone()),
         receipts,
@@ -667,19 +651,9 @@ pub(super) fn next_attempt_number(
     node: &NodeDefinition,
     current: NonZeroU32,
 ) -> Result<NonZeroU32, ReduceError> {
-    let next = current
-        .checked_add(1)
-        .ok_or_else(|| ReduceError::AttemptLimitExceeded {
-            node_id: node.id().clone(),
-            max_attempts: node.max_attempts(),
-        })?;
-    if next > node.max_attempts() {
-        return Err(ReduceError::AttemptLimitExceeded {
-            node_id: node.id().clone(),
-            max_attempts: node.max_attempts(),
-        });
-    }
-    Ok(next)
+    current.checked_add(1).ok_or_else(|| ReduceError::AttemptNumberOverflow {
+        node_id: node.id().clone(),
+    })
 }
 
 pub(crate) fn state_has_only_current_ready_items(state: &GraphState) -> bool {

@@ -4,8 +4,6 @@ use sha2::{Digest, Sha256};
 
 const LEADER_ROLE_ID: &str = "leader";
 
-const TEAM_DISCUSSION_PROMPT: &str = "你负责与用户讨论当前团队的任务，明确目标、交付物、范围和约束。\n\n信息足够时直接给出推荐方案及关键取舍；仅当缺失信息会改变任务范围、交付物或关键依赖时提问，不反复确认已明确的要求。\n\n区分用户已确认的要求、你的建议和待确认的假设；不把讨论结论表述为已保存的工作流或已执行的结果。\n\n本阶段只讨论和分析，不修改运行图、不启动 Run、不派发或执行节点任务。";
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartGateRuntimeBindingLookup {
     AgentScoped {
@@ -24,12 +22,14 @@ pub(crate) struct StartGateBinding {
     pub(crate) run_id: organization::GraphRunId,
     pub(crate) role_id: organization::RoleId,
     pub(crate) start_gate: organization::RunStartGate,
+    pub(crate) workspace: Option<crate::RunWorkspace>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartGatePromptPlan {
     run_id: organization::GraphRunId,
-    protocol: String,
+    protocol: Option<String>,
+    workspace: Option<crate::RunWorkspace>,
     pub(crate) design: bool,
 }
 
@@ -38,8 +38,12 @@ impl StartGatePromptPlan {
         &self.run_id
     }
 
-    pub fn system_provenance_receipt(&self) -> &str {
-        &self.protocol
+    pub fn system_provenance_receipt(&self) -> Option<&str> {
+        self.protocol.as_deref()
+    }
+
+    pub fn workspace(&self) -> Option<&crate::RunWorkspace> {
+        self.workspace.as_ref()
     }
 }
 
@@ -47,21 +51,22 @@ pub(crate) fn prepare_prompt(
     store: &mut crate::OrganizationStore,
     lookup: &StartGateRuntimeBindingLookup,
     resolver: &dyn crate::RoleSessionIdentityResolver,
+    inject_prompt: bool,
 ) -> Result<Option<StartGatePromptPlan>, crate::StoreFault> {
     let Some(binding) = resolve_runtime_binding(store.facts(), lookup, resolver) else {
         return Ok(None);
     };
-    if binding.role_id.as_str() != LEADER_ROLE_ID
-        || matches!(binding.start_gate, crate::RunStartGate::Started)
-    {
-        session_trace("runtime.start-gate.prompt", || json!({
-            "outcome": "skipped",
-            "reason": if binding.role_id.as_str() != LEADER_ROLE_ID { "non_leader" } else { "started" },
-        }));
-        return Ok(None);
+    let run = store.facts().run(&binding.run_id).ok_or(crate::StoreFault::InvalidFacts)?;
+    if binding.workspace.is_some() && !run.workspace_ready() {
+        return Err(crate::StoreFault::InvalidFacts);
     }
-    let design = matches!(binding.start_gate, crate::RunStartGate::Designing { .. });
-    let protocol = if design {
+    let inject_prompt = inject_prompt
+        && binding.role_id.as_str() == LEADER_ROLE_ID
+        && !matches!(binding.start_gate, crate::RunStartGate::Started);
+    let design = inject_prompt && matches!(binding.start_gate, crate::RunStartGate::Designing { .. });
+    let protocol = if !inject_prompt {
+        None
+    } else if design {
         let mut entropy = [0u8; 32];
         getrandom::fill(&mut entropy).map_err(|_| crate::StoreFault::InvalidFacts)?;
         let generation = format!("sgg-{:x}", Sha256::digest(entropy));
@@ -70,13 +75,14 @@ pub(crate) fn prepare_prompt(
             .facts()
             .run(&binding.run_id)
             .ok_or(crate::StoreFault::InvalidFacts)?;
-        super::design_prompt::compose(store.facts(), run, &generation)
+        Some(super::design_prompt::compose(store.facts(), run, &generation))
     } else {
-        TEAM_DISCUSSION_PROMPT.to_owned()
+        Some(store.facts().team_prompts().text("discussion.body.body").to_owned())
     };
     Ok(Some(StartGatePromptPlan {
         run_id: binding.run_id,
         protocol,
+        workspace: binding.workspace,
         design,
     }))
 }
@@ -135,5 +141,6 @@ pub(crate) fn resolve_runtime_binding(
         run_id: binding.team_run().clone(),
         role_id: binding.role().clone(),
         start_gate: run.start_gate().clone(),
+        workspace: run.workspace().cloned(),
     })
 }

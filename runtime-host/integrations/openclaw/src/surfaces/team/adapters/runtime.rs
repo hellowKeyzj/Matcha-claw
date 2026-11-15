@@ -8,14 +8,14 @@ use crate::{
     session::{
         operation::SessionCreateSubmission,
         protocol::{
-            AgentId, AgentScopedSessionKey, EndpointSessionId, ModelRef, SessionCreateParams,
-            SessionsListParams,
+            AgentId, AgentScopedSessionKey, EndpointSessionId, ModelRef, NativeSessionId,
+            SessionCreateParams,
         },
     },
 };
 use organization::{
-    NativeEffectFailure, RoleSessionReadbackOutcome, RoleSessionReceipt, RunRuntimeReceipt,
-    RoleSessionCreationOutcome, RoleSessionSubmission, RuntimeReceiptOutcome, TeamCreationFailure,
+    NativeDeletionFailure, NativeEffectFailure, RoleSessionReadbackOutcome, RoleSessionReceipt, RunRuntimeReceipt,
+    RoleSessionCreationOutcome, RoleSessionSubmission, RunWorkspace, RuntimeReceiptOutcome, TeamCreationFailure,
     TeamCreationFailureReason as FailureReason,
     TeamCreationStage, TeamNativeEffectsPort,
 };
@@ -29,10 +29,15 @@ use runtime_directory::OwnedRuntimeFuture;
 
 async fn confirm_runtime_receipt_native(
     gateway: &OpenClawGateway,
+    access: &crate::surfaces::workspace::OpenClawWorkspaceAccess,
     receipt: RunRuntimeReceipt,
+    workspace: Option<&RunWorkspace>,
     cancellation: &tokio_util::sync::CancellationToken,
     submission: &mut RoleSessionSubmission,
 ) -> (RuntimeReceiptOutcome, Option<TeamCreationFailure>) {
+    if workspace.is_some_and(|workspace| !workspace.is_prepared()) {
+        return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::WorkspaceMissing);
+    }
     if cancellation.is_cancelled() {
         return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted);
     }
@@ -57,11 +62,13 @@ async fn confirm_runtime_receipt_native(
         ).await else {
             return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted);
         };
-        let exists = match native_session_exists(gateway, &agent, &session_key, cancellation).await {
-            Ok(exists) => exists,
-            Err(outcome) => return outcome,
+        let existing = match crate::session::cwd::read_identity(gateway, &session_key, cancellation).await {
+            Ok(existing) => existing,
+            Err(error) => return map_runtime_receipt_error(error),
         };
-        if !exists {
+        let native_session_id = if let Some(existing) = existing {
+            existing.native_session_id().clone()
+        } else {
             let listed = tokio::select! {
                 biased;
                 listed = gateway.list_agents() => listed,
@@ -87,11 +94,17 @@ async fn confirm_runtime_receipt_native(
                 Ok(model) => model,
                 Err(_) => return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig),
             };
-            let params =
+            let mut params =
                 match SessionCreateParams::try_new(agent.clone(), endpoint_session_id, model) {
                     Ok(params) => params,
                     Err(_) => return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig),
                 };
+            if let Some(workspace) = workspace {
+                params = match params.with_cwd(workspace.root().to_path_buf()) {
+                    Ok(params) => params,
+                    Err(_) => return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig),
+                };
+            }
             let delivery = match gateway.create_session_delivery(params, cancellation).await {
                 Ok(delivery) => delivery,
                 Err(error) => return map_runtime_receipt_error(error),
@@ -100,7 +113,20 @@ async fn confirm_runtime_receipt_native(
                 *submission = RoleSessionSubmission::Unknown;
             }
             match delivery.outcome {
-                InvocationOutcome::Succeeded(_) => {}
+                InvocationOutcome::Succeeded(result) => {
+                    if let Some(workspace) = workspace {
+                        if result.spawned_cwd().is_none() || result.session_root().is_none() {
+                            return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::NativeReadbackMismatch);
+                        }
+                        if let Err(error) = crate::session::cwd::bind_expected_workspace(access, &result.identity(&session_key), workspace.root()).await {
+                            return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, match error {
+                                crate::session::cwd::SessionCwdError::Mismatch => FailureReason::NativeReadbackMismatch,
+                                crate::session::cwd::SessionCwdError::Unavailable => FailureReason::WorkspaceMissing,
+                            });
+                        }
+                    }
+                    result.native_session_id().clone()
+                }
                 InvocationOutcome::TargetRejected(_) => {
                     return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::RpcRejected);
                 }
@@ -115,14 +141,9 @@ async fn confirm_runtime_receipt_native(
                     });
                 }
             }
-            match native_session_exists(gateway, &agent, &session_key, cancellation).await {
-                Ok(true) => {}
-                Ok(false) => return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::NativeReadbackMismatch),
-                Err(outcome) => return outcome,
-            }
-        }
+        };
 
-        match readback_native_session(gateway, binding, cancellation).await {
+        match readback_native_session(gateway, access, binding, workspace, Some(&native_session_id), cancellation).await {
             (RuntimeReceiptOutcome::Installed, _) => {}
             outcome => return outcome,
         }
@@ -139,9 +160,34 @@ fn receipt_failure(
 
 async fn readback_native_session(
     gateway: &OpenClawGateway,
+    access: &crate::surfaces::workspace::OpenClawWorkspaceAccess,
     binding: &RoleSessionReceipt,
+    workspace: Option<&RunWorkspace>,
+    expected_session_id: Option<&NativeSessionId>,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> (RuntimeReceiptOutcome, Option<TeamCreationFailure>) {
+    if workspace.is_some_and(|workspace| !workspace.is_prepared()) {
+        return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::WorkspaceMissing);
+    }
+    let key = match super::super::native_effects::agent_scoped_session_key(binding) {
+        Ok(key) => key,
+        Err(_) => return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig),
+    };
+    let identity = match crate::session::cwd::read_identity(gateway, &key, cancellation).await {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return receipt_failure(RuntimeReceiptOutcome::Unavailable, FailureReason::NativeReadbackMismatch),
+        Err(error) => return map_runtime_receipt_error(error),
+    };
+    if expected_session_id.is_some_and(|expected| expected != identity.native_session_id()) {
+        return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::NativeReadbackMismatch);
+    }
+    if let Some(workspace) = workspace {
+        return match crate::session::cwd::bind_expected_workspace(access, &identity, workspace.root()).await {
+            Ok(_) => (RuntimeReceiptOutcome::Installed, None),
+            Err(crate::session::cwd::SessionCwdError::Mismatch) => receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::NativeReadbackMismatch),
+            Err(crate::session::cwd::SessionCwdError::Unavailable) => receipt_failure(RuntimeReceiptOutcome::Unavailable, FailureReason::WorkspaceMissing),
+        };
+    }
     let (readback, reason) = crate::surfaces::team::OpenClawTeamNativeEffects::new(gateway)
         .with_cancellation(cancellation.clone())
         .readback_diagnostic(binding)
@@ -163,25 +209,6 @@ fn map_native_effect_failure(failure: NativeEffectFailure) -> RuntimeReceiptOutc
             RuntimeReceiptOutcome::Unavailable
         }
     }
-}
-
-async fn native_session_exists(
-    gateway: &OpenClawGateway,
-    agent: &AgentId,
-    key: &AgentScopedSessionKey,
-    cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<bool, (RuntimeReceiptOutcome, Option<TeamCreationFailure>)> {
-    let params = SessionsListParams::default()
-        .try_for_agent(agent.as_str())
-        .map_err(|_| receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig))?;
-    let sessions = gateway
-        .list_sessions_cancellable(params, cancellation)
-        .await
-        .map_err(map_runtime_receipt_error)?;
-    Ok(sessions
-        .sessions
-        .iter()
-        .any(|session| session.key.as_str() == key.as_str()))
 }
 
 fn map_runtime_receipt_error(error: OpenClawSessionError) -> (RuntimeReceiptOutcome, Option<TeamCreationFailure>) {
@@ -441,33 +468,38 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     fn confirm_team_run_receipt(
         &self,
         receipt: organization::RunRuntimeReceipt,
+        workspace: Option<RunWorkspace>,
     ) -> OwnedRuntimeFuture<organization::RuntimeReceiptOutcome> {
-        let confirmation = self.confirm_team_run_receipt_cancellable(receipt, tokio_util::sync::CancellationToken::new());
+        let confirmation = self.confirm_team_run_receipt_cancellable(receipt, workspace, tokio_util::sync::CancellationToken::new());
         Box::pin(async move { confirmation.await.0 })
     }
 
     fn confirm_team_run_receipt_cancellable(
         &self,
         receipt: organization::RunRuntimeReceipt,
+        workspace: Option<RunWorkspace>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)> {
         let gateway = Arc::clone(&self.gateway);
+        let access = self.workspace.clone();
         Box::pin(async move {
-            confirm_runtime_receipt_native(&gateway, receipt, &cancellation, &mut RoleSessionSubmission::Settled).await
+            confirm_runtime_receipt_native(&gateway, &access, receipt, workspace.as_ref(), &cancellation, &mut RoleSessionSubmission::Settled).await
         })
     }
 
     fn create_team_role_session_cancellable(
         &self,
         binding: RoleSessionReceipt,
+        workspace: Option<RunWorkspace>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<RoleSessionCreationOutcome> {
         let gateway = Arc::clone(&self.gateway);
+        let access = self.workspace.clone();
         Box::pin(async move {
             let receipt = RunRuntimeReceipt::try_new(binding.team_run().clone(), vec![binding])
                 .expect("one binding is a valid run receipt");
             let mut submission = RoleSessionSubmission::Settled;
-            let (outcome, failure) = confirm_runtime_receipt_native(&gateway, receipt, &cancellation, &mut submission).await;
+            let (outcome, failure) = confirm_runtime_receipt_native(&gateway, &access, receipt, workspace.as_ref(), &cancellation, &mut submission).await;
             RoleSessionCreationOutcome { outcome, failure, submission }
         })
     }
@@ -475,26 +507,57 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     fn readback_team_role_session_cancellable(
         &self,
         binding: RoleSessionReceipt,
+        workspace: Option<RunWorkspace>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)> {
         let gateway = Arc::clone(&self.gateway);
+        let access = self.workspace.clone();
         Box::pin(async move {
             let key = match super::super::native_effects::agent_scoped_session_key(&binding) {
                 Ok(key) => key,
                 Err(_) => return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig),
             };
-            let agent = AgentId::try_new(key.agent_id().to_owned())
-                .expect("agent-scoped session key preserves its validated agent");
             let Some(_binding) = gateway.client().role_session_transactions(
                 vec![key.as_str().to_owned()], &cancellation,
             ).await else {
                 return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted);
             };
-            match native_session_exists(&gateway, &agent, &key, &cancellation).await {
-                Ok(true) => readback_native_session(&gateway, &binding, &cancellation).await,
-                Ok(false) => receipt_failure(RuntimeReceiptOutcome::Unavailable, FailureReason::NativeReadbackMismatch),
-                Err(outcome) => outcome,
+            readback_native_session(&gateway, &access, &binding, workspace.as_ref(), None, &cancellation).await
+        })
+    }
+
+    fn validate_run_files(
+        &self,
+        binding: RoleSessionReceipt,
+        workspace: RunWorkspace,
+        paths: Vec<String>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<Result<(), organization::RunFileValidationError>> {
+        let gateway = Arc::clone(&self.gateway);
+        let access = self.workspace.clone();
+        Box::pin(async move {
+            use organization::RunFileValidationError;
+            let paths = organization::run::artifact::normalize_delivery_files(paths)
+                .map_err(|_| RunFileValidationError::InvalidPath)?;
+            if !workspace.is_prepared() || cancellation.is_cancelled() {
+                return Err(RunFileValidationError::Unavailable);
             }
+            let key = super::super::native_effects::agent_scoped_session_key(&binding)
+                .map_err(|_| RunFileValidationError::Unavailable)?;
+            let identity = crate::session::cwd::read_identity(&gateway, &key, &cancellation).await
+                .map_err(|_| RunFileValidationError::Unavailable)?
+                .ok_or(RunFileValidationError::Unavailable)?;
+            let files = crate::session::cwd::bind_expected_workspace(&access, &identity, workspace.root()).await
+                .map_err(|_| RunFileValidationError::Unavailable)?;
+            tokio::task::spawn_blocking(move || {
+                for path in paths {
+                    if cancellation.is_cancelled() {
+                        return Err(RunFileValidationError::Unavailable);
+                    }
+                    files.validate_run_file(&path)?;
+                }
+                Ok(())
+            }).await.map_err(|_| RunFileValidationError::Unavailable)?
         })
     }
 
@@ -567,21 +630,26 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
             };
             let mut effects = crate::surfaces::team::OpenClawTeamNativeEffects::new(&gateway)
                 .with_cancellation(cancellation);
-            if abort_first {
-                for binding in &bindings {
+            let mut failure = None;
+            let mut deletable = Vec::with_capacity(bindings.len());
+            for binding in &bindings {
+                if abort_first {
                     match effects.abort(binding).await {
                         organization::RoleSessionAbortOutcome::Confirmed { .. } => {}
                         organization::RoleSessionAbortOutcome::Failed { .. } => {
-                            return organization::NativeDeletionEvidence::Rejected;
+                            failure = failure.max(Some(NativeDeletionFailure::Rejected));
+                            continue;
                         }
                         organization::RoleSessionAbortOutcome::OutcomeUnknown => {
-                            return organization::NativeDeletionEvidence::OutcomeUnknown;
+                            failure = Some(NativeDeletionFailure::OutcomeUnknown);
+                            continue;
                         }
                     }
                 }
+                deletable.push(binding);
             }
-            let mut confirmations = Vec::with_capacity(bindings.len());
-            for binding in &bindings {
+            let mut confirmations = Vec::with_capacity(deletable.len());
+            for binding in deletable {
                 match effects.delete(binding).await {
                     organization::RoleSessionDeleteOutcome::Confirmed { receipt } => {
                         let Ok(confirmation) =
@@ -590,22 +658,20 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
                                 receipt,
                             )
                         else {
-                            return organization::NativeDeletionEvidence::Rejected;
+                            failure = failure.max(Some(NativeDeletionFailure::Rejected));
+                            continue;
                         };
                         confirmations.push(confirmation);
                     }
                     organization::RoleSessionDeleteOutcome::Failed { .. } => {
-                        return organization::NativeDeletionEvidence::Rejected;
+                        failure = failure.max(Some(NativeDeletionFailure::Rejected));
                     }
                     organization::RoleSessionDeleteOutcome::OutcomeUnknown => {
-                        return organization::NativeDeletionEvidence::OutcomeUnknown;
+                        failure = Some(NativeDeletionFailure::OutcomeUnknown);
                     }
                 }
             }
-            organization::NativeDeletionProof::try_new(run_id, confirmations).map_or(
-                organization::NativeDeletionEvidence::Rejected,
-                organization::NativeDeletionEvidence::Confirmed,
-            )
+            organization::NativeDeletionEvidence::from_confirmations(run_id, confirmations, failure)
         })
     }
 

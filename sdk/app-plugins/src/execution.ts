@@ -227,7 +227,7 @@ export function isAppExecutionRequest(value: unknown): value is AppExecutionRequ
       && teamTarget(input) && typeof input.approvalId === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(input.approvalId)
       && typeof input.idempotencyKey === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(input.idempotencyKey)
       && (input.decision === 'approve' || input.decision === 'deny' || input.decision === 'abort')
-      && (input.note === undefined || (text(input.note, 256) && new TextEncoder().encode(input.note).byteLength <= 256))
+      && (input.note === undefined || (typeof input.note === 'string' && input.note.trim().length > 0 && !input.note.includes('\0')))
       && (input.language === undefined || (SUPPORTED_LANGUAGE_CODES as readonly unknown[]).includes(input.language));
     case 'importTeamGraph': return fields(input, ['scope', 'teamId', 'runId', 'yaml', 'idempotencyKey']) && teamTarget(input)
       && text(input.yaml, 768 * 1024) && new TextEncoder().encode(input.yaml).byteLength <= 768 * 1024 && text(input.idempotencyKey);

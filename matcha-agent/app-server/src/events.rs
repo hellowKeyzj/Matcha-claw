@@ -154,28 +154,23 @@ impl Events {
         })?;
         let session_id = session_id.to_owned();
         let run_id = run_id.map(str::to_owned);
+        let database = self.database.clone();
         let watchers = self.watchers.clone();
-        self.database
-            .call(move |connection| {
-                // Serialize each moved payload once, off the async I/O threads and before locking SQLite.
+        // Queue encoding before the first await; the owner finishes persistence even if append is dropped.
+        let encoding = tokio::task::spawn_blocking(move || {
+            let mut encoded = Vec::with_capacity(items.len());
+            for (kind, payload) in items {
+                let text = serde_json::to_string(&payload).map_err(|source| {
+                    rpc::Error::internal("events_payload_encode").with_source(source)
+                })?;
+                encoded.push((kind, payload, text));
+            }
+            Ok::<_, rpc::Error>(encoded)
+        });
+        tokio::spawn(async move {
+            let encoded = encoding.await.map_err(encoding_worker_error)??;
+            let append = move |connection: &mut Connection| {
                 let at_ms = timestamp()?;
-                let mut encoded = Vec::with_capacity(items.len());
-                for (kind, payload) in items {
-                    let text = serde_json::to_string(&payload).map_err(|source| {
-                        rpc::Error::internal("events_payload_encode").with_source(source)
-                    })?;
-                    encoded.push((
-                        Event {
-                            session_id: session_id.clone(),
-                            seq: 0,
-                            run_id: run_id.clone(),
-                            kind,
-                            at_ms,
-                            payload,
-                        },
-                        text,
-                    ));
-                }
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|source| storage_error("events_begin_failed", source))?;
@@ -204,8 +199,15 @@ impl Events {
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     ).map_err(|source| storage_error("events_insert_prepare_failed", source))?;
                     let mut events = Vec::with_capacity(encoded.len());
-                    for (offset, (mut event, text)) in encoded.into_iter().enumerate() {
-                        event.seq = previous + offset as u64 + 1;
+                    for (offset, (kind, payload, text)) in encoded.into_iter().enumerate() {
+                        let event = Event {
+                            session_id: session_id.clone(),
+                            seq: previous + offset as u64 + 1,
+                            run_id: run_id.clone(),
+                            kind,
+                            at_ms,
+                            payload,
+                        };
                         statement
                             .execute(params![
                                 event.session_id,
@@ -251,8 +253,18 @@ impl Events {
                     });
                 }
                 Ok(events)
-            })
-            .await
+            };
+            database.call(append).await
+        })
+        .await
+        .map_err(|error| {
+            rpc::Error::new(
+                -32006,
+                "sqlite_operation_outcome_unknown",
+                "Database worker stopped without a result; inspect persisted state before retrying",
+            )
+            .with_source(error)
+        })?
     }
 
     /// Exclusive cursor, ascending sequence, at most exactly the requested limit; zero reads no payloads.
@@ -266,38 +278,37 @@ impl Events {
         validate_session(session_id)?;
         let sql_limit = replay_limit(limit)?;
         let session_id = session_id.to_owned();
-        self.database
-            .call(move |connection| {
-                let latest = durable_latest(connection, &session_id)?;
-                validate_cursor(after_seq, latest)?;
-                if limit == 0 || after_seq == latest {
-                    return Ok(Vec::new());
-                }
-                // Append-only storage lets this query read the immutable prefix observed above.
-                let mut statement = connection
-                    .prepare_cached(
-                        "SELECT seq, run_id, kind, at_ms, payload FROM session_events
+        self.read_snapshot(move |connection| {
+            let latest = durable_latest(connection, &session_id)?;
+            validate_cursor(after_seq, latest)?;
+            if limit == 0 || after_seq == latest {
+                return Ok(Vec::new());
+            }
+            // Append-only storage lets this query read the immutable prefix observed above.
+            let mut statement = connection
+                .prepare_cached(
+                    "SELECT seq, run_id, kind, at_ms, payload FROM session_events
                  WHERE session_id = ?1 AND seq > ?2 AND seq <= ?3 ORDER BY seq LIMIT ?4",
-                    )
-                    .map_err(|source| storage_error("events_replay_prepare_failed", source))?;
-                let events = read_page(
-                    &mut statement,
-                    &[&session_id, &after_seq, &latest, &sql_limit],
-                    &session_id,
-                )?;
-                let mut cursor = after_seq;
-                for event in &events {
-                    if event.seq != cursor + 1 {
-                        return Err(sequence_gap(cursor + 1, Some(event.seq), latest));
-                    }
-                    cursor = event.seq;
+                )
+                .map_err(|source| storage_error("events_replay_prepare_failed", source))?;
+            let events = read_page(
+                &mut statement,
+                &[&session_id, &after_seq, &latest, &sql_limit],
+                &session_id,
+            )?;
+            let mut cursor = after_seq;
+            for event in &events {
+                if event.seq != cursor + 1 {
+                    return Err(sequence_gap(cursor + 1, Some(event.seq), latest));
                 }
-                if events.len() < limit && cursor < latest {
-                    return Err(sequence_gap(cursor + 1, None, latest));
-                }
-                Ok(events)
-            })
-            .await
+                cursor = event.seq;
+            }
+            if events.len() < limit && cursor < latest {
+                return Err(sequence_gap(cursor + 1, None, latest));
+            }
+            Ok(events)
+        })
+        .await
     }
 
     /// Filter in SQLite before decoding payloads, within the fixed (after_seq, through_seq] window.
@@ -319,32 +330,31 @@ impl Events {
         let sql_limit = replay_limit(limit)?;
         let session_id = session_id.to_owned();
         let kinds: Vec<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
-        self.database
-            .call(move |connection| {
-                let latest = durable_latest(connection, &session_id)?;
-                validate_cursor(through_seq, latest)?;
-                if limit == 0 || after_seq == through_seq || kinds.is_empty() {
-                    return Ok(Vec::new());
-                }
-                let placeholders = (0..kinds.len())
-                    .map(|index| format!("?{}", index + 5))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sql = format!(
-                    "SELECT seq, run_id, kind, at_ms, payload FROM session_events
+        self.read_snapshot(move |connection| {
+            let latest = durable_latest(connection, &session_id)?;
+            validate_cursor(through_seq, latest)?;
+            if limit == 0 || after_seq == through_seq || kinds.is_empty() {
+                return Ok(Vec::new());
+            }
+            let placeholders = (0..kinds.len())
+                .map(|index| format!("?{}", index + 5))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT seq, run_id, kind, at_ms, payload FROM session_events
                  INDEXED BY session_events_by_kind
                  WHERE session_id = ?1 AND seq > ?2 AND seq <= ?3 AND kind IN ({placeholders})
                  ORDER BY seq LIMIT ?4",
-                );
-                let mut statement = connection
-                    .prepare(&sql)
-                    .map_err(|source| storage_error("events_kind_query_prepare_failed", source))?;
-                let mut parameters: Vec<&dyn ToSql> =
-                    vec![&session_id, &after_seq, &through_seq, &sql_limit];
-                parameters.extend(kinds.iter().map(|kind| kind as &dyn ToSql));
-                read_page(&mut statement, &parameters, &session_id)
-            })
-            .await
+            );
+            let mut statement = connection
+                .prepare(&sql)
+                .map_err(|source| storage_error("events_kind_query_prepare_failed", source))?;
+            let mut parameters: Vec<&dyn ToSql> =
+                vec![&session_id, &after_seq, &through_seq, &sql_limit];
+            parameters.extend(kinds.iter().map(|kind| kind as &dyn ToSql));
+            read_page(&mut statement, &parameters, &session_id)
+        })
+        .await
     }
 
     pub async fn query_native_results(
@@ -360,7 +370,7 @@ impl Events {
         let limit = replay_limit(limit)?;
         let session_id = session_id.map(str::to_owned);
         let before = before.cloned();
-        self.database.call(move |connection| {
+        self.read_snapshot(move |connection| {
             if let Some(session_id) = &session_id {
                 crate::session::assert_live_session(connection, session_id)?;
             }
@@ -441,7 +451,7 @@ impl Events {
         let session_id = session_id.map(str::to_owned);
         let after = after.cloned();
         let before = before.cloned();
-        self.database.call(move |connection| {
+        self.read_snapshot(move |connection| {
             if let Some(session_id) = &session_id {
                 crate::session::assert_live_session(connection, session_id)?;
             }
@@ -524,8 +534,27 @@ impl Events {
     pub async fn latest(&self, session_id: &str) -> rpc::Result<u64> {
         validate_session(session_id)?;
         let session_id = session_id.to_owned();
+        self.read_snapshot(move |connection| durable_latest(connection, &session_id))
+            .await
+    }
+
+    async fn read_snapshot<F, T>(&self, read: F) -> rpc::Result<T>
+    where
+        F: FnOnce(&Connection) -> rpc::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
         self.database
-            .call(move |connection| durable_latest(connection, &session_id))
+            .read(move |connection| {
+                // Session existence, deletion fences, heads and rows share one WAL snapshot.
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .map_err(|source| storage_error("events_snapshot_begin_failed", source))?;
+                let result = read(&transaction)?;
+                transaction
+                    .commit()
+                    .map_err(|source| storage_error("events_snapshot_commit_failed", source))?;
+                Ok(result)
+            })
             .await
     }
 
@@ -561,6 +590,24 @@ impl Events {
             }
         });
         receiver
+    }
+}
+
+fn encoding_worker_error(error: tokio::task::JoinError) -> rpc::Error {
+    if error.is_cancelled() {
+        rpc::Error::new(
+            -32005,
+            "sqlite_worker_cancelled",
+            "Database operation was cancelled before its worker started",
+        )
+        .with_source(error)
+    } else {
+        rpc::Error::new(
+            -32006,
+            "sqlite_operation_outcome_unknown",
+            "Database worker stopped without a result; inspect persisted state before retrying",
+        )
+        .with_source(error)
     }
 }
 

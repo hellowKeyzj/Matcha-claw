@@ -36,6 +36,7 @@ pub struct LaunchSpec {
     pub agent_id: String,
     pub session_id: String,
     pub paths: Paths,
+    pub workspace: std::path::PathBuf,
     pub resume: bool,
     pub fork_from: Option<String>,
     pub(crate) effort: Option<effort::Level>,
@@ -206,17 +207,19 @@ impl Cli {
             .agents
             .insert(spec.agent_id.clone(), spec.agent.clone());
         let instance_id = Uuid::new_v4().to_string();
-        let iab = iab_owner.register(
-            &spec.agent_id,
-            &spec.session_id,
-            &instance_id,
-            &spec.paths.workspace(&spec.agent_id)?,
-        )
-        .await?;
+        let iab = iab_owner
+            .register(
+                &spec.agent_id,
+                &spec.session_id,
+                &instance_id,
+                &spec.workspace,
+            )
+            .await?;
         let mut launch = projection::launch_instance(
             &execution_config,
             &spec.paths,
             &spec.agent_id,
+            &spec.workspace,
             args,
             &iab,
         )

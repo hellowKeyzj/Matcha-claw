@@ -8,14 +8,18 @@ import { Card, CardContent } from '@/components/ui/card';
 import { useLocalLicenseLocked } from '@/plugins/account/stores/license';
 import { cn } from '@/lib/utils';
 import { DEFAULT_SETTINGS_SECTION, parseSettingsSectionFromSearch } from './sections';
+import { useSettingsStore } from './store';
 
 export function Settings() {
   const { t } = useTranslation(['settings', 'common']);
   const location = useLocation();
   const navigate = useNavigate();
   const licenseLocked = useLocalLicenseLocked();
+  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const contributions = useContributions(applicationSettings);
-  const sections = useMemo(() => [...contributions].sort((a, b) => a.order - b.order), [contributions]);
+  const sections = useMemo(() => contributions
+    .filter((section) => !section.developerOnly || devModeUnlocked)
+    .sort((a, b) => a.order - b.order), [contributions, devModeUnlocked]);
   const activeSection = licenseLocked
     ? 'license'
     : parseSettingsSectionFromSearch(location.search, sections) ?? DEFAULT_SETTINGS_SECTION;

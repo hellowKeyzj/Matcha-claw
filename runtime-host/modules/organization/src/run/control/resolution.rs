@@ -1,7 +1,7 @@
 use crate::run::{
     delivery::AuthorizedGraphOutcome,
     evidence::EvidenceLedger,
-    graph::{EdgeDefinition, ExecutionFence, GraphRunId, GraphState, NodeAttempt, NodeId, NodeKind},
+    graph::{EdgeDefinition, ExecutionFence, GraphEvent, GraphRunId, GraphState, NodeAttempt, NodeId, NodeKind},
 };
 
 /// The producer channel that decided a control node outcome.
@@ -312,6 +312,23 @@ impl ControlNodeResolution {
     pub fn idempotency_key(&self) -> &str {
         &self.idempotency_key
     }
+
+    pub(crate) fn graph_event(&self) -> GraphEvent {
+        match self.outcome {
+            AuthorizedGraphOutcome::Completed => GraphEvent::NodeCompleted {
+                node_id: self.node_id.clone(),
+                fence: self.fence.clone(),
+                output_port: self.output_port.clone(),
+                completed_at: self.resolved_at,
+            },
+            AuthorizedGraphOutcome::Failed => GraphEvent::NodeFailed {
+                node_id: self.node_id.clone(),
+                fence: self.fence.clone(),
+                output_port: self.output_port.clone(),
+                failed_at: self.resolved_at,
+            },
+        }
+    }
 }
 
 /// Admits only the control node attempt a producer channel may still resolve.
@@ -421,20 +438,20 @@ pub(crate) fn require_join_ready(
         .map(|input| (input.edge_id(), input))
         .collect::<std::collections::BTreeMap<_, _>>();
     for edge in edges {
-        let source = graph
-            .current_attempt(edge.source_node_id())
-            .ok_or(ControlNodeResolutionError::GraphStateMismatch)?;
         let input = inputs
             .get(edge.id())
+            .ok_or(ControlNodeResolutionError::GraphStateMismatch)?;
+        let source = graph.executions().get(input.source_node_id())
+            .and_then(|history| history.attempts().iter().find(|source| source.fence() == input.source_fence()))
             .ok_or(ControlNodeResolutionError::GraphStateMismatch)?;
         if edge.action() != crate::EdgeAction::Gate
             || source.status() != crate::AttemptStatus::Completed
             || source.output_port() != Some(edge.source_port())
+            || source.batch_id() != attempt.batch_id()
             || input.source_node_id() != edge.source_node_id()
             || input.source_port() != edge.source_port()
             || input.target_port() != edge.target_port()
             || input.action() != edge.action()
-            || input.source_fence() != source.fence()
         {
             return Err(ControlNodeResolutionError::GraphStateMismatch);
         }

@@ -125,7 +125,6 @@ export function killWorkflowTask(
       ...task,
       status: 'killed',
       endTime: Date.now(),
-      notified: true,
       abortController: undefined,
     }
   })

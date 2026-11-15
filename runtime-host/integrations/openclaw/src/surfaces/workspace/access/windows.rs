@@ -156,7 +156,7 @@ pub(super) fn list_dir(
                             });
                         }
                     }
-                    Err(WorkspaceFileError::Unavailable | WorkspaceFileError::NotFile)
+                    Err(WorkspaceFileError::Missing | WorkspaceFileError::Unavailable | WorkspaceFileError::NotFile)
                     | Err(WorkspaceFileError::NotDirectory) => {}
                     Err(error) => return Err(error),
                 }
@@ -194,7 +194,7 @@ pub(super) fn write_file(
     for segment in parents {
         let child = match open_directory_handle(parent, segment) {
             Ok(child) => child,
-            Err(WorkspaceFileError::Unavailable) => create_directory_handle(parent, segment)?,
+            Err(WorkspaceFileError::Missing | WorkspaceFileError::Unavailable) => create_directory_handle(parent, segment)?,
             Err(error) => return Err(error),
         };
         parent = child.as_raw_handle() as F::HANDLE;
@@ -447,7 +447,7 @@ fn open_entry_handle(
     };
     let mut status = IO_STATUS_BLOCK::default();
     let mut raw = null_mut();
-    if unsafe {
+    let result = unsafe {
         NFS::NtCreateFile(
             &mut raw,
             access,
@@ -461,9 +461,12 @@ fn open_entry_handle(
             null(),
             0,
         )
-    } < 0
-    {
-        return Err(WorkspaceFileError::Unavailable);
+    };
+    if result < 0 {
+        return Err(match result {
+            F::STATUS_OBJECT_NAME_NOT_FOUND | F::STATUS_OBJECT_PATH_NOT_FOUND | F::STATUS_NO_SUCH_FILE => WorkspaceFileError::Missing,
+            _ => WorkspaceFileError::Unavailable,
+        });
     }
     // SAFETY: NtCreateFile returned a new owned handle.
     let handle = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };

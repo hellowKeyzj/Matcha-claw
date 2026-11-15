@@ -4,7 +4,6 @@ use crate::run::graph::ExecutionFence;
 
 const MAX_REVIEW_ID_BYTES: usize = 256;
 const MAX_REVIEW_FACT_BYTES: usize = 256;
-const MAX_REVIEW_PROMPT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ReviewerRequest {
@@ -31,7 +30,6 @@ pub enum ReviewerRequestError {
     BlankIdempotencyKey,
     OversizedReviewId,
     OversizedFact,
-    OversizedPrompt,
     NodeFenceMismatch,
     AcceptedBeforeRequest,
 }
@@ -115,9 +113,6 @@ impl ReviewerRequest {
         if self.prompt.trim().is_empty() {
             return Err(ReviewerRequestError::BlankPrompt);
         }
-        if self.prompt.len() > MAX_REVIEW_PROMPT_BYTES {
-            return Err(ReviewerRequestError::OversizedPrompt);
-        }
         if self.fence.node_execution_id().as_str().trim().is_empty()
             || self.fence.attempt_id().as_str().trim().is_empty()
             || !fence_belongs_to_node(&self.fence, &self.node_id)
@@ -182,7 +177,7 @@ impl ReviewVerdictReceipt {
         {
             return Err(ReviewVerdictError::InvalidIdempotencyKey);
         }
-        if self.summary.trim().is_empty() || self.summary.len() > crate::run::MAX_SUMMARY_BYTES {
+        if self.summary.trim().is_empty() {
             return Err(ReviewVerdictError::InvalidSummary);
         }
         if self.resolved_at < request.requested_at {

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64},
 };
 
 use crate::run::event::{MetadataValue, OpaqueId};
@@ -11,7 +11,8 @@ use super::{
     GraphRunId, GraphState, InputReceipt, NodeAttempt,
     NodeAttemptDurableInput, NodeDefinition, NodeExecutionHistory, NodeId, NodeKind, NodePosition,
     ReadyQueueItem, RestoreError, ReviewAssignment, StartTrigger, WorkAssignment,
-    restore_oracle,
+    BlockedRework, ReworkCounterKey,
+    restore::validate_execution_state,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +27,9 @@ pub struct GraphDurableSnapshot {
     pub edges: Vec<DurableEdgeDefinition>,
     pub executions: Vec<DurableNodeExecution>,
     pub ready_queue: Vec<DurableReadyQueueItem>,
+    pub next_batch_id: u64,
+    pub rework_counts: Vec<DurableReworkCounter>,
+    pub blocked_reworks: Vec<DurableBlockedRework>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,11 +50,12 @@ pub struct DurableNodeDefinition {
     pub id: String,
     pub kind: NodeKind,
     pub title: String,
-    pub max_attempts: u32,
+    pub rework_limits: BTreeMap<String, u32>,
     pub is_control: bool,
     pub trigger: Option<DurableStartTrigger>,
     pub work: Option<DurableWorkAssignment>,
     pub review: Option<DurableReviewAssignment>,
+    pub approval_prompt: Option<String>,
     pub script_review_rule: Option<crate::ScriptReviewRule>,
 }
 
@@ -105,6 +110,7 @@ pub struct DurableNodeExecution {
 pub struct DurableNodeAttempt {
     pub fence: DurableExecutionFence,
     pub number: u32,
+    pub batch_id: u64,
     pub node_id: String,
     pub node_kind: NodeKind,
     pub status: AttemptStatus,
@@ -148,7 +154,29 @@ pub struct DurableReadyQueueItem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableReworkCounter {
+    pub batch_id: u64,
+    pub source_node_id: String,
+    pub source_port: String,
+    pub used: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableBlockedRework {
+    pub batch_id: u64,
+    pub source_node_id: String,
+    pub source_port: String,
+    pub source_fence: DurableExecutionFence,
+    pub scope: Vec<String>,
+    pub edge_ids: Vec<String>,
+    pub used: u32,
+    pub max_reworks: u32,
+    pub blocked_at: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DurableRestoreError {
+    InvalidExecutionControl,
     NonCanonicalNodeOrder,
     NonCanonicalEdgeOrder,
     NonCanonicalLayout,
@@ -228,9 +256,10 @@ impl GraphState {
                     id: node.id().as_str().to_owned(),
                     kind: node.kind(),
                     title: node.title().to_owned(),
-                    max_attempts: node.max_attempts().get(),
+                    rework_limits: node.rework_limits().clone(),
                     is_control: node.is_control(),
                     trigger: node.trigger().map(durable_trigger),
+                    approval_prompt: node.approval_prompt().map(ToOwned::to_owned),
                     script_review_rule: node.script_review_rule(),
                     work: node.work_assignment().map(|work| DurableWorkAssignment {
                         task_id: work.task_id().to_owned(),
@@ -279,6 +308,18 @@ impl GraphState {
                 })
                 .collect(),
             ready_queue: self.ready_queue().iter().map(durable_ready_item).collect(),
+            next_batch_id: self.next_batch_id().get(),
+            rework_counts: self.rework_counts().iter().map(|(key, used)| DurableReworkCounter {
+                batch_id: key.batch_id.get(), source_node_id: key.source_node_id.as_str().to_owned(),
+                source_port: key.source_port.clone(), used: *used,
+            }).collect(),
+            blocked_reworks: self.blocked_reworks().values().map(|blocked| DurableBlockedRework {
+                batch_id: blocked.batch_id.get(), source_node_id: blocked.source_node_id.as_str().to_owned(),
+                source_port: blocked.source_port.clone(), source_fence: durable_fence(&blocked.source_fence),
+                scope: blocked.scope.iter().map(|id| id.as_str().to_owned()).collect(),
+                edge_ids: blocked.edge_ids.iter().map(|id| id.as_str().to_owned()).collect(),
+                used: blocked.used, max_reworks: blocked.max_reworks, blocked_at: blocked.blocked_at,
+            }).collect(),
         }
     }
 
@@ -286,6 +327,38 @@ impl GraphState {
         let definition = restore_definition(&snapshot)?;
         let executions = restore_executions(&snapshot.executions)?;
         let layout = restore_layout(&snapshot)?;
+        let next_batch_id = NonZeroU64::new(snapshot.next_batch_id)
+            .ok_or(DurableRestoreError::InvalidExecutionControl)?;
+        let mut rework_counts = BTreeMap::new();
+        let mut previous_key = None;
+        for counter in &snapshot.rework_counts {
+            let key = ReworkCounterKey {
+                batch_id: NonZeroU64::new(counter.batch_id).ok_or(DurableRestoreError::InvalidExecutionControl)?,
+                source_node_id: NodeId::new(counter.source_node_id.clone()), source_port: counter.source_port.clone(),
+            };
+            if previous_key.as_ref().is_some_and(|previous| previous >= &key) {
+                return Err(DurableRestoreError::InvalidExecutionControl);
+            }
+            previous_key = Some(key.clone());
+            rework_counts.insert(key, counter.used);
+        }
+        let mut blocked_reworks = BTreeMap::new();
+        let mut previous_source = None;
+        for blocked in &snapshot.blocked_reworks {
+            let source_node_id = NodeId::new(blocked.source_node_id.clone());
+            if previous_source.as_ref().is_some_and(|previous| previous >= &source_node_id) {
+                return Err(DurableRestoreError::InvalidExecutionControl);
+            }
+            previous_source = Some(source_node_id.clone());
+            blocked_reworks.insert(source_node_id.clone(), BlockedRework {
+                batch_id: NonZeroU64::new(blocked.batch_id).ok_or(DurableRestoreError::InvalidExecutionControl)?,
+                source_node_id, source_port: blocked.source_port.clone(),
+                source_fence: restore_fence(blocked.source_fence.clone()),
+                scope: blocked.scope.iter().cloned().map(NodeId::new).collect(),
+                edge_ids: blocked.edge_ids.iter().cloned().map(EdgeId::new).collect(),
+                used: blocked.used, max_reworks: blocked.max_reworks, blocked_at: blocked.blocked_at,
+            });
+        }
         let ready_queue = snapshot
             .ready_queue
             .into_iter()
@@ -303,9 +376,34 @@ impl GraphState {
             layout,
             executions,
             ready_queue,
+            next_batch_id,
+            rework_counts,
+            blocked_reworks,
         );
         validate_cross_references(&state)?;
-        restore_oracle(state).map_err(DurableRestoreError::InvalidState)
+        validate_execution_state(&state).map_err(DurableRestoreError::InvalidState)?;
+        Ok(state)
+    }
+
+    pub(crate) fn validate_durable(&self) -> Result<(), DurableRestoreError> {
+        for node in self.definition().nodes() {
+            if node.is_control() && node.kind() == NodeKind::Work {
+                return Err(DurableRestoreError::InvalidNodeSnapshot {
+                    node_id: node.id().as_str().to_owned(),
+                });
+            }
+            validate_rework_limits(node.id().as_str(), node.kind(), node.rework_limits())?;
+        }
+        self.definition()
+            .validate_structure()
+            .map_err(DurableRestoreError::InvalidDefinition)?;
+        for node_id in self.layout().node_positions().keys() {
+            if self.definition().node(node_id).is_none() {
+                return Err(DurableRestoreError::InvalidLayoutNodePosition);
+            }
+        }
+        validate_cross_references(self)?;
+        validate_execution_state(self).map_err(DurableRestoreError::InvalidState)
     }
 }
 
@@ -350,6 +448,7 @@ fn durable_attempt(attempt: &NodeAttempt) -> DurableNodeAttempt {
     DurableNodeAttempt {
         fence: durable_fence(attempt.fence()),
         number: attempt.number().get(),
+        batch_id: attempt.batch_id().get(),
         node_id: attempt.node_id().as_str().to_owned(),
         node_kind: attempt.node_kind(),
         status: attempt.status(),
@@ -413,87 +512,88 @@ fn restore_definition(
                 return Err(DurableRestoreError::NonCanonicalNodeOrder);
             }
             let id = NodeId::new(node.id.clone());
-            let Some(max_attempts) = NonZeroU32::new(node.max_attempts) else {
-                return Err(DurableRestoreError::InvalidNodeSnapshot {
-                    node_id: node.id.clone(),
-                });
-            };
-            if let Some(rule) = node.script_review_rule {
+            let definition = if node.approval_prompt.is_some() {
+                if node.kind != NodeKind::HumanDecision || !node.is_control
+                    || node.trigger.is_some() || node.work.is_some() || node.review.is_some()
+                    || node.script_review_rule.is_some()
+                {
+                    return Err(DurableRestoreError::InvalidNodeSnapshot { node_id: node.id.clone() });
+                }
+                Ok(NodeDefinition::human_decision(id, node.title.clone(), node.approval_prompt.clone()))
+            } else if let Some(rule) = node.script_review_rule {
                 if node.kind != NodeKind::ScriptReview || !node.is_control
                     || node.trigger.is_some() || node.work.is_some() || node.review.is_some()
                 {
                     return Err(DurableRestoreError::InvalidNodeSnapshot { node_id: node.id.clone() });
                 }
-                return Ok(NodeDefinition::script_review(id, node.title.clone(), max_attempts, rule));
-            }
-            match (
-                node.kind,
-                node.is_control,
-                &node.trigger,
-                &node.work,
-                &node.review,
-            ) {
-                (NodeKind::Start, false, trigger, None, None) => Ok(NodeDefinition::start(
-                    id,
-                    node.title.clone(),
-                    max_attempts,
-                    trigger.as_ref().map(restore_trigger),
-                )),
-                (NodeKind::Work, false, None, Some(work), None) => Ok(NodeDefinition::work(
-                    id,
-                    node.title.clone(),
-                    max_attempts,
-                    WorkAssignment::typed(
-                        work.task_id.clone(),
-                        work.prompt.clone(),
-                        ExecutorPolicy::team_role_session(
-                            work.role_id.clone(),
-                            crate::RoleSessionRef::try_new(work.session_ref.clone()).map_err(
-                                |_| DurableRestoreError::InvalidNodeSnapshot {
-                                    node_id: node.id.clone(),
-                                },
-                            )?,
-                        ),
-                        work.output_artifact_kind.clone(),
-                    ),
-                )),
-                (NodeKind::Review, false, None, None, Some(review)) => {
-                    Ok(NodeDefinition::review(
+                Ok(NodeDefinition::script_review(id, node.title.clone(), rule))
+            } else {
+                match (
+                    node.kind,
+                    node.is_control,
+                    &node.trigger,
+                    &node.work,
+                    &node.review,
+                ) {
+                    (NodeKind::Start, false, trigger, None, None) => Ok(NodeDefinition::start(
                         id,
                         node.title.clone(),
-                        max_attempts,
-                        ReviewAssignment::with_executor(
+                        trigger.as_ref().map(restore_trigger),
+                    )),
+                    (NodeKind::Work, false, None, Some(work), None) => Ok(NodeDefinition::work(
+                        id,
+                        node.title.clone(),
+                        WorkAssignment::typed(
+                            work.task_id.clone(),
+                            work.prompt.clone(),
                             ExecutorPolicy::team_role_session(
-                                review.role_id.clone(),
-                                crate::RoleSessionRef::try_new(review.session_ref.clone())
-                                    .map_err(|_| DurableRestoreError::InvalidNodeSnapshot {
+                                work.role_id.clone(),
+                                crate::RoleSessionRef::try_new(work.session_ref.clone()).map_err(
+                                    |_| DurableRestoreError::InvalidNodeSnapshot {
                                         node_id: node.id.clone(),
-                                    })?,
+                                    },
+                                )?,
                             ),
-                            review.prompt.clone(),
+                            work.output_artifact_kind.clone(),
                         ),
-                    ))
+                    )),
+                    (NodeKind::Review, false, None, None, Some(review)) => {
+                        Ok(NodeDefinition::review(
+                            id,
+                            node.title.clone(),
+                                ReviewAssignment::with_executor(
+                                ExecutorPolicy::team_role_session(
+                                    review.role_id.clone(),
+                                    crate::RoleSessionRef::try_new(review.session_ref.clone())
+                                        .map_err(|_| DurableRestoreError::InvalidNodeSnapshot {
+                                            node_id: node.id.clone(),
+                                        })?,
+                                ),
+                                review.prompt.clone(),
+                            ),
+                        ))
+                    }
+                    (NodeKind::Join, false, None, None, None) => Ok(NodeDefinition::join(
+                        id,
+                        node.title.clone(),
+                    )),
+                    (NodeKind::Start, true, None, None, None)
+                    | (NodeKind::Review, true, None, None, None)
+                    | (NodeKind::Join, true, None, None, None)
+                    | (NodeKind::HumanDecision, true, None, None, None)
+                    | (NodeKind::ScriptReview, true, None, None, None)
+                    | (NodeKind::End, true, None, None, None) => Ok(NodeDefinition::control(
+                        id,
+                        node.kind,
+                        node.title.clone(),
+                    )),
+                    _ => Err(DurableRestoreError::InvalidNodeSnapshot {
+                        node_id: node.id.clone(),
+                    }),
                 }
-                (NodeKind::Join, false, None, None, None) => Ok(NodeDefinition::join(
-                    id,
-                    node.title.clone(),
-                    max_attempts,
-                )),
-                (NodeKind::Start, true, None, None, None)
-                | (NodeKind::Review, true, None, None, None)
-                | (NodeKind::Join, true, None, None, None)
-                | (NodeKind::HumanDecision, true, None, None, None)
-                | (NodeKind::ScriptReview, true, None, None, None)
-                | (NodeKind::End, true, None, None, None) => Ok(NodeDefinition::control(
-                    id,
-                    node.kind,
-                    node.title.clone(),
-                    max_attempts,
-                )),
-                _ => Err(DurableRestoreError::InvalidNodeSnapshot {
-                    node_id: node.id.clone(),
-                }),
-            }
+            }?;
+            validate_rework_limits(&node.id, node.kind, &node.rework_limits)?;
+            Ok(definition.with_rework_limits(node.rework_limits.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let edges = snapshot
@@ -529,6 +629,23 @@ fn restore_definition(
         edges,
     )
     .map_err(DurableRestoreError::InvalidDefinition)
+}
+
+fn validate_rework_limits(
+    node_id: &str,
+    kind: NodeKind,
+    limits: &BTreeMap<String, u32>,
+) -> Result<(), DurableRestoreError> {
+    let expected = kind.source_ports().iter()
+        .map(|port| port.as_str())
+        .filter(|port| kind.accepts_edge_action(port, EdgeAction::Rework))
+        .collect::<BTreeSet<_>>();
+    if limits.keys().map(String::as_str).ne(expected) {
+        return Err(DurableRestoreError::InvalidNodeSnapshot {
+            node_id: node_id.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn restore_trigger(trigger: &DurableStartTrigger) -> StartTrigger {
@@ -579,6 +696,7 @@ fn restore_attempt(snapshot: &DurableNodeAttempt) -> Result<NodeAttempt, Durable
     Ok(NodeAttempt::from_durable(NodeAttemptDurableInput {
         fence: restore_fence(snapshot.fence.clone()),
         number,
+        batch_id: NonZeroU64::new(snapshot.batch_id).ok_or(DurableRestoreError::InvalidExecutionControl)?,
         node_id: NodeId::new(snapshot.node_id.clone()),
         node_kind: snapshot.node_kind,
         status: snapshot.status,
@@ -681,9 +799,18 @@ fn validate_reason(
                 .iter()
                 .map(InputReceipt::edge_id)
                 .collect::<Vec<_>>();
-            (actual == expected)
-                .then_some(())
-                .ok_or_else(invalid_inputs)
+            if reason_edge.action() == EdgeAction::Gate && attempt.status() == AttemptStatus::Pending {
+                let received = actual.iter().copied().collect::<BTreeSet<_>>();
+                let ordered = expected.iter().copied().filter(|edge| received.contains(edge)).collect::<Vec<_>>();
+                (!actual.is_empty() && actual.len() < expected.len()
+                    && actual.len() == received.len() && actual == ordered && received.contains(edge_id))
+                    .then_some(())
+                    .ok_or_else(invalid_inputs)
+            } else {
+                (actual == expected)
+                    .then_some(())
+                    .ok_or_else(invalid_inputs)
+            }
         }
         AttemptReason::Rework => {
             let actual = attempt.inputs();
@@ -755,7 +882,10 @@ fn validate_input(
             edge_id,
         });
     };
-    if !source.status().is_terminal() || source.output_port() != Some(receipt.source_port()) {
+    if !source.status().is_terminal() || source.output_port() != Some(receipt.source_port())
+        || source.batch_id() != attempt.batch_id()
+        || (edge.action() == EdgeAction::Gate && source.status() != AttemptStatus::Completed)
+    {
         return Err(DurableRestoreError::InvalidInputSourceAttempt {
             node_id: node_id.clone(),
             number: attempt.number(),

@@ -1,6 +1,8 @@
 use std::{fs, io, path::Path, time::Duration};
 
-use rusqlite::{Connection, Error, ErrorCode, OpenFlags, Row, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, Error, ErrorCode, OpenFlags, Row, Transaction, TransactionBehavior, params,
+};
 
 use super::{
     StoreFault,
@@ -47,6 +49,9 @@ impl Database {
         let version: u8 = transaction
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(read_error)?;
+        if version == 1 {
+            return Err(StoreFault::MigrationRequired);
+        }
         if version != 0 && version != schema::VERSION {
             return Err(StoreFault::UnsupportedSchemaVersion(version));
         }
@@ -74,7 +79,10 @@ impl Database {
         Ok(Self { connection })
     }
 
-    pub(crate) fn read_record(path: &Path, key: &RecordKey) -> Result<Option<StoredRecord>, StoreFault> {
+    pub(crate) fn read_record(
+        path: &Path,
+        key: &RecordKey,
+    ) -> Result<Option<StoredRecord>, StoreFault> {
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(read_error)?;
         connection.busy_timeout(Duration::from_millis(500)).map_err(read_error)?;
@@ -82,27 +90,18 @@ impl Database {
         let version: u8 = transaction
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(read_error)?;
+        if version == 1 {
+            return Err(StoreFault::MigrationRequired);
+        }
         if version != schema::VERSION {
             return Err(StoreFault::UnsupportedSchemaVersion(version));
         }
         if !metadata(&transaction)?.1 {
             return Err(StoreFault::MigrationRequired);
         }
-        let record = {
-            let mut statement = transaction.prepare_cached(
-                "SELECT kind,scope,id,team_id,run_id,payload FROM records
-                 WHERE kind=?1 AND scope=?2 AND id=?3 AND payload IS NOT NULL",
-            ).map_err(read_error)?;
-            let mut rows = statement.query(params![key.kind.as_str(), key.scope, key.id])
-                .map_err(read_error)?;
-            rows.next().map_err(read_error)?.map(read_change).transpose()?
-        };
+        let record = read_record(&transaction, key)?;
         transaction.commit().map_err(read_error)?;
-        match record {
-            Some(RecordChange::Put(record)) => Ok(Some(record)),
-            None => Ok(None),
-            Some(RecordChange::Delete(_)) => Err(StoreFault::CorruptRecord),
-        }
+        Ok(record)
     }
 
     pub(crate) fn initialized(&self) -> Result<bool, StoreFault> {
@@ -154,6 +153,10 @@ impl WriteTransaction<'_> {
 
     pub(crate) fn read_all(&self) -> Result<Vec<StoredRecord>, StoreFault> {
         read_all(&self.transaction)
+    }
+
+    pub(crate) fn read_record(&self, key: &RecordKey) -> Result<Option<StoredRecord>, StoreFault> {
+        read_record(&self.transaction, key)
     }
 
     pub(crate) fn read_since(&self, epoch: u64) -> Result<(u64, Vec<RecordChange>), StoreFault> {
@@ -256,6 +259,20 @@ fn metadata(connection: &Connection) -> Result<(u64, bool), StoreFault> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(read_error)
+}
+
+fn read_record(connection: &Connection, key: &RecordKey) -> Result<Option<StoredRecord>, StoreFault> {
+    let mut statement = connection.prepare_cached(
+        "SELECT kind,scope,id,team_id,run_id,payload FROM records
+         WHERE kind=?1 AND scope=?2 AND id=?3 AND payload IS NOT NULL",
+    ).map_err(read_error)?;
+    let mut rows = statement.query(params![key.kind.as_str(), key.scope, key.id])
+        .map_err(read_error)?;
+    match rows.next().map_err(read_error)?.map(read_change).transpose()? {
+        Some(RecordChange::Put(record)) => Ok(Some(record)),
+        None => Ok(None),
+        Some(RecordChange::Delete(_)) => Err(StoreFault::CorruptRecord),
+    }
 }
 
 fn read_all(connection: &Connection) -> Result<Vec<StoredRecord>, StoreFault> {

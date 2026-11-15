@@ -207,10 +207,9 @@ impl EventLedger {
     }
 
     pub fn events_for_run(&self, run_id: &str) -> impl Iterator<Item = &TeamEvent> {
-        self.events
-            .iter()
-            .filter(move |(candidate, _)| candidate.as_str() == run_id)
-            .flat_map(|(_, events)| events.iter())
+        OpaqueId::try_new(run_id).ok()
+            .and_then(|run| self.events.get(&run))
+            .into_iter().flatten()
     }
 
     pub(crate) fn command_by_idempotency(
@@ -266,70 +265,36 @@ impl EventLedger {
     }
 
     pub fn restore(snapshot: EventLedgerSnapshot) -> Result<Self, RestoreEventLedgerError> {
+        validate_records(snapshot.commands.iter(), snapshot.events.iter())?;
         let mut ledger = Self::default();
-        let mut command_ids = BTreeSet::new();
-        let mut keys = BTreeSet::new();
         for record in snapshot.commands {
-            if !command_ids.insert((record.run_id().clone(), record.command_id().clone())) {
-                return Err(RestoreEventLedgerError::DuplicateCommandId);
-            }
-            if !keys.insert((record.run_id().clone(), record.idempotency_key().clone())) {
-                return Err(RestoreEventLedgerError::DuplicateIdempotencyKey);
-            }
-            let records = ledger.commands.entry(record.run_id().clone()).or_default();
-            let expected = next_sequence(records.len()).expect("sequence length cannot overflow");
-            if record.sequence() != expected.get() {
-                return Err(RestoreEventLedgerError::CommandSequenceGap);
-            }
-            records.push(record);
+            ledger.commands.entry(record.run_id().clone()).or_default().push(record);
         }
-
         for event in snapshot.events {
-            if !ledger.event_ids.insert(event.event_id().to_owned()) {
-                return Err(RestoreEventLedgerError::DuplicateEventId);
-            }
-            let event_run_id = event.run_id_value().clone();
-            let expected_sequence =
-                next_sequence(ledger.events.get(&event_run_id).map_or(0, Vec::len))
-                    .expect("event sequence length cannot overflow");
-            if event.sequence() != expected_sequence.get() {
-                return Err(RestoreEventLedgerError::EventSequenceGap);
-            }
-            match event.event_type() {
-                super::TeamEventType::ApprovalResolved => {
-                    if !approval_resolution_event_is_canonical(&event) {
-                        return Err(RestoreEventLedgerError::EventDoesNotMatchCommand);
-                    }
-                }
-                _ => {
-                    let expected_event = expected_event_for(&ledger, &event)
-                        .ok_or(RestoreEventLedgerError::EventWithoutAcceptedCommand)?;
-                    if expected_event != event {
-                        return Err(RestoreEventLedgerError::EventDoesNotMatchCommand);
-                    }
-                }
-            }
-            ledger.events.entry(event_run_id).or_default().push(event);
-        }
-        for (run_id, records) in &ledger.commands {
-            let expected_event_count = records.iter().filter(|record| record.is_accepted()).count();
-            let events = ledger
-                .events
-                .get(run_id)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let command_event_count = events
-                .iter()
-                .filter(|event| event.event_type() != super::TeamEventType::ApprovalResolved)
-                .count();
-            if command_event_count < expected_event_count {
-                return Err(RestoreEventLedgerError::AcceptedCommandWithoutEvent);
-            }
-            if command_event_count != expected_event_count {
-                return Err(RestoreEventLedgerError::EventDoesNotMatchCommand);
-            }
+            ledger.event_ids.insert(event.event_id().to_owned());
+            ledger.events.entry(event.run_id_value().clone()).or_default().push(event);
         }
         Ok(ledger)
+    }
+
+    pub(crate) fn commands(&self) -> impl Iterator<Item = &CommandRecord> {
+        self.commands.values().flatten()
+    }
+
+    pub(crate) fn events(&self) -> impl Iterator<Item = &TeamEvent> {
+        self.events.values().flatten()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), RestoreEventLedgerError> {
+        validate_records(self.commands(), self.events())
+    }
+
+    pub(crate) fn preserves_history(&self, previous: &Self) -> bool {
+        previous.commands.iter().all(|(run, records)| {
+            self.commands_for_run(run).starts_with(records)
+        }) && previous.events.iter().all(|(run, events)| {
+            self.events_for_run_id(run).starts_with(events)
+        })
     }
 
     pub(crate) fn retain_without_run(&mut self, run_id: &str) {
@@ -520,16 +485,80 @@ fn approval_resolution_event_is_canonical(event: &TeamEvent) -> bool {
     }
 }
 
+fn validate_records<'a>(
+    commands: impl IntoIterator<Item = &'a CommandRecord>,
+    events: impl IntoIterator<Item = &'a TeamEvent>,
+) -> Result<(), RestoreEventLedgerError> {
+    let mut records_by_run = BTreeMap::<&OpaqueId, BTreeMap<&str, &CommandRecord>>::new();
+    let mut keys = BTreeSet::new();
+    for record in commands {
+        let records = records_by_run.entry(record.run_id()).or_default();
+        if records.contains_key(record.command_id().as_str()) {
+            return Err(RestoreEventLedgerError::DuplicateCommandId);
+        }
+        if !keys.insert((record.run_id(), record.idempotency_key())) {
+            return Err(RestoreEventLedgerError::DuplicateIdempotencyKey);
+        }
+        let expected = next_sequence(records.len()).expect("sequence length cannot overflow");
+        if record.sequence() != expected.get() {
+            return Err(RestoreEventLedgerError::CommandSequenceGap);
+        }
+        records.insert(record.command_id().as_str(), record);
+    }
+
+    let mut event_ids = BTreeSet::new();
+    let mut event_counts = BTreeMap::<&OpaqueId, usize>::new();
+    let mut command_event_counts = BTreeMap::<&OpaqueId, usize>::new();
+    for event in events {
+        if !event_ids.insert(event.event_id()) {
+            return Err(RestoreEventLedgerError::DuplicateEventId);
+        }
+        let count = event_counts.entry(event.run_id_value()).or_default();
+        let expected = next_sequence(*count).expect("event sequence length cannot overflow");
+        if event.sequence() != expected.get() {
+            return Err(RestoreEventLedgerError::EventSequenceGap);
+        }
+        match event.event_type() {
+            super::TeamEventType::ApprovalResolved => {
+                if !approval_resolution_event_is_canonical(event) {
+                    return Err(RestoreEventLedgerError::EventDoesNotMatchCommand);
+                }
+            }
+            _ => {
+                let record = records_by_run.get(event.run_id_value())
+                    .and_then(|records| records.get(event.causation_id()));
+                let expected = record.and_then(|record| expected_event_for_record(record, event))
+                    .ok_or(RestoreEventLedgerError::EventWithoutAcceptedCommand)?;
+                if &expected != event {
+                    return Err(RestoreEventLedgerError::EventDoesNotMatchCommand);
+                }
+                *command_event_counts.entry(event.run_id_value()).or_default() += 1;
+            }
+        }
+        *count += 1;
+    }
+    for (run_id, records) in records_by_run {
+        let expected = records.values().filter(|record| record.is_accepted()).count();
+        let actual = command_event_counts.get(run_id).copied().unwrap_or_default();
+        if actual < expected {
+            return Err(RestoreEventLedgerError::AcceptedCommandWithoutEvent);
+        }
+        if actual != expected {
+            return Err(RestoreEventLedgerError::EventDoesNotMatchCommand);
+        }
+    }
+    Ok(())
+}
+
 fn expected_event_for(ledger: &EventLedger, event: &TeamEvent) -> Option<TeamEvent> {
     let record = ledger
-        .commands
+        .commands_for_run(event.run_id_value())
         .iter()
-        .find(|(run_id, _)| run_id.as_str() == event.run_id())
-        .and_then(|(_, records)| {
-            records
-                .iter()
-                .find(|record| record.command_id().as_str() == event.causation_id())
-        })?;
+        .find(|record| record.command_id().as_str() == event.causation_id())?;
+    expected_event_for_record(record, event)
+}
+
+fn expected_event_for_record(record: &CommandRecord, event: &TeamEvent) -> Option<TeamEvent> {
     if !record.is_accepted() || record.idempotency_key().as_str() != event.idempotency_key() {
         return None;
     }

@@ -112,7 +112,7 @@ pub(super) fn list_dir(
             }
             let child_descriptor = match open_at(stream_descriptor, child, FILE_OPEN_FLAGS) {
                 Ok(descriptor) => unsafe { OwnedFd::from_raw_fd(descriptor) },
-                Err(WorkspaceFileError::Unavailable) => continue,
+                Err(WorkspaceFileError::Missing | WorkspaceFileError::Unavailable) => continue,
                 Err(error) => return Err(error),
             };
             let metadata = metadata(child_descriptor.as_raw_fd())?;
@@ -121,7 +121,7 @@ pub(super) fn list_dir(
                     if entry.kind == WorkspaceEntryKind::Directory
                         && excluded_directory(&entry.name) => {}
                 Ok(entry) => entries.push(entry),
-                Err(WorkspaceFileError::Unavailable) => continue,
+                Err(WorkspaceFileError::Missing | WorkspaceFileError::Unavailable) => continue,
                 Err(error) => return Err(error),
             }
         }
@@ -148,7 +148,7 @@ pub(super) fn write_file(
         let component = component(segment)?;
         let child = match open_at(parent.as_raw_fd(), &component, FILE_OPEN_FLAGS) {
             Ok(child) => child,
-            Err(WorkspaceFileError::Unavailable) => {
+            Err(WorkspaceFileError::Missing | WorkspaceFileError::Unavailable) => {
                 create_directory_at(parent.as_raw_fd(), &component)?
             }
             Err(error) => return Err(error),
@@ -290,6 +290,7 @@ fn open_at(parent: RawFd, name: &CStr, flags: libc::c_int) -> Result<RawFd, Work
     }
     let error = std::io::Error::last_os_error();
     match error.raw_os_error() {
+        Some(libc::ENOENT) => Err(WorkspaceFileError::Missing),
         Some(libc::EISDIR) => Err(WorkspaceFileError::NotFile),
         Some(libc::ENOTDIR) if flags & libc::O_DIRECTORY != 0 => {
             Err(WorkspaceFileError::NotDirectory)

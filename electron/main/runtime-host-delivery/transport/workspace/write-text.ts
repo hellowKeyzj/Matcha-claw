@@ -7,13 +7,13 @@ import {
   sendLoopbackJson,
 } from '../client';
 import {
-  type Endpoint,
   type FileTarget,
-  type AgentScope,
-  isEndpoint,
+  type FileScope,
+  type FileInputIdentity,
   isFileRelativePath,
   isFileTarget,
-  isAgentScope,
+  isFileScope,
+  isFileInput,
 } from './contract';
 
 const MAX_CONTENT_BYTES = 2 * 1024 * 1024;
@@ -26,11 +26,9 @@ const UNAVAILABLE = {
 type WorkspaceWriteRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.writeText';
-  scope: AgentScope;
+  scope: FileScope;
   target: FileTarget;
-  input: Readonly<{
-    endpoint: Endpoint;
-    agentId: string;
+  input: FileInputIdentity & Readonly<{
     relativePath: string;
     content: string;
   }>;
@@ -85,19 +83,13 @@ function isWorkspaceWriteRequest(value: unknown): value is WorkspaceWriteRequest
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.writeText'
-    && isAgentScope(value.scope)
+    && isFileScope(value.scope)
     && isFileTarget(value.target)
-    && isInput(value.input)
-    && value.scope.agentId === value.input.agentId
-    && value.scope.endpoint.runtimeAdapterId === value.input.endpoint.runtimeAdapterId
-    && value.scope.endpoint.runtimeInstanceId === value.input.endpoint.runtimeInstanceId;
+    && isInput(value.input, value.scope);
 }
 
-function isInput(value: unknown): value is WorkspaceWriteRequest['input'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['endpoint', 'agentId', 'relativePath', 'content'])
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.agentId)
+function isInput(value: unknown, scope: FileScope): value is WorkspaceWriteRequest['input'] {
+  return isFileInput(value, scope, ['relativePath', 'content'])
     && isFileRelativePath(value.relativePath)
     && typeof value.content === 'string'
     && Buffer.byteLength(value.content, 'utf8') <= MAX_CONTENT_BYTES;

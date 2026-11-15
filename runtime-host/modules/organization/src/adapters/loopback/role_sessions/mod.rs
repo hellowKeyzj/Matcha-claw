@@ -2,7 +2,7 @@ use platform::capability::CapabilityDecisionVerifier;
 
 use serde_json::{Value, json};
 
-use runtime_directory::RuntimeDriverIdentity;
+use runtime_directory::endpoint_from_reference;
 
 use crate::OrganizationHandle;
 
@@ -87,11 +87,11 @@ pub fn role_session_json(
     session: &organization::RoleSessionReceipt,
     resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> Option<Value> {
-    let identity = RuntimeDriverIdentity::from_reference(session.endpoint().as_str())?;
+    let endpoint = endpoint_from_reference(session.endpoint().as_str())?;
     let agent_id = session.agent().as_str();
     let endpoint_session_id = session.endpoint_session_id().as_str();
     let session_key = resolver.session_key(session)?;
-    let endpoint = serde_json::to_value(identity.endpoint()).ok()?;
+    let endpoint = serde_json::to_value(endpoint).ok()?;
     Some(json!({
         "teamId": session.team().as_str(),
         "runId": session.team_run().as_str(),
@@ -116,12 +116,11 @@ pub(crate) async fn list(
     request: Request,
 ) -> Delivery {
     match owner.role_sessions(request.team_id).await {
-        Ok(organization::TeamRoleSessionQueryOutcome::Available(sessions)) => Delivery::Available(
-            sessions
-                .iter()
-                .filter_map(|session| role_session_json(session, resolver))
-                .collect(),
-        ),
+        Ok(organization::TeamRoleSessionQueryOutcome::Available(sessions)) => sessions
+            .iter()
+            .map(|session| role_session_json(session, resolver))
+            .collect::<Option<Vec<_>>>()
+            .map_or(Delivery::Unavailable, Delivery::Available),
         Ok(organization::TeamRoleSessionQueryOutcome::Unavailable)
         | Ok(organization::TeamRoleSessionQueryOutcome::OutcomeUnknown)
         | Err(_) => Delivery::Unavailable,

@@ -11,11 +11,16 @@ use super::{
     pixel_size, wire,
 };
 
-pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabilities, Failure> {
+pub(super) fn capabilities(
+    model: &ProviderModel,
+    kind: Kind,
+    endpoint_validates_options: bool,
+) -> Result<Capabilities, Failure> {
     let mut limits = Capabilities {
         max_images: 0,
         max_count: 1,
         mask: false,
+        endpoint_validates_options,
         pixel_size: false,
         pixel_size_limits: None,
         sizes: None,
@@ -28,6 +33,12 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
                 return Err(Failure::Unsupported);
             }
             match model.model_id() {
+                _ if endpoint_validates_options => {
+                    limits.max_images = 16;
+                    limits.max_count = 10;
+                    limits.mask = true;
+                    None
+                }
                 "dall-e-2" => {
                     limits.max_images = 1;
                     limits.max_count = 10;
@@ -73,8 +84,9 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
                 return Err(Failure::Unsupported);
             }
             limits.max_images = 1;
-            limits.durations_seconds = Some(vec![4, 8, 12]);
+            limits.durations_seconds = (!endpoint_validates_options).then(|| vec![4, 8, 12]);
             match model.model_id() {
+                _ if endpoint_validates_options => None,
                 "sora-2" | "sora-2-2025-10-06" | "sora-2-2025-12-08" => {
                     Some(&["720x1280", "1280x720"])
                 }
@@ -96,14 +108,20 @@ pub(super) fn capabilities(model: &ProviderModel, kind: Kind) -> Result<Capabili
         Kind::Music => return Err(Failure::Unsupported),
     };
     limits.sizes = sizes.map(|sizes| sizes.iter().map(|size| (*size).to_owned()).collect());
-    if let Some(size) = model.resolution() {
-        validate_size(&limits, kind, size)?;
+    if !endpoint_validates_options {
+        if let Some(size) = model.resolution() {
+            validate_size(&limits, kind, size)?;
+        }
     }
     Ok(limits)
 }
 
-pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), Failure> {
-    let limits = capabilities(model, request.kind)?;
+pub(super) fn validate(
+    model: &ProviderModel,
+    request: &Request,
+    endpoint_validates_options: bool,
+) -> Result<(), Failure> {
+    let limits = capabilities(model, request.kind, endpoint_validates_options)?;
     if request.images.len() > usize::from(limits.max_images)
         || request.count.unwrap_or(1) > limits.max_count
         || request.mask.is_some() && !limits.mask
@@ -115,17 +133,20 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
             if request.audio.is_some() || request.voice.is_some() || request.language.is_some() {
                 return Err(Failure::Unsupported);
             }
-            if let Some(size) = request.size.as_deref().or(model.resolution()) {
-                validate_size(&limits, request.kind, size)?;
+            if !endpoint_validates_options {
+                if let Some(size) = request.size.as_deref().or(model.resolution()) {
+                    validate_size(&limits, request.kind, size)?;
+                }
             }
             match request.kind {
                 Kind::Image if request.duration_seconds.is_some() => {
                     return Err(Failure::Unsupported);
                 }
                 Kind::Video
-                    if request
-                        .duration_seconds
-                        .is_some_and(|seconds| !matches!(seconds, 4 | 8 | 12)) =>
+                    if !endpoint_validates_options
+                        && request
+                            .duration_seconds
+                            .is_some_and(|seconds| !matches!(seconds, 4 | 8 | 12)) =>
                 {
                     return Err(Failure::Unsupported);
                 }
@@ -139,33 +160,37 @@ pub(super) fn validate(model: &ProviderModel, request: &Request) -> Result<(), F
             if request.kind == Kind::Speech {
                 if request.audio.is_some()
                     || request.language.is_some()
-                    || request.prompt.chars().count() > 4096
+                    || !endpoint_validates_options && request.prompt.chars().count() > 4096
                 {
                     return Err(Failure::Unsupported);
                 }
                 if !request.voice.as_deref().is_some_and(|voice| {
-                    matches!(
-                        voice,
-                        "alloy"
-                            | "ash"
-                            | "ballad"
-                            | "coral"
-                            | "echo"
-                            | "fable"
-                            | "onyx"
-                            | "nova"
-                            | "sage"
-                            | "shimmer"
-                            | "verse"
-                            | "marin"
-                            | "cedar"
-                    )
+                    !voice.is_empty()
+                        && (endpoint_validates_options
+                            || matches!(
+                                voice,
+                                "alloy"
+                                    | "ash"
+                                    | "ballad"
+                                    | "coral"
+                                    | "echo"
+                                    | "fable"
+                                    | "onyx"
+                                    | "nova"
+                                    | "sage"
+                                    | "shimmer"
+                                    | "verse"
+                                    | "marin"
+                                    | "cedar"
+                            ))
                 }) {
                     return Err(Failure::Unsupported);
                 }
             } else {
                 if request.voice.is_some()
-                    || model.model_id() == "gpt-4o-transcribe-diarize" && !request.prompt.is_empty()
+                    || !endpoint_validates_options
+                        && model.model_id() == "gpt-4o-transcribe-diarize"
+                        && !request.prompt.is_empty()
                     || request.language.as_deref().is_some_and(|language| {
                         language.len() != 2
                             || !language.bytes().all(|byte| byte.is_ascii_lowercase())

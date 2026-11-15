@@ -61,6 +61,7 @@ impl fmt::Debug for TeamSkillSelectionId {
 /// Persistence stores only the canonical root necessary to re-open a previously
 /// authorized selection. Its serialized form is private to this Domain owner;
 /// Delivery continues to receive only `TeamSkillSelectionId`.
+#[derive(Clone)]
 pub struct TeamSkillSelectionResolver {
     path: PathBuf,
     selections: BTreeMap<TeamSkillSelectionId, TeamSkillPackageRoot>,
@@ -120,13 +121,7 @@ impl TeamSkillSelectionResolver {
     }
 
     pub fn validate(&self, selection_id: &TeamSkillSelectionId) -> TeamSkillPackageValidation {
-        match self.read(selection_id) {
-            Ok(package) => TeamSkillPackageValidation::Valid {
-                package: TeamSkillPackageView::from_package(selection_id.clone(), &package),
-            },
-            Err(TeamSkillSelectionError::InvalidSelection) => TeamSkillPackageValidation::Invalid,
-            Err(TeamSkillSelectionError::Unavailable) => TeamSkillPackageValidation::Unavailable,
-        }
+        TeamSkillPackageValidation::from_package(selection_id.clone(), self.read(selection_id))
     }
 
     pub fn with_package<T>(
@@ -143,18 +138,7 @@ impl TeamSkillSelectionResolver {
         selection_id: &TeamSkillSelectionId,
         catalog: &TeamSkillDependencyCatalog,
     ) -> TeamSkillDependencyPlanResult {
-        let package = match self.read(selection_id) {
-            Ok(package) => package,
-            Err(TeamSkillSelectionError::InvalidSelection) => {
-                return TeamSkillDependencyPlanResult::Invalid;
-            }
-            Err(TeamSkillSelectionError::Unavailable) => {
-                return TeamSkillDependencyPlanResult::Unavailable;
-            }
-        };
-        TeamSkillDependencyPlanResult::Available {
-            plan: TeamSkillDependencyPlan::from_package(selection_id.clone(), &package, catalog),
-        }
+        TeamSkillDependencyPlanResult::from_package(selection_id.clone(), self.read(selection_id), catalog)
     }
 
     pub fn compile_team_skill_materialization(
@@ -259,17 +243,20 @@ impl TeamSkillSelectionResolver {
         }
     }
 
+    pub(crate) fn package_reader(
+        &self,
+        selection_id: &TeamSkillSelectionId,
+    ) -> Result<TeamSkillPackageReader, TeamSkillSelectionError> {
+        self.selections.get(selection_id).cloned()
+            .map(TeamSkillPackageReader::new)
+            .ok_or(TeamSkillSelectionError::Unavailable)
+    }
+
     fn read(
         &self,
         selection_id: &TeamSkillSelectionId,
     ) -> Result<TeamSkillPackage, TeamSkillSelectionError> {
-        let root = self
-            .selections
-            .get(selection_id)
-            .ok_or(TeamSkillSelectionError::Unavailable)?;
-        TeamSkillPackageReader::new(root.clone())
-            .read()
-            .map_err(TeamSkillSelectionError::from)
+        self.package_reader(selection_id)?.read().map_err(TeamSkillSelectionError::from)
     }
 }
 
@@ -458,6 +445,21 @@ pub enum TeamSkillPackageValidation {
     Unavailable,
 }
 
+impl TeamSkillPackageValidation {
+    pub(crate) fn from_package(
+        selection_id: TeamSkillSelectionId,
+        package: Result<TeamSkillPackage, TeamSkillSelectionError>,
+    ) -> Self {
+        match package {
+            Ok(package) => Self::Valid {
+                package: TeamSkillPackageView::from_package(selection_id, &package),
+            },
+            Err(TeamSkillSelectionError::InvalidSelection) => Self::Invalid,
+            Err(TeamSkillSelectionError::Unavailable) => Self::Unavailable,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamSkillPackageView {
@@ -525,6 +527,22 @@ pub enum TeamSkillDependencyPlanResult {
     Unavailable,
 }
 
+impl TeamSkillDependencyPlanResult {
+    pub(crate) fn from_package(
+        selection_id: TeamSkillSelectionId,
+        package: Result<TeamSkillPackage, TeamSkillSelectionError>,
+        catalog: &TeamSkillDependencyCatalog,
+    ) -> Self {
+        match package {
+            Ok(package) => Self::Available {
+                plan: TeamSkillDependencyPlan::from_package(selection_id, &package, catalog),
+            },
+            Err(TeamSkillSelectionError::InvalidSelection) => Self::Invalid,
+            Err(TeamSkillSelectionError::Unavailable) => Self::Unavailable,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamSkillDependencyPlan {
@@ -536,7 +554,7 @@ pub struct TeamSkillDependencyPlan {
 }
 
 impl TeamSkillDependencyPlan {
-    fn from_package(
+    pub(crate) fn from_package(
         selection_id: TeamSkillSelectionId,
         package: &TeamSkillPackage,
         catalog: &TeamSkillDependencyCatalog,

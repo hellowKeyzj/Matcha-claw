@@ -30,10 +30,7 @@ pub enum RestoreError {
         node_id: NodeId,
         number: NonZeroU32,
     },
-    AttemptLimitExceeded {
-        node_id: NodeId,
-        max_attempts: NonZeroU32,
-    },
+    InvalidExecutionControl,
     AttemptHistoryTooLong(NodeId),
     InvalidAttemptTimestamp {
         node_id: NodeId,
@@ -61,6 +58,11 @@ pub fn restore_oracle(state: GraphState) -> Result<GraphState, RestoreError> {
         .definition()
         .validate_structure()
         .map_err(RestoreError::InvalidDefinition)?;
+    validate_execution_state(&state)?;
+    Ok(state)
+}
+
+pub(super) fn validate_execution_state(state: &GraphState) -> Result<(), RestoreError> {
     let expected_ids = state
         .definition()
         .nodes()
@@ -103,12 +105,6 @@ pub fn restore_oracle(state: GraphState) -> Result<GraphState, RestoreError> {
                     node_id: node_id.clone(),
                     expected: expected_number,
                     actual: attempt.number(),
-                });
-            }
-            if attempt.number() > definition_node.max_attempts() {
-                return Err(RestoreError::AttemptLimitExceeded {
-                    node_id: node_id.clone(),
-                    max_attempts: definition_node.max_attempts(),
                 });
             }
             let attempt_id = AttemptId::for_node(node_id, expected_number);
@@ -174,7 +170,7 @@ pub fn restore_oracle(state: GraphState) -> Result<GraphState, RestoreError> {
             ));
         }
     }
-    if !state_has_only_current_ready_items(&state) {
+    if !state_has_only_current_ready_items(state) {
         return Err(RestoreError::QueueDoesNotMatchReadyAttempts);
     }
     if state.ready_queue().windows(2).any(|items| {
@@ -182,5 +178,6 @@ pub fn restore_oracle(state: GraphState) -> Result<GraphState, RestoreError> {
     }) {
         return Err(RestoreError::NonCanonicalReadyQueue);
     }
-    Ok(state)
+    super::execution_control::validate(state).map_err(|_| RestoreError::InvalidExecutionControl)?;
+    Ok(())
 }

@@ -32,11 +32,12 @@ impl Idle {
 }
 
 impl Execution {
-    fn sleep_candidate(&self) -> bool {
+    fn sleep_candidate(&self, record: &record::Record) -> bool {
         self.cli.is_some()
             && self.native.initialize.is_some()
-            && self.record.status == record::Status::Open
-            && !self.record.native_cleanup_failed
+            && record.status == record::Status::Open
+            && !record.native_cleanup_failed
+            && !self.cleanup_failed
             && self.storage_fault.is_none()
             && !self.launching
             && !self.closing
@@ -48,11 +49,11 @@ impl Execution {
             && !self.native.busy
     }
 
-    pub(super) fn idle_deadline(&mut self) -> Option<Instant> {
+    pub(super) fn idle_deadline(&mut self, record: &record::Record) -> Option<Instant> {
         if self.idle.handing_off() {
             return None;
         }
-        if !self.sleep_candidate() {
+        if !self.sleep_candidate(record) {
             self.idle = Idle::Dormant;
             return None;
         }
@@ -73,17 +74,15 @@ impl Execution {
 
 impl Sessions {
     pub(super) async fn sleep_instance(&self, session: Arc<Session>) {
-        let agent_id = session.data.lock().await.record.agent_id.clone();
-        let _agent = tokio::select! {
+        let agent_id = session.record().agent_id.clone();
+        let agent = tokio::select! {
             _ = session.stopped.cancelled() => return,
-            guard = self.agent_guard(&agent_id) => guard,
+            guard = self.agent_admission(&agent_id) => guard,
         };
         // Permanent close and idle handoff cannot own the same consumer join.
         let Ok(_closing) = session.close_guard.try_lock() else {
             return;
         };
-        // Search holds this existing guard from instance lookup through readback.
-        let _search = self.search_guard().await;
         let Ok(config) = self.0.config.checked_snapshot().await else {
             return;
         };
@@ -91,15 +90,16 @@ impl Sessions {
             let mut execution = session.data.lock().await;
             if self.0.shutdown.load(Ordering::Acquire)
                 || execution
-                    .idle_deadline()
+                    .idle_deadline(&session.record())
                     .is_none_or(|deadline| deadline > Instant::now())
             {
                 return;
             }
-            let Ok(spec) = self.launch_spec(config, &execution) else {
+            let record = session.record();
+            let Ok(spec) = self.launch_spec(config, &record) else {
                 return;
             };
-            let Ok(replay_state) = super::selection::replay_state(&execution, &spec) else {
+            let Ok(replay_state) = super::selection::replay_state(&record, &spec) else {
                 return;
             };
             execution.idle = Idle::Handoff;
@@ -108,6 +108,7 @@ impl Sessions {
                 replay_state,
             )
         };
+        drop(agent);
         let prepared = cli.prepare_to_sleep(replay_state).await;
         if matches!(prepared, Ok(Preparation::Busy | Preparation::Resident)) {
             let mut execution = session.data.lock().await;
@@ -134,21 +135,21 @@ impl Sessions {
         let closed = self.stop_instance(&session, &cli).await;
         let mut execution = session.data.lock().await;
         let transcript = async {
+            let record = session.record();
             let path = history::locate(
-                &execution.record.runtime,
-                &execution.record.workspace,
-                &execution.record.session_id,
+                &record.runtime,
+                &record.workspace,
+                &record.session_id,
             )
             .await?;
-            if execution.record.native_started && path.is_none() {
+            if record.native_started && path.is_none() {
                 return Err(rpc::Error::not_found("Native transcript"));
             }
             if let Some(path) = path {
-                let mut persisted = execution.record.clone();
+                let mut persisted = (*record).clone();
                 persisted.native_started = true;
                 persisted.transcript = Some(path);
-                record::save_session(&self.0.database, &persisted).await?;
-                execution.record = persisted;
+                session.commit(&self.0.database, &mut execution, persisted).await?;
             }
             Ok(())
         }
@@ -160,7 +161,8 @@ impl Sessions {
             && closed.is_ok()
             && transcript.is_ok()
             && execution.storage_fault.is_none()
-            && !execution.record.native_cleanup_failed
+            && !execution.cleanup_failed
+            && !session.record().native_cleanup_failed
             && cli.exited_gracefully();
         let kind = if safe {
             "native_sleep_safe"
@@ -180,9 +182,10 @@ impl Sessions {
             .or_else(|| closed.as_ref().err().cloned())
             .or_else(|| transcript.err())
             .or_else(|| execution.storage_fault.clone());
+        let record = session.record();
         let mut context = json!({
-            "sessionId": execution.record.session_id,
-            "agentId": execution.record.agent_id,
+            "sessionId": record.session_id,
+            "agentId": record.agent_id,
             "instanceId": cli.instance_id(),
             "stage": if ready { "ready_acknowledged" } else { "prepare_unknown" },
             "cleanupComplete": closed.is_ok(),

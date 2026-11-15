@@ -91,6 +91,14 @@ pub trait SessionObservation: Send + Sync {
         epoch: u64,
     ) -> SessionFuture<'a, Result<SessionSync, RuntimeOperationFailure>>;
 
+    /// Reads native work status without projecting a timeline or advancing its cursor.
+    fn check_work_pending<'a>(
+        &'a self,
+        _endpoint_session_id: Option<&'a str>,
+    ) -> SessionFuture<'a, Result<bool, RuntimeOperationFailure>> {
+        Box::pin(async { Err(RuntimeOperationFailure::Unsupported) })
+    }
+
     /// Confirms the owner committed this generation's synchronized state and snapshot.
     /// This is not a receipt for individually consumed native events.
     fn accept_sync(&self, _generation: u64, _source_epoch: Option<u64>, _cut: SessionSyncCut) {}
@@ -134,6 +142,8 @@ pub struct SessionSync {
     pub replay_baseline: Option<SessionView>,
     /// Only explicit native run facts, never inferred from final history items.
     pub terminal_runs: Vec<SessionTerminalRun>,
+    /// Explicit native work status; None leaves the last known projection unchanged.
+    pub work_pending: Option<bool>,
     /// Explicit display retirement evidence from native reconciliation, not missing
     /// history rows, shared run IDs, or equal bodies. Applied even to partial items.
     pub retired_item_ids: Vec<String>,
@@ -145,6 +155,7 @@ pub struct SessionSync {
 #[derive(Clone, Debug)]
 pub struct SessionObserveCommand {
     pub identity: ViewIdentity,
+    pub endpoint_session_id: Option<String>,
     /// Receive resource ID, not a message-routing or native authorization token.
     pub lease_id: String,
     pub window: WindowRequest,

@@ -124,6 +124,7 @@ export type TeamApiContext = RuntimeHostTransportContext<
   | 'teamRoleSessionsTransport'
   | 'teamApprovalsTransport'
   | 'teamGraphTransport'
+  | 'teamPromptsTransport'
   | 'teamSkillTransport'
   | 'teamTriggerTransport'
   | 'teamLifecycleTransport'

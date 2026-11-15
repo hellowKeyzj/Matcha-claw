@@ -4,7 +4,6 @@ mod media;
 use std::sync::Arc;
 
 use foundation::process::supervision::SupervisorPhase;
-use serde_json::json;
 use workspace_module::{
     ResolvedWorkspaceMedia, WorkspaceBinding, WorkspaceDirectoryFailure, WorkspaceDirectoryRoot,
     WorkspaceMediaFailure, WorkspaceMediaReceipt, WorkspaceMediaThumbnail, WorkspaceOps,
@@ -20,11 +19,12 @@ impl WorkspaceOps for MatchaRuntimeDriver {
         agent_id: &'a str,
     ) -> WorkspaceFuture<'a, Arc<dyn WorkspaceBinding>, WorkspaceDirectoryFailure> {
         Box::pin(async move {
-            Ok(Arc::new(Binding::new(
+            Ok(Arc::new(Binding::bind(
                 self.native_client(),
                 agent_id.to_owned(),
                 None,
-            )) as Arc<dyn WorkspaceBinding>)
+                None,
+            ).await?) as Arc<dyn WorkspaceBinding>)
         })
     }
 
@@ -42,14 +42,13 @@ impl WorkspaceOps for MatchaRuntimeDriver {
     ) -> WorkspaceFuture<'a, Arc<dyn WorkspaceBinding>, WorkspaceDirectoryFailure> {
         Box::pin(async move {
             let client = self.native_client();
-            let (agent_id, session_id) = selection(&client, session_key)
+            let record = selection(&client, session_key)
                 .await
                 .map_err(|_| WorkspaceDirectoryFailure::Unavailable)?;
-            client
-                .call("workspace.stat", json!({ "agentId": agent_id, "path": "" }))
-                .await
-                .map_err(|_| WorkspaceDirectoryFailure::Unavailable)?;
-            Ok(Arc::new(Binding::new(client, agent_id, Some(session_id))) as Arc<dyn WorkspaceBinding>)
+            Ok(Arc::new(Binding::bind(
+                client, record.agent_id, Some(record.session_id.as_str().to_owned()),
+                Some(std::path::Path::new(&record.cwd)),
+            ).await?) as Arc<dyn WorkspaceBinding>)
         })
     }
 
@@ -68,14 +67,16 @@ impl WorkspaceOps for MatchaRuntimeDriver {
                 return Err(WorkspaceMediaFailure::InvalidReference);
             }
             let client = self.native_client();
-            let (agent_id, session_id) = selection(&client, session_key).await?;
+            let record = selection(&client, session_key).await?;
+            let agent_id = &record.agent_id;
+            let session_id = record.session_id.as_str();
             let bytes = if historical {
-                media::historical(&client, &agent_id, &session_id, reference, 50 * 1024 * 1024)
+                media::historical(&client, agent_id, session_id, reference, 50 * 1024 * 1024)
                     .await?
                     .0
             } else {
                 client
-                    .take_media(&agent_id, &session_id, reference)
+                    .take_media(agent_id, session_id, reference)
                     .await
                     .map_err(media::failure)?
             };
@@ -101,8 +102,10 @@ impl WorkspaceOps for MatchaRuntimeDriver {
                 return Err(WorkspaceMediaFailure::InvalidReference);
             }
             let client = self.native_client();
-            let (agent_id, session_id) = selection(&client, session_key).await?;
-            media::historical_thumbnail(&client, &agent_id, &session_id, reference).await
+            let record = selection(&client, session_key).await?;
+            let agent_id = &record.agent_id;
+            let session_id = record.session_id.as_str();
+            media::historical_thumbnail(&client, agent_id, session_id, reference).await
         })
     }
 
@@ -125,11 +128,13 @@ impl WorkspaceOps for MatchaRuntimeDriver {
     ) -> WorkspaceFuture<'a, WorkspaceMediaReceipt, WorkspaceMediaFailure> {
         Box::pin(async move {
             let client = self.native_client();
-            let (agent_id, session_id) = selection(&client, session_key).await?;
+            let record = selection(&client, session_key).await?;
+            let agent_id = &record.agent_id;
+            let session_id = record.session_id.as_str();
             media::stage_buffer(
                 &client,
-                &agent_id,
-                &session_id,
+                agent_id,
+                session_id,
                 base64,
                 file_name,
                 mime_type,
@@ -164,17 +169,14 @@ impl WorkspaceOps for MatchaRuntimeDriver {
 async fn selection(
     client: &Client,
     session_key: &str,
-) -> Result<(String, String), WorkspaceMediaFailure> {
+) -> Result<crate::session::model::SessionRecord, WorkspaceMediaFailure> {
     let (requested_agent, session_id) = crate::session::projection::parse_session_key(session_key)
         .ok_or(WorkspaceMediaFailure::Unavailable)?;
-    let record = client
-        .call("sessions.get", json!({ "sessionId": session_id }))
+    let record = crate::session::rpc::get(client, session_id, Some(requested_agent))
         .await
-        .map_err(media::failure)?;
-    let agent_id = record
-        .get("agentId")
-        .and_then(serde_json::Value::as_str)
-        .filter(|agent_id| *agent_id == requested_agent)
-        .ok_or(WorkspaceMediaFailure::Unavailable)?;
-    Ok((agent_id.to_owned(), session_id.to_owned()))
+        .map_err(|_| WorkspaceMediaFailure::Unavailable)?;
+    if record.status == "deleting" {
+        return Err(WorkspaceMediaFailure::Unavailable);
+    }
+    Ok(record)
 }

@@ -1,7 +1,9 @@
+mod files;
 mod ledger;
 mod model;
 mod projection;
 
+pub use files::{RunFilePath, RunFilePathError, normalize_delivery_files};
 pub use ledger::{ArtifactLedger, ArtifactRecordOutcome, RestoreArtifactLedgerError};
 pub use model::{
     ArtifactEvidenceProvenance, ArtifactId, ArtifactIdError, ArtifactKindError, ArtifactRecord,

@@ -8,16 +8,16 @@ import {
   sendLoopbackJson,
 } from '../client';
 import {
-  type Endpoint,
   type FileTarget,
-  type AgentScope,
-  isEndpoint,
+  type FileScope,
+  type FileInputIdentity,
   isFileRelativePath,
   isFileTarget,
-  isAgentScope,
+  isFileScope,
+  isFileInput,
 } from './contract';
 
-const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+const MAX_TEXT_BYTES = 50 * 1024 * 1024;
 const ROUTE_PATH = '/api/workspace/files/read-text';
 const UNAVAILABLE = {
   success: false,
@@ -27,11 +27,9 @@ const UNAVAILABLE = {
 type WorkspaceTextRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.readText';
-  scope: AgentScope;
+  scope: FileScope;
   target: FileTarget;
-  input: Readonly<{
-    endpoint: Endpoint;
-    agentId: string;
+  input: FileInputIdentity & Readonly<{
     relativePath: string;
     maxBytes?: number;
   }>;
@@ -87,12 +85,9 @@ function isWorkspaceTextRequest(value: unknown): value is WorkspaceTextRequest {
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.readText'
-    && isAgentScope(value.scope)
+    && isFileScope(value.scope)
     && isFileTarget(value.target)
-    && isInput(value.input)
-    && value.scope.agentId === value.input.agentId
-    && value.scope.endpoint.runtimeAdapterId === value.input.endpoint.runtimeAdapterId
-    && value.scope.endpoint.runtimeInstanceId === value.input.endpoint.runtimeInstanceId;
+    && isInput(value.input, value.scope);
 }
 
 function withBoundedMaxBytes(request: WorkspaceTextRequest): WorkspaceTextRequest {
@@ -108,17 +103,10 @@ function withBoundedMaxBytes(request: WorkspaceTextRequest): WorkspaceTextReques
   };
 }
 
-function isInput(value: unknown): value is WorkspaceTextRequest['input'] {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const hasRequiredFields = hasExactKeys(value, ['endpoint', 'agentId', 'relativePath'])
-    || hasExactKeys(value, ['endpoint', 'agentId', 'relativePath', 'maxBytes']);
-  return hasRequiredFields
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.agentId)
+function isInput(value: unknown, scope: FileScope): value is WorkspaceTextRequest['input'] {
+  return isFileInput(value, scope, ['relativePath'], ['maxBytes'])
     && isFileRelativePath(value.relativePath)
-    && (value.maxBytes === undefined || isSafeInteger(value.maxBytes));
+    && (!Object.hasOwn(value, 'maxBytes') || isSafeInteger(value.maxBytes));
 }
 
 function isWorkspaceTextResponse(value: unknown): boolean {

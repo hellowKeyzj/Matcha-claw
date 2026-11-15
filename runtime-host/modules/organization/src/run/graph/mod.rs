@@ -1,5 +1,6 @@
 mod definition;
 mod durable;
+mod execution_control;
 mod patch;
 mod projection;
 mod reducer;
@@ -18,12 +19,15 @@ pub use durable::{
     DurableGraphLayout, DurableInputReceipt, DurableNodeAttempt, DurableNodeDefinition,
     DurableNodeExecution, DurableNodePosition, DurableReadyQueueItem, DurableRestoreError,
     DurableReviewAssignment, DurableStartTrigger, DurableWorkAssignment, GraphDurableSnapshot,
+    DurableReworkCounter, DurableBlockedRework,
 };
+pub use execution_control::{BlockedRework, ReworkCounterKey};
 pub use patch::{GraphPatch, GraphPatchError, GraphPatchOperation, apply as apply_graph_patch};
 pub(crate) use patch::apply_in_place as apply_graph_patch_in_place;
+pub(crate) use projection::{edge_satisfied, graph_status};
 pub use projection::{
     AttemptProjection, EdgeProjection, EdgeStatus, GraphProjection, GraphStatus, InputProjection,
-    NodeProjection, project,
+    NodeProjection, ReworkProjection, ReworkCounterProjection, BlockedReworkProjection, project,
 };
 pub use reducer::{GraphEvent, ReduceError, reduce, settle_superseded_attempt};
 pub use restore::{RestoreError, restore_oracle};

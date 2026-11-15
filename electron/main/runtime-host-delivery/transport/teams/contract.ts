@@ -1,6 +1,7 @@
 import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 
 import { isTeamDesignPatchOperation, isTeamGraphVersion } from '../../../../../src/types/team-design';
+import { isTeamNodeReviewQuery } from '../../../../../src/types/team-workspace';
 
 export const TEAM_RUNTIME_CAPABILITY_ID = 'team.runtime';
 
@@ -14,9 +15,11 @@ const TEAM_RUNTIME_OPERATIONS = [
   ['team.triggerList', 'List TeamRun armed triggers', 'team'],
   ['team.webhookTriggerFire', 'Fire TeamRun webhook trigger by path', 'team'],
   ['team.runSnapshot', 'Read TeamRun snapshot', 'team-run'],
+  ['team.nodeReviewHistory', 'Read TeamRun node review history', 'team-run'],
   ['team.roleSessionCreate', 'Create TeamRun role session', 'team-run'],
   ['team.designStart', 'Start TeamRun design', 'team'],
   ['team.runStart', 'Start TeamRun', 'team'],
+  ['team.runReworkContinue', 'Increase TeamRun rework limit and continue', 'team-run'],
   ['team.designExit', 'Exit TeamRun design', 'team'],
   ['team.designSnapshot', 'Read TeamRun design snapshot', 'team'],
   ['team.designGraphPatch', 'Patch TeamRun design graph', 'team'],
@@ -101,7 +104,7 @@ function validateOperation(
         && matchingString(target, 'team-approval', 'runId', input, 'runId')
         && matchingField(target, 'approvalId', input, 'approvalId')
         && (input.decision === 'approve' || input.decision === 'deny' || input.decision === 'abort')
-        && (input.note === undefined || isText(input.note))
+        && (input.note === undefined || isNonblankText(input.note))
         && isOpaque(input.idempotencyKey);
     case 'team.designGraphPatch':
       return isRecord(target) && hasExactKeys(target, ['kind', 'teamId'])
@@ -121,6 +124,14 @@ function validateOperation(
         && hasExactKeys(input, ['teamId', 'runId', 'designEpoch', 'expectedGraphVersion', 'idempotencyKey'])
         && isIdentifier(input.runId) && (input.designEpoch === null || isOpaque(input.designEpoch))
         && isTeamGraphVersion(input.expectedGraphVersion) && isOpaque(input.idempotencyKey);
+    case 'team.runReworkContinue':
+      return isRecord(target) && hasExactKeys(target, ['kind', 'runId'])
+        && target.kind === 'team-run' && matchingField(target, 'runId', input, 'runId')
+        && hasExactKeys(input, ['teamId', 'runId', 'nodeId', 'sourcePort', 'batchId', 'sourceNodeExecutionId', 'maxReworks', 'expectedGraphVersion', 'commandId', 'idempotencyKey'])
+        && isIdentifier(input.teamId) && isOpaque(input.runId) && isText(input.nodeId) && isText(input.sourcePort)
+        && isPositiveInteger(input.batchId) && isText(input.sourceNodeExecutionId)
+        && isNonNegativeInteger(input.maxReworks) && input.maxReworks <= 0xffff_ffff
+        && isTeamGraphVersion(input.expectedGraphVersion) && isOpaque(input.commandId) && isOpaque(input.idempotencyKey);
     case 'team.designStart':
     case 'team.designSnapshot':
       return isRecord(target) && hasExactKeys(target, ['kind', 'teamId'])
@@ -128,6 +139,10 @@ function validateOperation(
         && (operation === 'team.designSnapshot'
           ? hasExactKeys(input, ['teamId', 'runId'])
           : hasExactKeys(input, ['teamId', 'runId', 'idempotencyKey']) && isOpaque(input.idempotencyKey));
+    case 'team.nodeReviewHistory':
+      return hasExactKeys(input, ['teamId', 'runId', 'nodeId', 'query'])
+        && matchingRequiredTeamRunTarget(target, input) && isText(input.nodeId)
+        && isTeamNodeReviewQuery(input.query);
     case 'team.runSnapshot':
     case 'team.graphExportYaml':
     case 'team.runDiagnostics':
@@ -149,10 +164,11 @@ function validateOperation(
         && isRecord(input.graph);
     case 'team.graphPatch':
       return matchingRunTarget(target, input)
-        && isIdentifier(input.summary)
+        && isNonblankText(input.summary)
         && isRecord(input.patch)
         && Array.isArray(input.patch.operations)
         && input.patch.operations.length > 0
+        && input.patch.operations.every((operation) => !isRecord(operation) || operation.op !== 'set_node_position' || isTeamDesignPatchOperation(operation))
         && isOpaque(input.idempotencyKey);
     case 'team.graphImportYaml':
       return hasExactKeys(input, ['runId', 'yaml', 'idempotencyKey'])
@@ -174,7 +190,7 @@ function validateOperation(
         && hasRequiredKeys(input, ['runId', 'decision', 'idempotencyKey'])
         && matchingRunTarget(target, input)
         && (input.decision === 'retry' || input.decision === 'proceed_degraded' || input.decision === 'abort')
-        && (input.note === undefined || isText(input.note))
+        && (input.note === undefined || isNonblankText(input.note))
         && isOpaque(input.idempotencyKey);
     case 'team.resume':
       return matchingString(target, 'team', 'teamId', input, 'teamId') && isOpaque(input.idempotencyKey);
@@ -249,6 +265,7 @@ function isNodeEventRequest(target: unknown, input: Record<string, unknown>): bo
     'roleId',
     'outputPort',
     'evidenceRefs',
+    'artifactIds',
     'requestedAction',
     'risk',
     'metadata',
@@ -260,7 +277,6 @@ function isNodeEventRequest(target: unknown, input: Record<string, unknown>): bo
   ]) || !matchingRunTarget(target, input)
     || !isOpaque(input.nodeExecutionId)
     || !isOpaque(input.idempotencyKey)
-    || !isText(input.summary)
     || !areValidNodeEventOptionalFields(input)) {
     return false;
   }
@@ -268,10 +284,16 @@ function isNodeEventRequest(target: unknown, input: Record<string, unknown>): bo
   switch (input.event) {
     case 'progress':
     case 'request_input':
-      return hasExactKeys(input, ['runId', 'nodeExecutionId', 'event', 'summary', 'idempotencyKey']);
+      return hasExactKeys(input, ['runId', 'nodeExecutionId', 'event', 'summary', 'idempotencyKey'])
+        && isNonblankText(input.summary);
     case 'request_approval':
       return hasRequiredKeys(input, ['runId', 'nodeExecutionId', 'event', 'summary', 'idempotencyKey', 'requestedAction'])
-        && isApprovalAction(input.requestedAction);
+        && isApprovalAction(input.requestedAction)
+        && isNonblankText(input.summary)
+        && (input.risk === undefined || isNonblankText(input.risk))
+        && (!Object.hasOwn(input, 'artifactIds') || Array.isArray(input.artifactIds)
+          && input.artifactIds.every((id) => isText(id) && new TextEncoder().encode(id).length <= 128)
+          && new Set(input.artifactIds).size === input.artifactIds.length);
     case 'complete':
     case 'reject':
       return hasRequiredKeys(input, [
@@ -286,6 +308,8 @@ function isNodeEventRequest(target: unknown, input: Record<string, unknown>): bo
         'attemptNumber',
         'outputPort',
       ])
+        && isNonblankText(input.summary)
+        && !Object.hasOwn(input, 'artifactIds')
         && isText(input.deliveryId)
         && isText(input.receipt)
         && isIdentifier(input.nodeId)
@@ -301,13 +325,13 @@ function areValidNodeEventOptionalFields(input: Record<string, unknown>): boolea
     && (input.outputPort === undefined || isText(input.outputPort))
     && (input.evidenceRefs === undefined || Array.isArray(input.evidenceRefs))
     && (input.requestedAction === undefined || isApprovalAction(input.requestedAction))
-    && (input.risk === undefined || isText(input.risk))
+    && (input.event === 'request_approval' || input.risk === undefined || isNonblankText(input.risk))
     && (input.metadata === undefined || isRecord(input.metadata))
     && (input.result === undefined || isNodeEventResult(input.result));
 }
 
 function isNodeEventResult(value: unknown): boolean {
-  return isRecord(value) && (value.summary === undefined || isText(value.summary));
+  return isRecord(value) && (value.summary === undefined || isNonblankText(value.summary));
 }
 
 function isApprovalAction(value: unknown): boolean {
@@ -388,6 +412,10 @@ function isOpaque(value: unknown): boolean {
 
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[\0\p{Cc}]/u.test(value);
+}
+
+function isNonblankText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && !value.includes('\0');
 }
 
 function isText(value: unknown): value is string {

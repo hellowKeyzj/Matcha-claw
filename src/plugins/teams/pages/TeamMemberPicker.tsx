@@ -6,13 +6,22 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import type { SubagentSummary } from '@/types/subagent';
+import { buildRuntimeEndpointKey, type NativeRuntimeEndpointRef } from '@/types/desktop/runtime-address';
 
 export type ManualMemberDraft = {
-  agentId: string;
+  endpoint: NativeRuntimeEndpointRef;
+  runtimeName: string;
+  agent: SubagentSummary;
   isLeader: boolean;
 };
 
+function memberKey(endpoint: NativeRuntimeEndpointRef, agentId: string): string {
+  return JSON.stringify([buildRuntimeEndpointKey(endpoint), agentId]);
+}
+
 export function TeamMemberPicker({
+  endpoint,
+  runtimeName,
   agents,
   loading,
   error,
@@ -21,6 +30,8 @@ export function TeamMemberPicker({
   onMembersChange,
   onRefresh,
 }: {
+  endpoint: NativeRuntimeEndpointRef | null;
+  runtimeName: string;
   agents: SubagentSummary[];
   loading: boolean;
   error: string | null;
@@ -33,31 +44,36 @@ export function TeamMemberPicker({
   const pickerId = useId();
   const [searchQuery, setSearchQuery] = useState('');
   const searchText = searchQuery.trim().toLocaleLowerCase();
-  const agentsById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
-  const selectedAgentIds = useMemo(() => new Set(members.map((member) => member.agentId)), [members]);
+  const selectedAgentKeys = useMemo(() => new Set(members.map((member) => memberKey(member.endpoint, member.agent.id))), [members]);
   const visibleAgents = useMemo(() => searchText
     ? agents.filter((agent) => [agent.id, agent.name, agent.identity?.name, agent.workspace, ...(agent.skills ?? [])]
       .some((value) => value?.toLocaleLowerCase().includes(searchText)))
     : agents, [agents, searchText]);
 
-  const removeMember = (agentId: string) => {
-    const remaining = members.filter((member) => member.agentId !== agentId);
-    const removedLeader = members.some((member) => member.agentId === agentId && member.isLeader);
+  const removeMember = (key: string) => {
+    const remaining = members.filter((member) => memberKey(member.endpoint, member.agent.id) !== key);
+    const removedLeader = members.some((member) => memberKey(member.endpoint, member.agent.id) === key && member.isLeader);
     onMembersChange(removedLeader
       ? remaining.map((member, index) => ({ ...member, isLeader: index === 0 }))
       : remaining);
   };
 
-  const toggleMember = (agentId: string) => {
-    if (selectedAgentIds.has(agentId)) {
-      removeMember(agentId);
+  const toggleMember = (agent: SubagentSummary) => {
+    if (!endpoint || !ready || loading || error) return;
+    const key = memberKey(endpoint, agent.id);
+    if (selectedAgentKeys.has(key)) {
+      removeMember(key);
       return;
     }
-    onMembersChange([...members, { agentId, isLeader: members.length === 0 }]);
+    onMembersChange([...members, {
+      endpoint: { ...endpoint }, runtimeName,
+      agent: { ...agent, skills: agent.skills ? [...agent.skills] : undefined, identity: agent.identity ? { ...agent.identity } : undefined },
+      isLeader: members.length === 0,
+    }]);
   };
 
-  const selectLeader = (agentId: string) => {
-    onMembersChange(members.map((member) => ({ ...member, isLeader: member.agentId === agentId })));
+  const selectLeader = (key: string) => {
+    onMembersChange(members.map((member) => ({ ...member, isLeader: memberKey(member.endpoint, member.agent.id) === key })));
   };
 
   return (
@@ -103,18 +119,21 @@ export function TeamMemberPicker({
           {!error && agents.length > 0 && visibleAgents.length === 0 ? (
             <p role="status" className="px-3 py-4 text-sm text-muted-foreground">{t('create.manualNoMatchingAgents')}</p>
           ) : null}
+          {!ready ? <p role="status" className="px-3 py-4 text-sm text-muted-foreground">{t('create.manualRuntimeUnavailable')}</p> : null}
           {visibleAgents.map((agent) => {
-            const selected = selectedAgentIds.has(agent.id);
+            const key = endpoint ? memberKey(endpoint, agent.id) : agent.id;
+            const selected = selectedAgentKeys.has(key);
             const agentName = agent.name ?? agent.identity?.name ?? agent.id;
             return (
               <Button
-                key={agent.id}
+                key={key}
                 type="button"
                 variant="ghost"
                 role="checkbox"
                 aria-checked={selected}
-                aria-label={t('create.manualSelectAgentAriaLabel', { agentName })}
-                onClick={() => toggleMember(agent.id)}
+                aria-label={t('create.manualSelectAgentAriaLabel', { agentName, runtimeName })}
+                disabled={!ready || loading || Boolean(error)}
+                onClick={() => toggleMember(agent)}
                 className={cn(
                   'h-[54px] w-full justify-start gap-3 rounded-xl px-3 py-0 text-left font-medium text-foreground',
                   selected && 'bg-[hsl(var(--shell-surface-muted))] hover:bg-[hsl(var(--shell-surface-muted))]',
@@ -128,7 +147,10 @@ export function TeamMemberPicker({
                   className="h-8 w-8"
                   alt=""
                 />
-                <span className="min-w-0 flex-1 truncate text-sm">{agentName}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm">{agentName}</span>
+                  <span className="block truncate text-xs font-normal text-muted-foreground">{runtimeName}</span>
+                </span>
                 <span
                   aria-hidden="true"
                   className={cn(
@@ -155,11 +177,12 @@ export function TeamMemberPicker({
           {members.length === 0 ? (
             <p className="py-6 text-sm leading-6 text-muted-foreground">{t('create.manualSelectedEmpty')}</p>
           ) : members.map((member) => {
-            const agent = agentsById.get(member.agentId);
-            const agentName = agent?.name ?? agent?.identity?.name ?? member.agentId;
+            const { agent } = member;
+            const key = memberKey(member.endpoint, agent.id);
+            const agentName = agent.name ?? agent.identity?.name ?? agent.id;
             return (
               <div
-                key={member.agentId}
+                key={key}
                 className={cn(
                   'flex items-center gap-3 px-3',
                   member.isLeader
@@ -168,22 +191,25 @@ export function TeamMemberPicker({
                 )}
               >
                 <AgentAvatar
-                  avatarSeed={agent?.avatarSeed}
-                  avatarStyle={agent?.avatarStyle}
-                  agentId={member.agentId}
+                  avatarSeed={agent.avatarSeed}
+                  avatarStyle={agent.avatarStyle}
+                  agentId={agent.id}
                   agentName={agentName}
                   className="h-8 w-8"
                   alt=""
                 />
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{agentName}</span>
+                <span className="min-w-0 flex-1 font-medium text-foreground">
+                  <span className="block truncate text-sm">{agentName}</span>
+                  <span className="block truncate text-xs font-normal text-muted-foreground">{member.runtimeName}</span>
+                </span>
                 <label className="shrink-0 cursor-pointer">
                   <input
                     type="radio"
                     name={`${pickerId}-leader`}
-                    value={member.agentId}
+                    value={key}
                     checked={member.isLeader}
-                    aria-label={t('create.manualLeaderAriaLabel', { agentName })}
-                    onChange={() => selectLeader(member.agentId)}
+                    aria-label={t('create.manualLeaderAriaLabel', { agentName, runtimeName: member.runtimeName })}
+                    onChange={() => selectLeader(key)}
                     className="peer sr-only"
                   />
                   <span className="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full border border-transparent px-2.5 text-xs text-muted-foreground transition-colors hover:text-foreground peer-checked:border-border peer-checked:bg-background peer-checked:text-foreground peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background">
@@ -197,8 +223,8 @@ export function TeamMemberPicker({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  onClick={() => removeMember(member.agentId)}
-                  aria-label={t('create.manualRemoveAgentAriaLabel', { agentName })}
+                  onClick={() => removeMember(key)}
+                  aria-label={t('create.manualRemoveAgentAriaLabel', { agentName, runtimeName: member.runtimeName })}
                   className="h-7 w-7 shrink-0 text-muted-foreground"
                 >
                   <X aria-hidden="true" className="h-4 w-4" />

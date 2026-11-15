@@ -340,7 +340,7 @@ export function bootstrapMainApplication(deps: {
     owner: appPlugins, host: appPluginHost,
     onPreview: (developmentId) => deps.hostEventBus.emit('app-plugins:preview', { developmentId }),
     root: join(app.getPath('userData'), 'app-plugin-agent'),
-    sdkArchive: app.isPackaged ? join(process.resourcesPath, 'app-plugins', 'sdk.tgz') : join(app.getAppPath(), 'sdk', 'app-plugins', 'matcha-app-plugins-sdk-1.5.0.tgz'),
+    sdkArchive: app.isPackaged ? join(process.resourcesPath, 'app-plugins', 'sdk.tgz') : join(app.getAppPath(), 'sdk', 'app-plugins', 'matcha-app-plugins-sdk-1.6.0.tgz'),
   }));
   const stopAppPluginAssets = registerAppPluginAssets({
     owner: appPlugins,
@@ -482,9 +482,9 @@ export function bootstrapMainApplication(deps: {
         getMainWindow: deps.getMainWindow,
         sessionObservers,
         sessionEvents: bundle.sessionEventsTransport,
-        resyncSessions: () => sessionObservers.resync(async (identity, leaseId) => {
+        resyncSessions: () => sessionObservers.resync(async (identity, leaseId, endpointSessionId) => {
           const response = await transports.sessionObservationTransport.observe(
-            observationRequest(identity, leaseId, 'sessions.observe'));
+            observationRequest(identity, leaseId, 'sessions.observe', undefined, undefined, endpointSessionId));
           return response.status === 200 && 'leaseId' in response.body ? response.body : null;
         }),
       }));
@@ -674,11 +674,22 @@ export function bootstrapMainApplication(deps: {
   };
   const forceClose = (): Promise<void> => {
     shutdown.abort();
-    stopAppPluginAssets();
-    appPresentation?.close();
-    void stopAppSpellcheck();
     forceCloseTask ??= (async () => {
-      const results = await Promise.allSettled([interconnect.then((owner) => owner.close(), () => undefined).finally(() => sharedFolders.close()), networkAccess.then((network) => network.close()), access.close(), iab.close(), appPluginAgentGateway.then((gateway) => gateway.forceClose(), () => undefined), appPluginHost.forceClose(), appPlugins.close(), appPluginPackages.forceClose(), ...[...heldRuntimeHosts].map((host) => host.forceKill())]);
+      const cleanup = [
+        stopAppPluginAssets,
+        () => appPresentation?.close(),
+        stopAppSpellcheck,
+        () => interconnect.then((owner) => owner.close(), () => undefined).finally(() => sharedFolders.close()),
+        () => networkAccess.then((network) => network.close()),
+        () => access.close(),
+        () => iab.close(),
+        () => appPluginAgentGateway.then((gateway) => gateway.forceClose(), () => undefined),
+        () => appPluginHost.forceClose(),
+        () => appPlugins.close(),
+        () => appPluginPackages.forceClose(),
+        ...[...heldRuntimeHosts].map((host) => () => host.forceKill()),
+      ];
+      const results = await Promise.allSettled(cleanup.map((stop) => Promise.resolve().then(stop)));
       const failures = results.filter((result) => result.status === 'rejected');
       if (failures.length > 0) {
         throw new AggregateError(failures.map((result) => result.reason), 'Runtime-host force confirmation failed');

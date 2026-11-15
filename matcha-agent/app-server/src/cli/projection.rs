@@ -246,23 +246,34 @@ pub(crate) async fn launch(
     agent_id: &str,
     args: Vec<String>,
 ) -> rpc::Result<Launch> {
-    launch_with_iab(config, paths, agent_id, args, None).await
+    launch_with_iab(
+        config,
+        paths,
+        agent_id,
+        paths.workspace(agent_id)?,
+        args,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn launch_instance(
     config: &Config,
     paths: &Paths,
     agent_id: &str,
+    workspace: &std::path::Path,
     args: Vec<String>,
     iab: &crate::session::iab::InstanceGuard,
 ) -> rpc::Result<Launch> {
-    launch_with_iab(config, paths, agent_id, args, Some(iab)).await
+    let workspace = crate::workspace::session_directory(paths, agent_id, workspace).await?;
+    launch_with_iab(config, paths, agent_id, workspace, args, Some(iab)).await
 }
 
 async fn launch_with_iab(
     config: &Config,
     paths: &Paths,
     agent_id: &str,
+    workspace: PathBuf,
     args: Vec<String>,
     iab: Option<&crate::session::iab::InstanceGuard>,
 ) -> rpc::Result<Launch> {
@@ -354,7 +365,7 @@ async fn launch_with_iab(
         command: config.cli.command.clone(),
         args: command_args,
         env,
-        cwd: paths.workspace(agent_id)?,
+        cwd: workspace,
     })
 }
 

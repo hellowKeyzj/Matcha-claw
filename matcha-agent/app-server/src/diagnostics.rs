@@ -198,7 +198,7 @@ impl Diagnostics {
 
     pub async fn retention_status(&self) -> rpc::Result<Value> {
         self.database
-            .call(|connection| {
+            .read(|connection| {
                 let (count, oldest_at_ms, newest_at_ms) = connection
                     .query_row(
                         "SELECT COUNT(*), MIN(at_ms), MAX(at_ms) FROM diagnostics_records",
@@ -277,7 +277,7 @@ impl Diagnostics {
         bindings.push(limit.into());
         let mut response = self
             .database
-            .call(move |connection| {
+            .read(move |connection| {
                 let mut statement = connection
                     .prepare(&sql)
                     .map_err(|error| storage_error("diagnostics_query", error))?;

@@ -1,9 +1,10 @@
 use std::fmt;
 
-use crate::run::graph::ExecutionFence;
+use crate::{RoleSessionRef, run::graph::ExecutionFence};
+
+use super::normalize_delivery_files;
 
 const MAX_OPAQUE_BYTES: usize = 128;
-const MAX_TEXT_BYTES: usize = 512;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ArtifactId(String);
@@ -67,6 +68,8 @@ pub struct ArtifactRecord {
     node_execution_id: String,
     fence: ExecutionFence,
     role_id: String,
+    producer_session_ref: Option<RoleSessionRef>,
+    files: Vec<String>,
     kind: String,
     title: String,
     content_ref: String,
@@ -86,6 +89,7 @@ pub enum ArtifactRecordError {
     InvalidTitle,
     InvalidContentReference,
     InvalidSummary,
+    InvalidFiles,
 }
 
 impl ArtifactRecord {
@@ -113,14 +117,20 @@ impl ArtifactRecord {
             return Err(ArtifactRecordError::BlankIdentity);
         }
         let role_id = identity(role_id.into())?;
-        let kind =
-            bounded(kind.into(), MAX_OPAQUE_BYTES).ok_or(ArtifactRecordError::InvalidKind)?;
-        let title =
-            bounded(title.into(), MAX_TEXT_BYTES).ok_or(ArtifactRecordError::InvalidTitle)?;
+        let kind = kind.into();
+        if kind.trim().is_empty() {
+            return Err(ArtifactRecordError::InvalidKind);
+        }
+        let title = title.into();
+        if title.trim().is_empty() {
+            return Err(ArtifactRecordError::InvalidTitle);
+        }
         let content_ref = bounded(content_ref.into(), MAX_OPAQUE_BYTES)
             .ok_or(ArtifactRecordError::InvalidContentReference)?;
         let summary = summary
-            .map(|v| bounded(v, crate::run::MAX_SUMMARY_BYTES).ok_or(ArtifactRecordError::InvalidSummary))
+            .map(|value| {
+                (!value.trim().is_empty()).then_some(value).ok_or(ArtifactRecordError::InvalidSummary)
+            })
             .transpose()?;
         let source_envelope_id = identity(source_envelope_id.into())?;
         let idempotency_key = identity(idempotency_key.into())?;
@@ -131,6 +141,8 @@ impl ArtifactRecord {
             node_execution_id,
             fence,
             role_id,
+            producer_session_ref: None,
+            files: Vec::new(),
             kind,
             title,
             content_ref,
@@ -142,6 +154,24 @@ impl ArtifactRecord {
             updated_at: created_at,
         })
     }
+    pub fn with_delivery_files(
+        mut self,
+        session_ref: Option<RoleSessionRef>,
+        files: Vec<String>,
+    ) -> Result<Self, ArtifactRecordError> {
+        self.files = normalize_delivery_files(files).map_err(|_| ArtifactRecordError::InvalidFiles)?;
+        self.producer_session_ref = session_ref;
+        Ok(self)
+    }
+
+    pub fn producer_session_ref(&self) -> Option<&RoleSessionRef> {
+        self.producer_session_ref.as_ref()
+    }
+
+    pub fn files(&self) -> &[String] {
+        &self.files
+    }
+
     pub fn artifact_id(&self) -> &ArtifactId {
         &self.artifact_id
     }
@@ -198,6 +228,8 @@ impl fmt::Debug for ArtifactRecord {
             .field("node_execution_id", &self.node_execution_id)
             .field("fence", &self.fence)
             .field("role_id", &self.role_id)
+            .field("producer_session_ref", &self.producer_session_ref)
+            .field("file_count", &self.files.len())
             .field("kind", &self.kind)
             .field("title", &self.title)
             .field("has_content_ref", &true)

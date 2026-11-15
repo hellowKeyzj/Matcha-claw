@@ -3,7 +3,7 @@ mod media;
 
 use serde_json::{Map, Value};
 
-use crate::session::protocol::{ChatHistoryResult, HistoryRole};
+use crate::session::protocol::{ChatHistoryResult, DisplayContent, HistoryRole, projection_whitespace, session_message_display_content, session_projection_final_identity};
 
 use super::model::{
     ActivityPosition, DisplayPosition, StreamFallback, StreamFallbackSource,
@@ -460,7 +460,10 @@ fn decode_session_state(envelope: &Map<String, Value>) -> Result<SessionState, H
             .map_err(|_| payload_error("sessionInfo.timing", "invalid", "number"))?;
         if timing.ended_at_ms.is_some() { timings.push(timing); }
     }
-    Ok(state.with_run_timings(timings).with_activity(
+    Ok(state.with_work_pending(match info.get("hasPendingWork") {
+        None | Some(Value::Null) => None,
+        _ => optional_bool(info, "hasPendingWork")?,
+    }).with_run_timings(timings).with_activity(
         optional_string(info, "status")?,
         match info.get("hasActiveRun") {
             None | Some(Value::Null) => None,
@@ -720,6 +723,11 @@ fn decode_text_history(payload: Value) -> Result<Vec<Message>, HistoryError> {
         .into_iter()
         .enumerate()
         .map(|(index, message)| {
+            let value = serde_json::json!({ "role": if message.role == HistoryRole::User { "user" } else { "assistant" }, "text": &message.text });
+            let (display_text, has_nontext, uses_fallback_text) = session_message_display_content(&value);
+            let display_content = DisplayContent::from_display(&value, &display_text, has_nontext);
+            let final_content = session_projection_final_identity(&value, display_content.has_displayable_content(), uses_fallback_text)
+                .map(|message_identity| super::model::FinalContent { message_identity, text_only: !has_nontext });
             let role = match message.role {
                 HistoryRole::User => MessageRole::User,
                 HistoryRole::Assistant => MessageRole::Assistant,
@@ -736,7 +744,7 @@ fn decode_text_history(payload: Value) -> Result<Vec<Message>, HistoryError> {
                 Some(index as u64),
                 None,
                 None,
-            )
+            ).with_content_identity(None, None, final_content, display_content)
         })
         .collect())
 }
@@ -872,7 +880,7 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
             let text = string_message(value, index, "streamId")?;
             if text.len() > MAX_STREAM_ID_BYTES { return Err(message_error(index, "streamId", "string_too_large", "string")); }
             if text.contains('\0') { return Err(message_error(index, "streamId", "invalid", "string")); }
-            Ok(text.trim().to_owned())
+            Ok(text.trim_matches(projection_whitespace).to_owned())
         }).transpose()?.filter(|id| !id.is_empty());
     let message_id = identity_message_id.clone().or(optional_alias_string_message(message, index, "messageId", "id")?);
     let parent_id = optional_alias_string_message(message, index, "parentId", "parentMessageId")?;
@@ -906,9 +914,14 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
     let canonical_position = native.and_then(|meta| meta.get("transcriptPosition")).is_some_and(|position|
         position.get("source").and_then(Value::as_str).is_some_and(|source| !source.trim_matches(projection_whitespace).is_empty() && source.trim_matches(projection_whitespace).encode_utf16().count() <= 128)
             && position.get("rawSeq").and_then(Value::as_u64).is_some_and(|seq| seq <= MAX_SAFE_SEQUENCE));
-    let is_imported = !canonical_position && native.map(|meta| ["importedFrom", "cliSessionId", "externalId"].into_iter()
-        .try_fold(false, |imported, field| projection_string(meta, index, field).map(|value| imported || value.is_some())))
-        .transpose()?.unwrap_or(false);
+    let import_source = [
+        native.map(|meta| projection_string(meta, index, "importedFrom")).transpose()?.flatten(),
+        native.map(|meta| projection_string(meta, index, "cliSessionId")).transpose()?.flatten(),
+        native.map(|meta| projection_string(meta, index, "externalId")).transpose()?.flatten(),
+    ];
+    let is_imported = import_source.iter().any(Option::is_some);
+    let external_source = import_source.iter().all(Option::is_some)
+        .then(|| serde_json::json!(import_source).to_string());
     let steer_target_run_id = native.map(|meta| projection_string(meta, index, "steerTargetRunId")).transpose()?.flatten();
     let metadata_run = native.map(|meta| projection_string(meta, index, "runId")).transpose()?.flatten().and_then(normalize_run);
     let envelope_run = envelope.map(|envelope| projection_string(envelope, index, "runId")).transpose()?.flatten().and_then(normalize_run);
@@ -916,23 +929,27 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         .or(projection_string(message, index, "idempotencyKey")?)
         .or(envelope.map(|envelope| projection_string(envelope, index, "idempotencyKey")).transpose()?.flatten())
         .or(envelope.map(|envelope| projection_string(envelope, index, "clientRunId")).transpose()?.flatten());
-    let input_id = (role == MessageRole::User && identity_message_id.is_some() && !is_imported)
+    let input_imported = !canonical_position && native.is_some_and(|meta| ["importedFrom", "cliSessionId", "externalId"].into_iter()
+        .any(|field| meta.get(field).and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty())));
+    let input_message_id = native.and_then(|meta| meta.get("id")).and_then(Value::as_str).is_some_and(|id| !id.trim().is_empty())
+        || envelope.and_then(|envelope| envelope.get("messageId")).and_then(Value::as_str).is_some_and(|id| !id.trim().is_empty());
+    let input_id = (role == MessageRole::User && input_message_id && !input_imported)
         .then(|| native.and_then(|meta| meta.get("idempotencyKey")).and_then(Value::as_str)
             .or_else(|| message.get("idempotencyKey").and_then(Value::as_str))
             .and_then(|key| key.strip_suffix(":user")))
         .flatten().map(str::to_owned)
         .filter(|id| sessions_module::state::valid_input_ids(std::slice::from_ref(id)));
     let persisted_run = idempotency_key.clone().and_then(normalize_run);
-    let has_send_identity = persisted_run.is_some();
+    let has_send_identity = idempotency_key.is_some();
     let cli_assistant = role == MessageRole::Assistant && projection_string(message, index, "api")?
         .is_some_and(|api| api.eq_ignore_ascii_case("cli"));
     let persisted_run = persisted_run.and_then(|run| {
         if cli_assistant && let Some(run) = run.strip_prefix("cli-assistant:") {
-            (!run.trim().is_empty()).then(|| run.trim().to_owned())
+            (!run.trim_matches(projection_whitespace).is_empty()).then(|| run.trim_matches(projection_whitespace).to_owned())
         } else { Some(run) }
     });
     let identity_run_id = if role == MessageRole::Assistant {
-        metadata_run.or(envelope_run).or_else(|| stream_fallback.as_ref().and_then(|fallback| fallback.run_id.clone()).and_then(normalize_run))
+        metadata_run.or(envelope_run)
             .or_else(|| (cli_assistant || mirror_origin.is_none()).then_some(persisted_run).flatten())
     } else { metadata_run.or(persisted_run).or(envelope_run) };
     let run_id = identity_run_id.clone().or(projection_string(message, index, "runId")?.and_then(normalize_run))
@@ -942,8 +959,6 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
     let sequence = identity_sequence.or(optional_alias_u64_pair_message(message, index, "seq", "sequence")?);
     media::bind_sources(message, native, native_session_id, identity_message_id.as_deref(), identity_sequence, &mut content);
     let after_sequence = match envelope.and_then(|envelope| envelope.get("afterSequence")) {
-        None if role == MessageRole::Assistant && identity_message_id.is_none() && identity_sequence.is_none() =>
-            fallback.and_then(|fallback| fallback.get("afterSequence")).and_then(Value::as_u64).map(|seq| Some(seq)),
         None => None,
         Some(Value::Null) => Some(None),
         Some(value) => Some(Some(value.as_u64().ok_or_else(|| message_error(index, "afterSequence", "expected_u64", value_kind(value)))?)),
@@ -960,10 +975,10 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         ));
     }
     let stop_reason = projection_string(message, index, "stopReason")?;
-    let final_content = final_content_identity(message, role, is_imported, true);
-    let tool_continuation = message.get("content").and_then(Value::as_array).is_some_and(|blocks|
-        blocks.iter().any(|block| matches!(block.get("type").and_then(Value::as_str), Some("toolCall" | "toolUse" | "functionCall"))))
-        || (stop_reason.as_deref() == Some("toolUse") && final_content_identity(message, role, is_imported, false).is_none());
+    let (display_text, has_nontext, uses_fallback_text) = session_message_display_content(value);
+    let display_content = DisplayContent::from_display(value, &display_text, has_nontext);
+    let final_content = session_projection_final_identity(value, display_content.has_displayable_content(), uses_fallback_text)
+        .map(|message_identity| super::model::FinalContent { message_identity, text_only: !has_nontext });
     let created_at = optional_created_at_message(message, index)?;
     let updated_at = optional_u64_message(message, index, "updatedAt")?;
     Ok(Message::new(
@@ -978,57 +993,21 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         sequence,
         created_at,
         updated_at,
-    ).with_notice(notice).with_display(display_position, stream_fallback).with_imported(is_imported)
-        .with_content_identity(idempotency_key, stop_reason, final_content, tool_continuation)
+    ).with_notice(notice).with_display(display_position, stream_fallback).with_imported(is_imported, external_source)
+        .with_content_identity(idempotency_key, stop_reason, final_content, display_content)
         .with_input_id(input_id)
         .with_identity(identity_message_id, identity_stream_id, identity_run_id, identity_sequence, after_sequence)
         .with_steer_target_run_id(steer_target_run_id)
         .with_projection_state(None, mirror_origin, run_terminal)
         .with_event_facts(
-            envelope.map(|envelope| projection_string(envelope, index, "runId")).transpose()?.flatten(),
-            envelope.map(|envelope| projection_string(envelope, index, "clientRunId")).transpose()?.flatten(),
+            envelope.and_then(|envelope| envelope.get("runId")).and_then(Value::as_str).map(str::to_owned),
+            envelope.and_then(|envelope| envelope.get("clientRunId")).and_then(Value::as_str).map(str::to_owned),
             has_send_identity,
-            native.is_some_and(|meta| meta.get("seq").and_then(Value::as_u64).is_some_and(|seq| seq > 0)
-                || ["importedFrom", "cliSessionId", "externalId"].into_iter().all(|field| meta.get(field).and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty()))),
+            native.is_some_and(|meta| meta.get("seq").and_then(Value::as_u64).is_some_and(|seq| seq > 0))
+                || import_source.iter().all(Option::is_some),
             terminal_reply_signature(message, run_terminal, hidden_control_reply),
         )
         .with_hidden_control_reply(hidden_control_reply).with_truncated(truncated))
-}
-
-fn final_content_identity(message: &Map<String, Value>, role: MessageRole, imported: bool, terminal: bool) -> Option<super::model::FinalContent> {
-    use sha2::{Digest, Sha256};
-    let original = message.get("content")?;
-    let stripped = original.as_array().filter(|_| terminal).map(|blocks| blocks.iter().filter(|block|
-        block.get("openclawStatusNotice").and_then(Value::as_bool) != Some(true)).cloned().collect::<Vec<_>>());
-    let filtered = stripped.as_ref().filter(|blocks| !blocks.is_empty() && original.as_array().is_some_and(|original| original.len() != blocks.len()))
-        .map(|blocks| Value::Array(blocks.clone()));
-    let content = filtered.as_ref().unwrap_or(original);
-    let trim = |text: &str| text.trim_matches(projection_whitespace).to_owned();
-    let mut texts = Vec::new();
-    let native = message.get("__openclaw");
-    let media = native.and_then(|native| native.get("media"));
-    let mut nontext = media.and_then(Value::as_array).is_some_and(|media| !media.is_empty());
-    for block in content.as_array().map(Vec::as_slice).unwrap_or(std::slice::from_ref(content)) {
-        if block.is_object() && !block.get("type").and_then(Value::as_str).is_some_and(|kind| TEXT_BLOCK_TYPES.contains(&kind)) {
-            nontext |= !matches!(block.get("type").and_then(Value::as_str), Some("thinking" | "reasoning" | "redacted_thinking"));
-            continue;
-        }
-        if let Some(text) = block.as_str().or_else(|| block.get("text").and_then(Value::as_str)) {
-            let text = trim(text);
-            if !text.is_empty() { texts.push(text); }
-        }
-    }
-    let text = if texts.is_empty() && filtered.is_none() {
-        message.get("text").and_then(Value::as_str).map(trim).unwrap_or_default()
-    } else { texts.join("\n") };
-    if text.is_empty() && !nontext { return None; }
-    let other = serde_json::json!([
-        match role { MessageRole::Assistant => "assistant", MessageRole::User => "user", MessageRole::System => "system", MessageRole::ToolResult => "toolresult" },
-        if nontext { content.clone() } else { Value::Null },
-        media.unwrap_or(&Value::Null),
-        if imported { serde_json::json!([native.and_then(|native| native.get("importedFrom")), native.and_then(|native| native.get("cliSessionId")), native.and_then(|native| native.get("externalId"))]) } else { Value::Null },
-    ]);
-    Some(super::model::FinalContent { text: Sha256::digest(text.as_bytes()).into(), other: Sha256::digest(serde_json::to_vec(&other).ok()?).into(), text_only: !nontext })
 }
 
 fn terminal_reply_signature(message: &Map<String, Value>, run_terminal: bool, hidden: bool) -> Option<String> {
@@ -1061,16 +1040,11 @@ fn terminal_reply_signature(message: &Map<String, Value>, run_terminal: bool, hi
     (!content.is_empty()).then(|| serde_json::to_string(&content).ok()).flatten()
 }
 
-fn projection_whitespace(ch: char) -> bool {
-    matches!(ch, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
-        | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
-}
-
 fn projection_string(object: &Map<String, Value>, index: usize, field: &'static str) -> Result<Option<String>, HistoryError> {
     match object.get(field) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => {
-            let text = string_message(value, index, field)?.trim();
+            let text = string_message(value, index, field)?.trim_matches(projection_whitespace);
             if text.len() > MAX_METADATA_BYTES { return Err(message_error(index, field, "string_too_large", "string")); }
             Ok((!text.is_empty()).then(|| text.to_owned()))
         }
@@ -2071,7 +2045,7 @@ fn tool_payload(object: &Map<String, Value>, fields: &[&'static str]) -> Option<
 }
 
 fn tool_details(object: &Map<String, Value>, output_value: Option<&Value>) -> Option<Value> {
-    project_tool_details([
+    project_tool_details(first_alias_value(object, ROLE_TOOL_NAME_FIELDS).and_then(Value::as_str), [
         object
             .get("result")
             .and_then(|result| result.get("details")),
@@ -2080,7 +2054,7 @@ fn tool_details(object: &Map<String, Value>, output_value: Option<&Value>) -> Op
     ])
 }
 
-fn project_tool_details(values: [Option<&Value>; 3]) -> Option<Value> {
+fn project_tool_details(tool_name: Option<&str>, values: [Option<&Value>; 3]) -> Option<Value> {
     let mut details = Map::new();
     for value in values.into_iter().flatten() {
         let Some(object) = value.as_object() else {
@@ -2088,6 +2062,9 @@ fn project_tool_details(values: [Option<&Value>; 3]) -> Option<Value> {
         };
         if let Some(preview) = crate::session::protocol::project_mcp_app_preview_value(value) {
             details.insert("mcpAppPreview".to_owned(), preview);
+        }
+        if let Some(reference) = crate::session::media_tasks::project_task_reference(tool_name, value) {
+            details.extend(reference);
         }
         for key in [
             "browserTab",

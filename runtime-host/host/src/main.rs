@@ -40,12 +40,24 @@ async fn run() -> Result<(), Error> {
             _ => Err(Error::Arguments),
         };
     }
-    if let Some((source, target)) = migration_arguments()? {
-        let report = organization::migrate_legacy_log(&source, &target).map_err(Error::Migration)?;
-        println!(
-            "{}",
-            serde_json::to_string(&report).map_err(|_| Error::MigrationReport)?
-        );
+    if let Some(command) = migration_arguments()? {
+        let report = match command {
+            MigrationCommand::PreviewRework { source, limits } => {
+                let limits: organization::ReworkMigrationLimits = serde_json::from_slice(
+                    &std::fs::read(limits).map_err(Error::MigrationInput)?,
+                ).map_err(Error::MigrationJson)?;
+                serde_json::to_string(&organization::preview_rework_migration(&source, &limits)
+                    .map_err(Error::ReworkMigration)?)
+            }
+            MigrationCommand::ApplyRework { source, target, confirmation } => {
+                let confirmation: organization::ReworkMigrationPreview = serde_json::from_slice(
+                    &std::fs::read(confirmation).map_err(Error::MigrationInput)?,
+                ).map_err(Error::MigrationJson)?;
+                serde_json::to_string(&organization::migrate_rework_budgets(&source, &target, &confirmation)
+                    .map_err(Error::ReworkMigration)?)
+            }
+        }.map_err(|_| Error::MigrationReport)?;
+        println!("{report}");
         return Ok(());
     }
     if std::env::var_os("MATCHACLAW_DEBUG_CRON_PROVIDER").is_some() {
@@ -70,21 +82,31 @@ async fn run() -> Result<(), Error> {
     .map_err(Error::Control)
 }
 
-fn migration_arguments() -> Result<Option<(PathBuf, PathBuf)>, Error> {
+enum MigrationCommand {
+    PreviewRework { source: PathBuf, limits: PathBuf },
+    ApplyRework { source: PathBuf, target: PathBuf, confirmation: PathBuf },
+}
+
+fn migration_arguments() -> Result<Option<MigrationCommand>, Error> {
     let mut args = std::env::args_os().skip(1);
     let Some(command) = args.next() else {
         return Ok(None);
     };
-    if command != "migrate-organization" {
+    let preview = command == "preview-organization-rework";
+    if !preview && command != "migrate-organization-rework" {
         return Err(Error::Arguments);
     }
     let mut source = None;
     let mut target = None;
+    let mut limits = None;
+    let mut confirmation = None;
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(Error::Arguments)?;
         let slot = match flag.to_str() {
-            Some("--source-log") if source.is_none() => &mut source,
-            Some("--target-db") if target.is_none() => &mut target,
+            Some("--source-db") if source.is_none() => &mut source,
+            Some("--target-db") if !preview && target.is_none() => &mut target,
+            Some("--limits") if preview && limits.is_none() => &mut limits,
+            Some("--confirmation") if !preview && confirmation.is_none() => &mut confirmation,
             _ => return Err(Error::Arguments),
         };
         let path = PathBuf::from(value);
@@ -93,16 +115,24 @@ fn migration_arguments() -> Result<Option<(PathBuf, PathBuf)>, Error> {
         }
         *slot = Some(path);
     }
-    Ok(Some((
-        source.ok_or(Error::Arguments)?,
-        target.ok_or(Error::Arguments)?,
-    )))
+    let source = source.ok_or(Error::Arguments)?;
+    Ok(Some(if preview {
+        MigrationCommand::PreviewRework { source, limits: limits.ok_or(Error::Arguments)? }
+    } else {
+        MigrationCommand::ApplyRework {
+            source,
+            target: target.ok_or(Error::Arguments)?,
+            confirmation: confirmation.ok_or(Error::Arguments)?,
+        }
+    }))
 }
 
 #[derive(Debug)]
 enum Error {
     Arguments,
-    Migration(organization::MigrationError),
+    ReworkMigration(organization::ReworkMigrationError),
+    MigrationInput(std::io::Error),
+    MigrationJson(serde_json::Error),
     MigrationReport,
     Materials(std::io::Error),
     MaterialsSchema(world_protocol::schema::SchemaFailure),
@@ -114,9 +144,11 @@ impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Arguments => formatter.write_str(
-                "expected no arguments, world-materials [schema], mcp --state-dir <absolute directory>, or migrate-organization --source-log <absolute offline log> --target-db <absolute new offline database>; no automatic cutover",
+                "expected no arguments, world-materials [schema], mcp --state-dir <absolute directory>, preview-organization-rework --source-db <absolute offline database> --limits <absolute limits JSON>, or migrate-organization-rework --source-db <absolute offline database> --target-db <absolute new offline database> --confirmation <absolute confirmed preview JSON>; no automatic cutover",
             ),
-            Self::Migration(error) => error.fmt(formatter),
+            Self::ReworkMigration(error) => error.fmt(formatter),
+            Self::MigrationInput(error) => write!(formatter, "organization migration input: {error}"),
+            Self::MigrationJson(error) => write!(formatter, "organization migration JSON: {error}"),
             Self::MigrationReport => formatter.write_str("organization migration report could not be encoded"),
             Self::Materials(error) => write!(formatter, "world materials worker: {error}"),
             Self::MaterialsSchema(error) => error.fmt(formatter),

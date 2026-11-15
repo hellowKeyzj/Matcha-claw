@@ -5,7 +5,7 @@ pub const DESCRIPTOR_PROVIDER: CapabilityDescriptorProvider =
     CapabilityDescriptorProvider::new(listed_descriptors, describe_descriptor);
 
 pub fn listed_descriptors() -> Vec<Value> {
-    vec![browser_descriptor(), mcp_app_descriptor(), canvas_descriptor(), progress_card_descriptor(), question_descriptor()]
+    vec![browser_descriptor(), mcp_app_descriptor(), canvas_descriptor(), progress_card_descriptor(), question_descriptor(), video_task_descriptor()]
 }
 
 pub fn describe_descriptor(id: &str, scope: &Value) -> Option<Value> {
@@ -18,6 +18,7 @@ pub fn describe_descriptor(id: &str, scope: &Value) -> Option<Value> {
         "openclaw.canvas" => Some(canvas_descriptor()),
         "openclaw.progress" => Some(progress_card_descriptor()),
         "openclaw.question" => Some(question_descriptor()),
+        "openclaw.videoTask" => Some(video_task_descriptor()),
         _ => None,
     }
 }
@@ -120,6 +121,24 @@ pub fn question_descriptor() -> Value {
             operation("question.resolve", "Resolve OpenClaw question", "none"),
         ],
         "policyScope": "openclaw.question",
+        "ownerModuleId": "openclaw-gateway",
+        "routeOwnerId": "openclaw",
+    })
+}
+
+pub fn video_task_descriptor() -> Value {
+    json!({
+        "id": "openclaw.videoTask",
+        "kind": "openclaw-video-task",
+        "scopeKind": "runtime-instance",
+        "scope": native_runtime_instance_scope(),
+        "targetKinds": ["none"],
+        "runtimeAdapterId": "openclaw",
+        "runtimeInstanceId": "local",
+        "supportLevel": "native",
+        "availability": "available",
+        "operations": [operation("video.task.refresh", "Refresh existing video task", "none")],
+        "policyScope": "openclaw.videoTask",
         "ownerModuleId": "openclaw-gateway",
         "routeOwnerId": "openclaw",
     })

@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::native_config::provider::ProviderKey;
+
 pub(crate) const MAX_REPLACE_PATHS: usize = 256;
 
 pub(crate) fn encode_request(
@@ -110,8 +112,41 @@ pub(crate) fn destructive_array_replace_paths_at(
     path: &str,
 ) -> Vec<String> {
     let mut paths = BTreeSet::new();
-    collect_destructive_array_replace_paths(current, Some(target), path, &mut paths);
+    let context = if path.is_empty() {
+        ArrayPathContext::Root
+    } else {
+        ArrayPathContext::Other
+    };
+    collect_destructive_array_replace_paths(current, Some(target), path, context, &mut paths);
     paths.into_iter().collect()
+}
+
+#[derive(Clone, Copy)]
+enum ArrayPathContext {
+    Root,
+    Models,
+    Providers,
+    ProviderEntry,
+    ProviderMedia,
+    ModelCatalog,
+    Other,
+}
+
+fn child_array_path_context(context: ArrayPathContext, key: &str) -> ArrayPathContext {
+    match (context, key) {
+        (ArrayPathContext::Root, "models") => ArrayPathContext::Models,
+        (ArrayPathContext::Models, "providers") => ArrayPathContext::Providers,
+        // replacePaths is dot-delimited and cannot address dotted map keys.
+        (ArrayPathContext::Providers, provider)
+            if !provider.contains('.') && ProviderKey::try_new(provider.to_owned()).is_ok() =>
+        {
+            ArrayPathContext::ProviderEntry
+        }
+        (ArrayPathContext::ProviderEntry, "models") => ArrayPathContext::ModelCatalog,
+        (ArrayPathContext::ProviderEntry, "media") => ArrayPathContext::ProviderMedia,
+        (ArrayPathContext::ProviderMedia, "models") => ArrayPathContext::ModelCatalog,
+        _ => ArrayPathContext::Other,
+    }
 }
 
 fn apply_merge_patch(base: &Value, patch: &Value) -> Value {
@@ -136,12 +171,13 @@ fn collect_destructive_array_replace_paths(
     current: &Value,
     target: Option<&Value>,
     path: &str,
+    context: ArrayPathContext,
     paths: &mut BTreeSet<String>,
 ) {
     match current {
         Value::Array(current) => match target {
             Some(Value::Array(target)) => {
-                if !target_array_preserves_existing_entries(current, target) {
+                if !target_array_preserves_existing_entries(current, target, context) {
                     insert_non_empty_path(paths, path);
                     return;
                 }
@@ -155,7 +191,14 @@ fn collect_destructive_array_replace_paths(
             Some(target) => {
                 for (key, current) in current {
                     let path = child_dot_path(path, key);
-                    collect_destructive_array_replace_paths(current, target.get(key), &path, paths);
+                    let child_context = child_array_path_context(context, key);
+                    collect_destructive_array_replace_paths(
+                        current,
+                        target.get(key),
+                        &path,
+                        child_context,
+                        paths,
+                    );
                 }
             }
             None => collect_existing_array_paths(current, path, paths),
@@ -181,7 +224,24 @@ fn collect_existing_array_paths(
     }
 }
 
-fn target_array_preserves_existing_entries(current: &[Value], target: &[Value]) -> bool {
+fn target_array_preserves_existing_entries(
+    current: &[Value],
+    target: &[Value],
+    context: ArrayPathContext,
+) -> bool {
+    if matches!(context, ArrayPathContext::ModelCatalog) {
+        if !current.iter().all(object_with_string_id) {
+            return false;
+        }
+        let target_ids = target.iter().filter_map(string_id).collect::<BTreeSet<_>>();
+        // Native ID merging keeps existing positions and appends new IDs.
+        return target_ids.len() == target.len()
+            && current.len() <= target.len()
+            && current
+                .iter()
+                .zip(target)
+                .all(|(current, target)| string_id(current) == string_id(target));
+    }
     if current.iter().all(object_with_string_id) {
         let target_ids = target.iter().filter_map(string_id).collect::<BTreeSet<_>>();
         return current
@@ -227,6 +287,7 @@ fn collect_id_keyed_entry_array_paths(
             current_entry,
             Some(*target_entry),
             &format!("{path}[]"),
+            ArrayPathContext::Other,
             paths,
         );
     }
@@ -267,6 +328,71 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn provider_model_catalog_reorders_replace_the_full_array() {
+        let current = json!({"models":{"providers":{"custom":{
+            "models":[{"id":"first"},{"id":"second"}],
+            "media":{"models":[{"id":"image-first"},{"id":"image-second"}]}
+        }}}});
+        let target = json!({"models":{"providers":{"custom":{
+            "models":[{"id":"second"},{"id":"first"}],
+            "media":{"models":[{"id":"image-second"},{"id":"image-first"}]}
+        }}}});
+
+        assert_eq!(
+            destructive_array_replace_paths(&current, &target),
+            [
+                "models.providers.custom.media.models",
+                "models.providers.custom.models"
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_model_catalog_appends_and_field_updates_keep_id_merging() {
+        let current = json!({"models":{"providers":{"custom":{
+            "models":[{"id":"first","name":"Before"}]
+        }}}});
+        let target = json!({"models":{"providers":{"custom":{
+            "models":[{"id":"first","name":"After"},{"id":"second"}]
+        }}}});
+
+        assert!(destructive_array_replace_paths(&current, &target).is_empty());
+    }
+
+    #[test]
+    fn non_provider_id_arrays_keep_existing_merge_behavior() {
+        let current = json!({"agents":{"list":[{"id":"first"},{"id":"second"}]}});
+        let target = json!({"agents":{"list":[{"id":"second"},{"id":"first"},{"id":"third"}]}});
+
+        assert!(destructive_array_replace_paths(&current, &target).is_empty());
+    }
+
+    #[test]
+    fn only_addressable_provider_model_paths_use_catalog_ordering() {
+        let current = json!({"models":{"providers":{
+            "custom":{"models":[{"id":"first"},{"id":"second"}]},
+            "invalid/key":{"models":[{"id":"first"},{"id":"second"}]},
+            "foo.params":{
+                "models":[{"id":"first"},{"id":"second"}],
+                "params":{"models":[{"id":"nested-first"},{"id":"nested-second"}]}
+            }
+        }}});
+        let target = json!({"models":{"providers":{
+            "custom":{"models":[{"id":"second"},{"id":"first"}]},
+            "invalid/key":{"models":[{"id":"second"},{"id":"first"}]},
+            "foo.params":{
+                "models":[{"id":"second"},{"id":"first"}],
+                "params":{"models":[{"id":"nested-first"},{"id":"nested-second"}]}
+            }
+        }}});
+
+        assert_eq!(
+            destructive_array_replace_paths(&current, &target),
+            ["models.providers.custom.models"]
+        );
+    }
 
     #[test]
     fn runtime_guard_paths_include_runtime_only_arrays_removed_by_source_patch() {

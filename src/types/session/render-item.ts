@@ -197,20 +197,46 @@ export function isSessionImageGenerationToolName(value: string | null | undefine
   return typeof value === 'string' && IMAGE_GENERATION_TOOL_NAME_PATTERN.test(value);
 }
 
-type SessionImageGenerationTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'deleted';
+type SessionMediaGenerationTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'deleted';
 
-export function sessionImageGenerationTask(tool: SessionRenderToolCard): { taskId: string; runId: string | null; status: SessionImageGenerationTaskStatus } | null {
-  if (tool.runtimeAdapterId !== 'openclaw' || tool.name !== 'image_generate'
+export interface SessionMediaGenerationTask {
+  taskId: string;
+  runId: string | null;
+  status: SessionMediaGenerationTaskStatus;
+  createdAt?: number;
+  startedAt?: number;
+  endedAt?: number;
+  updatedAt?: number;
+  progressSummary?: string;
+  error?: string;
+  terminalOutcome?: string;
+  deliveryStatus?: string;
+}
+
+export function sessionMediaGenerationTask(tool: SessionRenderToolCard): SessionMediaGenerationTask | null {
+  if (tool.runtimeAdapterId !== 'openclaw' || tool.name !== 'image_generate' && tool.name !== 'video_generate'
     || !tool.details || typeof tool.details !== 'object') return null;
   const details = tool.details as Record<string, unknown>;
-  const task = details.task;
-  if (!task || typeof task !== 'object') return null;
-  const { taskId, status, runId } = task as Record<string, unknown>;
-  if (typeof taskId !== 'string' || !taskId || taskId !== details.taskId) return null;
+  if (!details.task || typeof details.task !== 'object') return null;
+  const task = details.task as Record<string, unknown>;
+  const { taskId, status, runId } = task;
+  if (typeof taskId !== 'string' || !taskId || details.taskId !== undefined && taskId !== details.taskId) return null;
   if (status !== 'queued' && status !== 'running' && status !== 'completed'
     && status !== 'failed' && status !== 'timed_out' && status !== 'cancelled' && status !== 'deleted') return null;
   const taskRunId = typeof runId === 'string' && runId ? runId : details.runId;
-  return { taskId, runId: typeof taskRunId === 'string' && taskRunId ? taskRunId : null, status };
+  const result: SessionMediaGenerationTask = { taskId, runId: typeof taskRunId === 'string' && taskRunId ? taskRunId : null, status };
+  for (const key of ['createdAt', 'startedAt', 'endedAt', 'updatedAt'] as const) {
+    const value = task[key];
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) result[key] = value;
+  }
+  for (const key of ['progressSummary', 'error', 'terminalOutcome', 'deliveryStatus'] as const) {
+    if (typeof task[key] === 'string') result[key] = task[key];
+  }
+  return result;
+}
+
+export function sessionImageGenerationTask(tool: SessionRenderToolCard): SessionMediaGenerationTask | null {
+  return tool.name === 'image_generate' ? sessionMediaGenerationTask(tool) : null;
 }
 
 export function deriveSessionImageGenerationPendingStateFromItems(

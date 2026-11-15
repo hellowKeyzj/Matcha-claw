@@ -58,15 +58,24 @@ impl Snapshot {
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty())
                 {
-                    let task = self.tasks.entry(id.to_owned()).or_insert_with(|| json!({}));
-                    if let (Some(current), Some(incoming)) =
-                        (task.as_object_mut(), message.as_object())
-                    {
-                        current.extend(
-                            incoming
-                                .iter()
-                                .map(|(key, value)| (key.clone(), value.clone())),
-                        );
+                    if message["subtype"] == "task_started" {
+                        // A resumed task registers its current tool/root, not the prior execution's.
+                        self.tasks.insert(id.to_owned(), message.clone());
+                    } else if let Some(task) = self.tasks.get_mut(id) {
+                        if ["tool_use_id", "request_message_id", "parent_tool_use_id"].iter().any(|field| {
+                            message.get(*field).is_some_and(|incoming| task.get(*field) != Some(incoming))
+                        }) {
+                            return;
+                        }
+                        if let (Some(current), Some(incoming)) =
+                            (task.as_object_mut(), message.as_object())
+                        {
+                            current.extend(
+                                incoming
+                                    .iter()
+                                    .map(|(key, value)| (key.clone(), value.clone())),
+                            );
+                        }
                     }
                 }
             }

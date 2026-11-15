@@ -32,7 +32,8 @@ impl Sessions {
 
     async fn retire_session(&self, input: Retire) -> rpc::Result<Value> {
         self.accepting()?;
-        let admission = self.agent_guard(&input.expected_agent_id).await;
+        let admission = self.agent_gate(&input.expected_agent_id).await.write_owned().await;
+        let registration = self.registration_guard(&input.session_id).await;
         self.accepting()?;
         if let Some(deletion) = record::deletion_state(
             &self.0.database,
@@ -48,7 +49,7 @@ impl Sessions {
         }
         let session = self.0.sessions.read().await.get(&input.session_id).cloned();
         if let Some(session) = session {
-            if session.data.lock().await.record.agent_id != input.expected_agent_id {
+            if session.record().agent_id != input.expected_agent_id {
                 return Err(retire_error(
                     rpc::Error::conflict(
                         "session_agent_mismatch",
@@ -59,6 +60,7 @@ impl Sessions {
             }
             // The existing deletion path checks Closed/quiescent before accepting
             // intent, then stops/joins the executor and proves each owned cleanup.
+            drop(registration);
             self.delete_session_guarded(session, Some(admission))
                 .await
                 .map_err(|error| retire_error(error, "session"))?;
@@ -99,6 +101,7 @@ impl Sessions {
         record::delete(&self.0.database, &input.session_id)
             .await
             .map_err(|error| retire_error(error, "records"))?;
+        drop(registration);
         drop(admission);
         Ok(receipt(&input.session_id, deletion.had_session))
     }

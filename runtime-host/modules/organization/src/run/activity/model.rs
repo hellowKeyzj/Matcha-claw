@@ -96,6 +96,7 @@ pub struct ActivityRequest {
     pub node_execution_id: NodeExecutionId,
     pub fence: ExecutionFence,
     pub activity_kind: ActivityKind,
+    pub(crate) input_artifact_ids: Option<Vec<crate::run::ArtifactId>>,
     pub target: ActivityTarget,
     pub idempotency_key: String,
     pub created_at: u64,
@@ -114,6 +115,7 @@ pub enum ActivityRequestError {
     InvalidSessionRef,
     BlankPrompt,
     BlankControlAction,
+    InvalidInputArtifacts,
     BlankIdempotencyKey,
     ZeroMaxAttempts,
 }
@@ -156,6 +158,14 @@ impl ActivityRequest {
             return Err(ActivityRequestError::FenceMismatch);
         }
         validate_kind(&self.activity_kind)?;
+        if let Some(ids) = &self.input_artifact_ids {
+            let mut unique = std::collections::BTreeSet::new();
+            if !matches!(self.activity_kind, ActivityKind::AgentTask { .. })
+                || ids.iter().any(|id| !unique.insert(id))
+            {
+                return Err(ActivityRequestError::InvalidInputArtifacts);
+            }
+        }
         if self.idempotency_key.trim().is_empty() {
             return Err(ActivityRequestError::BlankIdempotencyKey);
         }
@@ -243,8 +253,8 @@ impl SettlementProof {
         }
         use crate::{DeliveryReceipt as R, DeliveryResolution as D};
         let delivery_outcome = match &self.receipt {
-            R::Accepted { accepted_at, .. } if *accepted_at == claim.claimed_at() => D::Delivered,
-            R::Rejected { failure, observed_at } if *observed_at == claim.claimed_at() => {
+            R::Accepted { accepted_at, .. } if *accepted_at >= claim.claimed_at() => D::Delivered,
+            R::Rejected { failure, observed_at } if *observed_at >= claim.claimed_at() => {
                 if failure.is_retryable() && claim.attempt() < activity.facts.max_attempts {
                     D::RetryScheduled {
                         retry_at: crate::run::delivery::delivery_retry_at(*observed_at),
@@ -253,7 +263,7 @@ impl SettlementProof {
                     D::Failed
                 }
             }
-            R::OutcomeUnknown { observed_at } if *observed_at == claim.claimed_at() => {
+            R::OutcomeUnknown { observed_at } if *observed_at >= claim.claimed_at() => {
                 D::OutcomeUnknown
             }
             _ => return false,

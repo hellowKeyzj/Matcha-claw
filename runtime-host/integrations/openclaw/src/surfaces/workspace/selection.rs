@@ -76,7 +76,7 @@ pub(crate) struct WorkspaceSelection {
 }
 
 impl WorkspaceSelection {
-    fn new(workspace: PathBuf) -> Self {
+    pub(super) fn new(workspace: PathBuf) -> Self {
         Self { workspace }
     }
 

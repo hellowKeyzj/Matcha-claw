@@ -8,25 +8,25 @@ const CHANNEL = 'app-plugins:execution-teams';
 let revision = Number(import.meta.hot?.data.executionTeamsRevision ?? 0);
 let stopProjection: PluginCleanup | undefined;
 
-function projectTeams(teams: readonly TeamMeta[]): AppTeam[] {
-  return teams.map((team) => ({
-    teamId: team.id,
-    name: team.name,
-    // The store's pre-cutover TeamMeta contract is local OpenClaw (store.ts:329).
-    scope: team.runtimeScope ?? {
-      kind: 'runtime-instance',
-      endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
-    },
-    packagePath: team.packagePath,
-    sourceType: team.sourceType ?? 'teamskill',
-  }));
+function projectTeams(teams: readonly TeamMeta[], scopeForTeam: (teamId: string) => AppTeam['scope'] | null): AppTeam[] {
+  return teams.map((team) => {
+    const scope = scopeForTeam(team.id);
+    if (!scope) throw new Error(`Team runtime scope is unavailable: ${team.id}`);
+    return {
+      teamId: team.id,
+      name: team.name,
+      scope,
+      packagePath: team.packagePath,
+      sourceType: team.sourceType ?? 'teamskill',
+    };
+  });
 }
 
 export function observeTeamExecutionTargets(): PluginCleanup {
   stopProjection?.();
   let active = true;
   let unsubscribe = () => {};
-  let pending: readonly AppTeam[] | undefined;
+  let pending: readonly AppTeam[] | null | undefined;
   let sending = false;
   let previous: string | undefined;
   const push = (teams: readonly AppTeam[] | null) => {
@@ -50,8 +50,7 @@ export function observeTeamExecutionTargets(): PluginCleanup {
       }
     } finally { sending = false; }
   };
-  const publish = (teams: readonly TeamMeta[]) => {
-    const next = projectTeams(teams);
+  const publish = (next: readonly AppTeam[] | null) => {
     const serialized = JSON.stringify(next);
     if (!active || serialized === previous) return;
     previous = serialized;
@@ -73,12 +72,21 @@ export function observeTeamExecutionTargets(): PluginCleanup {
   if (!TEAMS_FEATURE_ENABLED) {
     publish([]);
   } else {
-    void import('./store').then(({ useTeamsStore }) => {
+    void import('./store').then(({ selectTeamRuntimeScope, useTeamsStore }) => {
       if (!active) return;
+      const publishState = (state: ReturnType<typeof useTeamsStore.getState>) => {
+        try {
+          publish(projectTeams(state.teams, (teamId) => selectTeamRuntimeScope(state, teamId)));
+        } catch (error) {
+          publish(null);
+          console.error('Could not resolve the team execution directory.', error);
+        }
+      };
       unsubscribe = useTeamsStore.subscribe((state, previousState) => {
-        if (state.teams !== previousState.teams) publish(state.teams);
+        if (state.teams !== previousState.teams || state.rolesByTeamId !== previousState.rolesByTeamId
+          || state.runListByTeamId !== previousState.runListByTeamId || state.designByRunId !== previousState.designByRunId) publishState(state);
       });
-      publish(useTeamsStore.getState().teams);
+      publishState(useTeamsStore.getState());
     }).catch((error) => {
       if (active) {
         stop();

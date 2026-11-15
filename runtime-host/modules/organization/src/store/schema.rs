@@ -28,6 +28,7 @@ pub(crate) enum RecordKind {
     Runner,
     Mailbox,
     PurgedRun,
+    TeamPrompts,
 }
 
 impl RecordKind {
@@ -59,6 +60,7 @@ impl RecordKind {
             Self::Runner => "runner",
             Self::Mailbox => "mailbox",
             Self::PurgedRun => "purged_run",
+            Self::TeamPrompts => "team_prompts",
         }
     }
 
@@ -90,6 +92,7 @@ impl RecordKind {
             "runner" => Self::Runner,
             "mailbox" => Self::Mailbox,
             "purged_run" => Self::PurgedRun,
+            "team_prompts" => Self::TeamPrompts,
             _ => return Err(super::StoreFault::CorruptRecord),
         })
     }
@@ -126,7 +129,7 @@ pub(crate) enum RecordChange {
     Delete(RecordKey),
 }
 
-pub(crate) const VERSION: u8 = 1;
+pub(crate) const VERSION: u8 = 2;
 
 pub(crate) const CREATE: &str = "
     CREATE TABLE IF NOT EXISTS organization_meta (

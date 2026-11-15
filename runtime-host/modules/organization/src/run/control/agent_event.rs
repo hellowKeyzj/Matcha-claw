@@ -456,11 +456,9 @@ impl AgentNodeEventResolution {
         let summary = summary
             .map(|summary| {
                 let summary = summary.trim().to_owned();
-                (summary.len() <= crate::run::MAX_SUMMARY_BYTES
-                    && !summary.is_empty()
-                    && !summary.chars().any(char::is_control))
-                .then_some(summary)
-                .ok_or(AgentNodeEventResolutionError::InvalidSummary)
+                crate::run::is_valid_summary(&summary)
+                    .then_some(summary)
+                    .ok_or(AgentNodeEventResolutionError::InvalidSummary)
             })
             .transpose()?;
         if let Some(completion_receipt) = &completion_receipt

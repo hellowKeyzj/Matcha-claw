@@ -51,10 +51,7 @@ pub(super) struct Record {
 impl Record {
     pub fn mutable(&self) -> rpc::Result<()> {
         if self.status == Status::Deleting {
-            return Err(rpc::Error::conflict(
-                "session_deleting",
-                "Session deletion is pending; retry deletion instead of resuming activity",
-            ));
+            return Err(deleting());
         }
         Ok(())
     }
@@ -64,12 +61,20 @@ impl Record {
             "sessionId": self.session_id, "agentId": self.agent_id, "status": self.status,
             "createdAtMs": self.created_at_ms, "updatedAtMs": self.updated_at_ms,
             "model": self.model, "mode": self.mode, "forkedFrom": self.forked_from,
+            "cwd": self.workspace,
             "title": self.title.as_ref().or_else(|| self.native_title.as_ref().and_then(|title| title.custom.as_ref())),
             "displayName": self.native_title.as_ref().and_then(|title| title.ai.as_ref().or(title.fallback.as_ref())),
             "providerId": self.provider_id,
             "modelSelectionId": self.model_selection_id, "providerFingerprint": self.provider_fingerprint,
         })
     }
+}
+
+pub(super) fn deleting() -> rpc::Error {
+    rpc::Error::conflict(
+        "session_deleting",
+        "Session deletion is pending; retry deletion instead of resuming activity",
+    )
 }
 
 fn already_attempted() -> bool {
@@ -174,7 +179,7 @@ fn deleted(connection: &rusqlite::Connection, session_id: &str) -> rpc::Result<b
 pub(super) async fn assert_not_deleted(database: &Database, session_id: &str) -> rpc::Result<()> {
     let session_id = session_id.to_owned();
     database
-        .call(move |connection| {
+        .read(move |connection| {
             if deleted(connection, &session_id)? {
                 return Err(rpc::Error::conflict(
                     "session_deleted",
@@ -223,9 +228,11 @@ pub(super) async fn deletion_state(
     let session_id = session_id.to_owned();
     let expected_agent_id = expected_agent_id.map(str::to_owned);
     database
-        .call(move |connection| {
-            let deletion = deletion(connection, &session_id)?;
-            let live_agent = session_agent(connection, &session_id)?;
+        .read(move |connection| {
+            let transaction = connection.transaction()
+                .map_err(|error| sqlite_error("session_deletion_read", error))?;
+            let deletion = deletion(&transaction, &session_id)?;
+            let live_agent = session_agent(&transaction, &session_id)?;
             if expected_agent_id.as_ref().is_some_and(|expected| {
                 live_agent.as_ref().is_some_and(|agent| agent != expected)
                     || deletion
@@ -265,7 +272,7 @@ pub(super) async fn deletion_complete(
 pub(super) async fn open(database: &Database) -> rpc::Result<Vec<Record>> {
     prepare_database(database).await?;
     database
-        .call(|connection| {
+        .read(|connection| {
             let mut statement = connection
                 .prepare("SELECT record FROM managed_sessions ORDER BY created_at_ms,session_id")
                 .map_err(|error| sqlite_error("session_read", error))?;
@@ -319,7 +326,7 @@ fn assert_investigations_settled(connection: &rusqlite::Connection, session_id: 
 
 pub(super) async fn ensure_investigations_settled(database: &Database, session_id: &str) -> rpc::Result<()> {
     let session_id = session_id.to_owned();
-    database.call(move |connection| assert_investigations_settled(connection, &session_id)).await
+    database.read(move |connection| assert_investigations_settled(connection, &session_id)).await
 }
 
 pub(super) async fn begin_delete(database: &Database, record: &Record) -> rpc::Result<()> {
@@ -462,7 +469,7 @@ pub(super) async fn managed_input_message_ids(
         return Ok(Vec::new());
     }
     let encoded = encode(&candidates)?;
-    database.call(move |connection| {
+    database.read(move |connection| {
         let mut statement = connection.prepare(
             "SELECT value FROM json_each(?1) AS candidate
              WHERE EXISTS(SELECT 1 FROM managed_input_messages WHERE message_id=candidate.value)",
@@ -486,9 +493,11 @@ pub(super) async fn input_runs(
     let session_id = session_id.to_owned();
     let messages = encode(&message_ids)?;
     let requests = encode(&request_ids)?;
-    database.call(move |connection| {
-        assert_live_session(connection, &session_id)?;
-        let mut statement = connection.prepare(
+    database.read(move |connection| {
+        let transaction = connection.transaction()
+            .map_err(|error| sqlite_error("run_input_read", error))?;
+        assert_live_session(&transaction, &session_id)?;
+        let mut statement = transaction.prepare(
             "WITH selected AS (
                 SELECT run_id,record FROM managed_runs INDEXED BY managed_runs_message
                 WHERE session_id=?1 AND json_extract(record,'$.run.messageId') IN (SELECT value FROM json_each(?2))
@@ -522,8 +531,10 @@ pub(super) async fn input_runs(
 pub(super) async fn get_run(database: &Database, run_id: &str) -> rpc::Result<run::Record> {
     let run_id = run_id.to_owned();
     database
-        .call(move |connection| {
-            let encoded: Option<String> = connection
+        .read(move |connection| {
+            let transaction = connection.transaction()
+                .map_err(|error| sqlite_error("run_read", error))?;
+            let encoded: Option<String> = transaction
                 .query_row(
                     "SELECT record FROM managed_runs WHERE run_id=?1",
                     [run_id],
@@ -534,7 +545,7 @@ pub(super) async fn get_run(database: &Database, run_id: &str) -> rpc::Result<ru
             let record: run::Record =
                 serde_json::from_str(&encoded.ok_or_else(|| rpc::Error::not_found("Run"))?)
                     .map_err(|error| storage("run_record_decode").with_source(error))?;
-            assert_live_session(connection, &record.run.session_id)?;
+            assert_live_session(&transaction, &record.run.session_id)?;
             Ok(record)
         })
         .await
@@ -547,9 +558,11 @@ pub(super) async fn get_run_by_request(
 ) -> rpc::Result<Option<run::Record>> {
     let session_id = session_id.to_owned();
     let request_id = request_id.to_owned();
-    database.call(move |connection| {
-        assert_live_session(connection, &session_id)?;
-        let encoded: Option<String> = connection.query_row(
+    database.read(move |connection| {
+        let transaction = connection.transaction()
+            .map_err(|error| sqlite_error("run_request_read", error))?;
+        assert_live_session(&transaction, &session_id)?;
+        let encoded: Option<String> = transaction.query_row(
             "SELECT record FROM managed_runs WHERE session_id=?1 AND json_extract(record,'$.run.requestId')=?2",
             params![session_id, request_id], |row| row.get(0),
         ).optional().map_err(|error| sqlite_error("run_request_read", error))?;
@@ -563,7 +576,7 @@ pub(super) async fn pending_runs(
     session_id: &str,
 ) -> rpc::Result<Vec<run::Record>> {
     let session_id = session_id.to_owned();
-    database.call(move |connection| {
+    database.read(move |connection| {
         let mut statement = connection.prepare(
             "SELECT record FROM managed_runs WHERE session_id=?1 AND status IN ('\"queued\"','\"starting\"','\"running\"','\"cancelRequested\"') ORDER BY created_at_ms,run_id",
         ).map_err(|error| sqlite_error("run_recovery_read", error))?;
@@ -584,7 +597,7 @@ pub(super) async fn list_runs(
     let session_id = session_id.to_owned();
     let before_run_id = before_run_id.map(str::to_owned);
     let read_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
-    database.call(move |connection| {
+    database.read(move |connection| {
         let transaction = connection.transaction()
             .map_err(|error| sqlite_error("run_snapshot_begin", error))?;
         let latest_seq = crate::events::durable_latest(&transaction, &session_id)?;

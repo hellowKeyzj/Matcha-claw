@@ -343,6 +343,27 @@ impl OpenClawDriver {
         if !valid_command_identity(&command.identity) {
             return SessionSendOutcome::Rejected;
         }
+        if let Some(expected) = command.expected_workspace.as_deref() {
+            let key = match crate::session::protocol::AgentScopedSessionKey::try_parse(&command.identity.session_key) {
+                Ok(key) => key,
+                Err(_) => return SessionSendOutcome::Rejected,
+            };
+            let identity = match crate::session::cwd::read_identity(&self.gateway, &key, &cancellation).await {
+                Ok(Some(identity)) => identity,
+                Ok(None) | Err(crate::port::OpenClawSessionError::TargetRejected) => return SessionSendOutcome::Rejected,
+                Err(_) => return SessionSendOutcome::Unavailable,
+            };
+            let binding = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return SessionSendOutcome::Unavailable,
+                binding = crate::session::cwd::bind_expected_workspace(&self.workspace, &identity, expected) => binding,
+            };
+            match binding {
+                Ok(_) => {}
+                Err(crate::session::cwd::SessionCwdError::Mismatch) => return SessionSendOutcome::Rejected,
+                Err(crate::session::cwd::SessionCwdError::Unavailable) => return SessionSendOutcome::Unavailable,
+            }
+        }
         let goal_start = match &command.intent {
             Some(sessions_module::goal::SessionSendIntent::GoalStart { issued_at_ms }) => {
                 if *issued_at_ms > sessions_module::state::MAX_SAFE_INTEGER || command.idempotency_key.as_deref() != Some(idempotency_key.as_str()) || idempotency_key.len() > 128 || command.run_id.is_some() || command.message.trim().is_empty() || command.message.encode_utf16().count() > 16_000 || command.system_provenance_receipt.is_some() || command.deliver == Some(true) {
@@ -1051,6 +1072,13 @@ impl SessionOps for OpenClawDriver {
                 Err(error) => project_openclaw_delete_error(error),
             }
         })
+    }
+
+    fn read_session_run<'a>(
+        &'a self,
+        command: sessions_module::execution::SessionRunReadCommand,
+    ) -> sessions_module::SessionFuture<'a, sessions_module::execution::SessionRunReadOutcome> {
+        Box::pin(self.session_gateway.read_request_run(command))
     }
 
     fn read_execution_result<'a>(

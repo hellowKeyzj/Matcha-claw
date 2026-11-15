@@ -86,7 +86,7 @@ async fn mutate(
     let snapshot = config.snapshot().await;
     let expected = snapshot.channels.get(&id).cloned();
     let binding = definition(&snapshot, &id)?;
-    let _admission = sessions.agent_guard(&binding.agent_id).await;
+    let _admission = sessions.agent_scope(&binding.agent_id).await;
     let snapshot = config.snapshot().await;
     if snapshot.channels.get(&id) != expected.as_ref() {
         return Err(Error::conflict(

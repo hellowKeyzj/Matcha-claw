@@ -3,7 +3,7 @@ import {
   type RuntimeScope,
 } from '../../../src/types/desktop/runtime-address';
 import { isBrowserRequestInput } from '../../../src/types/openclaw-browser';
-import { isOpenClawSurfaceCapabilityRequest } from '../../main/runtime-host-delivery/transport/openclaw-gateway';
+import { isOpenClawSurfaceCapabilityRequest, isOpenClawVideoTaskCapabilityRequest } from '../../main/runtime-host-delivery/transport/openclaw-gateway';
 import type { RuntimeHostTransportContext } from '../context';
 import { dispatchSessionCapability, type SessionCapabilityDeps } from '../../main/sessions/capabilities';
 import {
@@ -96,6 +96,10 @@ const OPENCLAW_QUESTION_REQUEST_INVALID = {
 const OPENCLAW_QUESTION_UNAVAILABLE = {
   success: false,
   error: 'OpenClaw question request is unavailable',
+} as const;
+const OPENCLAW_VIDEO_TASK_REQUEST_INVALID = {
+  success: false,
+  error: 'OpenClaw video task refresh request is invalid',
 } as const;
 type CapabilityRouteContext = SessionCapabilityDeps
   & RuntimeHostTransportContext<
@@ -290,6 +294,11 @@ export async function handleCapabilityRoutes(
 
   if (body.id === 'openclaw.question') {
     const response = await executeOpenClawQuestionCapability(body, deps, req.sessionPage);
+    return jsonResult(response.status, response.body);
+  }
+
+  if (body.id === 'openclaw.videoTask') {
+    const response = await executeOpenClawVideoTaskCapability(body, deps, req.sessionPage);
     return jsonResult(response.status, response.body);
   }
 
@@ -524,6 +533,23 @@ async function executeOpenClawQuestionCapability(
     return projectOpenClawGatewayResponse(response, OPENCLAW_QUESTION_REQUEST_INVALID, OPENCLAW_QUESTION_UNAVAILABLE);
   } catch {
     return { status: 503, body: OPENCLAW_QUESTION_UNAVAILABLE };
+  }
+}
+
+async function executeOpenClawVideoTaskCapability(
+  body: Record<string, unknown>,
+  deps: CapabilityRouteContext,
+  page: SessionPage | undefined,
+): Promise<{ status: number; body: unknown }> {
+  if (!deps.sessionObservers.isCurrent(page) || !isOpenClawVideoTaskCapabilityRequest(body)) {
+    return { status: 400, body: OPENCLAW_VIDEO_TASK_REQUEST_INVALID };
+  }
+  try {
+    const response = await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
+    if (!deps.sessionObservers.isCurrent(page)) return { status: 503, body: { outcome: 'unknown' } };
+    return response;
+  } catch {
+    return { status: 503, body: { outcome: 'unknown' } };
   }
 }
 

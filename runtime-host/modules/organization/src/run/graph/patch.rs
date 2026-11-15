@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{collections::{BTreeMap, BTreeSet}, num::NonZeroU64};
 
 use crate::run::event::{MetadataValue, OpaqueId};
 
 use super::{
-    EdgeDefinition, EdgeId, GraphEvent, GraphState, NodeDefinition, NodeId, NodeKind, NodePosition,
+    EdgeDefinition, EdgeId, GraphEvent, GraphState, NodeDefinition, NodeId, NodePosition,
     ReduceError,
 };
 
@@ -11,6 +11,11 @@ use super::{
 pub enum GraphPatchOperation {
     AddNode(NodeDefinition),
     ReplaceNode(NodeDefinition),
+    SetReworkLimit {
+        source_node_id: NodeId,
+        source_port: String,
+        max_reworks: u32,
+    },
     RemoveNode(NodeId),
     AddEdge(EdgeDefinition),
     ReplaceEdge(EdgeDefinition),
@@ -113,6 +118,27 @@ fn apply_checked(state: &mut GraphState, patch: &GraphPatch, applied_at: u64) ->
         return Err(GraphPatchError::StaleRevision);
     }
     validate_operations(state, &patch.operations)?;
+    for operation in &patch.operations {
+        match operation {
+            GraphPatchOperation::ReplaceEdge(edge) if state.blocked_reworks().values()
+                .any(|blocked| blocked.edge_ids.contains(edge.id()))
+                && definition.edges().iter().find(|previous| previous.id() == edge.id()) != Some(edge) =>
+            {
+                return Err(GraphPatchError::ConsumedEdge(edge.id().clone()));
+            }
+            GraphPatchOperation::RemoveEdge(edge_id) if state.blocked_reworks().values()
+                .any(|blocked| blocked.edge_ids.contains(edge_id)) =>
+            {
+                return Err(GraphPatchError::ConsumedEdge(edge_id.clone()));
+            }
+            GraphPatchOperation::RemoveNode(node_id) if state.blocked_reworks().values()
+                .any(|blocked| &blocked.source_node_id == node_id || blocked.scope.contains(node_id)) =>
+            {
+                return Err(GraphPatchError::InvalidDefinition);
+            }
+            _ => {}
+        }
+    }
 
     state.apply_event(
         GraphEvent::GraphPatched {
@@ -204,15 +230,16 @@ fn validate_operations(
                 if previous_kind != node.kind() && durable_node_kinds.contains_key(node.id()) {
                     return Err(GraphPatchError::NodeKindChanged(node.id().clone()));
                 }
-                if state.executions().get(node.id()).is_some_and(|history| {
-                    history
-                        .attempts()
-                        .iter()
-                        .any(|attempt| attempt.number() > node.max_attempts())
-                }) {
-                    return Err(GraphPatchError::InvalidDefinition);
-                }
                 node_kinds.insert(node.id().clone(), node.kind());
+            }
+            GraphPatchOperation::SetReworkLimit { source_node_id, source_port, .. } => {
+                let kind = node_kinds.get(source_node_id)
+                    .ok_or_else(|| GraphPatchError::UnknownNode(source_node_id.clone()))?;
+                if !kind.accepts_edge_action(source_port, super::EdgeAction::Rework) {
+                    return Err(GraphPatchError::Definition(super::DefinitionError::InvalidReworkPort {
+                        node_id: source_node_id.clone(), source_port: source_port.clone(),
+                    }));
+                }
             }
             GraphPatchOperation::RemoveNode(node_id) => {
                 if node_kinds.remove(node_id).is_none() {
@@ -271,42 +298,7 @@ fn validate_node_payload(node: &NodeDefinition) -> Result<(), GraphPatchError> {
     if node.id().as_str().trim().is_empty() || node.title().trim().is_empty() {
         return Err(GraphPatchError::InvalidDefinition);
     }
-    match node.kind() {
-        NodeKind::Work => {
-            let Some(work) = node.work_assignment() else {
-                return Err(GraphPatchError::Definition(
-                    super::DefinitionError::InvalidWorkAssignment(node.id().clone()),
-                ));
-            };
-            if node.review_assignment().is_some()
-                || work.task_id().trim().is_empty()
-                || work.role_id().trim().is_empty()
-            {
-                return Err(GraphPatchError::Definition(
-                    super::DefinitionError::InvalidWorkAssignment(node.id().clone()),
-                ));
-            }
-        }
-        NodeKind::Review => {
-            if node.work_assignment().is_some()
-                || node.review_assignment().is_some_and(|review| {
-                    review.role_id().trim().is_empty() || review.prompt().trim().is_empty()
-                })
-            {
-                return Err(GraphPatchError::Definition(
-                    super::DefinitionError::InvalidReviewAssignment(node.id().clone()),
-                ));
-            }
-        }
-        _ if node.work_assignment().is_some() || node.review_assignment().is_some() => {
-            return Err(GraphPatchError::InvalidDefinition);
-        }
-        _ => {}
-    }
-    if node.kind() != NodeKind::Start && node.trigger().is_some() {
-        return Err(GraphPatchError::InvalidDefinition);
-    }
-    Ok(())
+    node.validate_assignment().map_err(GraphPatchError::Definition)
 }
 
 fn validate_edge_payload<'a>(
@@ -339,6 +331,91 @@ fn validate_edge_payload<'a>(
     Ok(())
 }
 
+fn same_execution_edge(left: &EdgeDefinition, right: &EdgeDefinition) -> bool {
+    left.source_node_id() == right.source_node_id()
+        && left.target_node_id() == right.target_node_id()
+        && left.source_port() == right.source_port()
+        && left.target_port() == right.target_port()
+        && left.action() == right.action()
+}
+
+pub(super) fn initial_batches(
+    state: &GraphState,
+    definition: &super::GraphDefinition,
+    operations: &[GraphPatchOperation],
+) -> Result<BTreeMap<NodeId, NonZeroU64>, ReduceError> {
+    if !operations.iter().any(|operation| matches!(operation,
+        GraphPatchOperation::AddNode(_) | GraphPatchOperation::AddEdge(_) | GraphPatchOperation::ReplaceEdge(_)
+    )) {
+        return Ok(BTreeMap::new());
+    }
+    let new_nodes = definition.nodes().iter().filter(|node| !state.executions().contains_key(node.id()))
+        .map(|node| node.id().clone()).collect::<BTreeSet<_>>();
+    let assignable = definition.nodes().iter().filter(|node| {
+        new_nodes.contains(node.id()) || state.executions().get(node.id()).is_some_and(|history| {
+            let attempt = history.current();
+            history.attempts().len() == 1 && matches!(attempt.reason(), super::AttemptReason::Initial)
+                && attempt.status() == super::AttemptStatus::Pending && attempt.inputs().is_empty()
+                && !state.is_rework_blocked(node.id())
+        })
+    }).map(|node| node.id().clone()).collect::<BTreeSet<_>>();
+    let previous_edges = state.definition().edges().iter().map(|edge| (edge.id(), edge))
+        .collect::<BTreeMap<_, _>>();
+    let changed_edges = definition.edges().iter().filter(|edge| {
+        previous_edges.get(edge.id()).is_none_or(|previous| !same_execution_edge(previous, edge))
+    }).collect::<Vec<_>>();
+    if new_nodes.is_empty() && changed_edges.is_empty() { return Ok(BTreeMap::new()); }
+
+    let mut seeds = new_nodes;
+    let mut neighbors = BTreeMap::<NodeId, Vec<NodeId>>::new();
+    let mut sources = BTreeMap::<NodeId, BTreeSet<NonZeroU64>>::new();
+    for edge in definition.edges() {
+        let source = edge.source_node_id();
+        let target = edge.target_node_id();
+        if assignable.contains(source) && assignable.contains(target) {
+            neighbors.entry(source.clone()).or_default().push(target.clone());
+            neighbors.entry(target.clone()).or_default().push(source.clone());
+        } else if assignable.contains(target) {
+            sources.entry(target.clone()).or_default()
+                .insert(state.current_attempt(source).expect("existing boundary source").batch_id());
+        }
+    }
+    for edge in &changed_edges {
+        seeds.extend([edge.source_node_id(), edge.target_node_id()].into_iter()
+            .filter(|node| assignable.contains(*node)).cloned());
+    }
+    let mut batches = BTreeMap::new();
+    for seed in seeds {
+        if batches.contains_key(&seed) { continue; }
+        let mut scope = BTreeSet::from([seed.clone()]);
+        let mut pending = vec![seed.clone()];
+        let mut inherited = BTreeSet::new();
+        let mut previous = BTreeSet::new();
+        while let Some(node) = pending.pop() {
+            if let Some(source_batches) = sources.get(&node) { inherited.extend(source_batches); }
+            if let Some(attempt) = state.current_attempt(&node) { previous.insert(attempt.batch_id()); }
+            if let Some(adjacent) = neighbors.get(&node) {
+                for neighbor in adjacent {
+                    if scope.insert(neighbor.clone()) { pending.push(neighbor.clone()); }
+                }
+            }
+        }
+        if inherited.is_empty() { inherited = previous; }
+        if inherited.len() > 1 { return Err(ReduceError::BatchMismatch { node_id: seed }); }
+        let batch_id = inherited.into_iter().next().unwrap_or(NonZeroU64::MIN);
+        batches.extend(scope.into_iter().map(|node| (node, batch_id)));
+    }
+    for edge in changed_edges {
+        let batch = |node| batches.get(node).copied()
+            .or_else(|| state.current_attempt(node).map(super::NodeAttempt::batch_id))
+            .expect("edge endpoint has a batch");
+        if batch(edge.source_node_id()) != batch(edge.target_node_id()) {
+            return Err(ReduceError::BatchMismatch { node_id: edge.target_node_id().clone() });
+        }
+    }
+    Ok(batches)
+}
+
 fn map_reduce_error(error: ReduceError) -> GraphPatchError {
     match error {
         ReduceError::StaleGraphIdentity => GraphPatchError::StaleRevision,
@@ -350,7 +427,14 @@ fn map_reduce_error(error: ReduceError) -> GraphPatchError {
         | ReduceError::TriggerNotArmed(_)
         | ReduceError::StaleFence { .. }
         | ReduceError::InvalidTransition { .. }
-        | ReduceError::AttemptLimitExceeded { .. } => GraphPatchError::InvalidDefinition,
+        | ReduceError::AttemptNumberOverflow { .. }
+        | ReduceError::BatchNumberOverflow
+        | ReduceError::BatchMismatch { .. }
+        | ReduceError::TriggerScopeBusy { .. }
+        | ReduceError::InvalidReworkPort { .. }
+        | ReduceError::ReworkNotBlocked { .. }
+        | ReduceError::InvalidReworkContinuation { .. }
+        | ReduceError::ReworkLimitNotIncreased { .. } => GraphPatchError::InvalidDefinition,
     }
 }
 

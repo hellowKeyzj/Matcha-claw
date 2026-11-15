@@ -101,6 +101,7 @@ pub fn decode(bytes: &[u8]) -> rpc::Result<NativeMessage> {
             request_id: text(&message, "request_id", "control_cancel_request_id")?.to_owned(),
         }),
         "result" => {
+            optional_uuid(&message, "request_message_id", "result_request_message_id")?;
             match text(&message, "subtype", "result_subtype")? {
                 "success" => {
                     text(&message, "result", "result_result")?;
@@ -144,12 +145,7 @@ pub fn decode(bytes: &[u8]) -> rpc::Result<NativeMessage> {
                 "result_permission_denials",
                 Value::is_array,
             )?;
-            if message.get("input_message_id").is_some() {
-                let id = text(&message, "input_message_id", "result_input_message_id")?;
-                if uuid::Uuid::parse_str(id).is_err() {
-                    return Err(field_error("result_input_message_id", "invalid"));
-                }
-            }
+            optional_uuid(&message, "input_message_id", "result_input_message_id")?;
             if message.get("native_measurement").is_some() {
                 check(
                     &message,
@@ -186,13 +182,26 @@ pub fn decode(bytes: &[u8]) -> rpc::Result<NativeMessage> {
                     text(&message, name, &format!("user_{name}"))?;
                 }
             }
-            if message.get("source_tool_use_id").is_some() {
-                check(
-                    &message,
-                    "source_tool_use_id",
-                    "user_source_tool_use_id",
-                    |value| value.as_str().is_some_and(|id| !id.is_empty()),
-                )?;
+            optional_uuid(&message, "request_message_id", "user_request_message_id")?;
+            for name in ["source_tool_use_id", "source_task_id"] {
+                if message.get(name).is_some() {
+                    check(&message, name, &format!("user_{name}"), |value| {
+                        value.as_str().is_some_and(|id| !id.is_empty())
+                    })?;
+                }
+            }
+            Ok(NativeMessage::Message(message))
+        }
+        "system" => {
+            if matches!(
+                message["subtype"].as_str(),
+                Some("task_started" | "task_progress" | "task_notification")
+            ) {
+                text(&message, "task_id", "task_id")?;
+                if message.get("tool_use_id").is_some() {
+                    text(&message, "tool_use_id", "task_tool_use_id")?;
+                }
+                optional_uuid(&message, "request_message_id", "task_request_message_id")?;
             }
             Ok(NativeMessage::Message(message))
         }
@@ -270,6 +279,13 @@ fn valid_measurement(value: &Value) -> bool {
                     _ => false,
                 }
         })
+}
+
+fn optional_uuid(value: &Value, name: &str, field: &str) -> rpc::Result<()> {
+    if value.get(name).is_some() && uuid::Uuid::parse_str(text(value, name, field)?).is_err() {
+        return Err(field_error(field, "invalid"));
+    }
+    Ok(())
 }
 
 fn required<'a>(value: &'a Value, name: &str, field: &str) -> rpc::Result<&'a Value> {

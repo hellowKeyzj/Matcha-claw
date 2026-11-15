@@ -55,7 +55,7 @@ impl Media {
         {
             return Err(rpc::Error::invalid("A valid media MIME type is required"));
         }
-        let _guard = sessions.agent_guard(agent_id).await;
+        let _guard = sessions.agent_scope(agent_id).await;
         authorize(config, sessions, agent_id, session_id).await?;
         let receipt = MediaReceipt {
             reference: format!("media_{}", Uuid::new_v4().simple()),
@@ -95,7 +95,7 @@ impl Media {
         {
             return Err(rpc::Error::invalid("The media reference is invalid"));
         }
-        let _guard = sessions.agent_guard(agent_id).await;
+        let _guard = sessions.agent_scope(agent_id).await;
         authorize(config, sessions, agent_id, session_id).await?;
         let now = Instant::now();
         let mut entries = self.0.lock().map_err(|_| unavailable())?;

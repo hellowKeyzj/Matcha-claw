@@ -7,13 +7,13 @@ import {
   sendLoopbackJsonDelivery,
 } from '../client';
 import {
-  type Endpoint,
   type FileTarget,
-  type AgentScope,
-  isEndpoint,
+  type FileScope,
+  type FileInputIdentity,
   isFileRelativePath,
   isFileTarget,
-  isAgentScope,
+  isFileScope,
+  isFileInput,
 } from './contract';
 
 const MAX_BINARY_BYTES = 50 * 1024 * 1024;
@@ -30,11 +30,9 @@ const OUTCOME_UNKNOWN = {
 type WorkspaceWriteBinaryRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.writeBinary';
-  scope: AgentScope;
+  scope: FileScope;
   target: FileTarget;
-  input: Readonly<{
-    endpoint: Endpoint;
-    agentId: string;
+  input: FileInputIdentity & Readonly<{
     relativePath: string;
     data: string;
   }>;
@@ -101,19 +99,13 @@ function isWorkspaceWriteBinaryRequest(value: unknown): value is WorkspaceWriteB
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.writeBinary'
-    && isAgentScope(value.scope)
+    && isFileScope(value.scope)
     && isFileTarget(value.target)
-    && isInput(value.input)
-    && value.scope.agentId === value.input.agentId
-    && value.scope.endpoint.runtimeAdapterId === value.input.endpoint.runtimeAdapterId
-    && value.scope.endpoint.runtimeInstanceId === value.input.endpoint.runtimeInstanceId;
+    && isInput(value.input, value.scope);
 }
 
-function isInput(value: unknown): value is WorkspaceWriteBinaryRequest['input'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['endpoint', 'agentId', 'relativePath', 'data'])
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.agentId)
+function isInput(value: unknown, scope: FileScope): value is WorkspaceWriteBinaryRequest['input'] {
+  return isFileInput(value, scope, ['relativePath', 'data'])
     && isFileRelativePath(value.relativePath)
     && isBinaryData(value.data);
 }

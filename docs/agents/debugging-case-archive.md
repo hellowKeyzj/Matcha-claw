@@ -91,6 +91,480 @@ DP-xxx 或 `none`
 
 ## 6. 当前归档案例
 
+## Case: Team 正常审批意见与内嵌图片网页被内容小上限拒绝
+
+### Status / Linked pattern
+
+archived；DP-001、P4／P6／P7 与宪法 §26 已覆盖，不新增同义规则。
+
+### Source incident / Root cause boundary
+
+2026-11-19，连续实机录像中的正常中文返工意见提交后显示 `Team runtime request is invalid`，正式审批仍 pending、note 为 null；改成204 UTF-8字节的短备注后才接受。Canonical approval／Run decision 将备注限为256字节，Main 又复用身份规则拒绝换行；风险说明有同样256字节上限。另一独立失败是内嵌PNG的HTML超过2 MiB文本读取容量，阅读器显示文件过大。原流程通过缩短备注和生成轻量v02完成，不等于产品缺陷已修复；原始证据与连续MP4在 `.scratch/coffee-recorded-20261119-vwwn2ehf/`。
+
+### Fix boundary / Verification closure
+
+按用户后续授权，在原请求入口、canonical校验、恢复和消费者同步取消备注、风险、审批正文／材料、摘要／交付清单的小上限；保留非空、精确身份、幂等、fence与真实文件核验。文本读取在原Files→Main→Workspace→OpenClaw native链对齐50 MiB，不加binary旁路、不放宽sandbox；Matcha 既有整文件读取后才判超限的资源缺口仍保留，不能据此称两种 runtime 已对齐。下游内部Session正文64 KiB资格与YAML局部限额一并清理，保留原native／整体资源预算与用户返工额度。源码边界、原样回归失败及未部署限制见[本轮开发记录](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-19-team-内容小上限清理)。写前387份文件字节与增量在 `.scratch/team-content-limits-20261119-192hrinr/`；未重启应用或提交新审批，修后长备注／大HTML的真实链路未验。
+
+## Case: Files HTML 资源补齐保留重复读取与文档提交
+
+### Status / Linked pattern
+
+archived；DP-001、P6／P7 与宪法 §26 已覆盖，属于实现收口不足，不新增同义规则。
+
+### Source incident / Root cause boundary
+
+2026-11-18，HTML 相对媒体已能在保留 sandbox 的条件下显示，但补资源读取 hook 再订阅容器已有 formats，资源列表以 attribute＋path 分组并逐次复制数组。同一 source 同时用于 img/src 和 video/poster 时重复读取、编码并消耗页面预算；编译与四张不同图片成功不足以证明复用和成本正确。
+
+### Fix boundary / Verification closure
+
+回到原 FilePreviewBody 的格式订阅与窄 callback；HTML 按 source 统一一次读取／编码，各引用保存目标元素及属性，不加跨预览 cache 或新资源层。真实 Chrome 生产组件前后回放为同一图片2次→1次读取，解码与空 sandbox保持；修后 noEmit／限定ESLint通过。这不是 Electron→Host 端到端验收或应用耗时 benchmark；现有测试夹具失败及当时 Host 未部署继续保留。证据与写前基线见[本轮开发记录](../architecture-knowledge/modules/workspace-files-media/dev.md#2026-11-18-停止后只读与-html音视频预览)。
+
+2026-11-19又出现审批HTML白屏：正文与样式一致、外框正常，子文档却无正文布局；真实原生前台同文件对照确认无资源二次 `srcDoc` 提交是应用侧触发路径。一行无资源跳过恢复原文件，但未覆盖带资源文档的先显示再替换。后续在原hook收口为文档与资源准备完成后创建iframe，单请求身份隔离内容切换与迟到结果；不加刷新、重试或放宽sandbox。隔离Chrome的原四图、0次已挂载iframe属性更新及失败／切换／卸载边界通过；原实例已退出，最终结构的Electron复验未完成，不拿前一版实机通过替代。详见[生命周期收口](../architecture-knowledge/modules/workspace-files-media/dev.md#2026-11-19-html-文档准备与展示生命周期收口)。
+
+## Case: 工作区媒体已生成，但原生附件交付仍只允许全局目录
+
+### Status / Linked pattern
+
+archived；DP-001、P4／P6／P7 与宪法 §26 已覆盖，不新增同义规则。
+
+### Source incident / Root cause boundary
+
+2026-11-18，将图片、音乐、视频直接保存到会话 workspace 后，仅凭干净包转换、语法和旧补丁测试提前肯定完整适配。用户实机两张图片已落盘、assistant 已回复 `MEDIA:`，但图片不展示、任务卡仍等待；原生队列的两项 `last_error` 均为对应图片 `could not be prepared`，随后 handoff 超时、任务 succeeded／blocked。后续日志与新截图确认终态已到 Host／Renderer，不能再把旧截图的转圈归因成终态事件丢失。
+
+共用原生 `persistInternalMedia` 仍以 `[getMediaDir()]` 构建 managed outgoing，实际保存根已变但消费根没变。路径拒绝会清洗成附件准备失败，不能因日志不含 `path-not-allowed` 就排除；模型写路径或主轮结束也不能证明结构化附件已持久化。
+
+### Fix boundary / Verification closure
+
+仅在既有原生媒体补丁为共用交付入口追加同一已加载本地会话的授权 workspace，保原真实路径校验、managed outgoing 缓存和消息关联；不做 Renderer 路径扫描、任意目录白名单或 Host 搬运。检查又暴露字符串替换把目标属性当成旧属性前缀而跳过，已用完整调用锚点修正并从干净原包重打；最终明确核 builder 消费而非仅变量定义。18项幂等、101份生成 JS 与13项既有测试通过，本机依赖已替换。用户随后手动生成猫、狗两图，原生均 succeeded 且不再 blocked、transcript 有结构化 image/artifactId；助手连接当前真实界面核两卡完成、两缩略图加载，并逐一点击确认两张 1024×1024 原图经 Host 成功加载，图片回归闭环通过。未扩称音乐、视频、sandbox、Team 或旧任务恢复已验。证据及失败记录见[本轮记录](../architecture-knowledge/modules/openclaw-matcha-integrations/dev.md#2026-11-18-工作区生成媒体交付回归图片实机闭环通过)。
+
+## Case: 生成媒体修改擅自增加旧补丁原位升级
+
+### Status / Linked pattern
+
+archived；宪法 §26 与 debugging P4／P6／P7 已覆盖，不新增同义规则。
+
+### Source incident / Root cause boundary
+
+2026-11-18，会话工作区媒体修改中，为适配本机已打过旧补丁的依赖，擅自加入 image／video 输出升级分支。转换幂等和原有13项测试未覆盖旧输出的生成语法；进一步检查发现重复插入视频恢复 helper。用户明确拒绝原位升级，要求重装干净 OpenClaw 后重打最终补丁。这是未经要求扩大兼容范围，不是媒体运行时需要另一套迁移机制。
+
+### Fix boundary / Verification closure
+
+删除本轮旧输出升级分支与模板拆片，保留单份最终转换及同版本重复 clean；工作区安全写入和恢复授权修正保留。干净原包三项转换 applied→clean、22份生成 JS 语法、3处 import 导出合同通过。未卸载或替换实际依赖、未启动或重启用户实例、未执行真实生成；静态检查不证明媒体业务通过。写前与纠偏快照在 `.scratch/generated-media-quality-20261118-rkgdvo9c/`，实际结果见[开发记录](../architecture-knowledge/modules/openclaw-matcha-integrations/dev.md#2026-11-18-生成媒体工作区工程复核安全写入恢复授权与干净包重打)。
+
+## Case: Team 取消事实未结算审批与提交准入重复
+
+### Status / Linked pattern
+
+archived；DP-001、P4／P6／P7、编码宪法 §26。已有 owner／完整链路规则适用，不新增同义规范。
+
+### Source incident / Root cause boundary
+
+2026-11-19，真实 Run／Graph 已 Cancelled，审批仍 Pending，侧栏、顶部及审批记录均提供决定；三种决定被后端 Active＋Started 准入拒绝。原因是原取消事务只结算运行、图和执行，未结算审批。只隐藏入口会留下错误事实，允许继续又会改变取消终态语义。修复落在 Organization 原取消事务及原审批事件账本，Renderer 只派生处理资格并保留历史与材料。
+
+用户随后质疑补丁式实现，定界复核发现同次提交先在面板找审批／核资格，再在 Store 入口核一次，等待布局保存后又核一次。前两次同一时刻的业务判定不能替代真正发送前的重核，只增加重复查找和维护点；面板另有 leader、runtime、互斥和重复提交保护，Store 原 mutation owner 已同步登记互斥。此次移除面板的业务重查及 Store 的前置资格副本；后续还纠正了只将 map 改提前退出的浅层精简：调用方已知 exact team/run，直接传原 `TeamDesignTarget`，删除跨 Run 反查，而不是为丢失的身份另建索引。等待结束后由 Store 最新事实唯一判断提交资格；Run 定位为直接键访问，同 Run 审批仍按现有数组查找，不冒称整条提交链 O(1)。保留呈现、权限与服务端事务各自必要边界。审批侧栏的只读投影也不再暴露无消费者的 active-Team 审批别名或选择动作，不删除仍有其他消费者的原 Store 字段。
+
+同次只读复核还发现新增取消审批结算复用了入队前的取消请求时间；准入等待期间审批若晚于该时间创建，严格的审批时间校验会让 native 确认后的取消事务回滚。仅在原结算处按既有批量中止规则取 `max(observed_at, approval.requested_at)`，不改 Run 历史时间、不放宽模型校验；源码反例成立，未动态制造该竞态。
+
+追加核对原公开状态 producer 后确认前端白名单仍是错误建模：`run.status` 同时承载 Graph Failed／Cancelled、runtime Unknown 和 Run lifecycle；其他分支失败／节点取消／发送未知不必终结当前 HumanDecision。按 running／waiting 白名单会误藏合法 Pending，按 cancelled 文案还会混淆节点取消与 Run 取消。原 `TeamRunPublicRun` 已有 lifecycle，但 legacy snapshot 丢失该字段。用户随后明确批准在原 snapshot 顶层补齐必填只读 lifecycle，直接序列化原 owner 事实；Main／Renderer 共享严格枚举校验，共同选择器删除综合状态猜测，也不再订阅 `runsById`。不新增查询、状态副本、状态例外或缺字段 fallback，不改原 status／审批／存储合同；新 producer、Main 与 Renderer 必须同次投递，未部署不称实际合同已生效。
+
+### Verification closure / Archive note
+
+修前391份字节与取消增量在 `.scratch/team-cancel-approvals-20261119-y5ltfyxr/`，质量收口前快照为 `quality-baseline.json`。真实旧 Cancelled＋Pending 的待办消失、历史只读和 HTML 正文呈现已观察；质量改动后的只读检查时原目标页面已不在当前组件树，不沿用旧截图冒充新提交链验收。实际类型、lint、既有用例及后端未部署／冷恢复未验边界见 [Team dev](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-19-取消运行的审批收口)。不把复用 helper、多个代理同意或编译通过当作业务闭环，不为显得资深另造审批框架。
+
+## Case: Team 顶部审批与画布 key 碰撞遗留孤儿 DOM
+
+### Status / Linked pattern
+
+archived；DP-001、P4／P6／P7；局部呈现身份错误，不新增长期规则。
+
+### Source incident / Root cause boundary
+
+2026-11-18，真实素材 Run 的正式 API 仅一条 `direction` 审批且已 approved，页面却保留五个审批 `details`。只读 fiber 观察确认五者 connected=true、presentInCurrentReactTree=false；页面“待审批”文本次数包含展开卡片内状态，不等于真实审批数量。同一兄弟列表的审批与 Canvas 使用相同 `[teamId,runId]` key，React 重排时后项覆盖删除映射，旧审批 DOM 脱离当前 tree。Store 是同 Run snapshot 覆盖，不是审批累加，不能从视觉重复推导后台创建多条。
+
+### Fix boundary / Verification closure
+
+仅将原审批 key 改为 `['approvals',teamId,runId]`，保 Canvas、审批数据、表单及业务门禁；不增加去重、Store 或命令式 DOM 清理。本轮 Renderer noEmit 与组件零 warning ESLint 通过，字节对照仅生产一行变化；没有重挂当前工作面或触发新审批，修后真实更新／清空仍未验。原始证据在 `.scratch/team-matcha-rerun-20261118-1dnd8o3p/approval-dom-ownership.json`，写前基线在 `.scratch/team-settlement-approval-fix-20261118-7lz3fsk3/`；检查与范围见 [Team dev](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-18-顶部待审批-key-冲突--静态检查通过修后交互未验)。
+
+2026-11-19，同一审批工作面改为弹窗和纯文件预览后，工程复核在真实 pending 审批复现“输入备注→关闭→重开”丢草稿，前轮仅验证预览返回时保备注，未覆盖弹窗卸载；源码又在 ApprovalRecord 与 TeamNodeDeliveries 重复判断文件选择、归属和就绪。收口为同 Run 的弹窗组件保存按 approvalId 隔离的备注，Dialog 仍正常卸载且只挂当前审批；选择与预览资格唯一归原交付组件，通过内容槽决定审批布局，不新建 Store、持久化或平行预览器。Renderer noEmit 与两组件零 warning ESLint 通过；修后实机命令在交互前发现用户已切回另一 Run／节点预览而停止，未关闭或改动该预览，草稿修复及纯文件视图尚未实机复验，不沿用前轮截图作修后证据。已有 §26／P6／P7 已覆盖，这是执行与验收收口遗漏，不新增同义规范；本轮字节基线及差异位于 `.scratch/approval-final-form-20261119-ube68o5b/`。
+
+2026-11-19，用户截图再次指出统一范围遗漏：顶部待审批弹窗打开文件会收起审批说明，节点“审核记录”却仍保留说明，“输入”也保留输入配置；返回栏、当前文件标签和阅读器文件名重复占两行。源码确认前轮只在 `inDialog && previewing` 隐藏说明，文件选择仍局限于单个材料列表。此次按整个阅读区域统一到局部 `TeamFilePreview`，审批、审核记录、输入及产物共用选择／资格判定与 `FilePreviewBody` 原标题操作栏；打开隐藏原区域、返回恢复，可处理审核的原备注及决定操作通过 approvalId 呈现到区域底部，不复制状态或处理路径。正式材料与审批时间仅差 39ms，界面展示为同一秒，现按本地化展示值去掉重复交付时间，不同仍保留。Renderer noEmit、八个相关文件零 warning ESLint 通过。用户回到专用 pending Run 后，真实文件读取验证审核／输入／产物及顶部审批的单行工具栏、纯文件内容、返回焦点、备注保留；顶部审批关闭重开保草稿，1280×720、390×640、320×640 均无横溢且操作可达，临时备注及视口已恢复。首段正式 Run／审批／产物／Graph 完全等值，末段运行状态仍 waiting_for_user、审批仍 pending、业务事实和图版本不变，但图 layout 的部分位置变化，不宣称全程坐标不变；未提交审批或恢复运行。卡片直达文件键盘通过，鼠标被既有端口／添加节点浮层拦截而超时，不强制点击求通过。随后用户报告画布左偏，只读观察外层滚动为 0、内部 overflow-hidden 裁剪层为 348／94px，实际画布偏移与之相等；该容器签名在写前基线即存在，验收聚焦／自动滚入可视区可能触发，但本轮未修改该缺陷或重排真实图。沿用 §26／P6／P7，不再补同义规则；本轮基线、差异与真实证据为 `.scratch/team-file-view-20261119-fr4s_ala/`。
+
+2026-11-19 工程收口，实机确认当前 Chromium 支持 `overflow: clip`；将缩放尺寸包装层由 hidden 改为 clip，外层 `StableScrollArea` 保持唯一滚动 owner，不加滚动监听、反复 reset、节点坐标或布局算法补偿。热更新后原内部 348／94px 立即归零，surface 与裁剪区域起点一致；聚焦 End／Brief／Start、卡片文件键盘打开及关闭返回均保持内部零滚动、适配节点完整可见。真实手掌平移只改变外层 70／35px，适应视图恢复外层零位置，正式 Run、审批、产物、graphVersion 与全部保存坐标前后等值。生产 noEmit 和 Canvas 零 warning ESLint 通过；未点击会保存坐标的“整理布局”，不把视口恢复冒充布局算法重验。之后只读抽查时外层视口已变为 441／45px，部分节点不在当前视口，整图可见断言未通过；内部仍为零、surface 与裁剪起点一致，未观察到外层变化的触发过程，未擅自复位，不归因于本修复或声称整个交互链均通过。收口基线及实机证据在 `.scratch/team-reading-quality-20261119-fcrn99xo/`。
+
+同轮文件阅读复核又确认：普通子树与 Portal 切换会重建备注输入 DOM，保留 React 字符串不等于保留输入控件；顶部与节点审核还分别拥有同一 approval 的草稿，后者是基线遗留；卡片直达绕过列表选择，返回也未捕获目标按钮。现删除动作区 Portal 及 footer DOM 共享，审核内容槽仅按 approvalId 切换原记录的可见性和布局，备注／决定始终留在原记录；共同工作面内的 keyed `TeamApprovalDrafts` 为两入口提供唯一局部草稿，原提交锁、pending、身份和权限门禁不变。卡片直达返回仅在当前阅读区按 artifactId＋filePath 定位原文件按钮，不作全局查询。最终 Renderer noEmit 和七个相关文件零 warning ESLint 通过。实机回读时该审批已 approved、Run 已 failed，不恢复或伪造 pending；真实产物直达、列表阅读及已通过的审核材料往返均确认原按钮保留并回焦，单行工具栏 45px、审核区无横溢，正式 Run／审批／产物／图及版本前后等值。当前可编辑备注、跨入口草稿同步、多条记录及窄屏固定操作区未实机覆盖，不沿用前轮 Portal 版本的截图或保值结果证明新结构；另在真实已通过的审核材料中验证 390×640 窄屏阅读往返，原记录滚动位置 373px 返回后仍为 373px，焦点回到原文件按钮，设备指标已恢复。验收命令曾因误写无障碍名称、用 role 查询隐藏按钮而超时，另两次截图捕获超时／白图；修正定位后交互核验通过，但不宣称最终视觉验收通过。未提交决定、写节点布局或新建测试／probe／脚本；证据仍位于上述收口目录，不新增同义规范。
+
+## Case: Team 请求结算误用后台续执行的 runId 重建发送回执
+
+### Status / Linked pattern
+
+archived；DP-001、P4／P6／P7；请求归属与单次执行身份混淆，不新增 Job／Request owner。
+
+### Source incident / Real minimum loop
+
+2026-11-18，专用素材 Run 的 brief、方向审批、production-plan 与 copy 已正式完成。images 原生生图一次成功，主轮结束后 Team 正确等待后台；媒体完成通知启动同会话执行 B，原 collector 已读到一条正式候选，但 images 一直 running、汇合未触达。落盘发送回执 A 指纹为 `f197981f`，续执行 B 为 `6aed31be`；bridge 同时携原 delivery A 与真实 native B，原 Store 报 receiptMatches=false、correlationMatches=false，随后 `invalid_terminal_observation`／`store_error`。保存证据中的150次 store_error 是同一终态重试，不是生图次数、模型 repair 次数或审批数量。
+
+### Root cause boundary / Wrong path taken
+
+公共 Organization 先把 snapshot.native_run_id B 送入 `accept_native_terminal_context`，按 B 重建 accepted receipt，再与已保存 A 比较；后续定位也只按 B 查原 delivery。Sessions 已补齐原请求归属与完整正文，这不是首节点 reader 再次失败；`ls launch-kit/images` 的 ENOENT、未复制原图和正文声明未完成也不能解释引擎身份拒绝。修复应使用已经证明的原 request／delivery 与原 accepted target，保留真实 B，不改 native、全局令 request=run 或放宽 Store correlation。
+
+同日用户再次质疑补丁式实现后，对照当前调用链确认：actor 先检查缺回执，再记录 task native、再结算，每段重复解析同一归属；已 Accepted 仍经写事务重放相同 receipt，相关 helper 又刷新 Store 后重找 target。它们是已证的结构与额外工作，不是新增实机故障。收口为原终态 owner 的单一入口，一次解析返回借用 delivery／binding 与原 target／repair key，已确认路径不再做 accepted 写事务；缺回执仍沿既有只读 inspection 返回原入口重新验证，最终持久化校验不删。既有宪法 §26 已覆盖，这是执行收口不足，不新增同义规范。
+
+### Verification closure / Archive note
+
+原始日志、正式状态、DOM与录像位于 `.scratch/team-matcha-rerun-20261118-1dnd8o3p/`，本轮写前字节基线位于 `.scratch/team-settlement-approval-fix-20261118-7lz3fsk3/`。本案与图片交接漏原图路径、未完成却声明 completed 是不同责任；当前仅授权修前端重复审批与公共结算归属，不将后两项或旧录像冒充恢复。修正及本轮实际检查／未验范围见 [Team dev](../architecture-knowledge/modules/team-task-organization/dev.md)。
+
+## Case: OpenClaw 结束快照与持久正文重复展示
+
+### Status / Linked pattern
+
+archived；DP-001。原有规则已要求 producer／consumer 与真实日志闭环，不新增同义规则。
+
+### Source incident / Symptom
+
+2026-11-16，同一视频 completion run 的 `session.message` 已保存 caption＋`MEDIA:` 路径，随后无消息身份的 `chat final` 只带 caption；应用最后出现两个不同文字 item，而非同一 item 的 React 重绘。
+
+### Root cause / Boundary
+
+Rust 终结接管要求 canonical 内容指纹全等，两个正文不同而未命中。此证据不等于原生 UI 也有相同显示故障，也不允许按 run 合并全部回复。
+
+### Wrong path taken / Fix boundary
+
+曾扩展 `outputs` 来源清单，但未持久的 `A → tool → B` 会被清理后尾插成 `tool → A → B`；该版未投递即按用户要求撤销，先改为单向子串匹配。用户后续明确移除结束正文接替的内容比较与终结位置筛选，故该子串逻辑也已删除；现以原身份、同 run／来源／前后边界及唯一候选决定接替；按后续授权，先仅结束正文候选匹配不因幂等 key 冲突或含工具调用而排除，再将相同放宽应用于普通缺 ID 接替：不比较候选正文，不按 key／工具额外筛选，保明确消息／流 ID 冲突、同 run／来源／边界与唯一候选，不合并两个不同 durable。中间版的 terminal 布尔开关及普通包装／provisional_matches 分流已删除，普通与结束共用单一 matches；结束选中 final 与原推断复核独立保留。因筛选删除新产生的 tool_continuation 字段和 decoder 参数已清理，不改 native 协议或 Renderer，不另加配置或状态。
+
+2026-11-18 续案：真实日志显示 history 工具 assistant 与正式回复同时成为无 ID Final 的同 run 模糊候选，故 Host 物化第二展示项。按已知字段组合执行参考 Web 函数也可保留两项，不能据局部 helper 宣称已解释用户实际 Web 的单条结果。用户随后明确批准仅在 terminal 模糊路径排除工具续执行候选；exact 身份、普通接替及工具展示保留。
+
+对齐中又擅加“已接纳 Final 数量决定流来源”及“history authority 仅首条＋纯文本＋多项身份条件”，两者无 Web 依据；先删局部条件仍漏 wire Final＋error authority，并保留本地 inferred 回扫／复活策略，属于既有 §26 和证据闭环规则的执行失败，不补同义禁令。本轮按完整涉及链补 per-run SDK 事实，移除这些策略；live 与 Full 分开匹配，终态物化后清流 owner，诊断恢复的投影开放与 native terminal custody 分离。保留该记录，避免将编译通过或部分路径接近参考写成完整等价。
+
+2026-11-18 工程收口复核又发现两处实现耦合：reducer 扫描已生成 RunStarted 才反推恢复并直接修改 Body fence，Sessions 在投影后依赖 `projected[0]` 改写终态。两处属于表示与责任问题，不是另一个已实测产品故障；修正在原接纳分支直接携恢复事实、Body 原 RunStarted 消费处维护 fence、Sessions 原投影函数依据批次前事实直接生成最终事件，不新增框架、业务规则或公共协议。既有 Final-form 规则已经覆盖，仍按执行收口记录，不再堆同义规范。
+
+### Verification closure / Reusable rule
+
+撤回与各阶段检查记录见 Session dev；尚未投递／实机复验，原重复、诊断恢复和 Team 交错不宣称已恢复。结束快照不必等同单条物理消息；改变关联方式时须保留工具前后顺序，不能用静态或编译通过替代该行为证据。
+
+### Applies to / Does not apply to
+
+适用于相同 run 的无身份结束正文与持久候选接管；不适用于跨 run／跨会话去重或多个正式回复合并。
+
+### Archive note
+
+记录一次已撤销方案及真实失败边界，避免把未投递协议写成现行合同。
+
+## Case: OpenClaw 视频任务已失败，状态未知且原查询误报503
+
+### Status / Linked pattern
+
+promoted；DP-001、P4／P6／P7 已要求双方协议与真实调用闭环，本次是执行遗漏，不新增同义规则。
+
+### Source incident / Symptom
+
+2026-11-16，原视频工具已返回后台started回执，真实任务已经失败／超时，聊天状态卡却显示“暂未确认”；补齐状态后，“查询原任务结果”仍只显示Host API HTTP503。
+
+### Root cause boundary / Wrong path taken
+
+OpenClaw history及Rust history/live的两端安全白名单都丢了taskId，原tasks.get无法补summary；仅核一端投影、编译和工件幂等不足。查询的原生明确拒绝又被Rust映射为Rejected→通用Unavailable，丢失业务原因；TS调用审计decoder也未接新operation。未读取运行响应前，不能把旧任务缺引用的静态分支当已证明现场原因。
+
+### Fix boundary / Verification closure
+
+两端只保最小任务引用，复用原tasks.get／ToolUpdated；固定查询仅将原生拒绝投影为闭合errorCode，原任务状态不变、调用审计仍rejected。首版真实Host SHA4e32在原超时及截图rate-limit／404任务均取得missing_job_reference，页面明确历史任务未保存云端编号，A→B→A回读再次查询通过。该版本Cargo0但守卫因残留vctip返回124／Job0，保留差异。
+
+用户再次要求工程质量收口时，复核确认首版仍靠英文message判错，把拒绝夹在Succeeded内、让审计反查JSON。这是已有宪法§26的执行漏项，不新增同义规则。最终改为原生structured ToolResult→Rust显式VideoTaskRejected→原审计rejected，公共DTO／UI不变；同时在原owner保恢复投递目标、共用pending去重、补三协议提交事实。最终Host SHA `d5bf962156836e57cc7f3c3bf84900b2ffdceeb02f7fa60f57a5736761083990` 已投递真实profile，三条原任务按钮及A→B→A再查均保持明确missing_job_reference、原状态不变，不再503；Cargo0／runner0／Job0、2m04s、峰7.217GiB。未新收费生成、读DB／密钥或伪补job；成功恢复附件、交付中防重／原route及提交后故障不重提仍未实测，不能据源码收口称端到端已验。当前实现与完整边界见 [Session dev](../architecture-knowledge/modules/session-chat/dev.md) 和 [Provider dev](../architecture-knowledge/modules/provider-model-secret/dev.md)。
+
+同日用户进一步要求检查全部 git status，复核覆盖当时70个 tracked／untracked 路径，而非继续只看视频。发现 Design 新请求整数校验误收紧既有 v1 snapshot／editing，会让旧小数时长记录阻断初始化；Google 自定义端点放行付费提交后，URI 收集仍只认官方 Files，正常公开产物不可达。分别在原历史解析与 Google 下载边界修正，不启动时跳过记录、不改用户数据、不重提任务，公开 URI 复用无凭据安全下载。另将任务回执复制收窄到当前 task、删除视频补丁的开发旧版本归一化块；已有原始包变换、两实际包字节与17补丁clean证明删除不改交付输出。74项 Provider／24项前端回归、Rust check、Renderer／Electron noEmit及隔离Design构建通过；Design noEmit一项Host fixture错误、Main boundary6项失败仍保留，新历史加载／URI下载和任务交错未动态验收，也未投递新Host／Design工件。完整边界见上述模块 dev；现有§26已覆盖完整读写边界，本次不再叠同义规范。
+
+## Case: Agent 准入协议跨模块外露未被架构复核拦住
+
+### Status / Linked pattern
+
+promoted；编码宪法 §4／§26、layered architecture 依赖规则及 `/code` 既有入口／reviewer pass 已覆盖窄边界与复用要求。本次强化 `.claude/commands/code.md` §2.2 的证据和阻断流程，不新增架构原则或 Diagnostic Pattern。
+
+### Source incident / Symptom
+
+2026-11-13，用户追问 App Server 模块间实现泄漏并要求收口。保存基线中的 `Sessions::agent_guard` 返回裸 Tokio 写 guard，`delete_agent_sessions_guarded(agent_id)` 依赖调用方已持正确租约，`stable_agent_instances` 返回可分离的 guard／Vec。功能可运行，但跨模块调用方必须理解 Session 私有准入协议；这不是已证明的数据泄漏或死锁。
+
+### Root cause boundary / Wrong path taken
+
+问题在 Session 接口边界，不在 Tokio 调度器。已有规则明确要求正确 owner 和窄接口，但执行复核未拦住这类调用约定；旧入口与最终检查没有要求逐项提交“已有候选／具体缺口、责任链、边界约束、对应验证”的证据，不能以“分了模块、编译通过”代替。不能从本例推断所有模块都重复造轮子。
+
+### Fix boundary / Verification closure
+
+已在原 Session owner 以 `AgentScope` 绑定 Sessions／Agent／写租约，批删使用绑定对象；Agent 删除移交作用域，`AgentInstances` 同持集合与租约。其他资源流程未转移 owner，仍保留显式协调。check／release、既有 RPC 与真实 CLI 验收通过，但未覆盖专项批删／retire／Skill 竞态，不宣称消除所有死锁。基线、原始验证及限制见[Agent 准入收口记录](../../.scratch/app-server-agent-scope-20261113-zzuvnfs0/README.md)。
+
+### Reusable rule / Applies to / Does not apply to
+
+后续新增机制或改变模块边界时，在实现前查已有能力、闭合责任链、检查前置条件约束并确定验证判据；brief 交接同一边界，完成时按实际 diff 复核。无具体缺口不另建机制，opaque 包装不自动算收口，无关运行通过不结算并发主张。纯文案／样式／格式不触发，也不要求全仓重构或新增测试。规则写入与静态检查不等于未来代理已遵守，仍须任务级执行和复核。
+
+### Archive note
+
+此例的可复用要求已进入执行门禁，不改变故障诊断第一轮归因；归档只保留已观察边界和验证限制，不把用户对代码质量的质疑写成新增缺陷。
+
+同日流程复核：补充 §2.2 后，用户指出指令持续增长并未带来预期的严格执行。先前称“硬门禁”的内容仍是文字约束，文档结构和示例核对也不能证明代理行为改善。现将 `/code` 收敛为单一执行路由，合并重复门禁和固定长汇报，按任务用证据验收表区分结构、行为与未验证范围。此轮未新增机器门禁、hook 或评测平台，未做真实任务回放，不宣称执行偏差已减少；已有原则清楚却未遵守时，应定位执行失败，不继续追加同义规则。
+
+2026-11-16，请求完成归属实施再次暴露执行偏差：共享契约反复调整并扩查 cloud worker，静态讨论迟迟没有进入真实 bundle 变换；首次机器检查连续暴露非唯一锚点。用户指出推进过慢后停止扩查，集中核现有链，另确认 visible history 不能证明完整正文、owner-only context 不能继续进入原 active list。最终生产编译、22目标变换／解析／幂等及既有13项回归通过，但持久归属、部分原生续轮与真实节点结算仍未闭合，按部分完成记录，不投递。既有 §26、P1／P4／P6／P7 已覆盖，属于执行失败，不追加规则；具体证据及限制见 [请求完成归属](../architecture-knowledge/modules/session-chat/dev.md#2026-11-16-openclaw-请求完成归属)。
+
+2026-11-17 续例：用户指出补遗留逐渐扩成改执行链。核对原始 producer／consumer 后确认，额外原生发送 busy／幂等裁决不属于原请求事实合同，已按明确要求定向删除；全局 Agent Promise 串行既牵连无关会话，也不等待 handler 内真正的异步持久化，不能代替提交边界。exec 通知正文确实只在内存、静默 task 台账无法重建，持久交接不能因此一并删掉，但借用媒体消费者后再逐项豁免工具／可见输出策略扩大了实现。收口必须保原 heartbeat 执行语义并复用原持久队列的实际消费确认，不以入内存、`captured`、单 run 结束或编译通过冒充整请求完成。复核又确认原 exec 在通知入队前先同步持久化 task terminal，单纯删除通知 custody 会暴露提前完成窗口；创建时提前 pending 只能挡住同步误判，不能恢复两步之间崩溃丢失的正文。最终复用原状态事务与 task／queue 写入能力：先沿原通知逻辑准备正文，再将 terminal task 和通知正文同事务提交，提交后走原内存发布及调度，删除无通知出口的 pending 补偿。组合变换、静态解析与既有打包回归通过，不等于真实崩溃恢复、主 AI 续执行或 Team 结算已验。同时，已消费通知不能证明仍明确 paused 的主请求成功，不以 queue 为空推导 completed。既有 §26 与 P3／P4／P6／P7 已覆盖，不新增规则；本轮修改和真实未验边界仍集中记录于上述模块 dev。
+
+同日应用补丁后，真实Gateway与doctor均报 `Cannot access 'AGENT_EVENT_STATE_KEY' before initialization`。同款Electron Node隔离执行事件模块复现并取得堆栈：事件模块新增task重依赖，经过会话存储回到事件模块的顶层handler注册，触发尚未初始化的状态常量。parse、导出检查及13项旧回归都未执行该加载链，前轮“静态收口”不证明可启动。修复将同步观察回调绑定到原run context，删除事件模块对task的反向import，不以改var／延时／吞错绕过；三份原生工件已写入本地包，修后事件／task／真实server-start模块加载和官方gateway帮助命令通过，真实实例未重启、握手和请求业务仍未验。既有P1／P2／P6／P7与宪法§26已覆盖，不补同义规则；原始失败、改动基线及检查见[Session dev](../architecture-knowledge/modules/session-chat/dev.md#2026-11-16-openclaw-请求完成归属)。
+
+同日第二次真实启动仍报 `Cannot access 'nativePluginBindings' before initialization`。原包重装＋正式 pnpm install 重打18补丁后同错，排除旧注入残留；同款 runtime 加载实际 plugin loader 复现，单独恢复原 system-events 或在内存仅删除其 task 静态 imports 即通过，单删 task→lifecycle 不足。根因是补丁把轻量队列反向接入 task／Session／provider 图，破坏原 lazy 加载边界，不能靠修改报错常量、延迟 import 或吞错修复。用户再次要求按 SDK／源码架构修正：已核外部 Gateway、进程内窄 SDK、单 run wait、task ledger 与原精确 receipt 的合同，缺口是请求级归属／消费事实，不重建执行器。最终由原通知生产方提供同步策略，队列只做原内存入队／选择／批量删除，实际提示准备复用同一策略；原 agent ownership、reset／poll receipt 和 durable exec 交接保留。另修 request 插入锚点与 World cleanup 的二次组合冲突。五份生成工件已核基线后应用，同款实际 loader／CLI registry／startup plugins／server-start／reply／chat-send 独立加载、18补丁只读 clean、既有13项回归通过；未重启实例，真实 ready／握手和请求业务仍未验。前轮局部 import 通过未覆盖实际 lazy consumer，属于已有规则执行失败，不新增同义门禁；证据见上述 [Session dev](../architecture-knowledge/modules/session-chat/dev.md#2026-11-16-openclaw-请求完成归属)。
+
+同日第三次真实启动仍失败，用户再次指出不应让他们代试。实际拉起真实 Profile 的桌面应用后，原生日志是缺 `matcha-world-investigation.mjs`，不再是前两条 TDZ。launcher 在普通模块入口前执行 pending package lifecycle，postinstall 依据原 inventory 清理；World 生成器只写模块却未登记清单。原生清理器只读对照准确选中该文件，证明这是产物合同遗漏；前轮直接 import 六入口绕过了会改 dist 的启动前置步骤。修复只在 World 原生成器增加6行，将该模块加入原生 inventory 并沿原 updates 提交，保原清理、World 功能和其他补丁。实际 postinstall 执行成功、9061份预期文件哈希保持、18组补丁 clean、既有13项回归通过。真实应用正式启动及正常重启均到 Gateway ready／控制 WebSocket connected，设置页实际截图已看，OpenClaw running／汇总“全部正常”；应用保持运行，未真实 send、操作业务 Team、手改 DB／Profile／权限或调用 repair。整请求业务仍未验，不将启动通过外推。P1／P2／P6／P7 与 §26 已明确覆盖，本例是没有执行真实验收，不继续加同义规则；基线、失败与恢复日志、截图集中于上述 [Session dev](../architecture-knowledge/modules/session-chat/dev.md#2026-11-16-openclaw-请求完成归属)。
+
+同日第四次回归发生在普通聊天：两个模型的三次手动发送都报 `Session transcript anchor was not returned`，并非历史 u64 工具 schema 舍入导致的上游502。新增 `agent_start` 观察回调同步追加 `matcha:request-run`／`appendMode=side`，原生索引按合同标 dirty；紧接着原 `message_end(role=user)` 复用已持久输入时，anchor reader 拒绝认证尚未重建的活动分支。实际事件序列与日志一致；现场没有完整 stack，不能在 SessionManager 两个同文抛点间进一步区分，也未证明停止 unknown 同因。最初恢复方向是将请求状态从 transcript 移至 SessionEntry；后经完整原生 owner 核查，已改为会话 `hasPendingWork` 只读事实＋本次输入有界正文区间，删除逐请求持久账本与归属传递，不修改 anchor 检查、不加重试或清库。此前只验启动未验聊天属于既有验收规则执行遗漏，不新增同义规则；本轮实现、投递与真实行为证据分别记录于上述 [Session dev](../architecture-knowledge/modules/session-chat/dev.md#2026-11-16-openclaw-请求完成归属)，未经对应验证不称恢复。
+
+同日第五次启动前失败是 postinstall 的 `native-history-path: source anchor mismatch`，不是 Gateway 运行时错误。原包生成与新版二次幂等均过，但未覆盖实际已部署旧版：chat／worker 旧 `historyPath` 在 `isTailPage` 内，新变换只识别原包或新版位置，外层分页回包另有两处旧输出未接。Node 24.15.0 对现场源码内存变换准确复现两处首错；修复原生成器4处严格旧锚点到当前单一输出，保 seal／唯一性和未知形态拒绝，不吞错。旧5目标升级、二次幂等、语法、篡改拒绝及既有13项回归通过；按用户新授权备份并投递34份已验证原包候选工件，退出旧请求注入，正式补丁入口18组全clean／exit0。真实默认Profile应用已拉起，原生日志 `gateway ready`／`webchat connected`，正式API healthy／connected，Agent加载及设置“全部正常”截图已验；应用保持运行。未重建新Host、未真实send／Team验收，不据启动通过声称聊天或会话完成恢复。已有P1／P6／P7覆盖，此为升级路径验收执行遗漏，不新增同义规则；证据见 [Session dev](../architecture-knowledge/modules/session-chat/dev.md#2026-11-17-openclaw-会话完成只读投影--native-已投递启动已验业务未验)。
+
+同日会话完成检视另发现：collector 将读取超时／Unknown 压成投递 `false`，原 work 已空时 observation 无主动 sync，失败集合又依赖其他事件改变 retry epoch，可能永久保留待结算首项。用户批准每次任务最多自动恢复一次后，已将额度放回原 pending 条目，读取失败主动回原 actor／observation restart／sync，再按同一 selector 重读；正文完整或失败冻结后沿原 hook 交付，Organization 以准确读取失败结算，不伪造 native Failed／空正文 repair。复核还发现外层恢复超时先于 sync 超时完成时的丢唤醒窗口，已将交付暂缓与真实失败分开，暂缓不进失败集合；关闭取消不转业务失败。本案仍只有源码／生产编译证据，故障恢复与 Team 真机未验；已有 P6／P7 和 §26 已覆盖，不新增同义规则。精确检查结果见上述 Session dev。
+
+同日普通聊天范围回归：用户生成图片时，工具已返回但发送按钮保持停止，最终图片与回复正常返回；原图片专属 composer 限制本已存在，新增公共 `requestPending` 又将会话级后台等待扩大到了普通聊天。当前运行应用只读确认该会话 `ownership=ordinary`、runtime `done` 且无 active run／pending turn，仍有 `requestPending=true`、发送 gate 为 active；不能只凭图标恢复成发送就声称准入已恢复。用户批准普通聊天在主 Agent 结束／明确 Yielded 后可继续输入，Team 仍等待全部工作和正文交付；在原 Sessions 投影／准入收窄规则，图片复用原视频任务卡，raw work 与原观察续读保留，不改 native 执行。精确源码范围、检查及旧运行工件未投递的限制见 [Session dev](../architecture-knowledge/modules/session-chat/dev.md#2026-11-17-普通聊天后台发送与媒体任务卡)。已有 §26／P4／P6／P7 覆盖事实与策略分离及前后端闭环，不新增同义规则。
+
+随后限定源码复核发现，新准入使原交接假设不再成立：Renderer 新提交继承上一 Yielded run，ACK 的本地 pending 接管失败，Stop 可能选中上一图片；仅清 activeRunId 仍可能从图片任务 fallback 取回旧 run。Sessions 同请求重试会在发送前重新插入已释放 run，ACK 的“不再添加”不能撤销该需求，后续新输入可能仍被挡。两者是源码可达的生命周期缺口，尚未实机复现，不能以此前编译通过或媒体完成卡可见否认。用户已授权在 Matcha 原发送／观察需求边界修复，不改 OpenClaw 源码或 Team 结算；Sessions 已在原结算处统一判据，亦覆盖前一次 Unknown 后的同请求已知确认。实施与实际验证结果集中于上述 Session dev，不把编译或源码推演当成真实交错验收。现有 §26／P6／P7 已要求完整责任链，本例是执行遗漏，不追加规则或新建状态 owner。
+
+2026-11-18 继续收口：前次新增 receipt 禁发只在同 run idle 时临时豁免，未退休旧等待；后台续轮换 run 后旧 accepted 又能拦输入，unknown-null 的确切消费也未接回发送记录。根因在原发送交接，不在图片卡或按钮。现按原具体运行时模型解释 exact 输入消费／会话变化，`handed-off` 保单条操作身份但退出禁发，迟 ACK／unknown 不回退；收存先于执行时仍由原 submitted 等待 native 接管。queued source final 可早于真正执行，即使消费证据先到也不能凭该 final 退休 submitted；ACK Started 与 started timing 也可能仅为准入。关联失败／真实 lifecycle ended timing 在原 projection 中收口本地等待；同 ID 在途补读复用原 `refreshRequested` 合并，不加第二 owner 或轮询。前次完整链路核对遗漏属于既有规则执行失败，不新增同义规则；实际检查与未验限制见上述 Session dev。
+
+2026-11-18 又确认公共 history 回读回归：新增内部 `work_pending` 自续条件与500ms节流，使普通发送也在无 waiter、`needs_sync=false`、已有 committed view 时持续同步。真实日志同一会话从 send 到正文提交的17.275秒内有38个不同 history 请求；既有 seq／resync、Renderer 补读与80／200分页不匹配将其放大，但不是新增持续驱动，不能归为旧版本一直如此。后续只读追到 subagent、exec、delivery、followup 与 wake 等 owner 的最后释放，确认部分正常路径没有可消费的最后事件；因此不以纯事件保证完成，也不扩大原生事件改造。用户批准将 Team 等待的状态查询留在原 Sessions observation，删除公共自续，现有事件只加速、无事件退避补查；状态读取不进入 timeline reconcile 或推进展示水位。已有 §26／P4／P6／P7 已覆盖责任隔离与完整验收，本例是执行遗漏，不新增同义规则；实现与本轮验证边界见 [Session dev](../architecture-knowledge/modules/session-chat/dev.md#2026-11-18-team-结算状态探测隔离)。
+
+2026-11-18 真实 Team 素材场景在首节点 `brief:attempt:1` 失败，错误为 `team_message_result_read_failed`；brief 文件与合法最终回复均已生成，未进入审批或生图。落盘日志确认原 collector 已执行一次 observation restart／sync，恢复成功后仍交付正文读取失败，不能再归因于“没有恢复”。原生同锚历史共有18条，直接输入的 user 位于 seq9、最终 assistant 位于 seq18，而 `inputReceipts`／`inputConsumptions` 均为空。改前 request reader 首次只读末1条，又在分页前强制要求 root messageId，误把仅查询 `session_pending_inputs` 的可选回执当成所有输入的必备索引，因而在已有真实输入和正文时提前失败。修复边界是原 Integration 的精确输入定位与同快照正文采集，不是放宽 Organization 结算、猜取末条回复或增加恢复次数。原始材料位于 `.scratch/team-matcha-scene-20261118-2960d5g9/`，本轮字节基线位于 `.scratch/team-request-root-fix-20261118-yjmmrv13/`；源码、编译与修后真实场景分别记录于 [Session dev](../architecture-knowledge/modules/session-chat/dev.md)。已有 P4／P6／P7 与 §26 覆盖，本例是协议取证与行为验收遗漏，不新增同义规则。
+
+## Case: Session cwd 需求被捆绑 CLI 指令源扩展
+
+### Status / Linked pattern
+
+promoted；编码宪法 §26、既有范围／原生能力复用原则与 debugging P4 已覆盖，不新增同义规范。
+
+### Source incident / Root cause boundary
+
+2026-11-13，用户追问只指定会话 cwd 为何需要修改 CLI，并要求撤回多余修改。实际 cwd 由 App Server 保存 Session.workspace、以进程工作目录启动原生 CLI 即可；此前将自动叠加 Agent 默认目录的 CLAUDE.md／imports／rules、配置目录固定和 cwd stamp 一并实施，超出“先只要 cwd”的明确范围。旧双目录指令验证通过不构成这项扩展的授权。
+
+### Fix boundary / Verification closure
+
+精确撤回 CLI 指令源六文件及 print.ts 对应 hunk，同时收回 App Server initialize／sleep replay 字段。CLI 恢复原生动态 getCwd，移除依赖固定 cwd stamp 的新增断言，history 恢复既有 leaf cwd 在 Session workspace 内且无重定向的校验；保留启动时目录授权、Session UUID／runtime custody、Session cwd 持久化／恢复／fork／文件绑定。print.ts 既有取消／EOF／队列修复不动，不整文件 git restore。CLI 全量 tsc 与 App Server cargo check 均通过，3GiB整树硬限、峰2.444／1.164GiB、exit0／Job0；未构建部署或重启实际应用，不把旧扩展版实机成绩当撤回后的业务证明。验证详情见 [Integration 撤回记录](../architecture-knowledge/modules/openclaw-matcha-integrations/dev.md#2026-11-13-撤回超范围-cli-指令源扩展)。
+
+### Reusable rule / Archive note
+
+先分清已授权目标与相邻增强，原生能力足够时不追加协议。撤回按完整依赖块而非目录／文件粒度，既清 producer 与 consumer，也保留原授权能力和其他作者修改；恢复原生行为不等于删除既有安全边界。此案是已有范围和复用规则的执行遗漏。
+
+## Case: Organization 借用重构未闭合算法与增量语义
+
+### Status / Linked pattern
+
+promoted；编码宪法 §26 与既有单一事实／完整链路规则已覆盖，不新增同义规范。
+
+### Source incident / Root cause boundary
+
+2026-11-13，用户再次质疑 Organization 内部重构是否只是补丁。限定复核确认模型收敛本身成立，但借用事件校验仍逐事件扫描命令、整态历史检查仍全账本嵌套查找，Graph 在结构已验后又验一次。Decision 则新引入整 Run 临时重建／校验，并将同 Run replacement 一律拒绝；现有 producer 允许 purge 后重用同 Run／Decision ID，SQLite read_since 压缩中间删除后只见合法最终 Put，滞后 handle 错报损坏而冷恢复可接受。后者是静态调用链确认，未动态复现。
+
+### Fix boundary / Verification closure
+
+在原 EventLedger 按 Run／commandId 借用索引，历史按已校验连续序列比较前缀；Graph 各入口原位验结构一次，共用执行状态校验，raw snapshot 编码排序仍保留；Decision 保持单 Event 事实／单 undo／原 SQL 双记录，以既有位置／幂等索引校验变化槽位与最终序列，接纳合法压缩后的同 Run 重用，不猜中间历史、不重验未变历史。最终生产 check／build 通过；原样复用 Event11、Decision4、Workflow3项通过。未新增测试／probe／benchmark；全库测试仍编译失败，新增增量边界、内存回滚、完整SQLite、真实Profile及业务性能未验。独立基线、工件与限制见[结构质量复核](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-13-结构质量复核)。
+
+同日后续全量精简复核又确认两处表示收敛未闭合：validate-only 为复用冷恢复逻辑构建完整 owned DeliveryIndexes 后丢弃，retry-due 实际调用；Decision 写侧由 snapshot 改为合法领域对象后仍重建 command。现同一校验返回临时借用索引，只有冷恢复成功后转 owned；Decision Row 直接借用原 command，读侧与双记录不变。三生产文件净增18行，不以减行冒充质量；生产 check／build通过，原样 Decision 源码局部重编4项通过，但不覆盖codec／Facts动态分支，完整库测试仍151项同诊断编译失败。基线与日志 `.scratch/org-quality-20261113-udmxga_d/`；临时树分配、冷恢复转换成本及真实性能未测，详见[同轮结构质量复核](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-13-同轮结构质量复核)。
+
+2026-11-15，四处引擎修复后的限定质量复核又确认：Task inspect 先将 Failed／RetryScheduled 合并成 Rejected，再反查 Delivery 区分是否结束；续跑先生成 receipt，再按未完成 intent 覆盖重组。前者改为原 Delivery 投影扫描内汇总有效 native terminal／确定 Failed，后者先判事实分支、只构造选中 receipt；公共模型、原事务和原恢复状态机不变。生产 check／build 与 DAG 通过，但不能据此宣称四项故障行为已验收。复核中的“无 End batch”候选被真实 RunStart 完整路径校验排除，未据此修改图算法。基线与证据见[推进引擎修复记录](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-15-推进引擎四处修复--源码与生产检查完成行为验收未闭合)。
+
+同日团队矩阵复验后的质量追问又暴露同类遗漏：移除全局 ActivityTarget 查询虽消除了真实多余往返，actor 仍预查 Run／binding 并解码 endpoint，领取 owner 再查相同 binding 并克隆整份 Activity。现由原 Run lane 核归属、原领取 owner 一次解析目标，借用 Run／Activity／binding 构造请求；Task inspection 共用原解析与构造，删除只用于预查的结果类型。持久化 claim 的事务再核与 prepare 后的发送准入属于不同时间边界，仍完整保留以防取消／fence 竞态；没有新增调度器、缓存、状态或公共协议。[VERIFY: runtime-host/modules/organization/src/owner/actor.rs] [VERIFY: runtime-host/modules/organization/src/owner/team_run.rs] [VERIFY: runtime-host/modules/organization/src/owner/run_scheduler.rs] [VERIFY: runtime-host/modules/organization/src/owner/task_execution.rs] [VERIFY: runtime-host/modules/organization/src/store/durable.rs:657-759]
+
+本次四个生产文件与 ignored flow 文档按独立基线核对，既有测试正文未改、未运行测试；最终 Organization check 为4.60秒／峰0.954GiB／exit0／Job0，29条既有 warnings，crate DAG／模块边界通过。Host 全链 check 首次触及4GiB硬限（exit125），按此前验证过的8GiB预算重验后240秒超时（exit124／峰5.247GiB／Job0）；不能拿前一版完整 build 成绩覆盖本次最终源码。未重建／部署最终 binary、重启应用或复跑真实性能，OpenClaw 取消后 exec-event 启动新 turn 的已知问题仍未修，撤回的 OpenClaw 打包补丁和严格退出等待未恢复。精确基线与原输出在 `.scratch/team-recheck-20261115-4bb9ac67/before-dispatch-owner-closure/`、`dispatch-owner-closure-*.output`。原生 endpoint 前置校验现收归领取 owner，正式调用链的校验顺序不变；直接调用 owner 的既有测试仍使用 `endpoint:one` 占位引用，不满足原生 endpoint 解码，未修改夹具或运行这些测试，不据生产 check 声称该回归边界通过。[VERIFY: runtime-host/modules/organization/src/owner/actor.rs:2420-2436] [VERIFY: runtime-host/modules/organization/src/owner/actor.rs:4049-4059] [VERIFY: runtime-host/modules/runtime-directory/src/domain/identity.rs:11-28] 这是 §26 已有单一路径／重复计算检查的执行遗漏，不追加同义规范。
+
+同轮通知修复的独立只读复核及主侧定向源码核对还确认覆盖未闭合：实机仅证明同一输入查询内的 `user.source_tool_use_id` 回放成功；独立通知查询会使用另一输入 ID，其结果不能通过原 Active 的精确身份门。Workflow 通知未带已有工具来源，resume replacement 又可能在没有新 progress 时留下旧 task/tool 关联。三者未实机复现，不认定本轮新增回归，也未扩大为原生通知生命周期重写。标准通知在 MessageSelector 可用时被排除出初始 ACK，因此 print 的 ACK 装饰不能证明该路径覆盖；lazy selector 加载失败时现有 fallback 仍可能产生 ACK，不能据此宣称装饰分支绝对不可达。未知 task、错工具、ACK、唯一 result 和 drained idle 保护不放宽。[VERIFY: matcha-agent/src/QueryEngine.ts:100-109] [VERIFY: matcha-agent/src/QueryEngine.ts:589-623] [VERIFY: matcha-agent/src/components/MessageSelector.tsx:809-819] [VERIFY: matcha-agent/src/cli/print.ts:2348-2349] [VERIFY: matcha-agent/src/cli/print.ts:2620-2626] [VERIFY: matcha-agent/app-server/src/session/observation.rs:218-230] [VERIFY: matcha-agent/app-server/src/session/observation.rs:354-365] [VERIFY: matcha-agent/src/workflow/notifications.ts:82-87] [VERIFY: matcha-agent/src/utils/task/framework.ts:101-108]
+
+### Reusable rule / Archive note
+
+减少表示副本不等于消除重复工作；借用重构还须核查算法与调用频率。增量协议若只承诺最终事实，刷新层不能推测已被压缩的操作历史；利用已有连续序列／索引证明变化集，而不是重建未变事实或另加常驻框架。构建与原有窄测试不能冒充未覆盖分支的动态证明。这是已有 §26 的执行遗漏，保留事实与未验边界，不扩大成通用框架。
+
+## Case: TeamRun 格式修复误丢可辨认文件声明
+
+### Status / Linked pattern
+
+promoted；编码宪法 §26 与 debugging P3／P6／P7 已覆盖。用户再次质疑补丁式实现，限定源码复核发现本反例；不新增同义规范。
+
+### Source incident / Root cause boundary
+
+2026-11-13，完整 JSON 已声明 `files:["report.md"]`，仅漏 `</team_message>`。正式 parser 应要求格式修复，但声明读取误用同一完整 envelope 门槛，返回 None；repair 正确保留原文件后，原结算把 None 当空列表，错误判为 `InvalidFiles`。根因在可辨认声明的提取，不是 native 文件缺失、模型改变文件或事务 proof。[VERIFY: runtime-host/modules/organization/src/run/delivery/model.rs:409-419] [VERIFY: runtime-host/modules/organization/src/owner/terminal_settlement.rs:322-325]
+
+### Fix boundary / Verification closure
+
+`declared_files` 复用原 `split_team_message` 提取唯一可辨认对象，严格 JSON／重复字段／路径校验保留；正式 parse 仍要求闭合，结算仍禁止 repair 增删文件，文件 proof 不变。单生产文件修改，未新增 helper／状态／fallback／测试／probe。修正版 Organization 生产 check 通过（`bjffac23d`，13.60秒、3GiB 整树硬限、峰0.953GiB、cargo0／guard0／Job0）；当前尚无该输入的动态 repair 或新 Host 部署，不能据此称完整业务已验。验证状态见[共享工作区工程复核](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-13-有界工程复核与声明解析修正)。
+
+2026-11-18补答工程复核发现相反方向的边界分裂：新 application parser可冻结“闭合控制块后还有正文”，原 business_messages提取却拒该 envelope并清空正文；另一个独立拒结算helper对正常合法补答额外完整解析两遍。已将声明识别收回原 TeamNodeOutput 的 envelope／JSON／重复键／路径校验，拒绝归原候选 UnsafeDecision 分支；删除平行 parser与完整扫描，保跨 native await的预检／结算再核。收口后生产 Host check通过（28.60秒、峰1.903GiB、Job0），未动态跑模型repair或部署，见[补答开发记录](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-18-缺控制块补交与格式修复分离)。
+
+### Reusable rule / Archive note
+
+严格接纳与修复前保留已知事实是不同职责，应复用现成的可辨认对象边界，而非让格式拒绝抹掉原文件声明或在结算处增例外。此前正常链跑通不证明异常修复路径；§26／P6／P7 已有，本案记录执行遗漏及实际验证边界。
+
+## Case: TeamRun 正文采集误依赖可选计量上下文
+
+### Status / Linked pattern
+
+promoted；DP-001，编码宪法§26与调试P4／P6／P7已覆盖，不新增同义规则。
+
+### Source incident / Symptom
+
+2026-11-12，共享Run工作区验收中，模型实际写入34字节report.md，UI与原生Run.result都含合法files交付控制块；nativeSeq451助手消息、455原生成功终态之后，Sessions candidateCount=0，Organization三次repair拿到空原文，产品节点failed且Artifact空。故障尚未进入文件stat／事务proof，不是模型格式或文件缺失。
+
+### Real minimum loop / Root cause boundary
+
+原生ACK＋唯一result＋drained idle确认exact Run结果 → Matcha read_session_run核session／inputMessageId → Sessions deliver_terminal → Organization解析／文件验证／同事务结算。原生展示消息无已证明run归属，inner runId=None不能猜补；已有exact Run结果读取却只在execution_context存在时执行，普通图和repair均无计量上下文，结果正文被错排除。[VERIFY: runtime-host/modules/sessions/src/owner/terminal.rs] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/runtime.rs] [VERIFY: matcha-agent/app-server/src/session/run.rs]
+
+### Wrong path taken / Correct first-round plan
+
+构建、原生成功和四项delivery生命周期通过，都未覆盖“无计量上下文但需原生正文”的分支；不能据此提前称业务链已通。先按本次nativeSeq／Run串现成日志，分别核终态状态、正文来源及业务Artifact；不用放宽parser、删除files或从当前active／outer run／正文相等猜消息归属。
+
+### Fix boundary / Verification closure
+
+只在原Sessions deliver_terminal将合法空正文的exact Run读取与计量enrichment分开，保Session／Run／phase／已知request／message校验、Some(empty)与完整性失败None区别；不改展示消息、公开DTO、原生协议或Organization结算。修复窄静态回核完成，首Hostbuild停在并行Organization模块删除中间态；冻结后完整构建cargo0／guard0／Job0，4分12秒、整树峰7.185GiB，已按原lifecycle切入真实Profile。新Run启动前另遇Renderer浮点布局与native整数合同冲突，已在原布局producer量化自动坐标并正常保存，未绕门禁。真实新Run两会话各一次native succeeded、无repair，四节点completed，snapshot候选0→Organization dequeue候选1，两次分别49／67ms settled；两条Artifact同report.md保各自attempt／rs0、rs1。较早交付预览当前最终47字节“初稿＋复核完成”，正常冷重启后根／绑定／Artifact身份与fence／文件SHA保留，正式API与旧交付预览再通过。本案正文消费故障已闭合，不外推为全runtime或故障矩阵通过。真实闭环与最终状态见[共享工作区验收](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-teamrun-共享工作区与文件交付关联)。
+
+### Reusable rule / Archive note
+
+执行既有完整链路原则：业务结果的必要输入不能隐含依赖可选审计／计量metadata；已知状态不等于正文或产物已消费。本案只保留实测反例与正确owner，不将短期失败堆成新框架或长期规范。
+
+## Case: 返工挂起快照遗漏后续执行生命周期
+
+### Status / Linked pattern
+
+promoted；宪法 §2／§26 与 debugging P3／P6／P7 已覆盖，属于完整生命周期验收遗漏，不新增同义规范。
+
+### Source incident / Symptom
+
+2026-11-12，用户质疑预算改造是否补丁式实现。合法 Graph 事件回放确认：返工耗尽冻结 scope 后，范围内已运行的 X 仍能完成并激活范围外 Y，Continue 重开 X2 后 Y 仍消费旧 X1；另一次 trigger 为 batch2，动态新增节点却初始化 batch1，连线成功但永不激活。[VERIFY: runtime-host/modules/organization/src/run/graph/reducer.rs] [VERIFY: runtime-host/modules/organization/src/run/graph/rework.rs]
+
+### Real minimum loop / Root cause boundary
+
+原 Graph reducer 完成节点 → 挂起出口／冻结影响范围 → 接收其他在途结果 → Continue；原 GraphPatch 新增节点与边 → 当前批次上游完成 → 激活新目标。两条失败均可在生产同款库的合法事件与逐步 durable 等值恢复中复现，不是 UI 刷新或 native 通信错误。
+
+### Wrong path taken / Missed first probe
+
+只验证“挂起已保存、Continue用了原scope、Activate检查同batch”，未验证冻结期间哪些新工作仍能产生，以及运行中改图如何延续真实批次。临时重算 Continue 范围会改变已批准边界，全局最新 batch 又会混淆独立任务；两者都不是正确修复。
+
+### Correct first-round plan / Fix boundary
+
+在原引擎统一读取 blocked source/scope，停止新调度／注册／claim／审批，已 claim 的结果真实保存但不再向下路由；Continue保原scope，Gate保实际已路由收据。动态新非Start节点先Pending，连入流程时由未执行分量的实际来源唯一继承batch，冲突整批拒绝；不新建暂停状态、调度器或第二图。[VERIFY: runtime-host/modules/organization/src/run/graph/state.rs] [VERIFY: runtime-host/modules/organization/src/run/graph/patch.rs] [VERIFY: runtime-host/modules/organization/src/store/durable.rs]
+
+### Verification closure
+
+当前生产库编译通过；公开Agent/control planner同输入对照已证明挂起范围不再被选择、独立工作继续，直接启动拒绝、Continue原范围与计数不变。原A/B及扩展回放、既有测试与未验范围以[本轮记录](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-挂起生命周期与动态节点批次修正)为准，不把Graph回放等同private SQLite claim事务、native或完整桌面验收。
+
+### Reusable rule / Applies to / Does not apply to
+
+规则已有且明确，本次承认未完整执行。下次在入口与reviewer pass同时核冻结事实、后续新执行资格、在途结果、恢复边界和动态拓扑，不能以单次终态或编译替代时序验证。适用于范围暂停／恢复、批次化工作流和动态改图；不要求静态图、文案或布局修改引入状态框架。
+
+### Archive note
+
+通用归因与final-form门禁已有，只保留反例与修复落点；未修改长期规范或harness配置。
+
+## Case: Team 终态容量限制误作跨会话交付互斥
+
+### Status / Linked pattern
+
+promoted；DP-001，编码宪法 §10／§26 已覆盖。属于实现检查遗漏，不新增同义长期规则。
+
+### Source incident / Symptom
+
+2026-11-12，聊天终态隔离修复仅让普通会话绕开 Team 单预算；用户追问后确认同一及不同 TeamRun 的成员会话仍互相等待。远端事故没有现场日志，不将源码缺陷认定为唯一现场根因。
+
+### Real minimum loop / Root cause boundary
+
+原生终态 → Sessions identity lane → 留存结果并发布状态 → 正文补读／hook 接纳 → 清理 pending。全局单份 permit 覆盖整个慢交付，唯一 worker 顺序 await；把防积压与执行互斥合在一起。单项 hook 失败还会终止公共 worker。普通会话分支绕行只缩小影响，未消除 Team 会话间的等待。
+
+### Wrong path taken / Missed first probe
+
+将“普通终态已不受慢 Team 阻挡”当作整体 final-form 收口，未以同 TeamRun 不同成员、不同 TeamRun 的慢 A／快 B 交错检查独立性。编译、普通分支通过及单件重试均不足以证明跨会话交付隔离。
+
+### Correct first-round plan / Fix boundary
+
+在原 Sessions owner 内统一终态入口；以逐结果容量保留 queued／running／failed custody，不再以一张票覆盖所有会话。不同 identity 独立推进，同 identity 队首保序；成功确认才释放，失败只保本项。满容量仍背压，不能用无限 pending、无限 spawn 或假设 native 自动重放来换“无锁”。下游接纳与业务持久结算分开，不借此变更 Organization 合同。
+
+### Verification closure
+
+旧二进制回放再次证实第二 Team 等单票；本轮源码、独立交付、容量与关闭验证结果单列在 [交付隔离验证](../../.scratch/chat-terminal-20261112/parallel-delivery-validation.md)。未部署或远端实机验证，不以模块回放声明现场恢复。
+
+### Reusable rule / Applies to / Does not apply to
+
+执行既有 §10／§26 与 P3／P6／P7：reviewer pass 同时核容量、顺序和失败域，分别验证同 key 与跨 key。适用于结果交付、异步补读及多会话接收；不要求把共享事务改为无锁，不承诺有限资源在任意积压下绝对互不影响。
+
+后续端到端只读审视确认：Sessions 交付隔离不等于全链路隔离。Matcha 启动／Agent 控制、Organization Global／Exclusive、Provider 模型解析和 Electron 重连仍有不同等待域，不能把模块验收外推成整体完成；OpenClaw 控制读又确实依赖前序工具／epoch 事实，机械拆锁会漏取消。按原 owner 的登记／执行／核实提交边界分别整改，实施、验证及保留的必要顺序见[全链路执行记录](../../.scratch/chat-terminal-20261112/end-to-end-execution.md)。该记录未收口前不构成修复完成证明。
+
+实施复核另发现：仅把 native await 挪到 keyed lane，再持同一 resident permit 通过普通 mailbox 回 Global，仍可能在满准入下自锁；必须同时核“执行中占有什么、提交还需再取得什么”，不是看到锁已缩短就算完成。Team 删除原按 Run 无界创建任务也不能借 dependency 的64项上限声称整体有界。最终返修直接在原 keyed store 核原意图提交，删除三条自发准入 command；TeamSkill begin／settle 恢复原 CallReply，保留未知提交审计。Team 删除以64份随 pending cleanup 留存的容量和每 Team 一份四 Run 滚动 batch 收敛，原回流／proof 不变。返修后联合生产 check 通过、三项窄静态复核未发现新的可达缺陷；Organization 测试编译仍被四处未改夹具错误阻断，慢 A/B 与实机未验，不以静态复核或编译代替行为证据。Matcha 后续复核确认关闭顺序与新目标 Provider 在途冲突后，停笔快照又核出两个新增关闭回归：预算等 guard 不再响应 stopped，可能与持 guard join executor 的删除互等；两个 close 夹已排 resume，前置 Closed 被 Open 覆盖，而后一个 close 拿锁后不重核却返回成功。原 writer 合批收口到原 guard／意图块，独立静态回核两条反例均已封住，最终 app-server 生产check通过；具体时序证据不是运行复现，慢A/B、实机与完整故障恢复仍未验，不以编译提前宣告整个链路恢复。不新增同义调度规范。
+
+### Archive note
+
+通用规则已明确，偏差是未核完整并发边界；这里只保留可追溯案例，不把本次实现细节升级为全局调度规范。
+
+## Case: 图保存状态沿输入贡献包装扩散到聊天外壳
+
+### Status / Linked pattern
+
+宪法 §20／§26 与 debugging P3／P6／P7 已覆盖；属于迁移时遗漏实际 React 祖先链，不新增同义规范。
+
+### Source incident / Symptom
+
+2026-11-12，用户报告移动 Review 卡片像整页刷新。实机确认拖动中局部更新、document 和 Canvas 身份不变；松手保存却使聊天／产物／工作区壳各重算 4–6 次。`TeamComposerActions` 的设计状态订阅位于 render-prop 包装链上，调用 `children(content)` 重新构造整片展示，而非独立输入内容。
+
+### Fix boundary / Verification closure
+
+composer-content 改为输入区内的叶子贡献，删除 wrapper 回调契约，lazy 加载用局部 Suspense；保留共享互斥、事件及权威回读，不靠减少更新频率或 memo 遮掩。真实同条件四次拖动及函数入口断点复核，保存时四个壳组件调用为 0；坐标刷新回读、草稿保留、成员只读通过。但开发版仍有保存尾部停顿、两项既有检查失败，不能宣称整体性能达标。详见 [本轮证据](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-图保存带动聊天外壳更新)。
+
+同日用户继续报告画布跟卡片抖动。真实几何复现发现，拖动越原点时点阵未随同坐标补偿；取消后内容右／下边界回缩夹紧 scroll，静止节点跳约 84px。原点完整 extent 与点阵收口后又测出约 2–3px 小数滚动取整漂移，按缩放对齐屏幕像素后 100% 同手势静止节点／点阵／取消回位均 0px，约 83% 条件交叉复验最大点阵误差小于 0.11px。Store 将图 patch action 的观察刷新统一到结算回读，最终设计快照两次降为一次；结算中迟到事件仍丢旧重读，不能为“一次请求”漏更新。Canvas 以最终坐标而非草稿／canonical 来源触发几何，保存阶段同坐标 route 调用八次降为零。四次真实往返保存无整图跳动，恢复当时实时基线；开发版仍有约 50–67ms 保存帧尾，不宣称全部性能问题解决。用户随后圈出按钮同步灰显再恢复：共享 mutationPending 正常互斥，却被各入口的 disabled opacity 表现为整片闪动；这是几何采样遗漏的可见状态变化，当前未修，不能以节点／点阵 0px 代替全界面视觉验收。[续案证据与未验范围](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-位置保存重复发布与画布抖动)。
+
+### Reusable rule / Applies to / Does not apply to
+
+同日布局保存续案：纯坐标在原 Store 保留每 exact-run 一在途 batch＋按节点合并的最新 pending，业务 flight 先登记再等布局；不删除顺序保护，也不改 CSS 掩盖 disabled。Canvas 仅交接草稿，旧 ack 不清新手势，失败保留位置并局部重试。真实保存采样中五个按钮始终 enabled／opacity=1、静止节点0px；前次 saving 时再次拖动成功，实时原坐标已权威回读恢复。开发版最大保存帧间隔约83ms，Store既有套件10通过／24失败（含旧 scope 精确断言失败后未释放回执，新增删除 admission 使后续串扰），不宣称整体最优或回归全绿。补充反证还发现明确 `graph_version_mismatch` 后冻结旧版本会让重试永久失败；仅此确证拒绝归回 latest pending、显式重试生成当前版本新请求，未知提交仍原请求重放。两种时序已分别回放，未改 native guard。完整范围见[后台布局续案](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-布局后台保存与按钮灰闪)。
+
+用户再次质疑后，复核同类 stale epoch/base 仍永久重试旧上下文的反例，暴露了只修 version 的特判遗漏。恢复现统一为 typed `context-stale`，batch 显式 `unconfirmed/outcome-unknown/acknowledged`，未知结果不被后续拒绝降格；八组真实 Store 源码回放覆盖新旧上下文、latest及未知重放，不改后端合同或增加通用框架。独立 Canvas 复核另确认只读主动整理被失败保存覆盖盖住，已在唯一坐标合成处提升本地只读视图优先级，保存意图不变；实际 Canvas 内存运行覆盖整理、后续保存刷新、回编辑及换 scope，未实机注入失败。[本轮复核](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-布局恢复模型工程复核)。
+
+2026-11-13 完整链审查进一步确认 unknown 跨设计阶段／epoch 时，native 先 guard 后 ledger，使已提交请求也无法确认；此前 Renderer 保守保原请求不能独自解决。现原 SQLite 事务先核 exact Run 归属与原 ledger，MCP generation 授权仍前置，只有 ledger miss 后的设计阶段／epoch／version 拒绝才可释放旧 unknown 合回 latest pending。真实隔离 SQLite 跨 Intake／新 epoch／Started／重开验证 replay 不写 records／epoch，Store 实际源码＋IO 替身验证已提交／未提交两分支，其他 unknown 不放宽。同轮修复合法原型名 ID 字典与安全整数坐标边界；[三处修复证据及失败／未验范围](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-13-运行图三处审查修复)。既有 P3／P6／P7、宪法§26已覆盖，不新增同义规则，不能把模型内回放称为实机故障闭环。
+
+用户继续追问画布全部操作是否已极致隔离，实机只读采样反证：标题／提示词各输入6字符，Canvas函数各执行12次、三卡片渲染逻辑共36次（开发StrictMode，非DOM提交数）；11字符的原生measures同时见滚动容器与添加节点控件各11次。四聊天壳、Panel和侧栏在配置输入期间0次，说明外层隔离不等于内层已收敛。保存的独立往返则ComposerActions8次、团队侧栏2次；源码归因是父Canvas持全部配置草稿、卡片直接map JSX，及整record订阅／回读新建列表投影。按原§20／§26继续在真实owner收敛，不新增同义规范，不因大型文件机械切分。[本轮性能边界与证据](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-配置输入与拖动更新范围收敛)。
+
+同次授权重构后，表单草稿与异步生命周期收归独立Editor，父Canvas旧路径删除；默认memo卡片使用原node事实与独立坐标，事件读取最新已提交handler，原路由按上一份候选／障碍依赖增量失效。Store同值共享另暴露隐式freshness耦合：迟到list原靠引用变化识别新snapshot，现需在原flight分别记录run/list roles/active roles接纳，null角色事实不能保Run或冒充list更新；该反例已由真实Store回放闭合。主侧内存真实Canvas中逐字符输入父画布／卡片0调用，中央拖动静止卡片／Palette0；几何7,808组oracle差分通过，但全节点移动有额外成本。真实后测因最终重载期间原CDP target关闭、9222不可达而未完成，未重启或补写坐标；类型／lint／Canvas19项通过，Store仍10／24，不能称实机零扩散或整体性能完成。详细负载、失败载具与未验见[本轮续案](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-配置输入与拖动更新范围收敛)。
+
+后续只读实机已补证：标题／prompt各6字符，父Canvas、卡片、Panel、Composer、侧栏及四聊天壳0调用；中央12步触摸取消仅移动卡片执行，两个静止卡片0，配置／位置均恢复。该样本为3节点／0连线，不覆盖复杂图。完整同内容graph回读的独立实际Canvas回放仍使三卡片各执行2次；父Canvas也仍逐边构建path／SVG，说明路由引用增量化不等于呈现增量化。这两项已分别在原Store完整接纳与默认memo连线叶子收口，保全部字段／同team-run-graph作用域、原几何和交互，不另建缓存或图owner。主侧真实“刷新快照”确认新snapshot已接纳、同值graph／nodes／edges引用保留，全部卡片0调用；20／8位置往返保存各发布1份设计快照，仅移动卡片执行，外围0、原坐标权威回读恢复。独立无断点四个小图保存窗口最大帧约16.8ms、五按钮不灰、静止节点0px；未有严格同条件改前时延，不报提升倍数。三边实际Canvas内存回放确认只变route的边重建路径，hover／selected只执行旧新边；这不是复杂图实机或生产证明。类型／lint／Canvas19项通过，Store仍10／24，整体未全绿。[后续证据与本轮结果](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-图快照共享与连线呈现边界)。
+
+### 2026-11-13 整页复核：提交与观察不能共用失败结论
+
+此前已记录却未修的反例由真实 StrictMode Node／Edge Editor＋Canvas patch builder＋Store 再现：写入接纳，后置 Run 读取失败，成功回调为0；再次保存仍以新 commandId 发送同 ID 的 add 并被拒 duplicate。不是草稿缺少局部 duplicate guard，也不是 native 写入失败。原 client 对设计快照／运行 `success + saved + available` 严格解码，Store 为普通图 patch 显式采用写入确认完成条件；回读继续发布原记录错误，开始／退出／返工等仍要求原回读完成。未把命令未知解释为成功，也不在两个 Editor 重复吞错。
+
+同轮空图反例是视图直接标 ready、实际 readyScope 却因零节点跳过；现空／非空图共用布局和尺寸就绪条件，删除特殊 ready 分支，不新增 viewport。修改与限定验证、既有回归失败及实机边界见[提交与视口复核](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-13-提交完成与空图视口的工程复核)。DP-001／P6／P7、宪法§26已覆盖，属于遗漏完成语义与空输入生命周期，不新增同义全局规则；历史非法边补入真实端口数组的几何风险未修，不能称整页缺陷清零。
+
+局部状态的责任边界要看实际 React 祖先、render 回调和权威回读后的引用，不只看 Store selector 和文件归属；先区分重载、重挂、render、DOM 和呈现，再用 profiler 与原操作复验。适用于状态化插件贡献／render-slot 的交互迁移，不要求普通内容机械拆组件，也不把 React 开发采样当生产性能。
+
+## Case: TeamRun 技术标签被当成正式标题
+
+### Status / Linked pattern
+
+promoted；debugging P3／P7 与宪法 §26 已覆盖，属于代理未完成生产者链核对，不新增同义规则。
+
+### Source incident / Root cause
+
+2026-11-13，用户指出侧栏和运行图出现 `teamrun-… · leader · rs0`。初答只核两处是否关联同一 Leader，后又把 Renderer 缺省 `titleSource:'none'` 误当 native 未命名证据。实际 Matcha Team confirm 调用 `sessions.rename` 持久化技术 title，经 catalog.label 共同显示；该显式 title 还阻止首个真人 ACK 的 AI 命名资格。公共 catalog 没有 native 标题来源，none 不能用来全局丢弃 label。[VERIFY: runtime-host/integrations/matcha-agent/src/team/native_effects.rs] [VERIFY: matcha-agent/app-server/src/session/title.rs:24-54] [VERIFY: src/plugins/chat/store/session-actions.ts:645-669]
+
+### Fix boundary / Verification closure
+
+删除 confirm 技术 rename 与标题等值条件，保留 existing get／create 后 get 的 identity／Agent／workspace／open 确证，工程复核再删除 rename 遗留的无副作用重复 get。共享 Chat catalog 对已知 Matcha team ownership 的精确技术模板作占位判定，manual／user 与其他正式 label 保留；两 UI 继续复用 Leader 标题，不加各自 guard、不改旧 native title／attempt。48项无落盘内存断言覆盖正式 none-source 名、手动名、displayName、user fallback、peer／ownership／缓存变更及同值引用；原登录实例打开已有活动 Run，侧栏和图标题均“新会话”，无创建／rename／模型消息。Renderer noEmit、限定 ESLint、integration cargo check 与 diffcheck 通过；既有22项仍13通过／9失败，与改前相同。未构建或部署新 Host，未创建新会话实测 producer，旧 attempt 不重置，不称自动补标题已恢复。
+
+2026-11-13 工程复核又发现删 rename 后残留纯重复 get，并在原 Profile 观察到技术名过滤后 user-item 回退把 `<teamrun_message_repair>` 指令显示为标题。前者删冗余往返但保 create 后权威回读；后者在原共享回退对齐 native XML prose 判据，不逐标签加黑名单、不改正式名／manual／OpenClaw。原始7条Leader displayName均null，native view也不从显式title复制，未因静态可构造输入扩大displayName过滤。独立复核的U+FEFF反例用Unicode White_Space收口，42＋62项内存断言与原Profile侧栏／图标题通过；Rust12场景业务断言通过但guard附属进程清理超时exit124，未计整次验证通过。最终cargo check通过，既有测试仍13／9，部署／新建验收仍未做。具体边界见[工程收口记录](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-13-标题链工程收口)。本案已由P3／P7／§26覆盖，不把必要的旧数据展示补偿伪称纯终态，也不为去掉它越权迁移会话或扩大公共来源字段。
+
+## Case: 团队工作区迁移保留页面中转与选择耦合
+
+### Status / Linked pattern
+
+promoted；宪法 §26 与 debugging P3／P6／P7 已覆盖，属于代理执行未遵守，不新增同义规范
+
+### Source incident / Symptom
+
+2026-11-11 至 2026-11-12，团队创建与图编辑迁入聊天工作区后，用户再次质疑补丁式实现。首版仍从侧栏导航到旧团队路由再回聊天，工作区 wrapper 导入旧页面组件；图绑定 exact run，运行详情与审批却仍读取团队当前选择。
+
+### Real minimum loop / Root cause boundary
+
+`团队创建／侧栏选择／审批入口 → Teams 导航 → Chat 完整 SessionIdentity → Workspace page → exact run snapshot／原 mutation → Organization`。问题是入口和读取粒度未一起迁移，不是缺少通用工作区框架；仅给部分动作补 runId，不能证明整个面板已隔离团队选择。
+
+### Fix boundary / Verification closure
+
+在原 Teams 导航中统一打开真实运行会话，删除独立路由与旧页面；图交互直接归工作区组件。原 Store 快照在途读取按 team/run 合并，按 run 发布运行与审批投影，只有仍为当前选择时更新团队级视图；创建成功传递本次真实 runId，删除后的迟到读取不能回填。实现与最终验证状态见 [Team Dev Notes](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-12-团队入口与工作区运行图)。静态结构收口不等于真实创建、持久化编辑或启动验收。
+
+### Reusable rule / Applies to / Does not apply to
+
+既有 §26 在入口冻结和 reviewer pass 即应检查入口、组件归属、读取与 mutation 是否采用相同实体身份，并确认旧 active path 已退出。适用于页面迁入工作区、保留页签及异步选择；不要求局部文案修改扩成框架重写。规则已有，本次只保存遗漏证据。
+
 ## Case: Markdown 粗体兼容只覆盖汉字相邻
 
 ### Status / Linked pattern
@@ -270,6 +744,14 @@ DP-001；宪法§2／§26与P6／P7已覆盖，属于执行遗漏，不新增同
 ### Archive note
 
 默认诊断顺序已由DP-001覆盖，此处仅保留可追溯反例，不新增active pattern或架构框架。
+
+### 2026-11-15 续例：请求收尾重新定义已有规则
+
+后台通知跨 ask 的 root 修复后，用户再次质疑补丁式实现。对照真实 dirty before 与 producer／queue／queryLoop，静态确认三项本轮回归：Task 注册绑定所有任务，但 print 只等 Agent／Workflow，一次性后台 Bash 的通知可能被当旧 root 丢弃；新增 `!liveRequest` 禁掉普通请求的 now 抢占；把 SDK `num_turns` 的 user 消息数当执行回合，多个工具结果会提前耗尽请求预算。这是既有 §26／P5–P7 的执行遗漏，不新增同义规范。
+
+五个既有生产文件内收口：请求／会话任务寿命只在 Task 注册处分类，print 只等待已绑定 root 的后台任务；恢复原 now controller 入口；queryLoop 直接报告真实 turnCount，SDK 展示计数不变；每条命令显式进入 root／无 root ALS 作用域，避免队列唤醒方上下文污染。未新增任务账本、队列、预算框架或 Team／UI 补偿。[VERIFY: matcha-agent/src/utils/task/framework.ts] [VERIFY: matcha-agent/src/cli/print.ts] [VERIFY: matcha-agent/src/query.ts] [VERIFY: matcha-agent/src/QueryEngine.ts] [VERIFY: matcha-agent/src/utils/requestExecution.ts]
+
+最终 CLI 类型与五文件 no-fix lint 通过；既有 query／queue 21项、controller／sleep 27项通过。通知／Task 五文件测试仍为0通过、11失败、4导入错误，首错为 `Cannot access 'env' before initialization`，未到业务断言且无改前对照；真实 A→B→A、Bash 通知、now 抢占与跨 ask 预算未运行，不能称行为恢复。before、日志及消费者资源阻断见[模块记录](../architecture-knowledge/modules/openclaw-matcha-integrations/dev.md#2026-11-15-后台通知续执行与请求终态--实现已落盘业务未验收)。
 
 ## Case: MCP schema 超大整数上限触发模型 502
 
@@ -470,6 +952,34 @@ Renderer的同一画布交互流程没有同时收口调度和提交：需要连
 ### Reusable rule
 
 按既有§26在交互reviewer pass核对活动区间和实际提交责任：连续手势不等于必须连续执行；验证中央静止、边缘持续、外部scroll与最终事件，不只看单次拖动能否移动。普通文案或无持续调度的点击不扩做帧循环审查。
+
+### 2026-11-13 手掌视口与工具交接续记
+
+首版手掌沿原extent／scroll接入，但普通主指针可用的验收遗漏了更新与工具交接。十步扩原点让四卡各执行20次，原因是把viewport原点减进每卡props；extent内平移仍无条件发布React，边界又由差值加回产生浮点往返。真实触摸还确认：手掌期间第二触点可拖单卡，或箭头拖卡后键盘切手掌仍保旧drag；两次以native cancel收尾，未保存。属于已有§20／§26与本Case的执行遗漏，不增同义规则。
+
+修正在原Canvas：节点保图坐标、公共层平移，已有边界内直接scroll，扩边界沿唯一layout提交；right／bottom直接派生，待scroll存图坐标。节点准入绑定选择模式主指针，切工具复用节点取消与capture释放。修后十步扩原点仅Canvas22次，卡片／router及所挂外层0；extent内回拖全部0；单卡拖动仅目标卡执行，配置输入不执行Canvas／卡片／外层且DOM身份不变。次触点与键盘切换反例复验通过，未写业务。开发StrictMode调用数不是commit或耗时；tsc／lint通过，既有Canvas仍3通过／16失败，保存回包、生产大图／尾延迟与正式E2E未验。详见[视口与手势复核](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-13-视口更新与手势交接质量复核)。
+
+### 2026-11-13 整页责任与验收范围续记
+
+用户所说“整个运行图页面”被主侧误缩为手掌／平移，随后明确纠正。正确的草稿隔离、卡片／连线叶子与 Files 复用保留；问题不在推倒重建，而在跨组件读取、临时可写性、启动准入与布局恢复没有按整页责任一起收口。既有 P4/P6/P7 与§20／§26已覆盖，这是执行遗漏，不新增同义规则。
+
+修正在原 Renderer：Details 删除独立 reader，原 Store 统一 exact-run snapshot 与 UTF-8 cursor 组装；编辑身份不再随临时 runtime readiness 改变，离线禁写但保草稿／取消；Panel与Composer共用真实当前 Chat／leader／send gate启动资格并在点击时即时复核；首次确定 node_not_found 只在精确回读后清失效旧布局意图，unknown保原请求、ACK只读。完整同值approvals保引用、呈现callback依赖nodes，Canvas普通memo，不另建canonical／队列或忽略callback的比较器。
+
+真实登录四节点三边Run验到七类新增取消、三条边编辑、五个详情tab及当前文件预览；前述本地操作实测team IPC0。完整同值刷新等待新快照接纳后：设计／运行各1次IPC，Panel6、Canvas／卡片／Editor／Inspector／Composer／侧栏／四聊天壳／App0，草稿与DOM身份保持；次数含开发StrictMode，不是commit或生产延迟。真实Store/client回放覆盖90KB中文／emoji分页、多消息、六类坏续页、dirty／removed、失败保旧与六组布局恢复；两runtime启动资格54组、真实Editor离线生命周期回放通过，不等于native故障验收。
+
+统一tsc、11生产文件零warning lint通过，既有Canvas3通过／16失败、Store8通过／26失败，总11／42；较前轮Store多两失败，旧快照夹具缺强制messagePage／workspace等，未修改测试或加fallback讨绿。首次刷新采样在void handler返回时过早结束、同revision伪造不同正文、原地更新WeakMap record等载具假设均已纠正，失败不抹去。正式Electron E2E、真实业务副作用／故障、生产大图与尾延迟仍未验，整体部分完成。完整责任、执行纠偏与验证边界见[本轮记录](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-13-整页运行图状态责任收敛)。
+
+再次整页结构复核确认 Panel 仍复制 Store 的读取状态：首次失败后，后台 Store 成功清错但局部 `snapshotError` 不变，实际 Panel StrictMode 回放复现旧警告残留。原 Panel 删除局部 error／refreshing，只派生 exact design/run 记录；七项恢复／两读并行／异team断言通过。实机同值刷新仍为 Run／Design 各1 IPC、Panel6、Canvas／卡片／Composer／侧栏／聊天壳／App0；新noEmit与Panel lint通过，不将前述42项失败抹成通过。没有再增加“成功时清错”effect、状态框架或后端fallback，详见同一模块记录的“整页结构复核：读取状态只归 Store”。
+
+同日用户纠正了运行图默认占主区：把图放大不应以聊天／图互斥切页为代价。唯一 Teams page builder 改为 `initialPane: side`，复用原 Workspace 分栏而非增加侧栏实现；主区保聊天，已有用户移动不强迁。原登录实例验证团队会话与聊天“查看运行图”两入口、重复点击单页、4节点实际呈现与输入框同时可见；原失败业务提示保留。§26调用边界／owner／单路径／旧默认替换落实，类型／定向lint通过；不以分栏验收宣称整页42项既有失败已修复。细节见同一模块记录“默认右侧工作区：保留主区聊天”。
+
+随后真实 Node／Edge 回放复现旧草稿 A 覆盖已接纳定义 B：Store 等布局后取得最新 version 不能代替草稿基线。修正沿原 Editor→Canvas→Panel→Store 传窄前置条件，在布局等待后冻结请求前比较，不新增 canonical、native字段或自动重试。Store七组、真实StrictMode Editor／Store与原builder两组反例、预算／只读／原子操作七组、布局等待窗口两组通过；冲突零transport、保草稿／错误、不触发成功。只读Agent随当前绑定，已删节点尺寸淘汰亦完成限定回放；四语207键、noEmit与定向lint通过。原登录实例只验本地改标题跨页签、取消重开与主聊天／右图并显，不真实写配置。当前检查不保证未观察native并发；收口复核另发现新增已写成功但Run回读失败时仍保新增身份，真实Node／Edge＋Store回放确认恢复后重试仍以新requestId发同ID的add并遭重复拒绝，尚未修复，不能泛化普通失败保草稿为该路径已恢复。Webhook URL与控制节点当前／历史输出亦未修，42项既有失败未重跑，整体仍部分完成。详见同一模块记录“配置草稿与提交前置条件”。
+
+### 2026-11-15 审批记录误用当前流程
+
+用户要求看清“审批什么”，首版却把当前节点的批准／拒绝／中止连线放进历史审批，又追加“不是审批时快照”等说明；用户先否定冗余小字，再指出业务方向错误。根因是未先核请求事实：旧 Approval 只有固定 reason／risk，公开适配还丢 note，当前配置不能补成过去的具体请求。已有任务目标校准、§26 与本 Case 的整页事实责任规则足够，不新增同义禁令。
+
+获补齐授权后，沿原 Approval／ContentStore／snapshot 保存请求时标题、正文、材料 ID 并回读真实处理事实，移除当前分支和冗余说明；旧记录保持未知，不虚构操作者或文件版本。随后复核确认四处边界缺口：派发后改 edge payload 影响材料、Electron 误套单行文本限制、合法正文 YAML 往返拒绝控制字符、新决定继承旧备注。获修复授权后，材料回到与实际 prompt 同存的 Activity 事实，另外三处分别在原入口、parser 和 resolution 写入／重放边界收口；无新审批或输入 Store。最终生产 Rust／Electron 类型／限定 lint 与依赖 DAG 通过，Rust 测试仍149项编译错误、0用例，前端定向用例4过31败，真实四项场景未动态验收。原实现及本次修复的独立基线、源码与准确验证分别见[审批真实内容与处理记录](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-15-审批真实内容与处理记录)及[审批四项边界修复](../architecture-knowledge/modules/team-task-organization/dev.md#2026-11-15-审批四项边界修复--源码收口行为验收未闭合)。
 
 ## Case: 审批展示预算误作原生请求有效性
 

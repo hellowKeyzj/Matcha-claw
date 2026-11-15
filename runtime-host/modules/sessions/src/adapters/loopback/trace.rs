@@ -95,6 +95,7 @@ pub fn changes_shape(changes: &[SessionChange]) -> Value {
         SessionChange::ApprovalUpdated { approval } => serde_json::json!({ "kind": "approvalUpdated", "approvalHash": fingerprint(&approval.approval_id), "phase": approval.phase }),
         SessionChange::RuntimeNoticeUpdated { notice } => serde_json::json!({ "kind": "runtimeNoticeUpdated", "runHash": fingerprint(&notice.run_id), "noticeKind": notice.kind }),
         SessionChange::GoalChanged { goal } => serde_json::json!({ "kind": "goalChanged", "known": matches!(goal, crate::goal::SessionGoalView::Known { .. }) }),
+        SessionChange::RequestPendingChanged { pending } => serde_json::json!({ "kind": "requestPendingChanged", "pending": pending }),
         SessionChange::WindowChanged { window } => serde_json::json!({ "kind": "windowChanged", "window": window }),
     }).collect::<Vec<_>>() })
 }

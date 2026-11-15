@@ -16,9 +16,9 @@ use tokio::sync::Mutex;
 use crate::{
     gateway::request::{
         OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest, OpenClawCanvasGatewayRequest, OpenClawProgressCardGatewayRequest,
-        OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest,
+        OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest, OpenClawVideoTaskRefreshGatewayRequest,
         decode_browser_request, decode_mcp_app_request, decode_canvas_request, decode_progress_card_request, is_mcp_app_operation_id,
-        decode_question_list_request, decode_question_resolve_request,
+        decode_question_list_request, decode_question_resolve_request, decode_video_task_refresh_request,
     },
     port::OpenClawGatewayRequestOutcome,
 };
@@ -43,6 +43,8 @@ const QUESTION_SCOPE: &str = "openclaw.question";
 const BROWSER_OPERATION: &str = "browser.request";
 const QUESTION_LIST_OPERATION: &str = "question.list";
 const QUESTION_RESOLVE_OPERATION: &str = "question.resolve";
+const VIDEO_TASK_SCOPE: &str = "openclaw.videoTask";
+const VIDEO_TASK_REFRESH_OPERATION: &str = "video.task.refresh";
 const BROWSER_SUBJECT: &str = "openclaw-browser";
 const QUESTION_SUBJECT: &str = "openclaw-question";
 
@@ -56,6 +58,8 @@ pub enum GatewayOperation {
     CanvasRequest,
     #[serde(rename = "question.resolve")]
     QuestionResolve,
+    #[serde(rename = "video.task.refresh")]
+    VideoTaskRefresh,
 }
 
 #[derive(Clone, Serialize)]
@@ -79,6 +83,7 @@ pub async fn begin_gateway_call(
         GatewayOperation::McpAppRequest => "mcp.app.request",
         GatewayOperation::CanvasRequest => "canvas.document.view",
         GatewayOperation::QuestionResolve => "question.resolve",
+        GatewayOperation::VideoTaskRefresh => VIDEO_TASK_REFRESH_OPERATION,
     };
     calls.begin(command, &GatewayCallDetail { runtime: "openclaw", operation }).await
 }
@@ -90,7 +95,8 @@ pub async fn finish_gateway_call(
 ) -> Result<(), CallLogError> {
     let status = match outcome {
         OpenClawGatewayRequestOutcome::Succeeded(_) => CallStatus::Succeeded,
-        OpenClawGatewayRequestOutcome::Rejected
+        OpenClawGatewayRequestOutcome::VideoTaskRejected { .. }
+        | OpenClawGatewayRequestOutcome::Rejected
         | OpenClawGatewayRequestOutcome::CapacityExhausted
         | OpenClawGatewayRequestOutcome::Unavailable => CallStatus::Rejected,
         OpenClawGatewayRequestOutcome::OutcomeUnknown => CallStatus::Unknown,
@@ -147,6 +153,12 @@ pub trait OpenClawGatewayCapabilityPort: Send + Sync {
     fn question_resolve(
         &self,
         request: OpenClawQuestionResolveGatewayRequest,
+        call: Option<GatewayCallContext>,
+    ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
+
+    fn video_task_refresh(
+        &self,
+        request: OpenClawVideoTaskRefreshGatewayRequest,
         call: Option<GatewayCallContext>,
     ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
 }
@@ -273,6 +285,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
         Invocation::McpApp(_) => GatewayOperation::McpAppRequest,
         Invocation::Canvas(_) => GatewayOperation::CanvasRequest,
         Invocation::QuestionResolve(_) => GatewayOperation::QuestionResolve,
+        Invocation::VideoTaskRefresh(_) => GatewayOperation::VideoTaskRefresh,
         Invocation::QuestionList(_) | Invocation::ProgressCard(_) => unreachable!("reads return before mutation audit"),
     };
     let call = match &dependencies.calls {
@@ -287,6 +300,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
         Invocation::McpApp(request) => dependencies.gateway.mcp_app_request(request, call).await,
         Invocation::Canvas(request) => dependencies.gateway.canvas_request(request, call).await,
         Invocation::QuestionResolve(request) => dependencies.gateway.question_resolve(request, call).await,
+        Invocation::VideoTaskRefresh(request) => dependencies.gateway.video_task_refresh(request, call).await,
         Invocation::QuestionList(_) | Invocation::ProgressCard(_) => unreachable!("reads return before mutation audit"),
     };
     match outcome {
@@ -323,6 +337,7 @@ enum Invocation {
     ProgressCard(OpenClawProgressCardGatewayRequest),
     QuestionList(OpenClawQuestionListGatewayRequest),
     QuestionResolve(OpenClawQuestionResolveGatewayRequest),
+    VideoTaskRefresh(OpenClawVideoTaskRefreshGatewayRequest),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -401,6 +416,20 @@ impl DecodeRequest {
                     decode_question_resolve_request(wire.input).map_err(|_| DecodeError)?,
                 ),
             }),
+            (VIDEO_TASK_SCOPE, VIDEO_TASK_REFRESH_OPERATION) => {
+                let request = decode_video_task_refresh_request(wire.input).map_err(|_| DecodeError)?;
+                let subject = serde_json::to_string(&(
+                    surface_subject(&request.session_identity)?, &request.task_id,
+                )).map_err(|_| DecodeError)?;
+                Ok(Self {
+                    authorization: RouteAuthorization {
+                        scope: VIDEO_TASK_SCOPE,
+                        capability: VIDEO_TASK_REFRESH_OPERATION.to_owned(),
+                        subject,
+                    },
+                    invocation: Invocation::VideoTaskRefresh(request),
+                })
+            }
             _ => Err(DecodeError),
         }
     }
@@ -422,6 +451,9 @@ fn surface_subject(identity: &sessions_module::state::SessionIdentity) -> Result
 fn response_for_outcome(outcome: OpenClawGatewayRequestOutcome) -> Response {
     match outcome {
         OpenClawGatewayRequestOutcome::Succeeded(payload) => Response::json(200, payload),
+        OpenClawGatewayRequestOutcome::VideoTaskRejected { task_id, reason } => {
+            Response::json(200, reason.public_result(&task_id))
+        }
         OpenClawGatewayRequestOutcome::SurfaceRejected(failure) => Response::json(
             failure.http_status(), json!({ "error": failure.public_error() }),
         ),

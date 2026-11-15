@@ -48,6 +48,7 @@ export type TaskStateBase = {
   status: TaskStatus
   description: string
   toolUseId?: string
+  requestMessageId?: string
   startTime: number
   endTime?: number
   totalPausedMs?: number

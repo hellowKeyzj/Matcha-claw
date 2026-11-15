@@ -4,7 +4,8 @@ import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '@/plugins/chat/store';
 import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
-import { agentScope, runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
+import { agentScope, runtimeEndpointsEqual, sessionIdentitiesEqual, teamRunScope } from '@/types/desktop/runtime-address';
+import { useTeamsStore } from '@/plugins/teams/store';
 import { ChatArtifactContext } from './artifact-context';
 import type { ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
 import { collectChatArtifactGroups, type ChatArtifactGroup } from '@/plugins/chat/artifacts';
@@ -47,27 +48,49 @@ export const ChatArtifacts = memo(function ChatArtifacts({ renderItems, renderVi
   const openFile = useOpenFileWorkspacePage(workspace);
   const supportsInlineDiff = useFilePreviewSupport('diff');
   const supportsPreview = useFilePreviewSupport('preview');
-  const { currentConversation, currentAgentId } = useChatStore(useShallow(selectChatSelection));
+  const { currentConversation, currentAgentId, currentSessionRecordKey } = useChatStore(useShallow(selectChatSelection));
+  const ownership = useChatStore((state) => {
+    if (currentConversation?.kind !== 'session') return null;
+    const meta = state.loadedSessions[currentSessionRecordKey]?.meta;
+    return meta?.sessionIdentity && sessionIdentitiesEqual(meta.sessionIdentity, currentConversation.sessionIdentity) ? meta.ownership : null;
+  });
+  const runWorkspace = useTeamsStore((state) => {
+    if (ownership?.kind !== 'team') return undefined;
+    const snapshot = state.designByRunId[ownership.teamRunId]?.snapshot;
+    const run = state.runsById[ownership.teamRunId];
+    return snapshot?.teamId === ownership.teamId ? snapshot.workspace
+      : run?.runId === ownership.teamRunId && (run.teamId === undefined || run.teamId === ownership.teamId) ? run.workspace : undefined;
+  });
+  const usesRunWorkspace = ownership?.kind === 'team' && runWorkspace?.status !== 'legacy';
   const currentConversationEndpoint = currentConversation?.endpoint ?? null;
   const { currentAgent } = useChatAgent();
   const currentWorkspacePath = currentAgent?.workspace?.trim() ?? '';
-  const currentConfigurationScope = useMemo(() => currentConversationEndpoint && currentAgentId
-    ? agentScope(currentConversationEndpoint, currentAgentId) : null, [currentAgentId, currentConversationEndpoint]);
+  const scopeEndpoint = currentConversationEndpoint && JSON.stringify(currentConversationEndpoint);
+  const scopeAgentId = usesRunWorkspace ? null : currentAgentId;
+  const teamId = usesRunWorkspace && ownership?.kind === 'team' ? ownership.teamId : null;
+  const teamRunId = usesRunWorkspace && ownership?.kind === 'team' ? ownership.teamRunId : null;
+  const hasFileScope = currentConversation?.kind !== 'session' || ownership !== null;
+  const currentConfigurationScope = useMemo(() => {
+    if (!scopeEndpoint || !hasFileScope) return null;
+    const endpoint = JSON.parse(scopeEndpoint) as NonNullable<typeof currentConversationEndpoint>;
+    return teamId && teamRunId ? teamRunScope(endpoint, teamRunId, teamId)
+      : scopeAgentId ? agentScope(endpoint, scopeAgentId) : null;
+  }, [hasFileScope, scopeAgentId, scopeEndpoint, teamId, teamRunId]);
   const updateAgent = useSubagentsStore((state) => state.updateAgent);
   const newSession = useChatStore((state) => state.newSession);
-  const canChooseWorkspaceForCurrentAgent = !!currentAgent
+  const canChooseWorkspaceForCurrentAgent = !usesRunWorkspace && !!currentAgent
     && currentConversationEndpoint?.kind === 'native-runtime' && currentConversationEndpoint.runtimeAdapterId === 'openclaw'
     && (currentAgent.kind !== 'system' || Boolean(currentAgent.isDefault))
     && !!currentAgentId;
   const artifactGroups = useMemo(() => collectChatArtifactGroups(renderItems), [renderItems]);
   const artifactFiles = useMemo(() => artifactGroups.flatMap((group) => group.files), [artifactGroups]);
-  const artifactWorkspaceRoot = useMemo(() => currentConversationEndpoint?.kind === 'native-runtime'
+  const artifactWorkspaceRoot = useMemo(() => usesRunWorkspace ? null : currentConversationEndpoint?.kind === 'native-runtime'
     ? currentWorkspacePath || null
     : resolveArtifactWorkspaceRoot({ currentWorkspace: currentWorkspacePath, artifactFiles, artifactFocusedFile: null }),
-  [artifactFiles, currentWorkspacePath, currentConversationEndpoint]);
-  const artifactWorkspaceContext = useMemo(() => ({
-    workspaceRoot: artifactWorkspaceRoot || undefined,
-    agentScope: currentConfigurationScope ?? undefined,
+  [artifactFiles, currentWorkspacePath, currentConversationEndpoint, usesRunWorkspace]);
+  const artifactWorkspaceContext = useMemo<WorkspaceFileContext>(() => ({
+    workspaceRoot: artifactWorkspaceRoot,
+    scope: currentConfigurationScope ?? undefined,
   }), [artifactWorkspaceRoot, currentConfigurationScope]);
   const openGeneratedArtifact = useCallback((file: GeneratedFile) => {
     const group = artifactGroups.find((entry) => entry.files.includes(file))
@@ -143,7 +166,7 @@ export const ChatArtifacts = memo(function ChatArtifacts({ renderItems, renderVi
     onOpenArtifactFile: openGeneratedArtifact,
     onOpenAttachedArtifact: handleOpenAttachedArtifact,
   }), [artifactGroups, artifactWorkspaceContext, handleOpenAttachedArtifact, openGeneratedArtifact, renderViewport]);
-  return <ChatArtifactContext.Provider value={{ artifactGroups, artifactWorkspaceRoot, artifactWorkspaceContext, workspaceRecoveryAction }}>
+  return <ChatArtifactContext.Provider value={{ artifactGroups, artifactWorkspaceRoot, artifactWorkspaceContext, workspaceRecoveryAction, runWorkspace }}>
     {children({ viewportPane: () => <ChatArtifactViewport render={renderArtifactViewport} /> })}
   </ChatArtifactContext.Provider>;
 });

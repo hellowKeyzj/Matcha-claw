@@ -4,6 +4,9 @@ import { messageParts, resolveMessagePartRenderer } from '@/plugins/message-rend
 import { Suspense, useCallback, useEffect, useMemo, useState, memo, useReducer, type ReactNode } from 'react';
 import { useReplyDuration, type ReplyTiming } from '@/plugins/chat/reply-timing';
 import { useTranslation } from 'react-i18next';
+import i18next from 'i18next';
+import { toast } from 'sonner';
+import { refreshVideoTask } from '@/plugins/chat/video-tasks';
 import type { ChatAssistantTurnItem } from '@/plugins/message-rendering/chat-render-item-model';
 import { buildAssistantTurnView } from '@/plugins/chat/assistant-turn-view';
 import { buildToolGroupPlan } from '@/plugins/chat/tool-group-plan';
@@ -174,9 +177,17 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     [projectedView, item, showThinking, textModel, resolvedToolSlots]);
   const { segments, attachedFiles, messageRenderTextByKey, pendingMode, plainText, visible } = view;
   const hasContentSegments = segments.length > 0;
-  const toolSessionIdentity = sessionIdentity && !validateSessionIdentity(sessionIdentity)
+  const toolSessionIdentity = useMemo(() => sessionIdentity && !validateSessionIdentity(sessionIdentity)
     && item.sessionKey === sessionIdentity.sessionKey
-    && (item.agentId === undefined || item.agentId === sessionIdentity.agentId) ? sessionIdentity : undefined;
+    && (item.agentId === undefined || item.agentId === sessionIdentity.agentId)
+    ? Object.freeze({ ...sessionIdentity, endpoint: Object.freeze({ ...sessionIdentity.endpoint }) }) : undefined,
+  [sessionIdentity, item.sessionKey, item.agentId]);
+  const onRefreshMediaTask = useMemo(() => toolSessionIdentity && isOpenClawSurfaceSessionIdentity(toolSessionIdentity)
+    ? async (taskId: string): Promise<void> => {
+      const result = await refreshVideoTask(toolSessionIdentity, taskId);
+      if ('errorCode' in result) throw new Error(i18next.t(`chat:videoTask.${result.errorCode}`));
+      if (result.status === 'queued' || result.status === 'running') toast.message(i18next.t('chat:videoTask.stillRunning'));
+    } : undefined, [toolSessionIdentity]);
 
   const rawPlainText = getAssistantTurnPlainText(item);
   const extractArtifactRefs = useArtifactRefExtractor();
@@ -250,6 +261,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
               onOpenToolSurface={openToolSurface}
               onRuntimeSendMessage={onRuntimeSendMessage}
               onRuntimeOpenLink={onRuntimeOpenLink}
+              onRefreshMediaTask={onRefreshMediaTask}
             />
           </Suspense>
         </div>

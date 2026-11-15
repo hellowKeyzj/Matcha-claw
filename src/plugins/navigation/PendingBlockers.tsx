@@ -12,9 +12,11 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/plugins/chat/store';
 import { resolveSessionNavigationTitle, selectPendingApprovalsBySession } from '@/plugins/chat/session-status';
-import { useTeamApprovalProjection } from '@/plugins/teams/approval-projection';
+import { isTeamApprovalActionable, selectTeamApprovalRunEligibility, useTeamApprovalProjection, type TeamApprovalRunEligibility } from '@/plugins/teams/approval-projection';
 import { TEAMS_FEATURE_ENABLED } from '@/plugins/teams/feature-flag';
 import type { TeamApprovalRecord } from '@/plugins/teams/services/team-runtime-client';
+import { openTeamRun } from '@/plugins/teams/session-navigation';
+import { toast } from 'sonner';
 
 const SIDEBAR_BLOCKER_RENDER_LIMIT = 8;
 const TEAM_APPROVAL_SCAN_LIMIT = 80;
@@ -31,11 +33,12 @@ interface PendingBlockerCard {
   from: string;
   createdAt: number;
   sessionKey?: string;
+  runId?: string;
 }
 
 const EMPTY_TEAM_APPROVALS: TeamApprovalRecord[] = [];
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
-const teamApprovalCardsCacheByApprovalsRef = new WeakMap<TeamApprovalRecord[], Map<string, PendingBlockerCard[]>>();
+const teamApprovalCardsCacheByApprovalsRef = new WeakMap<TeamApprovalRecord[], Map<string, { scanLimit: number; cards: PendingBlockerCard[] }>>();
 const approvalCardsCacheByApprovalsRef = new WeakMap<ApprovalItem[], Map<string, PendingBlockerCard[]>>();
 
 function formatMessageTime(createdAt: number): string {
@@ -52,26 +55,30 @@ function buildTeamApprovalBlockerCards(input: {
   teamId: string;
   teamName: string;
   approvals: TeamApprovalRecord[];
+  runId: string;
+  runEligibility: TeamApprovalRunEligibility;
+  scanLimit: number;
   t: (key: string, options?: Record<string, unknown>) => string;
 }): PendingBlockerCard[] {
-  if (input.approvals.length === 0) {
+  if (input.approvals.length === 0 || input.runEligibility !== 'actionable') {
     return [];
   }
   const cards: PendingBlockerCard[] = [];
-  const startIndex = Math.max(0, input.approvals.length - TEAM_APPROVAL_SCAN_LIMIT);
+  const startIndex = Math.max(0, input.approvals.length - input.scanLimit);
 
   for (let index = input.approvals.length - 1; index >= startIndex; index -= 1) {
     if (cards.length >= TEAM_APPROVAL_CARD_LIMIT) {
       break;
     }
     const approval = input.approvals[index];
-    if (approval.status !== 'pending') {
+    if (approval.runId !== input.runId || !isTeamApprovalActionable(approval, input.runEligibility)) {
       continue;
     }
     cards.push({
       id: `team:${input.teamId}:${approval.approvalId}`,
       source: 'team_approval',
       teamId: input.teamId,
+      runId: approval.runId,
       teamName: input.teamName,
       title: input.t('sidebar.pendingBlockerStage', { stageId: approval.stageId }),
       content: approval.requestedAction || approval.reason,
@@ -116,11 +123,14 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const teams = useTeamApprovalProjection((state) => state.teams);
-  const approvalsByTeamId = useTeamApprovalProjection((state) => state.approvalsByTeamId);
-  const setActiveTeam = useTeamApprovalProjection((state) => state.setActiveTeam);
+  const approvalProjection = useTeamApprovalProjection(useShallow((state) => ({
+    runIdsByTeamId: state.runIdsByTeamId,
+    runSnapshotsByRunId: state.runSnapshotsByRunId,
+    approvalsByRunId: state.approvalsByRunId,
+  })));
   const pendingApprovalsBySession = useChatStore(selectPendingApprovalsBySession);
   const deferredTeams = useDeferredValue(teams);
-  const deferredApprovalsByTeamId = useDeferredValue(approvalsByTeamId);
+  const deferredApprovalProjection = useDeferredValue(approvalProjection);
   const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
 
   const teamApprovalCards = useMemo(() => {
@@ -131,30 +141,37 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
     const cards: PendingBlockerCard[] = [];
 
     for (const team of deferredTeams) {
-      const approvals = deferredApprovalsByTeamId[team.id] ?? EMPTY_TEAM_APPROVALS;
-      let variants = teamApprovalCardsCacheByApprovalsRef.get(approvals);
-      if (!variants) {
-        variants = new Map<string, PendingBlockerCard[]>();
-        teamApprovalCardsCacheByApprovalsRef.set(approvals, variants);
+      const teamCards: PendingBlockerCard[] = [];
+      const runIds = deferredApprovalProjection.runIdsByTeamId[team.id] ?? [];
+      let scanned = 0;
+      for (let index = runIds.length - 1; index >= 0; index -= 1) {
+        if (scanned >= TEAM_APPROVAL_SCAN_LIMIT || teamCards.length >= TEAM_APPROVAL_CARD_LIMIT) break;
+        const runId = runIds[index];
+        const runEligibility = selectTeamApprovalRunEligibility(deferredApprovalProjection, team.id, runId);
+        if (runEligibility !== 'actionable') continue;
+        const approvals = deferredApprovalProjection.approvalsByRunId[runId] ?? EMPTY_TEAM_APPROVALS;
+        const scanLimit = Math.min(approvals.length, TEAM_APPROVAL_SCAN_LIMIT - scanned);
+        scanned += scanLimit;
+        let variants = teamApprovalCardsCacheByApprovalsRef.get(approvals);
+        if (!variants) {
+          variants = new Map();
+          teamApprovalCardsCacheByApprovalsRef.set(approvals, variants);
+        }
+        const variantKey = JSON.stringify([team.id, runId, team.name, i18n.language, runEligibility]);
+        let cached = variants.get(variantKey);
+        if (!cached || cached.scanLimit !== scanLimit) {
+          cached = { scanLimit, cards: buildTeamApprovalBlockerCards({
+            teamId: team.id, teamName: team.name, runId, approvals, runEligibility, scanLimit, t,
+          }) };
+          variants.set(variantKey, cached);
+        }
+        teamCards.push(...cached.cards.slice(0, TEAM_APPROVAL_CARD_LIMIT - teamCards.length));
       }
-      const variantKey = `${team.id}|${team.name}|${i18n.language}`;
-      let teamCards = variants.get(variantKey);
-      if (!teamCards) {
-        teamCards = buildTeamApprovalBlockerCards({
-          teamId: team.id,
-          teamName: team.name,
-          approvals,
-          t,
-        });
-        variants.set(variantKey, teamCards);
-      }
-      if (teamCards.length > 0) {
-        cards.push(...teamCards);
-      }
+      cards.push(...teamCards);
     }
 
     return cards;
-  }, [deferredApprovalsByTeamId, deferredTeams, i18n.language, t]);
+  }, [deferredApprovalProjection, deferredTeams, i18n.language, t]);
 
   const approvalCards = useMemo(() => {
     const cards: PendingBlockerCard[] = [];
@@ -262,8 +279,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
               className="flex-col items-stretch gap-0 rounded-[12px] text-left data-[highlighted]:bg-[hsl(var(--shell-surface-hover))] data-[highlighted]:text-[hsl(var(--shell-icon-active))]"
               onSelect={() => {
                 if (card.source === 'team_approval') {
-                  setActiveTeam(card.teamId);
-                  navigate(`/teams/${card.teamId}`);
+                  void openTeamRun(navigate, card.teamId, card.runId).catch((error: unknown) => toast.error(error instanceof Error ? error.message : String(error)));
                   return;
                 }
                 if (card.source === 'chat_approval' && card.sessionKey) {

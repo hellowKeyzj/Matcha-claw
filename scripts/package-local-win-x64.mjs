@@ -61,18 +61,19 @@ function msvcEnvironment() {
       delete env[key];
     }
   }
-  env.CARGO_BUILD_JOBS = '1';
+  env.CARGO_BUILD_JOBS = '18';
+  env.CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '8';
   env.BOUNDED_DISK_RESERVE_GIB = '1';
   env.PROTOC = path.join(root, 'resources', 'bin', 'protoc', 'win32-x64', 'bin', 'protoc.exe');
   env.PROTOC_INCLUDE = path.join(root, 'resources', 'bin', 'protoc', 'win32-x64', 'include');
   return env;
 }
 
-async function run(label, command, args, env, capGiB = 4, timeout = 900) {
+async function run(label, command, args, env, timeout = 900) {
   stage = label;
   console.log(`\n[本地打包] ${label}`);
   const log = createWriteStream(path.join(work, `${label}.log`), { flags: 'w' });
-  const child = spawn('python', ['-I', guard, root, String(capGiB), String(timeout), command, ...args], {
+  const child = spawn('python', ['-I', guard, root, '24', String(timeout), command, ...args], {
     cwd: root, env, stdio: ['inherit', 'pipe', 'pipe'], windowsHide: true,
   });
   child.stdout.on('data', data => { process.stdout.write(data); log.write(data); });
@@ -95,8 +96,8 @@ async function main() {
   execute('python', ['-I', '-c', 'import struct; assert struct.calcsize("P") == 8']);
   const env = msvcEnvironment();
   mkdirSync(work, { recursive: true });
-  console.log('[本地打包] Windows x64；Host ThinLTO/codegen1（不同于 CI 完整 LTO）；串行编译；不会安装或发布');
-  const nodeStep = (label, args, cap, timeout) => run(label, node, args, env, cap, timeout);
+  console.log('[本地打包] Windows x64；所有 Rust 构建并发18/codegen8；所有阶段内存上限24GiB；Host 保留 ThinLTO（不同于 CI 完整 LTO）；阶段顺序执行；不会安装或发布');
+  const nodeStep = (label, args, timeout) => run(label, node, args, env, timeout);
   await nodeStep('01-插件输入', ['scripts/check-openclaw-plugin-inputs.mjs']);
   await nodeStep('02-依赖缓存', [pnpm, 'run', 'prep:win-x64-binaries:local-functional-cache']);
   await nodeStep('03-protoc', ['scripts/download-bundled-protoc.mjs']);
@@ -108,11 +109,11 @@ async function main() {
   const cargoEnv = { ...env };
   if (existsSync(telemetry)) cargoEnv.BOUNDED_MSVC_TELEMETRY_EXE = telemetry;
   const network = path.join(work, 'network');
-  await run('06-网络', node, ['scripts/build-network-access.mjs', '--platform', 'win32', '--arch', 'x64', '--artifact-dir', network], cargoEnv, 4, 7200);
+  await run('06-网络', node, ['scripts/build-network-access.mjs', '--platform', 'win32', '--arch', 'x64', '--artifact-dir', network], cargoEnv, 7200);
 
   const plan = createRuntimeHostNativeBuildPlan({ rootDir: root, platform: 'win32', arch: 'x64' });
-  await run('07-AppServer', 'cargo', plan.appServer.cargoArgs, cargoEnv, 9, 7200);
-  await run('08-Host', 'cargo', ['rustc', ...plan.cargoArgs.slice(1), '--', '-C', 'lto=thin', '-C', 'codegen-units=1'], cargoEnv, 9, 7200);
+  await run('07-AppServer', 'cargo', plan.appServer.cargoArgs, cargoEnv, 7200);
+  await run('08-Host', 'cargo', ['rustc', ...plan.cargoArgs.slice(1), '--', '-C', 'lto=thin'], cargoEnv, 7200);
   const native = path.join(work, 'native');
   mkdirSync(native, { recursive: true });
   for (const [name, source] of [
@@ -123,13 +124,14 @@ async function main() {
     copyFileSync(source, path.join(native, name));
   }
 
-  await nodeStep('09-桌面', [pnpm, 'run', 'build:vite'], 7, 1200);
-  await nodeStep('10-AgentCLI', ['scripts/build-matcha-agent.mjs', '--arch', 'x64', '--if-needed'], 7, 1200);
-  await nodeStep('11-OpenClaw', ['scripts/bundle-openclaw.mjs'], 4, 1200);
-  await nodeStep('12-插件', ['scripts/bundle-openclaw-plugins.mjs'], 4, 1200);
+  await nodeStep('09-桌面', [pnpm, 'run', 'build:vite'], 1200);
+  await nodeStep('10-AgentCLI', ['scripts/build-matcha-agent.mjs', '--arch', 'x64', '--if-needed'], 1200);
+  await nodeStep('11-OpenClaw', ['scripts/bundle-openclaw.mjs'], 1200);
+  await nodeStep('12-插件', ['scripts/bundle-openclaw-plugins.mjs'], 1200);
   await nodeStep('13-插件镜像', ['scripts/check-openclaw-plugin-mirrors.mjs']);
   await run('14-Python312', path.join(root, 'resources/bin/win32-x64/uv.exe'), ['python', 'install', '3.12'], env);
-  await nodeStep('15-SearXNG', ['scripts/bundle-searxng.mjs', '--target', 'win32-x64'], 4, 1800);
+  await nodeStep('15-SearXNG', ['scripts/bundle-searxng.mjs', '--target', 'win32-x64'], 1800);
+  await run('15-Office原生依赖', node, ['apps/office/build-native.mjs', '--platform', 'win32', '--arch', 'x64'], cargoEnv, 1800);
 
   const config = parse(readFileSync(path.join(root, 'electron-builder.yml'), 'utf8'));
   for (const resource of config.win.extraResources) {
@@ -149,7 +151,7 @@ async function main() {
   writeFileSync(configPath, stringify(config));
   const metadata = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
   rmSync(path.join(output, `${metadata.name}-${metadata.version}-x64.nsis.7z`), { force: true });
-  await run('16-NSIS', node, [require.resolve('electron-builder/out/cli/cli.js'), '--config', configPath, '--win', 'nsis', '--x64', '--publish', 'never'], { ...env, ELECTRON_BUILDER_COMPRESSION_LEVEL: '5' }, 10, 1800);
+  await run('16-NSIS', node, [require.resolve('electron-builder/out/cli/cli.js'), '--config', configPath, '--win', 'nsis', '--x64', '--publish', 'never'], { ...env, ELECTRON_BUILDER_COMPRESSION_LEVEL: '5' }, 1800);
 
   await run('17-原生依赖', path.join(output, 'win-unpacked', 'MatchaClaw.exe'), ['-e', `
     const { createRequire } = require('node:module');
@@ -162,10 +164,10 @@ async function main() {
     const native = join(dirname(packaged.resolve('@lydell/node-pty-win32-x64')), 'utils.js');
     packaged(native).loadNativeModule('conpty');
     console.log('ConPTY native addon loaded from packaged app');
-  `], { ...env, ELECTRON_RUN_AS_NODE: '1' }, 1, 60);
+  `], { ...env, ELECTRON_RUN_AS_NODE: '1' }, 60);
   const builderRequire = createRequire(require.resolve('electron-builder/package.json'));
   const appBuilderRequire = createRequire(builderRequire.resolve('app-builder-lib'));
-  await run('18-安装包完整性', appBuilderRequire('7zip-bin').path7za, ['t', path.join(output, `MatchaClaw-${metadata.version}-win-x64.exe`)], env, 2, 600);
+  await run('18-安装包完整性', appBuilderRequire('7zip-bin').path7za, ['t', path.join(output, `MatchaClaw-${metadata.version}-win-x64.exe`)], env, 600);
   stage = '产物校验';
   const installer = path.join(output, `MatchaClaw-${metadata.version}-win-x64.exe`);
   const sha512 = await fileHash(installer, 'sha512', 'base64');

@@ -1,5 +1,6 @@
 import type { AppPluginContext, AppToolHandler, AppToolResult } from '@matcha/app-plugins-sdk';
 import { existsSync } from 'node:fs';
+import { chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureAppPaths } from './platform/electron-main';
@@ -25,6 +26,10 @@ import { createHtmlTools } from './html/tools';
 export async function activate(context: AppPluginContext): Promise<() => Promise<void>> {
   configureAppPaths({ userData: context.storagePath, temp: tmpdir(), documents: context.storagePath });
   const sidecar = join(context.packagePath, 'native', process.platform === 'win32' ? 'xlsx-sidecar.exe' : 'xlsx-sidecar');
+  if (process.platform !== 'win32') {
+    await chmod(sidecar, 0o700);
+    if (process.platform === 'darwin') await chmod(join(context.packagePath, 'native', 'ocr', 'vision-ocr'), 0o700);
+  }
   if (existsSync(sidecar)) process.env.XLSX_SIDECAR_PATH = sidecar;
   await initializeSheetsRuntime(context);
   const documents = createDocumentService(context);

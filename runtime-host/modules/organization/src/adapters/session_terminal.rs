@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use futures_util::future::BoxFuture;
 use foundation::execution::{
     EventObservation, EventReason, EventStage, ObservationRecord, ObservationSink,
     OperationObservation, OperationReason, OperationStage, TraceContext,
@@ -14,7 +15,7 @@ use serde_json::json;
 use tokio::{sync::{mpsc, OwnedSemaphorePermit, Semaphore}, task::JoinError};
 use tokio_util::sync::CancellationToken;
 
-use crate::{OrganizationHandle, TeamMessageRepairDispatch, TeamMessageTerminalObservation};
+use crate::{OrganizationHandle, RoleSessionIdentityResolver, TeamMessageRepairDispatch, TeamMessageTerminalObservation};
 
 const SESSION_TERMINAL_CAPACITY: usize = 256;
 
@@ -59,7 +60,7 @@ pub struct OrganizationRunTerminalSnapshot<SourceBinding> {
     pub native_message_id: Option<String>,
     pub measurement: crate::TaskRunMeasurement,
     pub phase: OrganizationRunPhase,
-    pub assistant_texts: Vec<String>,
+    pub assistant_texts: Result<Vec<String>, ()>,
 }
 
 pub struct TeamMessageRepairSessionRequest<SourceBinding> {
@@ -134,6 +135,7 @@ pub struct OrganizationSessionTerminal<SourceBinding> {
     permits: Arc<Semaphore>,
     cancellation: CancellationToken,
     organization: OrganizationHandle,
+    resolver: Arc<dyn RoleSessionIdentityResolver>,
     join_failed: std::sync::atomic::AtomicBool,
     closed_successfully: std::sync::atomic::AtomicBool,
     observation: ObservationSink,
@@ -150,13 +152,18 @@ impl<SourceBinding> OrganizationSessionTerminal<SourceBinding>
 where
     SourceBinding: Clone + PartialEq + Send + 'static,
 {
-    pub fn start(organization: OrganizationHandle, observation: ObservationSink) -> Self {
+    pub fn start(
+        organization: OrganizationHandle,
+        resolver: Arc<dyn RoleSessionIdentityResolver>,
+        observation: ObservationSink,
+    ) -> Self {
         let repair_session = Arc::new(Mutex::new(None));
         let (snapshots, receiver) = mpsc::channel(SESSION_TERMINAL_CAPACITY);
         let terminal_recovery = organization.subscribe_terminal_recovery();
         let cancellation = CancellationToken::new();
         let task = tokio::spawn(consume(
             organization.clone(),
+            Arc::clone(&resolver),
             Arc::clone(&repair_session),
             receiver,
             terminal_recovery,
@@ -172,6 +179,7 @@ where
             permits: Arc::new(Semaphore::new(SESSION_TERMINAL_CAPACITY)),
             cancellation,
             organization,
+            resolver,
             join_failed: std::sync::atomic::AtomicBool::new(false),
             closed_successfully: std::sync::atomic::AtomicBool::new(false),
             observation,
@@ -262,11 +270,11 @@ where
         if joined {
             return self.check_settled(retained.is_empty()).await;
         }
-        resume_pending(&mut retained, &self.organization, &self.repair_session, &self.cancellation, &self.observation, true);
+        resume_pending(&mut retained, &self.organization, &self.resolver, &self.repair_session, &self.cancellation, &self.observation, true);
         while retained.iter().any(|slot| matches!(slot, TerminalWork::Running { .. })) {
             let (index, pending) = next_delivery(&mut retained).await;
             retain_completion(&mut retained, index, pending);
-            resume_pending(&mut retained, &self.organization, &self.repair_session, &self.cancellation, &self.observation, false);
+            resume_pending(&mut retained, &self.organization, &self.resolver, &self.repair_session, &self.cancellation, &self.observation, false);
         }
         self.check_settled(retained.is_empty()).await
     }
@@ -337,6 +345,7 @@ fn retain_completion<SourceBinding: PartialEq>(
 fn resume_pending<SourceBinding: Clone + PartialEq + Send + 'static>(
     work: &mut [TerminalWork<SourceBinding>],
     organization: &OrganizationHandle,
+    resolver: &Arc<dyn RoleSessionIdentityResolver>,
     repair_session: &Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     cancellation: &CancellationToken,
     observation: &ObservationSink,
@@ -351,7 +360,7 @@ fn resume_pending<SourceBinding: Clone + PartialEq + Send + 'static>(
         } else if !all { continue; }
         let TerminalWork::Pending(mut delivery) = std::mem::replace(slot, TerminalWork::Vacant) else { unreachable!() };
         delivery.ignored = false;
-        *slot = delivery_work(organization.clone(), Arc::clone(repair_session), delivery, cancellation.clone(), observation.clone());
+        *slot = delivery_work(organization.clone(), Arc::clone(resolver), Arc::clone(repair_session), delivery, cancellation.clone(), observation.clone());
     }
 }
 
@@ -370,6 +379,7 @@ async fn next_delivery<SourceBinding>(work: &mut [TerminalWork<SourceBinding>]) 
 
 fn delivery_work<SourceBinding: Clone + PartialEq + Send + 'static>(
     organization: OrganizationHandle,
+    resolver: Arc<dyn RoleSessionIdentityResolver>,
     repair_session: Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     delivery: TerminalDelivery<SourceBinding>,
     cancellation: CancellationToken,
@@ -379,13 +389,14 @@ fn delivery_work<SourceBinding: Clone + PartialEq + Send + 'static>(
     TerminalWork::Running {
         repair,
         future: Box::pin(async move {
-            advance_delivery(&organization, &repair_session, delivery, &cancellation, &observation).await
+            advance_delivery(&organization, &resolver, &repair_session, delivery, &cancellation, &observation).await
         }),
     }
 }
 
 async fn consume<SourceBinding>(
     organization: OrganizationHandle,
+    resolver: Arc<dyn RoleSessionIdentityResolver>,
     repair_session: Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     mut snapshots: mpsc::Receiver<TerminalDelivery<SourceBinding>>,
     mut terminal_recovery: tokio::sync::watch::Receiver<()>,
@@ -411,17 +422,17 @@ async fn consume<SourceBinding>(
                         "nativeRunHash": identifier_hash(&snapshot.native_run_id),
                         "deliveryHash": snapshot.delivery_context.as_ref().map(|(delivery, _)| identifier_hash(delivery.as_str())),
                         "phase": format!("{:?}", snapshot.phase),
-                        "candidateCount": snapshot.assistant_texts.len(),
+                        "candidateCount": snapshot.assistant_texts.as_ref().ok().map(Vec::len),
                         "hasDeliveryContext": snapshot.delivery_context.is_some(),
                     }));
-                    work.push(delivery_work(organization.clone(), Arc::clone(&repair_session), delivery, cancellation.clone(), observation.clone()));
+                    work.push(delivery_work(organization.clone(), Arc::clone(&resolver), Arc::clone(&repair_session), delivery, cancellation.clone(), observation.clone()));
                     retry_pending = true;
                 } else { closed = true; drained = true; }
             }
             completed = next_delivery(&mut work) => {
                 let (index, pending) = completed;
                 retain_completion(&mut work, index, pending);
-                resume_pending(&mut work, &organization, &repair_session, &cancellation, &observation, false);
+                resume_pending(&mut work, &organization, &resolver, &repair_session, &cancellation, &observation, false);
             }
             changed = changes.changed(), if !closed => {
                 if changed.is_err() { snapshots.close(); closed = true; }
@@ -433,7 +444,7 @@ async fn consume<SourceBinding>(
             }
         }
         if retry_pending && !closed {
-            resume_pending(&mut work, &organization, &repair_session, &cancellation, &observation, true);
+            resume_pending(&mut work, &organization, &resolver, &repair_session, &cancellation, &observation, true);
         }
         if drained && !work.iter().any(|slot| matches!(slot, TerminalWork::Running { .. })) {
             return work.into_iter().filter_map(|slot| match slot { TerminalWork::Pending(delivery) => Some(delivery), TerminalWork::Running { .. } | TerminalWork::Vacant => None }).collect();
@@ -443,6 +454,7 @@ async fn consume<SourceBinding>(
 
 async fn advance_delivery<SourceBinding>(
     organization: &OrganizationHandle,
+    resolver: &Arc<dyn RoleSessionIdentityResolver>,
     repair_session: &Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     mut delivery: TerminalDelivery<SourceBinding>,
     cancellation: &CancellationToken,
@@ -454,7 +466,7 @@ async fn advance_delivery<SourceBinding>(
     if delivery.repair.is_none() {
         let mut outcome = None;
         for _ in 0..3 {
-            outcome = settle(organization, delivery.snapshot.clone(), delivery.settled_at, observation).await;
+            outcome = settle(organization, resolver, delivery.snapshot.clone(), delivery.settled_at, observation).await;
             if outcome.is_some() { break; }
         }
         let Some(outcome) = outcome else { return Some(delivery); };
@@ -490,22 +502,9 @@ async fn advance_delivery<SourceBinding>(
     }
     for _ in 0..3 {
         let (dispatch, outcome) = delivery.repair.as_ref().expect("repair outcome retained");
-        let settled = match outcome {
-            TeamMessageRepairSessionOutcome::Queued { native_run_id } => {
-                let native_run_hash = platform::trace::enabled().then(|| identifier_hash(native_run_id));
-                let result = organization.team_message_repair_queued(native_run_id.clone(), dispatch.clone()).await;
-                runtime_trace("runtime.team_run.repair.queued.reply", || json!({
-                    "nativeRunHash": native_run_hash,
-                    "outcome": if result.is_ok() { "accepted" } else { "admission_or_reply_closed" },
-                }));
-                if result.is_err() {
-                    observe_event(observation, EventStage::Drop, Some(EventReason::SinkClosed));
-                }
-                result.is_ok()
-            },
-            TeamMessageRepairSessionOutcome::Rejected => settle_rejected_repair(organization, dispatch.clone(), observation).await,
-            TeamMessageRepairSessionOutcome::NotDelivered | TeamMessageRepairSessionOutcome::Unknown => unreachable!(),
-        };
+        let settled = settle_repair_outcome(
+            organization, &delivery.snapshot.identity, dispatch, outcome, observation,
+        ).await;
         if settled {
             let mut flight = delivery.repair_flight.lock().expect("repair flight mutex poisoned");
             flight.active = false;
@@ -516,8 +515,34 @@ async fn advance_delivery<SourceBinding>(
     Some(delivery)
 }
 
+fn settle_repair_outcome<'a>(
+    organization: &'a OrganizationHandle,
+    identity: &'a SessionIdentity,
+    dispatch: &'a TeamMessageRepairDispatch,
+    outcome: &'a TeamMessageRepairSessionOutcome,
+    observation: &'a ObservationSink,
+) -> BoxFuture<'a, bool> {
+    match outcome {
+        TeamMessageRepairSessionOutcome::Queued { native_run_id } => Box::pin(async move {
+            let native_run_hash = platform::trace::enabled().then(|| identifier_hash(native_run_id));
+            let result = organization.team_message_repair_queued(identity.clone(), native_run_id.clone(), dispatch.clone()).await;
+            runtime_trace("runtime.team_run.repair.queued.reply", || json!({
+                "nativeRunHash": native_run_hash,
+                "outcome": if result.is_ok() { "accepted" } else { "admission_or_reply_closed" },
+            }));
+            if result.is_err() {
+                observe_event(observation, EventStage::Drop, Some(EventReason::SinkClosed));
+            }
+            result.is_ok()
+        }),
+        TeamMessageRepairSessionOutcome::Rejected => Box::pin(settle_rejected_repair(organization, identity, dispatch.clone(), observation)),
+        TeamMessageRepairSessionOutcome::NotDelivered | TeamMessageRepairSessionOutcome::Unknown => unreachable!(),
+    }
+}
+
 async fn settle<SourceBinding>(
     organization: &OrganizationHandle,
+    resolver: &Arc<dyn RoleSessionIdentityResolver>,
     snapshot: OrganizationRunTerminalSnapshot<SourceBinding>,
     settled_at: u64,
     observation: &ObservationSink,
@@ -525,6 +550,7 @@ async fn settle<SourceBinding>(
     SourceBinding: Clone + PartialEq + Send + 'static,
 {
     let OrganizationRunTerminalSnapshot {
+        identity,
         native_run_id,
         delivery_context,
         execution_context,
@@ -546,6 +572,8 @@ async fn settle<SourceBinding>(
     let native_run_hash = platform::trace::enabled().then(|| identifier_hash(&native_run_id));
     let observation_outcome = match organization
         .team_message_terminal_observed(
+            identity,
+            Arc::clone(resolver),
             native_run_id,
             delivery_context,
             status,
@@ -661,11 +689,12 @@ async fn schedule_repair<SourceBinding>(
 
 async fn settle_rejected_repair(
     organization: &OrganizationHandle,
+    identity: &SessionIdentity,
     dispatch: TeamMessageRepairDispatch,
     observation: &ObservationSink,
 ) -> bool {
     let native_run_hash = platform::trace::enabled().then(|| identifier_hash(dispatch.requested_run_id()));
-    let result = organization.team_message_repair_rejected(dispatch).await;
+    let result = organization.team_message_repair_rejected(identity.clone(), dispatch).await;
     runtime_trace("runtime.team_run.repair.rejected.reply", || json!({
         "nativeRunHash": native_run_hash,
         "outcome": match &result {

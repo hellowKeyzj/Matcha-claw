@@ -1,4 +1,6 @@
+import { isTeamGraphReworkProjection, type TeamGraphReworkProjection } from '../../../../../src/types/team-design';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isReworkLimits } from './graph';
 import {
   hasExactKeys,
   isNonEmptyBoundedText,
@@ -32,15 +34,16 @@ export type TeamPublicProjection = Readonly<{
     workflowPlanId: string;
     title: string;
     status: TeamGraphStatus;
+    rework: TeamGraphReworkProjection;
     nodes: readonly Readonly<{
       nodeId: string;
       kind: TeamNodeKind;
       title: string;
       roleId: string | null;
       taskId: string | null;
-      maxAttempts: number;
+      reworkLimits: Readonly<Record<string, number>>;
       trigger: TeamWebhookTrigger | TeamCronTrigger | null;
-      attempt: Readonly<{ number: number; status: TeamAttemptStatus; updatedAt: number }>;
+      attempt: Readonly<{ number: number; batchId: number; status: TeamAttemptStatus; updatedAt: number }>;
     }>[];
     edges: readonly Readonly<{
       edgeId: string;
@@ -111,11 +114,12 @@ function isProjection(value: unknown): value is TeamPublicProjection {
 
 function isGraph(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['graphId', 'workflowPlanId', 'title', 'status', 'nodes', 'edges'])
+    && hasExactKeys(value, ['graphId', 'workflowPlanId', 'title', 'status', 'nodes', 'edges', 'rework'])
     && isNonEmptyBoundedText(value.graphId)
     && isNonEmptyBoundedText(value.workflowPlanId)
     && typeof value.title === 'string'
     && isGraphStatus(value.status)
+    && isTeamGraphReworkProjection(value.rework)
     && Array.isArray(value.nodes)
     && value.nodes.every(isNode)
     && Array.isArray(value.edges)
@@ -124,13 +128,15 @@ function isGraph(value: unknown): boolean {
 
 function isNode(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['nodeId', 'kind', 'title', 'roleId', 'taskId', 'maxAttempts', 'trigger', 'attempt'])
+    && hasExactKeys(value, ['nodeId', 'kind', 'title', 'roleId', 'taskId', 'reworkLimits', 'trigger', 'attempt'])
     && isNonEmptyBoundedText(value.nodeId)
     && ['start', 'work', 'review', 'human_decision', 'script_review', 'join', 'end'].includes(value.kind as string)
     && typeof value.title === 'string'
     && (value.roleId === null || isNonEmptyBoundedText(value.roleId))
     && (value.taskId === null || isNonEmptyBoundedText(value.taskId))
-    && isSafeNonNegativeInteger(value.maxAttempts)
+    && isReworkLimits(value.reworkLimits, value.kind)
+    && Object.keys(value.reworkLimits).length === (value.kind === 'human_decision' ? 2
+      : value.kind === 'review' || value.kind === 'script_review' ? 1 : 0)
     && isStartTrigger(value.trigger)
     && isAttempt(value.attempt);
 }
@@ -144,8 +150,9 @@ function isStartTrigger(value: unknown): value is TeamWebhookTrigger | TeamCronT
 
 function isAttempt(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['number', 'status', 'updatedAt'])
+    && hasExactKeys(value, ['number', 'batchId', 'status', 'updatedAt'])
     && isSafeNonNegativeInteger(value.number)
+    && isSafeNonNegativeInteger(value.batchId) && value.batchId > 0
     && isGraphStatus(value.status)
     && isSafeNonNegativeInteger(value.updatedAt);
 }

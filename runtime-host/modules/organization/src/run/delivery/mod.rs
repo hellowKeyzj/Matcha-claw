@@ -27,6 +27,7 @@ pub use transition::{
 
 pub(crate) use transition::{
     observe_native_terminal, resolve_authorized_graph_outcome, resolve_native_run_output,
+    terminal_observation_matches_graph,
 };
 
 #[cfg(test)]

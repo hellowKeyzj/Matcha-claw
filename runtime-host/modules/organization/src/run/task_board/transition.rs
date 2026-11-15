@@ -24,7 +24,7 @@ pub fn upsert_plan(
     if fingerprint.trim().is_empty() {
         return Err(TaskBoardError::ConflictingCommand);
     }
-    let mut pending = std::collections::BTreeMap::new();
+    let mut pending = std::collections::BTreeSet::new();
     let mut records = Vec::new();
     let mut ids = Vec::new();
     for input in plan {
@@ -39,9 +39,8 @@ pub fn upsert_plan(
                 input.run_id.as_str().to_owned(),
                 id.clone(),
             );
-            if let std::collections::btree_map::Entry::Vacant(entry) = pending.entry(key) {
+            if pending.insert(key) {
                 let task = TaskRecord::new(input, now, fingerprint.to_owned())?;
-                entry.insert(records.len());
                 records.push(task);
             }
         }
@@ -52,7 +51,7 @@ pub fn upsert_plan(
             board
                 .task(task.team_id(), task.run_id(), dependency)
                 .is_none()
-                && !pending.contains_key(&(
+                && !pending.contains(&(
                     task.team_id().as_str().to_owned(),
                     task.run_id().as_str().to_owned(),
                     dependency.clone(),
@@ -316,20 +315,9 @@ fn reclaim_matching(
         })
         .collect();
     for (team, run, id) in &keys {
-        reclaim_expired_task(
-            board
-                .task_mut(team.as_str(), run.as_str(), id.as_str())
-                .unwrap(),
-            now,
-        );
-    }
-    keys.len()
-}
-
-fn reclaim_expired_task(task: &mut TaskRecord, now: u64) -> bool {
-    if task.lease_until().is_some_and(|x| x <= now)
-        && matches!(task.status(), TaskStatus::Claimed | TaskStatus::Running)
-    {
+        let task = board
+            .task_mut(team.as_str(), run.as_str(), id.as_str())
+            .unwrap();
         let (o, s, c, l) = task.owner_mut();
         *o = None;
         *s = None;
@@ -337,8 +325,6 @@ fn reclaim_expired_task(task: &mut TaskRecord, now: u64) -> bool {
         *l = None;
         *task.status_mut() = TaskStatus::Todo;
         *task.updated_mut() = now;
-        true
-    } else {
-        false
     }
+    keys.len()
 }

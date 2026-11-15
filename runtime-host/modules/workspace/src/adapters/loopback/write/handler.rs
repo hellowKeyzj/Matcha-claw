@@ -41,7 +41,7 @@ async fn handle_request(request: Request, dependencies: super::super::Dependenci
         .workspace
         .write_text(
             request.endpoint(),
-            request.agent_id().to_owned(),
+            request.selection(),
             request.relative_path().to_owned(),
             request.content().to_owned(),
         )

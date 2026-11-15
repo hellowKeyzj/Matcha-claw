@@ -9,6 +9,7 @@ export type FilePreviewMode = 'preview' | 'diff';
 export interface TextFileReaderProps {
   file: ArtifactPreviewTarget;
   text: string;
+  readResource?: (source: string, maxBytes: number) => Promise<Blob | null>;
 }
 
 export interface BinaryFileReaderProps {

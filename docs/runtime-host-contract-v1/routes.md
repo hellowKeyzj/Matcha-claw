@@ -116,6 +116,7 @@ Evidence: [session-routes.ts](../../runtime-host/api/routes/session-routes.ts#L3
 | `PUT` | `/api/openclaw/tool-permission-mode` | Renderer allowlisted |
 | `GET` | `/api/settings`, `/api/settings/:key` | Renderer allowlisted; public snapshot excludes secrets/native raw config |
 | `POST` | `/api/settings/desired` | Renderer Settings public intent; Electron Main adapts to signed Rust desired transport |
+| `POST` | `/api/team/prompts` | Renderer allowlisted; signed Organization fixed-prompt read/save/preview, separate from Settings desired |
 | `GET` | `/api/provider-accounts`, `/api/provider-accounts/:id/has-api-key` | Renderer allowlisted |
 | `GET` | `/api/provider-models`, `/api/provider-models/selectable`, `/api/provider-models/discover` | Renderer allowlisted |
 | `GET` | `/api/capability-routing` | Renderer allowlisted |
@@ -126,6 +127,24 @@ Evidence: [session-routes.ts](../../runtime-host/api/routes/session-routes.ts#L3
 | `POST` | `/api/skills/readme` | child direct; not present in current Electron public allowlist |
 | `POST` | `/api/clawhub/search` | Renderer allowlisted; Rust external ClawHub registry search |
 | `GET` | `/api/subagents/*` | `LEGACY-REJECTED` (registered as POST routes) |
+
+### Team 固定提示词
+
+Renderer 与 signed child 均用 `POST /api/team/prompts`，不经 `team.runtime` 或 Settings desired；Electron 拒绝 query，输入严格按 operation 解码，Rust 拒绝未知字段。签名 endpoint 固定此 path、subject=`team-prompts`、capability 为本次 operation；read 用 `team:read`，save／preview 用 `team:write`。[VERIFY: electron/api/route-boundary.ts:363,694] [VERIFY: electron/api/routes/team-prompts.ts:17-33] [VERIFY: electron/main/runtime-host-delivery/transport/teams/prompts.ts:35-49] [VERIFY: runtime-host/modules/organization/src/adapters/loopback/prompts.rs:17-69]
+
+| operation | 精确请求字段（除 `operation`） | 200 响应 |
+| --- | --- | --- |
+| `team.prompts.read` | 无 | `{revision,values,defaults}` |
+| `team.prompts.save` | `{expectedRevision,values}` | `{revision,values}`；Organization SQLite 单例事务 CAS 成功后整体替换、revision 加一 |
+| `team.prompts.preview` | `{values,group,variant}` | `{prompt}`；只组装草稿，不保存或执行 |
+
+`values`／`defaults` 是精确 19 键的字符串 map，原始 UTF-8 单字段 ≤64 KiB、合计 ≤512 KiB；save／preview 还要求非空、默认 `{{插槽}}` 名称及次数完全一致，不允许新增或删除插槽，插入值不递归替换。JSON 转义后的请求封套在 Electron 与 child 均限 4 MiB，不把封套限制当成原文预算。`expectedRevision` 为非负安全整数，缺设置记录时 revision 0；冲突不覆盖。group 为 discussion/design/execution/repair/introduction；单形态组 discussion/design/introduction 使用 variant=`work`，execution 接受 work/review，repair 接受 missing/declared/unreadable。样例复用生产拼装，不是 native 运行验收。[VERIFY: src/types/team-prompts.ts:1-42,70-83,133-148] [VERIFY: runtime-host/modules/organization/src/prompts/mod.rs:7-115] [VERIFY: runtime-host/modules/organization/src/prompts/preview.rs:14-66] [VERIFY: runtime-host/modules/organization/src/store/prompts.rs:15-33] [VERIFY: runtime-host/modules/organization/src/store/records/mod.rs:165-169] [VERIFY: runtime-host/modules/organization/src/adapters/loopback/mod.rs:30,275-278]
+
+业务错误使用 `{success:false,error:string,code:string,key?:string}`：400 `TEAM_PROMPTS_INVALID`（字段错误可带 key；error 为校验原因），409 `TEAM_PROMPTS_CONFLICT`，503 `TEAM_PROMPTS_UNAVAILABLE` 或 `TEAM_PROMPTS_OUTCOME_UNKNOWN`；只有 INVALID 允许 key。signed child 授权失败为 401，由 Electron 转安全 unavailable／save unknown，不透传未识别响应。save 的送达／提交或响应结果未知不等于未保存，客户端阻止再次 save，显式 read 回读后保留本地编辑再决定，不自动重发。[VERIFY: runtime-host/modules/organization/src/adapters/loopback/prompts.rs:108-149] [VERIFY: src/types/team-prompts.ts:108-122] [VERIFY: electron/main/runtime-host-delivery/transport/teams/prompts.ts:51-68] [VERIFY: src/lib/team-prompts-api.ts:31-53] [VERIFY: src/plugins/teams/settings/useTeamPrompts.ts:32-87]
+
+设置保存不改变 graph／run snapshot、端口枚举或重试预算；Activity 首次登记在刷新后的同一事务中冻结 prompt，既有 retry／restore 不重拼。讨论／设计仍走 system provenance，Matcha native `runs.submit` 当前无该注入字段，本轮未改 server 或降为用户正文；因此 API／preview 成功不证明 Matcha 已消费。[VERIFY: runtime-host/modules/organization/src/store/durable.rs:470-505,1558-1599] [VERIFY: runtime-host/modules/organization/src/store/facts/transaction.rs:354-366] [VERIFY: runtime-host/host/src/composition/host/ports/organization.rs:290-319] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/runtime.rs:302-313] [VERIFY: matcha-agent/app-server/src/session/dispatch.rs:55-63]
+
+### 渠道
 
 渠道适配按已授权的 ClawX 行为对齐，native 基线为 OpenClaw `2026.9.2`；当前 Renderer 入口以 `src/lib/channel-runtime.ts` 为准：
 

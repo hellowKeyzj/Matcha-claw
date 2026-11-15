@@ -28,7 +28,7 @@ impl RunRuntimeReceipt {
             if !slots.insert((binding.role().as_str(), binding.session_ref().as_str())) {
                 return Err(InvalidRunRuntimeReceipt::DuplicateRoleSessionBinding);
             }
-            if !endpoint_sessions.insert(binding.endpoint_session_id().as_str()) {
+            if !endpoint_sessions.insert((binding.endpoint().as_str(), binding.agent().as_str(), binding.endpoint_session_id().as_str())) {
                 return Err(InvalidRunRuntimeReceipt::DuplicateEndpointSessionBinding);
             }
         }

@@ -322,7 +322,8 @@ impl ProviderModelOwner {
     pub(super) fn select_session_model(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
+        accounts: &[ProviderAccount],
+        catalog: &ProviderModelCatalog,
         endpoint: ProviderSessionEndpoint,
         session_key: String,
         endpoint_session_id: Option<String>,
@@ -332,7 +333,7 @@ impl ProviderModelOwner {
         let Some(capability) = session_model_capability(endpoint) else {
             return ProviderSessionModelSelectionOutcome::Unsupported;
         };
-        match self.resolve_selection(runtime, cascade, endpoint, capability, &model_selection_id) {
+        match self.resolve_selection(runtime, accounts, catalog, endpoint, capability, &model_selection_id) {
             Ok(Some(selection)) => ProviderSessionModelSelectionOutcome::Selected(
                 selection.into_receipt(endpoint, session_key, endpoint_session_id, trace_id),
             ),
@@ -344,7 +345,9 @@ impl ProviderModelOwner {
     pub(super) fn select_matcha_session_model_runtime(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
+        accounts: &[ProviderAccount],
+        catalog: &ProviderModelCatalog,
+        routing: Option<&ProviderRouting>,
         session_key: String,
         endpoint_session_id: Option<String>,
         model_id: Option<String>,
@@ -355,7 +358,8 @@ impl ProviderModelOwner {
         let selection = match model_id {
             Some(model_id) => self.resolve_matcha_runtime(
                 runtime,
-                cascade,
+                accounts,
+                catalog,
                 ProviderModelCapability::Chat,
                 &model_id,
                 model_selection_id.as_deref(),
@@ -365,14 +369,15 @@ impl ProviderModelOwner {
                 if model_selection_id.is_some() || provider_fingerprint.is_some() {
                     return ProviderSessionModelSelectionOutcome::Rejected;
                 }
-                let Some(primary) = cascade.routing()
+                let Some(primary) = routing
                     .and_then(|routing| routing.route(ProviderRoutingCapability::Chat))
                     .map(|route| route.primary()) else {
                     return ProviderSessionModelSelectionOutcome::Rejected;
                 };
                 self.resolve_matching(
                     runtime,
-                    cascade,
+                    accounts,
+                    catalog,
                     ProviderSessionEndpoint::MatchaAgentLocal,
                     ProviderModelCapability::Chat,
                     |model, _account| provider_model_matches_routing_reference(
@@ -436,12 +441,13 @@ impl ProviderModelOwner {
     fn resolve_selection(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
+        accounts: &[ProviderAccount],
+        catalog: &ProviderModelCatalog,
         endpoint: ProviderSessionEndpoint,
         capability: ProviderModelCapability,
         selection_id: &str,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        self.resolve_matching(runtime, cascade, endpoint, capability, |model, _account| {
+        self.resolve_matching(runtime, accounts, catalog, endpoint, capability, |model, _account| {
             model.selection_id() == selection_id
         })
     }
@@ -449,13 +455,14 @@ impl ProviderModelOwner {
     fn resolve_matcha_runtime(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
+        accounts: &[ProviderAccount],
+        catalog: &ProviderModelCatalog,
         capability: ProviderModelCapability,
         model_id: &str,
         model_selection_id: Option<&str>,
         provider_fingerprint: Option<&str>,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        self.resolve_matching(runtime, cascade, ProviderSessionEndpoint::MatchaAgentLocal, capability, |model, account| {
+        self.resolve_matching(runtime, accounts, catalog, ProviderSessionEndpoint::MatchaAgentLocal, capability, |model, account| {
             model.model_id() == model_id
                 && model_selection_id.is_none_or(|id| model.selection_id() == id)
                 && provider_fingerprint
@@ -466,15 +473,16 @@ impl ProviderModelOwner {
     fn resolve_matching(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
+        accounts: &[ProviderAccount],
+        catalog: &ProviderModelCatalog,
         endpoint: ProviderSessionEndpoint,
         capability: ProviderModelCapability,
         mut matches_selection: impl FnMut(&ProviderModel, &ProviderAccount) -> bool,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
         let identity_ops = runtime.provider_runtime_identity_ops(&endpoint.runtime_endpoint()).ok_or(())?;
-        let identities = provider_runtime_identities(identity_ops, cascade.accounts())?;
-        for model in cascade.catalog().selectable_for(capability) {
-            let Some(account) = cascade.account(model.account_id()) else {
+        let identities = provider_runtime_identities(identity_ops, accounts)?;
+        for model in catalog.selectable_for(capability) {
+            let Some(account) = accounts.iter().find(|account| account.id() == model.account_id()) else {
                 continue;
             };
             if !matches_selection(model, account) {

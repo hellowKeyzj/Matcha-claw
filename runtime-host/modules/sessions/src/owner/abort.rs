@@ -104,14 +104,11 @@ impl SessionShared {
         if command.identity.provider() != SessionProvider::MatchaAgent {
             return Ok(command);
         }
-        let lane_key = session_identity_lane_key(&command.identity);
-        let session_id = self
-            .snapshot
-            .load()
-            .states
-            .get(&lane_key)
-            .and_then(|state| state.native_session_id().map(str::to_owned))
-            .ok_or(SessionAbortOutcome::Rejected)?;
+        let session_id = self.resolve_matcha_session_id(
+            &command.identity,
+            command.endpoint_session_id.as_deref(),
+            None,
+        ).map_err(|_| SessionAbortOutcome::Rejected)?;
         command
             .with_endpoint_session_id(session_id)
             .map_err(|_| SessionAbortOutcome::Rejected)

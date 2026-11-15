@@ -87,7 +87,7 @@ pub(super) async fn dispatch(
             }))
         }
         "auth.login" | "auth.logout" => {
-            let _guard = sessions.agent_guard(&input.agent_id).await;
+            let _guard = sessions.agent_scope(&input.agent_id).await;
             let snapshot = config.snapshot().await;
             let provider = for_agent(&snapshot, &input.agent_id)?;
             if sessions.is_agent_active(&input.agent_id).await {

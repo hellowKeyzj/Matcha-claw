@@ -30,7 +30,7 @@ pub use domain::{
         RuntimeRepairPhase, RuntimeRepairSnapshot, RuntimeRepairTrigger,
     },
     driver::RuntimeDriver,
-    identity::RuntimeDriverIdentity,
+    identity::{RuntimeDriverIdentity, endpoint_from_reference, endpoint_reference},
     lifecycle::{LifecycleOps, OwnedRuntimeFuture, RuntimeLifecycleFailure, RuntimeStartFailure},
     surface::{RuntimeCapabilityFamily, RuntimeCapabilitySurface, RuntimeFamilyAvailability},
 };

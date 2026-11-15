@@ -205,10 +205,10 @@ export function createGenerations(context: AppPluginContext, documents: Document
     const capability = selected.capabilities;
     for (const request of requests) {
       if ((request.images?.length ?? 0) > capability.maxImages || (request.count ?? 1) > capability.maxCount) invalid('The selected model does not support this reference-image count or output count.');
-      if (request.size && !(capability.sizes?.includes(request.size) || (capability.pixelSize && capability.pixelSizeLimits && isAppPixelSizeSupported(request.size, capability.pixelSizeLimits)))) {
+      if (!capability.endpointValidatesOptions && request.size && !(capability.sizes?.includes(request.size) || (capability.pixelSize && capability.pixelSizeLimits && isAppPixelSizeSupported(request.size, capability.pixelSizeLimits)))) {
         throw new DesignError('unsupported_target_size', 'The selected provider cannot execute the requested output size. No paid generation request was submitted.');
       }
-      if (request.durationSeconds !== undefined && !capability.durationsSeconds?.includes(request.durationSeconds)) invalid('The selected video model does not support this duration.');
+      if (!capability.endpointValidatesOptions && request.durationSeconds !== undefined && !capability.durationsSeconds?.includes(request.durationSeconds)) invalid('The selected video model does not support this duration.');
     }
     return selected.selectionId;
   }

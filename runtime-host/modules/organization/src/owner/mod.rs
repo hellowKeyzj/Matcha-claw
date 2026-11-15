@@ -5,7 +5,9 @@ pub(crate) mod coordinator;
 pub(crate) mod handle;
 mod manual_team;
 mod member_introduction;
+mod native_operations;
 mod run_delete;
+mod recovery;
 mod role_session;
 pub(crate) mod query;
 mod receipt_router;
@@ -15,6 +17,8 @@ mod step_runtime;
 mod task_execution;
 mod supervisor;
 pub(crate) mod team_run;
+mod team_skill;
+mod team_delete;
 mod terminal_settlement;
 
 pub use admission::{OrganizationPhase, RequestAdmissionClosed};

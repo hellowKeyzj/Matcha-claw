@@ -1,12 +1,13 @@
 pub(crate) mod adapters;
-pub(crate) use operation::approval;
+pub(crate) mod cwd;
+pub(crate) use operation::{approval, request};
 pub mod assembler;
 pub(crate) mod event_router;
 pub mod events;
 pub mod facts;
 pub(crate) mod goal;
 pub(crate) mod ingest;
-pub(crate) mod image_tasks;
+pub(crate) mod media_tasks;
 pub mod operation;
 pub mod projection;
 pub mod protocol;

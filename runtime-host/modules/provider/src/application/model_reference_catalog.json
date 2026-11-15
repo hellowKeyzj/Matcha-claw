@@ -367,6 +367,438 @@
       "checkedAt": "2026-09-06"
     },
     {
+      "modelId": "gpt-4o-mini-tts",
+      "reasoning": null,
+      "capabilities": [
+        "tts"
+      ],
+      "source": "https://github.com/openai/openai-python/blob/main/src/openai/types/audio/speech_model.py",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gpt-4o-mini-transcribe",
+      "reasoning": null,
+      "capabilities": [
+        "transcribe"
+      ],
+      "source": "https://github.com/openai/openai-python/blob/main/src/openai/types/audio_model.py",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gpt-image-2",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://github.com/openai/openai-python/blob/main/src/openai/types/image_model.py",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gpt-image-2.5-sunburst",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://github.com/openai/openai-python/blob/main/src/openai/types/image_model.py",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gpt-image-2.6-sunburst",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gpt-image-2.6-flare",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gpt-image-2.5-flare",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gemini-3.1-flash-image-preview",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "seedream-5-5",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "seedream-5-0-pro",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "seedream-4.5",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "qwen-image-3",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "qwen-image-3-pro",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "flux.2-pro",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "flux.2-flex",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "grok-imagine-image-2.0",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "recraft-v4.1-pro",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/images/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gemini-omni-1.2-flash",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "veo-3.1-fast",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "veo-3.1-lite",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "veo-3.1",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "seedance-2.5",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "seedance-2.0",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "seedance-2.0-fast",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "seedance-2.0-mini",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "wan-3.0-prime",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "wan-3.0",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "wan-2.7",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "wan-2.6",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "happyhorse-1.1",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "happyhorse-1.0",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "kling-v3.0-pro",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "kling-v3.0-std",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "kling-video-o1",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "MiniMax-H3",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://platform.minimax.io/docs/api-reference/video-generation-v2-create",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "MiniMax-H3-Highspeed",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://platform.minimax.io/docs/api-reference/video-generation-v2-create",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "MiniMax-H3-Lite",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://platform.minimax.io/docs/api-reference/video-generation-v2-create",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "MiniMax-H3-Max",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://platform.minimax.io/docs/api-reference/video-generation-v2-create",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "hailuo-3-max",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "hailuo-3",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "hailuo-2.3",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "grok-imagine-video-1.5",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gen-4.5",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/videos/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "lyria-3-pro-preview",
+      "reasoning": null,
+      "capabilities": [
+        "musicGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "lyria-3-clip-preview",
+      "reasoning": null,
+      "capabilities": [
+        "musicGenerate"
+      ],
+      "source": "https://openrouter.ai/api/v1/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gpt-audio",
+      "reasoning": null,
+      "capabilities": [
+        "tts"
+      ],
+      "source": "https://openrouter.ai/api/v1/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gpt-audio-mini",
+      "reasoning": null,
+      "capabilities": [
+        "tts"
+      ],
+      "source": "https://openrouter.ai/api/v1/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "voxtral-small-24b-2507",
+      "reasoning": null,
+      "capabilities": [
+        "transcribe"
+      ],
+      "source": "https://openrouter.ai/api/v1/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
       "modelId": "gpt-5",
       "reasoning": true,
       "reasoningEfforts": {
@@ -1264,6 +1696,33 @@
       }
     },
     {
+      "modelId": "gemini-omni-1.1-flash",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://ai.google.dev/gemini-api/docs/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "gemini-3.8-flash-tts",
+      "reasoning": null,
+      "capabilities": [
+        "tts"
+      ],
+      "source": "https://ai.google.dev/gemini-api/docs/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "lyria-3.5",
+      "reasoning": null,
+      "capabilities": [
+        "musicGenerate"
+      ],
+      "source": "https://ai.google.dev/gemini-api/docs/models",
+      "checkedAt": "2026-11-15"
+    },
+    {
       "modelId": "gemini-4-argon",
       "reasoning": true,
       "reasoningEfforts": {
@@ -1513,6 +1972,60 @@
       "maxTokens": 8192,
       "source": "https://help.aliyun.com/en/model-studio/qwen-max",
       "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen-image-3.0",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "qwen-image-3.0-pro",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "wan2.6-image",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://help.aliyun.com/zh/model-studio/wan-image-generation-api-reference",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "wan2.7-t2v",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "wan2.6-i2v",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://help.aliyun.com/zh/model-studio/image-to-video-api-reference",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "qwen3-tts-flash",
+      "reasoning": null,
+      "capabilities": [
+        "tts"
+      ],
+      "source": "https://help.aliyun.com/zh/model-studio/qwen-tts-api",
+      "checkedAt": "2026-11-15"
     },
     {
       "modelId": "qwen3-coder-flash",
@@ -1853,6 +2366,105 @@
       "contextWindow": 1000000,
       "source": "https://platform.minimax.cn/docs/guides/text-generation",
       "checkedAt": "2026-11-03"
+    },
+    {
+      "modelId": "doubao-seedream-5-0-260128",
+      "reasoning": null,
+      "capabilities": [
+        "imageGenerate"
+      ],
+      "source": "https://www.volcengine.com/docs/82379/1541523",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "doubao-seedance-2-5-260628",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://www.volcengine.com/docs/82379/1520757",
+      "checkedAt": "2026-11-15"
+    },
+    {
+      "modelId": "doubao-seedance-2-5",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://docs.volcengine.com/docs/ark/model-list?lang=zh",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "doubao-seedance-2-0",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://docs.volcengine.com/docs/ark/model-list?lang=zh",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "doubao-seedance-2-0-fast",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://docs.volcengine.com/docs/ark/model-list?lang=zh",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "doubao-seedance-2-0-mini",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://docs.volcengine.com/docs/ark/model-list?lang=zh",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "doubao-seedance-2.5",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://www.volcengine.com/docs/82379/1099320",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "doubao-seedance-2.0",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://www.volcengine.com/docs/82379/1099320",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "doubao-seedance-2.0-fast",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://www.volcengine.com/docs/82379/1099320",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "doubao-seedance-2.0-mini",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://www.volcengine.com/docs/82379/1099320",
+      "checkedAt": "2026-11-16"
+    },
+    {
+      "modelId": "doubao-seedance-2-0-260128",
+      "reasoning": null,
+      "capabilities": [
+        "videoGenerate"
+      ],
+      "source": "https://www.volcengine.com/docs/82379/1520757",
+      "checkedAt": "2026-11-15"
     },
     {
       "modelId": "doubao-seed-2-1-pro-260915",

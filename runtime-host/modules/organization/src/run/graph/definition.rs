@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    num::NonZeroU32,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -335,127 +334,120 @@ impl DependencyMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum NodeConfiguration {
+    Start(Option<StartTrigger>),
+    Work(WorkAssignment),
+    Review(ReviewAssignment),
+    Join,
+    // Retains the original control encoding, including editable values rejected by validation.
+    Control(NodeKind),
+    HumanDecision(String),
+    ScriptReview(crate::ScriptReviewRule),
+}
+
+impl NodeConfiguration {
+    fn kind(&self) -> NodeKind {
+        match self {
+            Self::Start(_) => NodeKind::Start,
+            Self::Work(_) => NodeKind::Work,
+            Self::Review(_) => NodeKind::Review,
+            Self::Join => NodeKind::Join,
+            Self::Control(kind) => *kind,
+            Self::HumanDecision(_) => NodeKind::HumanDecision,
+            Self::ScriptReview(_) => NodeKind::ScriptReview,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeDefinition {
     id: NodeId,
-    kind: NodeKind,
     title: String,
-    max_attempts: NonZeroU32,
-    is_control: bool,
-    trigger: Option<StartTrigger>,
-    work: Option<WorkAssignment>,
-    review: Option<ReviewAssignment>,
-    script_review_rule: Option<crate::ScriptReviewRule>,
+    rework_limits: BTreeMap<String, u32>,
+    configuration: NodeConfiguration,
 }
 
 impl NodeDefinition {
+    fn new(id: NodeId, title: impl Into<String>, configuration: NodeConfiguration) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            rework_limits: default_rework_limits(configuration.kind()),
+            configuration,
+        }
+    }
+
     pub fn start(
         id: NodeId,
         title: impl Into<String>,
-        max_attempts: NonZeroU32,
         trigger: Option<StartTrigger>,
     ) -> Self {
-        Self {
-            id,
-            kind: NodeKind::Start,
-            title: title.into(),
-            max_attempts,
-            is_control: false,
-            trigger,
-            work: None,
-            review: None,
-            script_review_rule: None,
-        }
+        Self::new(id, title, NodeConfiguration::Start(trigger))
     }
 
     pub fn control(
         id: NodeId,
         kind: NodeKind,
         title: impl Into<String>,
-        max_attempts: NonZeroU32,
     ) -> Self {
-        Self {
-            id,
-            kind,
-            title: title.into(),
-            max_attempts,
-            is_control: true,
-            trigger: None,
-            work: None,
-            review: None,
-            script_review_rule: None,
+        Self::new(id, title, NodeConfiguration::Control(kind))
+    }
+
+    pub fn human_decision(
+        id: NodeId,
+        title: impl Into<String>,
+        prompt: Option<String>,
+    ) -> Self {
+        let configuration = match prompt.filter(|prompt| !prompt.trim().is_empty()) {
+            Some(prompt) => NodeConfiguration::HumanDecision(prompt),
+            None => NodeConfiguration::Control(NodeKind::HumanDecision),
+        };
+        Self::new(id, title, configuration)
+    }
+
+    pub fn approval_prompt(&self) -> Option<&str> {
+        match &self.configuration {
+            NodeConfiguration::HumanDecision(prompt) => Some(prompt),
+            _ => None,
         }
     }
 
     pub fn script_review(
         id: NodeId,
         title: impl Into<String>,
-        max_attempts: NonZeroU32,
         rule: crate::ScriptReviewRule,
     ) -> Self {
-        Self {
-            script_review_rule: Some(rule),
-            ..Self::control(id, NodeKind::ScriptReview, title, max_attempts)
-        }
+        Self::new(id, title, NodeConfiguration::ScriptReview(rule))
     }
 
     pub fn script_review_rule(&self) -> Option<crate::ScriptReviewRule> {
-        self.script_review_rule
+        match &self.configuration {
+            NodeConfiguration::ScriptReview(rule) => Some(*rule),
+            _ => None,
+        }
     }
 
     pub fn work(
         id: NodeId,
         title: impl Into<String>,
-        max_attempts: NonZeroU32,
         assignment: WorkAssignment,
     ) -> Self {
-        Self {
-            id,
-            kind: NodeKind::Work,
-            title: title.into(),
-            max_attempts,
-            is_control: false,
-            trigger: None,
-            work: Some(assignment),
-            review: None,
-            script_review_rule: None,
-        }
+        Self::new(id, title, NodeConfiguration::Work(assignment))
     }
 
     pub fn review(
         id: NodeId,
         title: impl Into<String>,
-        max_attempts: NonZeroU32,
         assignment: ReviewAssignment,
     ) -> Self {
-        Self {
-            id,
-            kind: NodeKind::Review,
-            title: title.into(),
-            max_attempts,
-            is_control: false,
-            trigger: None,
-            work: None,
-            review: Some(assignment),
-            script_review_rule: None,
-        }
+        Self::new(id, title, NodeConfiguration::Review(assignment))
     }
 
     pub fn join(
         id: NodeId,
         title: impl Into<String>,
-        max_attempts: NonZeroU32,
     ) -> Self {
-        Self {
-            id,
-            kind: NodeKind::Join,
-            title: title.into(),
-            max_attempts,
-            is_control: false,
-            trigger: None,
-            work: None,
-            review: None,
-            script_review_rule: None,
-        }
+        Self::new(id, title, NodeConfiguration::Join)
     }
 
     pub fn id(&self) -> &NodeId {
@@ -463,47 +455,93 @@ impl NodeDefinition {
     }
 
     pub fn kind(&self) -> NodeKind {
-        self.kind
+        self.configuration.kind()
     }
 
     pub fn title(&self) -> &str {
         &self.title
     }
 
-    pub fn max_attempts(&self) -> NonZeroU32 {
-        self.max_attempts
+    pub fn rework_limits(&self) -> &BTreeMap<String, u32> {
+        &self.rework_limits
+    }
+
+    pub fn rework_limit(&self, port: &str) -> Option<u32> {
+        self.rework_limits.get(port).copied()
+    }
+
+    pub fn with_rework_limits(mut self, limits: BTreeMap<String, u32>) -> Self {
+        self.rework_limits.extend(limits);
+        self
+    }
+
+    pub(super) fn set_rework_limit(&mut self, port: String, max_reworks: u32) {
+        self.rework_limits.insert(port, max_reworks);
     }
 
     pub fn is_control(&self) -> bool {
-        self.is_control
+        matches!(self.configuration, NodeConfiguration::Control(_) | NodeConfiguration::HumanDecision(_) | NodeConfiguration::ScriptReview(_))
     }
 
     pub fn trigger(&self) -> Option<&StartTrigger> {
-        self.trigger.as_ref()
+        match &self.configuration {
+            NodeConfiguration::Start(trigger) => trigger.as_ref(),
+            _ => None,
+        }
     }
 
     pub fn work_assignment(&self) -> Option<&WorkAssignment> {
-        self.work.as_ref()
+        match &self.configuration {
+            NodeConfiguration::Work(work) => Some(work),
+            _ => None,
+        }
     }
 
     pub fn review_assignment(&self) -> Option<&ReviewAssignment> {
-        self.review.as_ref()
+        match &self.configuration {
+            NodeConfiguration::Review(review) => Some(review),
+            _ => None,
+        }
     }
 
     pub(crate) fn set_agent_prompt(&mut self, prompt: String) -> bool {
-        if let Some(work) = &mut self.work {
-            work.prompt = prompt;
-        } else if let Some(review) = &mut self.review {
-            review.prompt = prompt;
-        } else {
-            return false;
+        match &mut self.configuration {
+            NodeConfiguration::Work(work) => work.prompt = prompt,
+            NodeConfiguration::Review(review) => review.prompt = prompt,
+            _ => return false,
         }
         true
     }
 
     pub(crate) fn is_armed_start(&self) -> bool {
-        self.kind == NodeKind::Start && self.trigger.is_some()
+        matches!(self.configuration, NodeConfiguration::Start(Some(_)))
     }
+
+    pub(super) fn validate_assignment(&self) -> Result<(), DefinitionError> {
+        match &self.configuration {
+            NodeConfiguration::Work(work)
+                if work.task_id.trim().is_empty() || work.role_id().trim().is_empty() =>
+            {
+                Err(DefinitionError::InvalidWorkAssignment(self.id.clone()))
+            }
+            NodeConfiguration::Control(NodeKind::Work) => {
+                Err(DefinitionError::InvalidWorkAssignment(self.id.clone()))
+            }
+            NodeConfiguration::Review(review)
+                if review.role_id().trim().is_empty() || review.prompt.trim().is_empty() =>
+            {
+                Err(DefinitionError::InvalidReviewAssignment(self.id.clone()))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+fn default_rework_limits(kind: NodeKind) -> BTreeMap<String, u32> {
+    kind.source_ports().iter().map(|port| port.as_str())
+        .filter(|port| kind.accepts_edge_action(port, EdgeAction::Rework))
+        .map(|port| (port.to_owned(), 3))
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -706,15 +744,45 @@ impl GraphDefinition {
 
     pub fn validate_node_configuration(&self) -> Result<(), DefinitionError> {
         for node in &self.nodes {
-            if node.kind() == NodeKind::Review && node.review_assignment().is_none() {
-                return Err(DefinitionError::InvalidReviewAssignment(node.id().clone()));
+            match &node.configuration {
+                NodeConfiguration::Control(NodeKind::Review) => {
+                    return Err(DefinitionError::InvalidReviewAssignment(node.id().clone()));
+                }
+                NodeConfiguration::Control(NodeKind::ScriptReview) => {
+                    return Err(DefinitionError::MissingScriptReviewRule(node.id().clone()));
+                }
+                NodeConfiguration::Start(Some(StartTrigger::Cron { expression })) => {
+                    crate::run::scheduler::validate_cron_expression(expression)
+                        .map_err(|_| DefinitionError::InvalidStartCronExpression(node.id().clone()))?;
+                }
+                _ => {}
             }
-            if node.kind() == NodeKind::ScriptReview && node.script_review_rule().is_none() {
-                return Err(DefinitionError::MissingScriptReviewRule(node.id().clone()));
-            }
-            if let Some(StartTrigger::Cron { expression }) = node.trigger() {
-                crate::run::scheduler::validate_cron_expression(expression)
-                    .map_err(|_| DefinitionError::InvalidStartCronExpression(node.id().clone()))?;
+        }
+        self.validate_trigger_batches()?;
+        Ok(())
+    }
+
+    fn validate_trigger_batches(&self) -> Result<(), DefinitionError> {
+        let mut sources = self.nodes.iter().map(|node| (node.id().clone(), BTreeSet::<NodeId>::new()))
+            .collect::<BTreeMap<_, _>>();
+        let roots = self.execution_root_ids();
+        let initial_source = roots.iter().find(|id| self.node(id).is_some_and(|node| !node.is_armed_start()));
+        for root in &roots {
+            let source = if self.node(root).is_some_and(|node| node.is_armed_start()) {
+                root
+            } else {
+                initial_source.expect("ordinary root has initial source")
+            };
+            let mut reachable = self.reachable_from(root);
+            reachable.insert(root.clone());
+            for id in reachable { sources.get_mut(&id).expect("reachable node exists").insert(source.clone()); }
+        }
+        for node in &self.nodes {
+            let mut inputs = self.incoming_edges(node.id()).filter(|edge| edge.action() == EdgeAction::Gate);
+            let Some(first) = inputs.next() else { continue };
+            let common = &sources[first.source_node_id()];
+            if common.is_empty() || inputs.any(|edge| &sources[edge.source_node_id()] != common) {
+                return Err(DefinitionError::IncompatibleTriggerBatches { node_id: node.id().clone() });
             }
         }
         Ok(())
@@ -807,6 +875,13 @@ impl GraphDefinition {
         let mut nodes = BTreeMap::new();
         let mut task_ids = BTreeSet::new();
         for node in &self.nodes {
+            if let Some(port) = node.rework_limits().keys()
+                .find(|port| !node.kind().accepts_edge_action(port, EdgeAction::Rework))
+            {
+                return Err(DefinitionError::InvalidReworkPort {
+                    node_id: node.id().clone(), source_port: port.clone(),
+                });
+            }
             if node.id.as_str().trim().is_empty() {
                 return Err(DefinitionError::EmptyNodeId);
             }
@@ -816,44 +891,13 @@ impl GraphDefinition {
             if node.title.trim().is_empty() {
                 return Err(DefinitionError::EmptyNodeTitle(node.id.clone()));
             }
-            match (node.kind, &node.work, &node.review) {
-                (NodeKind::Work, Some(work), None)
-                    if !work.task_id.trim().is_empty() && !work.role_id().trim().is_empty() =>
-                {
-                    if !task_ids.insert(work.task_id.clone()) {
-                        return Err(DefinitionError::DuplicateWorkTaskId(work.task_id.clone()));
-                    }
+            node.validate_assignment()?;
+            if let Some(work) = node.work_assignment() {
+                if !task_ids.insert(work.task_id.clone()) {
+                    return Err(DefinitionError::DuplicateWorkTaskId(work.task_id.clone()));
                 }
-                (NodeKind::Work, _, _) => {
-                    return Err(DefinitionError::InvalidWorkAssignment(node.id.clone()));
-                }
-                (NodeKind::Review, None, None) => {}
-                (NodeKind::Review, None, Some(review))
-                    if !review.role_id().trim().is_empty() && !review.prompt.trim().is_empty() => {}
-                (NodeKind::Review, None, Some(_)) => {
-                    return Err(DefinitionError::InvalidReviewAssignment(node.id.clone()));
-                }
-                (NodeKind::Review, Some(_), _) => {
-                    return Err(DefinitionError::WorkAssignmentOnControlNode(
-                        node.id.clone(),
-                    ));
-                }
-                (_, Some(_), _) => {
-                    return Err(DefinitionError::WorkAssignmentOnControlNode(
-                        node.id.clone(),
-                    ));
-                }
-                (_, _, Some(_)) => {
-                    return Err(DefinitionError::ReviewAssignmentOnControlNode(
-                        node.id.clone(),
-                    ));
-                }
-                _ => {}
             }
-            if node.kind != NodeKind::Start && node.trigger.is_some() {
-                return Err(DefinitionError::TriggerOnNonStartNode(node.id.clone()));
-            }
-            if let Some(trigger) = &node.trigger {
+            if let Some(trigger) = node.trigger() {
                 let value = match trigger {
                     StartTrigger::Webhook { path } => path,
                     StartTrigger::Cron { expression } => expression,
@@ -1010,8 +1054,10 @@ pub enum DefinitionError {
         node_id: NodeId,
     },
     InvalidEdgeAction(EdgeId),
+    InvalidReworkPort { node_id: NodeId, source_port: String },
     AmbiguousEdgeAction(EdgeId),
     NoExecutionRoot,
     UnreachableNode(NodeId),
     ActivationCycle(NodeId),
+    IncompatibleTriggerBatches { node_id: NodeId },
 }

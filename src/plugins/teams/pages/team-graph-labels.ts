@@ -1,14 +1,12 @@
+import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TeamRunGraphCanvasLabels } from '@/plugins/teams/pages/TeamRunGraphCanvas';
 
 export function useTeamGraphLabels(): TeamRunGraphCanvasLabels {
   const { t } = useTranslation('teams');
-  return {
+  return useMemo(() => ({
     cancelNode: t('run.graphCanvas.cancelNode'),
     closeNode: t('run.graphCanvas.closeNode'),
-    nodeTechnicalDetails: t('run.graphCanvas.nodeTechnicalDetails'),
-    executionSettings: t('run.graphCanvas.executionSettings'),
-    executionLimitSummary: t('run.graphCanvas.executionLimitSummary'),
     workMember: t('run.graphCanvas.workMember'),
     reviewMember: t('run.graphCanvas.reviewMember'),
     nodeKindLabels: {
@@ -29,19 +27,18 @@ export function useTeamGraphLabels(): TeamRunGraphCanvasLabels {
       assert_no_blocking_gate: t('run.graphCanvas.scriptReviewRuleDescriptions.noBlockingGate'),
       assert_artifact_exists: t('run.graphCanvas.scriptReviewRuleDescriptions.artifactExists'),
     },
-    humanDecisionHint: t('run.graphCanvas.humanDecisionHint'),
     nodeIncomingConnections: t('run.graphCanvas.nodeIncomingConnections'),
     nodeOutgoingConnections: t('run.graphCanvas.nodeOutgoingConnections'),
     nodeNoConnections: t('run.graphCanvas.nodeNoConnections'),
     nodeDetails: t('run.graphCanvas.nodeDetails'),
     nodeDetailsDescription: t('run.graphCanvas.nodeDetailsDescription'),
-    task: t('run.graphCanvas.task'),
     zoomIn: t('run.graphCanvas.zoomIn'),
     zoomOut: t('run.graphCanvas.zoomOut'),
     fitToView: t('run.graphCanvas.fitToView'),
     autoLayout: t('run.graphCanvas.autoLayout'),
-    layoutPending: t('run.graphCanvas.layoutPending'),
     layoutFailed: t('run.graphCanvas.layoutFailed'),
+    layoutSaveFailed: t('run.graphCanvas.layoutSaveFailed'),
+    retryLayoutSave: t('run.graphCanvas.retryLayoutSave'),
     workflowCanvas: t('run.graphCanvas.workflowCanvas'),
     workflowEdges: t('run.graphCanvas.workflowEdges'),
     nodePalette: t('run.graphCanvas.nodePalette'),
@@ -107,9 +104,10 @@ export function useTeamGraphLabels(): TeamRunGraphCanvasLabels {
     edgeFallback: t('run.graphCanvas.edgeFallback'),
     canvasMinimap: t('run.graphCanvas.canvasMinimap'),
     nodeTitle: t('run.graphCanvas.nodeTitle'),
-    nodeMaxAttempts: t('run.graphCanvas.nodeMaxAttempts'),
-    nodeMaxAttemptsHint: t('run.graphCanvas.nodeMaxAttemptsHint'),
-    nodeMaxAttemptsInvalid: t('run.graphCanvas.nodeMaxAttemptsInvalid'),
+    reworkLimit: t('run.graphCanvas.reworkLimit'),
+    reworkLimitHint: t('run.graphCanvas.reworkLimitHint'),
+    reworkLimitInvalid: t('run.graphCanvas.reworkLimitInvalid'),
+    reworkUsage: t('run.graphCanvas.reworkUsage'),
     reworkLimitExceeded: t('run.graphCanvas.reworkLimitExceeded'),
     roleId: t('run.graphCanvas.roleId'),
     sessionRef: t('run.graphCanvas.sessionRef'),
@@ -140,7 +138,6 @@ export function useTeamGraphLabels(): TeamRunGraphCanvasLabels {
     joinConfigurationHint: t('run.graphCanvas.joinConfigurationHint'),
     endConfigurationHint: t('run.graphCanvas.endConfigurationHint'),
     saveGraphUnavailable: t('run.graphCanvas.saveGraphUnavailable'),
-    connectionDraft: t('run.graphCanvas.connectionDraft'),
     runStatusLabel: t('run.graphCanvas.runStatusLabel'),
     graphStatusLabel: t('run.graphCanvas.graphStatusLabel'),
     statusValues: {
@@ -217,5 +214,5 @@ export function useTeamGraphLabels(): TeamRunGraphCanvasLabels {
       join: t('run.graphCanvas.nodePaletteDescriptions.join'),
       end: t('run.graphCanvas.nodePaletteDescriptions.end'),
     },
-  };
+  }), [t]);
 }

@@ -46,8 +46,9 @@ import type {
   StreamEvent,
   SystemCompactBoundaryMessage,
 } from './types/message.js'
-import type { OrphanedPermission } from './types/textInputTypes.js'
+import type { OrphanedPermission, QueuedCommand } from './types/textInputTypes.js'
 import { createAbortController } from './utils/abortController.js'
+import { currentRequestMessageId } from './utils/requestExecution.js'
 import { currentInvestigation } from './world/investigation.js'
 import type { AttributionState } from './utils/commitAttribution.js'
 import { getGlobalConfig } from './utils/config.js'
@@ -69,6 +70,8 @@ import { registerStructuredOutputEnforcement } from './utils/hooks/hookHelpers.j
 import { getInMemoryErrors } from './utils/log.js'
 import {
   countToolCalls,
+  INTERRUPT_MESSAGE,
+  INTERRUPT_MESSAGE_FOR_TOOL_USE,
   SYNTHETIC_MESSAGES,
   SYNTHETIC_MODEL,
 } from './utils/messages.js'
@@ -164,6 +167,7 @@ export type QueryEngineConfig = {
   fallbackModel?: string
   thinkingConfig?: ThinkingConfig
   maxTurns?: number
+  onTurn?: (turnCount: number) => void
   maxBudgetUsd?: number
   taskBudget?: { total: number }
   jsonSchema?: Record<string, unknown>
@@ -228,7 +232,11 @@ export class QueryEngine {
 
   async *submitMessage(
     prompt: string | ContentBlockParam[],
-    options?: { uuid?: string; isMeta?: boolean },
+    options?: {
+      uuid?: string
+      isMeta?: boolean
+      taskNotification?: QueuedCommand['taskNotification']
+    },
   ): AsyncGenerator<SDKMessage, void, unknown> {
     const {
       cwd,
@@ -239,6 +247,7 @@ export class QueryEngine {
       verbose = false,
       thinkingConfig,
       maxTurns,
+      onTurn,
       maxBudgetUsd,
       taskBudget,
       canUseTool,
@@ -262,8 +271,20 @@ export class QueryEngine {
     setCwd(cwd)
     const persistSession = !isSessionPersistenceDisabled()
     const startTime = Date.now()
+    const initialApiDuration = getTotalAPIDuration()
     const nativeStartedAt = performance.now()
     const inputMessageId = options?.uuid ?? randomUUID()
+    const requestMessageId = currentRequestMessageId()
+    const inputSource = options?.taskNotification
+      ? {
+          request_message_id: options.taskNotification.requestMessageId,
+          source_task_id: options.taskNotification.taskId,
+          source_tool_use_id: options.taskNotification.toolUseId,
+        }
+      : { request_message_id: requestMessageId }
+    const apiDuration = () => requestMessageId
+      ? Math.max(0, getTotalAPIDuration() - initialApiDuration)
+      : getTotalAPIDuration()
     const tracing = process.env.MATCHACLAW_TRACE === '1'
     const traceInputHash = tracing ? debugIdentifierHash(inputMessageId) : undefined
     let tracedFirstStreamEvent = false
@@ -291,6 +312,7 @@ export class QueryEngine {
     let nativePending = false
     const nativeResult = (complete = false) => ({
       input_message_id: inputMessageId,
+      request_message_id: requestMessageId,
       native_measurement: {
         scope: 'native_query' as const,
         coverage: 'foreground_query_responses' as const,
@@ -589,16 +611,32 @@ export class QueryEngine {
     const replayableMessages = messagesFromUserInput.filter(
       msg =>
         (msg.type === 'user' &&
-          !msg.isMeta && // Skip synthetic caveat messages
-          !msg.toolUseResult && // Skip tool results (they'll be acked from query)
-          (_selector?.selectableUserMessagesFilter(msg) ?? true)) || // Skip non-user-authored messages (task notifications, etc.)
+          ((msg.uuid === inputMessageId && (requestMessageId || options?.taskNotification)) ||
+            (!msg.isMeta && // Skip synthetic caveat messages
+              !msg.toolUseResult && // Skip tool results (they'll be acked from query)
+              (_selector?.selectableUserMessagesFilter(msg) ?? true)))) ||
         (msg.type === 'system' && msg.subtype === 'compact_boundary'), // Always ack compact boundaries
     )
-    const messagesToAck = replayUserMessages ? replayableMessages : []
+    const messagesToAck = replayUserMessages
+      ? replayableMessages
+      : replayableMessages.filter(msg => msg.type === 'user' && msg.uuid === inputMessageId && requestMessageId)
     let hasAcknowledgedInitialMessages = false
     function* acknowledgeInitialMessages(): Generator<SDKUserMessageReplay> {
-      if (hasAcknowledgedInitialMessages || messagesToAck.length === 0) return
+      if (hasAcknowledgedInitialMessages) return
       hasAcknowledgedInitialMessages = true
+      // Local slash commands may replace the input with synthetic output.
+      // A managed request must still acknowledge its actual invocation UUID.
+      if (requestMessageId && !messagesToAck.some(msg => msg.type === 'user' && msg.uuid === inputMessageId)) {
+        yield {
+          type: 'user',
+          ...inputSource,
+          message: { role: 'user', content: prompt },
+          session_id: getSessionId(),
+          parent_tool_use_id: null,
+          uuid: inputMessageId,
+          isReplay: true,
+        } as unknown as SDKUserMessageReplay
+      }
       for (const msgToAck of messagesToAck) {
         if (msgToAck.type === 'user') {
           traceSessionTiming('query.input.ack', () => ({
@@ -608,6 +646,7 @@ export class QueryEngine {
           }))
           yield {
             type: 'user',
+            ...(msgToAck.uuid === inputMessageId ? inputSource : {}),
             message: msgToAck.message,
             session_id: getSessionId(),
             parent_tool_use_id: null,
@@ -773,7 +812,7 @@ export class QueryEngine {
         subtype: 'success',
         is_error: false,
         duration_ms: Date.now() - startTime,
-        duration_api_ms: getTotalAPIDuration(),
+        duration_api_ms: apiDuration(),
         num_turns: messages.length - 1,
         result: resultText ?? '',
         stop_reason: null,
@@ -910,6 +949,7 @@ export class QueryEngine {
       fallbackModel,
       querySource: 'sdk',
       maxTurns,
+      onTurn,
       taskBudget,
     })
     async function* withUsageSettlement() {
@@ -1045,7 +1085,16 @@ export class QueryEngine {
         case 'user': {
           const msg = message as Message
           this.mutableMessages.push(msg)
-          yield* normalizeMessage(msg)
+          const content = msg.message?.content
+          const isInterruption = (text: unknown) =>
+            text === INTERRUPT_MESSAGE || text === INTERRUPT_MESSAGE_FOR_TOOL_USE
+          const interrupted = this.abortController.signal.aborted &&
+            (isInterruption(content) || (Array.isArray(content) && content.some(
+              block => block.type === 'text' && isInterruption(block.text),
+            )))
+          for (const normalized of normalizeMessage(msg)) {
+            yield interrupted ? { ...normalized, request_message_id: requestMessageId } : normalized
+          }
           break
         }
         case 'stream_event': {
@@ -1175,6 +1224,7 @@ export class QueryEngine {
             maxTurns?: number
             prompt?: string
             source_uuid?: string
+            taskNotification?: QueuedCommand['taskNotification']
             [key: string]: unknown
           }
 
@@ -1201,7 +1251,7 @@ export class QueryEngine {
               ...nativeResult(),
               subtype: 'error_max_turns',
               duration_ms: Date.now() - startTime,
-              duration_api_ms: getTotalAPIDuration(),
+              duration_api_ms: apiDuration(),
               is_error: true,
               num_turns: attachment.turnCount as number,
               stop_reason: lastStopReason,
@@ -1222,9 +1272,16 @@ export class QueryEngine {
             return
           }
           // Yield queued_command attachments as SDK user message replays
-          else if (replayUserMessages && attachment.type === 'queued_command') {
+          else if (
+            attachment.type === 'queued_command' &&
+            (replayUserMessages || attachment.taskNotification?.requestMessageId)
+          ) {
+            const notification = attachment.taskNotification
             yield {
               type: 'user',
+              request_message_id: notification?.requestMessageId,
+              source_task_id: notification?.taskId,
+              source_tool_use_id: notification?.toolUseId,
               message: {
                 role: 'user' as const,
                 content: attachment.prompt,
@@ -1344,7 +1401,7 @@ export class QueryEngine {
           ...nativeResult(),
           subtype: 'error_max_budget_usd',
           duration_ms: Date.now() - startTime,
-          duration_api_ms: getTotalAPIDuration(),
+          duration_api_ms: apiDuration(),
           is_error: true,
           num_turns: turnCount,
           stop_reason: lastStopReason,
@@ -1394,7 +1451,7 @@ export class QueryEngine {
             ...nativeResult(),
             subtype: 'error_max_structured_output_retries',
             duration_ms: Date.now() - startTime,
-            duration_api_ms: getTotalAPIDuration(),
+            duration_api_ms: apiDuration(),
             is_error: true,
             num_turns: turnCount,
             stop_reason: lastStopReason,
@@ -1472,7 +1529,7 @@ export class QueryEngine {
         ...nativeResult(),
         subtype: 'error_during_execution',
         duration_ms: Date.now() - startTime,
-        duration_api_ms: getTotalAPIDuration(),
+        duration_api_ms: apiDuration(),
         is_error: true,
         num_turns: turnCount,
         stop_reason: lastStopReason,
@@ -1533,7 +1590,7 @@ export class QueryEngine {
       subtype: 'success',
       is_error: isApiError,
       duration_ms: Date.now() - startTime,
-      duration_api_ms: getTotalAPIDuration(),
+      duration_api_ms: apiDuration(),
       num_turns: turnCount,
       result: textResult,
       stop_reason: lastStopReason,
@@ -1595,6 +1652,7 @@ export async function* ask({
   prompt,
   promptUuid,
   isMeta,
+  taskNotification,
   cwd,
   tools,
   refreshTools,
@@ -1602,6 +1660,7 @@ export async function* ask({
   verbose = false,
   thinkingConfig,
   maxTurns,
+  onTurn,
   maxBudgetUsd,
   taskBudget,
   canUseTool,
@@ -1627,6 +1686,7 @@ export async function* ask({
   prompt: string | Array<ContentBlockParam>
   promptUuid?: string
   isMeta?: boolean
+  taskNotification?: QueuedCommand['taskNotification']
   cwd: string
   tools: Tools
   refreshTools?: () => Tools
@@ -1634,6 +1694,7 @@ export async function* ask({
   mcpClients: MCPServerConnection[]
   thinkingConfig?: ThinkingConfig
   maxTurns?: number
+  onTurn?: (turnCount: number) => void
   maxBudgetUsd?: number
   taskBudget?: { total: number }
   canUseTool: CanUseToolFn
@@ -1673,6 +1734,7 @@ export async function* ask({
     fallbackModel,
     thinkingConfig,
     maxTurns,
+    onTurn,
     maxBudgetUsd,
     taskBudget,
     jsonSchema,
@@ -1698,6 +1760,7 @@ export async function* ask({
     yield* engine.submitMessage(prompt, {
       uuid: promptUuid,
       isMeta,
+      taskNotification,
     })
   } finally {
     setReadFileCache(engine.getReadFileState())

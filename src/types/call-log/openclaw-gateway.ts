@@ -1,4 +1,4 @@
-export type GatewayOperation = 'browser.request' | 'mcp.app.request' | 'question.resolve';
+export type GatewayOperation = 'browser.request' | 'mcp.app.request' | 'question.resolve' | 'video.task.refresh';
 
 export interface GatewayCallDetail {
   runtime: 'openclaw';
@@ -16,6 +16,6 @@ export function decodeGatewayCallDetail(value: unknown): GatewayCallDetail | und
   const detail = value as Record<string, unknown>;
   if (Object.keys(detail).length !== 2 || detail.runtime !== 'openclaw'
     || (detail.operation !== 'browser.request' && detail.operation !== 'mcp.app.request'
-      && detail.operation !== 'question.resolve')) return undefined;
+      && detail.operation !== 'question.resolve' && detail.operation !== 'video.task.refresh')) return undefined;
   return { runtime: detail.runtime, operation: detail.operation };
 }

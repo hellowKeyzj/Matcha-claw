@@ -1,4 +1,5 @@
 import { validateRuntimeEndpointRef, validateSessionIdentity, runtimeEndpointsEqual, type RuntimeEndpointRef, type SessionIdentity } from './desktop/runtime-address';
+import { isRunWorkspaceProjection, type RunWorkspaceProjection } from './team-workspace';
 
 export interface TeamRoleBindingRecord {
   teamId?: string;
@@ -35,7 +36,7 @@ export interface TeamGraphNodeRecord {
   sourcePorts?: string[];
   targetPorts?: string[];
   sourcePortActions: Record<string, TeamGraphEdgeAction[]>;
-  maxAttempts?: number;
+  reworkLimits: Record<string, number>;
   createdAt?: number;
   completedAt?: number;
   artifactId?: string;
@@ -77,6 +78,26 @@ export interface TeamGraphLayoutRecord {
   nodePositions?: Record<string, TeamGraphNodePositionRecord>;
 }
 
+export interface TeamGraphReworkCounter {
+  batchId: number;
+  sourceNodeId: string;
+  sourcePort: string;
+  used: number;
+}
+
+export interface TeamGraphReworkBlocked extends TeamGraphReworkCounter {
+  sourceNodeExecutionId: string;
+  maxReworks: number;
+  blockedAt: number;
+  scopeNodeIds: string[];
+  edgeIds: string[];
+}
+
+export interface TeamGraphReworkProjection {
+  counters: TeamGraphReworkCounter[];
+  blocked: TeamGraphReworkBlocked[];
+}
+
 export interface TeamGraphSnapshotRecord {
   runId?: string;
   graphId?: string;
@@ -85,6 +106,7 @@ export interface TeamGraphSnapshotRecord {
   layout?: TeamGraphLayoutRecord;
   nodes: TeamGraphNodeRecord[];
   edges: TeamGraphEdgeRecord[];
+  rework: TeamGraphReworkProjection;
   status: string;
   updatedAt?: number;
   metadata?: Record<string, unknown>;
@@ -102,15 +124,34 @@ export type TeamGraphPatchOperation =
   | { op: 'add_edge' | 'replace_edge'; edge: Record<string, unknown> }
   | { op: 'remove_edge'; edgeId: string }
   | { op: 'set_node_position'; nodeId: string; position: TeamGraphNodePositionRecord }
+  | { op: 'set_rework_limit'; nodeId: string; sourcePort: string; maxReworks: number }
   | { op: 'set_metadata'; metadata: Record<string, unknown> };
+
+export interface TeamGraphEditBase {
+  node?: Pick<TeamGraphNodeRecord, 'nodeId' | 'kind' | 'title' | 'roleId' | 'taskId' | 'reworkLimits' | 'config'>;
+  edge?: Pick<TeamGraphEdgeRecord, 'edgeId' | 'sourceNodeId' | 'targetNodeId' | 'sourcePort' | 'targetPort' | 'action' | 'payload' | 'dependency'>;
+  reworkLimit?: { nodeId: string; sourcePort: string; maxReworks: number | undefined };
+}
 
 export interface TeamDesignTarget {
   teamId: string;
   runId: string;
 }
 
+export interface TeamRunReworkContinueInput extends TeamDesignTarget {
+  nodeId: string;
+  sourcePort: string;
+  batchId: number;
+  sourceNodeExecutionId: string;
+  maxReworks: number;
+  expectedGraphVersion: string;
+  commandId: string;
+  idempotencyKey: string;
+}
+
 export interface TeamDesignSnapshot extends TeamDesignTarget {
   success: true;
+  workspace: RunWorkspaceProjection;
   startGate: TeamRunStartGateProjection;
   graphVersion: string;
   designEpoch: string | null;
@@ -119,10 +160,15 @@ export interface TeamDesignSnapshot extends TeamDesignTarget {
   runtimeError: TeamDesignFailure | null;
 }
 
+export type TeamLayoutSave =
+  | { status: 'saving'; positions: Record<string, TeamGraphNodePositionRecord> }
+  | { status: 'failed'; positions: Record<string, TeamGraphNodePositionRecord>; error: string };
+
 export interface TeamDesignRecord {
   snapshot: TeamDesignSnapshot | null;
   loading: boolean;
   mutationPending: boolean;
+  layoutSave?: TeamLayoutSave;
   error: string | null;
 }
 
@@ -143,8 +189,9 @@ export function isTeamDesignFailure(value: unknown): value is TeamDesignFailure 
 
 export function decodeTeamDesignSnapshot(value: unknown, target: TeamDesignTarget): TeamDesignSnapshot {
   if (isTeamDesignFailure(value)) throw new Error(value.error, { cause: value });
-  if (!isRecord(value) || !exactKeys(value, ['success', 'teamId', 'runId', 'startGate', 'graphVersion', 'designEpoch', 'graph', 'roles', 'runtimeError'])
+  if (!isRecord(value) || !exactKeys(value, ['success', 'teamId', 'runId', 'workspace', 'startGate', 'graphVersion', 'designEpoch', 'graph', 'roles', 'runtimeError'])
     || value.success !== true || value.teamId !== target.teamId || value.runId !== target.runId
+    || !isRunWorkspaceProjection(value.workspace)
     || !isTeamGraphVersion(value.graphVersion) || !(value.designEpoch === null || isText(value.designEpoch))
     || !isStartGate(value.startGate, value.designEpoch, value.graphVersion)
     || !isGraph(value.graph, target.runId) || !Array.isArray(value.roles)
@@ -188,26 +235,29 @@ export function isTeamDesignPatchOperation(value: unknown): value is TeamGraphPa
     case 'replace_edge': return exactKeys(value, ['op', 'edge']) && isRecord(value.edge);
     case 'remove_edge': return exactKeys(value, ['op', 'edgeId']) && isText(value.edgeId);
     case 'set_node_position': return exactKeys(value, ['op', 'nodeId', 'position']) && isText(value.nodeId) && isPosition(value.position);
+    case 'set_rework_limit': return exactKeys(value, ['op', 'nodeId', 'sourcePort', 'maxReworks'])
+      && isText(value.nodeId) && isText(value.sourcePort) && isTeamReworkLimit(value.maxReworks);
     case 'set_metadata': return exactKeys(value, ['op', 'metadata']) && isRecord(value.metadata);
     default: return false;
   }
 }
 
 function isGraph(value: unknown, runId: string): boolean {
-  return isRecord(value) && exactKeys(value, ['runId', 'graphId', 'workflowPlanId', 'title', 'layout', 'nodes', 'edges', 'status'])
+  return isRecord(value) && exactKeys(value, ['runId', 'graphId', 'workflowPlanId', 'title', 'layout', 'nodes', 'edges', 'rework', 'status'])
     && value.runId === runId && isText(value.graphId) && (value.workflowPlanId === null || isText(value.workflowPlanId))
     && typeof value.title === 'string' && typeof value.status === 'string'
     && Array.isArray(value.nodes) && value.nodes.every(isNode)
-    && Array.isArray(value.edges) && value.edges.every(isEdge) && isLayout(value.layout);
+    && Array.isArray(value.edges) && value.edges.every(isEdge) && isLayout(value.layout)
+    && isTeamGraphReworkProjection(value.rework);
 }
 
 function isNode(value: unknown): boolean {
-  return isRecord(value) && exactKeys(value, ['nodeId', 'kind', 'title', 'roleId', 'taskId', 'maxAttempts', 'status', 'statusReason', 'config', 'sourcePorts', 'targetPorts', 'sourcePortActions'])
+  return isRecord(value) && exactKeys(value, ['nodeId', 'kind', 'title', 'roleId', 'taskId', 'reworkLimits', 'status', 'statusReason', 'config', 'sourcePorts', 'targetPorts', 'sourcePortActions'])
     && isTeamGraphSourcePortActions(value.sourcePortActions, value.sourcePorts)
+    && isTeamGraphReworkLimits(value.reworkLimits, value.sourcePortActions)
     && Array.isArray(value.targetPorts) && value.targetPorts.every(isText)
     && isText(value.nodeId) && ['start', 'work', 'review', 'human_decision', 'script_review', 'join', 'end'].includes(String(value.kind))
     && typeof value.title === 'string' && nullableText(value.roleId) && nullableText(value.taskId)
-    && typeof value.maxAttempts === 'number' && Number.isSafeInteger(value.maxAttempts) && value.maxAttempts > 0
     && typeof value.status === 'string' && nullableText(value.statusReason) && isNodeConfig(value.config);
 }
 
@@ -232,6 +282,30 @@ export function isTeamGraphSourcePortActions(value: unknown, sourcePorts: unknow
     && Object.values(value).every((actions) => Array.isArray(actions) && actions.length > 0 && actions.every(isEdgeAction));
 }
 
+export function isTeamReworkLimit(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff;
+}
+
+export function isTeamGraphReworkLimits(value: unknown, sourcePortActions: TeamGraphNodeRecord['sourcePortActions']): value is Record<string, number> {
+  return isRecord(value) && exactKeys(value, Object.keys(sourcePortActions).filter((port) => sourcePortActions[port].includes('rework')))
+    && Object.values(value).every(isTeamReworkLimit);
+}
+
+export function isTeamGraphReworkProjection(value: unknown): value is TeamGraphReworkProjection {
+  if (!isRecord(value) || !exactKeys(value, ['counters', 'blocked'])) return false;
+  const isCounter = (counter: Record<string, unknown>): boolean => typeof counter.batchId === 'number'
+    && Number.isSafeInteger(counter.batchId) && counter.batchId > 0
+    && isText(counter.sourceNodeId) && isText(counter.sourcePort) && isTeamReworkLimit(counter.used);
+  return Array.isArray(value.counters) && value.counters.every((counter) => isRecord(counter)
+    && exactKeys(counter, ['batchId', 'sourceNodeId', 'sourcePort', 'used']) && isCounter(counter))
+    && Array.isArray(value.blocked) && value.blocked.every((blocked) => isRecord(blocked)
+      && exactKeys(blocked, ['batchId', 'sourceNodeId', 'sourcePort', 'used', 'sourceNodeExecutionId', 'maxReworks', 'blockedAt', 'scopeNodeIds', 'edgeIds'])
+      && isCounter(blocked) && isText(blocked.sourceNodeExecutionId) && isTeamReworkLimit(blocked.maxReworks)
+      && typeof blocked.blockedAt === 'number' && Number.isSafeInteger(blocked.blockedAt) && blocked.blockedAt >= 0
+      && Array.isArray(blocked.scopeNodeIds) && blocked.scopeNodeIds.every(isText)
+      && Array.isArray(blocked.edgeIds) && blocked.edgeIds.every(isText));
+}
+
 function isEdgeAction(value: unknown): value is TeamGraphEdgeAction {
   return typeof value === 'string' && ['activate', 'rework', 'gate', 'finish'].includes(value);
 }
@@ -252,8 +326,8 @@ function isLayout(value: unknown): boolean {
 
 function isPosition(value: unknown): boolean {
   return isRecord(value) && exactKeys(value, ['x', 'y'])
-    && typeof value.x === 'number' && Number.isFinite(value.x)
-    && typeof value.y === 'number' && Number.isFinite(value.y);
+    && typeof value.x === 'number' && Number.isSafeInteger(value.x)
+    && typeof value.y === 'number' && Number.isSafeInteger(value.y);
 }
 
 function nullableText(value: unknown): boolean {

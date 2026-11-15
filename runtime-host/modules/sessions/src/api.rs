@@ -131,17 +131,19 @@ impl SessionHandle {
         &self,
         identity: SessionIdentity,
     ) -> Result<SessionEnsureOutcome, ()> {
-        self.ensure_bound_session(identity, SessionSourceBinding::ordinary())
+        self.ensure_bound_session(identity, None, SessionSourceBinding::ordinary())
             .await
     }
 
     pub async fn ensure_bound_session(
         &self,
         identity: SessionIdentity,
+        endpoint_session_id: Option<String>,
         source_binding: SessionSourceBinding,
     ) -> Result<SessionEnsureOutcome, ()> {
         self.request_command(|reply| SessionCommand::Ensure {
             identity,
+            endpoint_session_id,
             source_binding,
             reply,
         })
@@ -162,13 +164,17 @@ impl SessionHandle {
         identity: SessionIdentity,
         event: SessionEvent,
     ) -> Result<SessionIngestOutcome, ()> {
-        let permit = if crate::owner::terminal::terminal_event(&event) {
-            Some(self.shared.terminal_permit().await)
-        } else { None };
-        self.request_command_inner(producer, |reply| match permit {
-            Some(permit) => SessionCommand::TerminalIngest { identity, event, permit, reply },
-            None => SessionCommand::Ingest { identity, event, reply },
-        }).await
+        let mut event = event;
+        let mut permit = None;
+        loop {
+            let count = match self.request_command_inner(producer.inherited(), |reply| SessionCommand::Ingest {
+                identity: identity.clone(), event, permit, reply,
+            }).await? {
+                Ok(outcome) => return Ok(outcome),
+                Err((pending, count)) => { event = pending; count },
+            };
+            permit = Some(self.shared.terminal_permit(count).await);
+        }
     }
 
     async fn ingest_ingress_inner(
@@ -196,11 +202,18 @@ impl SessionHandle {
                 {
                     return Ok(SessionIngestOutcome::Rejected { reason: "Invalid restored terminal".to_owned() });
                 }
-                let permit = self.shared.terminal_permit().await;
-                let accepted = self.request_command_inner(producer, |reply| SessionCommand::SyncTerminals {
-                    identity, generation: generation.expect("validated observation generation"),
-                    terminals: vec![(terminal, crate::state::TerminalBodies::Complete(assistant_texts))], publish: false, permit, reply,
-                }).await?;
+                let mut terminals = vec![(terminal, crate::state::TerminalBodies::Complete(assistant_texts))];
+                let mut permit = None;
+                let accepted = loop {
+                    let count = match self.request_command_inner(producer.inherited(), |reply| SessionCommand::SyncTerminals {
+                        identity: identity.clone(), generation: generation.expect("validated observation generation"),
+                        terminals, publish: false, permit, reply,
+                    }).await? {
+                        Ok(accepted) => break accepted,
+                        Err((pending, count)) => { terminals = pending; count },
+                    };
+                    permit = Some(self.shared.terminal_permit(count).await);
+                };
                 Ok(if accepted.is_some() { SessionIngestOutcome::TerminalRestored } else {
                     SessionIngestOutcome::Rejected { reason: "Observation is stale".to_owned() }
                 })

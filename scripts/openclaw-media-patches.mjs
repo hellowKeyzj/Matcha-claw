@@ -162,10 +162,95 @@ function patchImageModelDefaults(source) {
   return replace(source, '\t\t\t\t\tquality: params.quality,', '\t\t\t\t\tquality: params.quality ?? mediaModel?.quality,');
 }
 
+function patchMediaStore(source) {
+  source = replace(source, 'import { fileStore as fileStore$1 } from "@openclaw/fs-safe/store";', 'import { root as fsRoot } from "@openclaw/fs-safe/root";\nimport { fileStore as fileStore$1 } from "@openclaw/fs-safe/store";');
+  source = replace(source, '\t\tpath: path.join(params.dir, params.id),', '\t\tpath: params.path ?? path.join(params.dir, params.id),');
+  source = replace(source, `async function writeSavedMediaBuffer(params) {
+\tconst dir = resolveMediaScopedDir(params.subdir, "writeSavedMediaBuffer");
+\tconst relativePath = resolveMediaRelativePath(params.id, params.subdir, "writeSavedMediaBuffer");
+\treturn await retryAfterRecreatingDir(dir, async () => await openMediaStore(params.buffer.byteLength).write(relativePath, params.buffer, { tempPrefix: \`.\${params.id}\` }));
+}`, `async function writeSavedMediaBuffer(params) {
+\tconst relativePath = resolveMediaRelativePath(params.id, params.subdir, "writeSavedMediaBuffer");
+\tif (params.sandbox) {
+\t\tconst { root, bridge } = params.sandbox;
+\t\tconst resolved = bridge.resolvePath({ filePath: relativePath, cwd: root });
+\t\tawait bridge.writeFile({ filePath: relativePath, cwd: root, data: params.buffer, mkdir: true });
+\t\treturn resolved.hostPath ?? resolved.containerPath;
+\t}
+\tif (params.rootDir !== void 0) {
+\t\tconst workspace = await fsRoot(params.rootDir);
+\t\tawait workspace.write(relativePath, params.buffer, { mkdir: true, mode: 420 });
+\t\treturn path.join(workspace.rootReal, relativePath);
+\t}
+\tconst dir = resolveMediaScopedDir(params.subdir, "writeSavedMediaBuffer");
+\treturn await retryAfterRecreatingDir(dir, async () => await openMediaStore(params.buffer.byteLength).write(relativePath, params.buffer, { tempPrefix: \`.\${params.id}\` }));
+}`);
+  source = replace(source, `async function saveMediaBuffer(buffer, contentType, subdir = "inbound", maxBytes = MAX_BYTES, originalFilename, detectionFilePathHint) {
+\tif (buffer.byteLength > maxBytes) throw SaveMediaSourceError.tooLarge(maxBytes);
+\tconst dir = resolveMediaScopedDir(subdir, "saveMediaBuffer");
+\tawait fs.mkdir(dir, {
+\t\trecursive: true,
+\t\tmode: 448
+\t});`, `async function saveMediaBuffer(buffer, contentType, subdir = "inbound", maxBytes = MAX_BYTES, originalFilename, detectionFilePathHint, rootDir, sandbox) {
+\tif (buffer.byteLength > maxBytes) throw SaveMediaSourceError.tooLarge(maxBytes);
+\tconst dir = rootDir === void 0 && !sandbox ? resolveMediaScopedDir(subdir, "saveMediaBuffer") : void 0;
+\tif (dir !== void 0) await fs.mkdir(dir, {
+\t\trecursive: true,
+\t\tmode: 448
+\t});`);
+  source = replace(source, `\tawait writeSavedMediaBuffer({
+\t\tsubdir,
+\t\tid,
+\t\tbuffer
+\t});
+\treturn buildSavedMediaResult({
+\t\tdir,`, `\tconst savedPath = await writeSavedMediaBuffer({
+\t\tsubdir,
+\t\tid,
+\t\tbuffer,
+\t\trootDir,
+\t\tsandbox
+\t});
+\treturn buildSavedMediaResult({
+\t\tdir,
+\t\tpath: savedPath,`);
+  return replace(source, `async function deleteMediaBuffer(id, subdir = "inbound") {
+\tconst relativePath = resolveMediaRelativePath(id, subdir, "deleteMediaBuffer");
+\tawait openMediaStore().remove(relativePath);
+}`, `async function deleteMediaBuffer(id, subdir = "inbound", rootDir, sandbox) {
+\tconst relativePath = resolveMediaRelativePath(id, subdir, "deleteMediaBuffer");
+\tif (sandbox) {
+\t\tawait sandbox.bridge.remove({ filePath: relativePath, cwd: sandbox.root, force: true });
+\t\treturn;
+\t}
+\tif (rootDir !== void 0) {
+\t\tawait (await fsRoot(rootDir)).remove(relativePath);
+\t\treturn;
+\t}
+\tawait openMediaStore().remove(relativePath);
+}`);
+}
+
+function patchGeneratedMediaDelivery(source, workspaceRootsImport, workspaceRootsExport) {
+  source = replace(source, '//#region src/gateway/server-restart-sentinel-agent-delivery.ts', `import { ${workspaceRootsExport} as resolveSessionWorkspaceRoots } from "${workspaceRootsImport}";
+//#region src/gateway/server-restart-sentinel-agent-delivery.ts`);
+  source = replace(source, '\t\tconst sessionId = params.sessionEntry?.sessionId?.trim();', '\t\tconst sessionEntry = params.sessionEntry;\n\t\tconst sessionId = sessionEntry?.sessionId?.trim();');
+  source = replace(source, '\t\tconst preparedMediaBlocks = { ...entry.preparedMediaBlocks };', `\t\tconst sessionRoot = sessionEntry.execNode || sessionEntry.repositoryWorkspaceId ? void 0 : sessionEntry.sessionRoot ?? resolveSessionWorkspaceRoots(params.cfg, params.agentId, sessionEntry).root;
+\t\tconst localRoots = [getMediaDir(), ...sessionRoot ? [sessionRoot] : []];
+\t\tconst preparedMediaBlocks = { ...entry.preparedMediaBlocks };`);
+  source = replace(source, '\t\t\t\t\tlocalRoots: [getMediaDir()]\n\t\t\t\t});', '\t\t\t\t\tlocalRoots\n\t\t\t\t});');
+  return replace(source, '\tif (await deliverQueuedGeneratedMediaAgentTurn({\n\t\tentry: queuedEntry,', '\tif (await deliverQueuedGeneratedMediaAgentTurn({\n\t\tcfg,\n\t\tentry: queuedEntry,');
+}
+
 export function patchOpenClawMedia(openclawDir) {
   const pkg = JSON.parse(read(path.join(openclawDir, 'package.json')));
   if (pkg.name !== 'openclaw' || pkg.version !== VERSION) throw new Error(`${PATCH}: requires openclaw@${VERSION}`);
   const dist = path.join(openclawDir, 'dist');
+  const workspaceRootsFile = locate(dist, 'session-workspace-roots-', ['function resolveSessionWorkspaceRoots(']);
+  const workspaceRootsImport = `./${path.basename(workspaceRootsFile)}`;
+  const workspaceRootsExports = [...read(workspaceRootsFile).matchAll(/export \{ resolveSessionWorkspaceRoots as ([A-Za-z_$][\w$]*) \};/g)];
+  if (workspaceRootsExports.length !== 1) throw new Error(`${PATCH}: expected one native workspace roots export`);
+  const workspaceRootsExport = workspaceRootsExports[0][1];
   const edits = [
     [locate(dist, 'zod-schema.core-', ['const ModelProviderSchema = object({']), patchSchema],
     [path.join(dist, 'extensions/openai/index.js'), patchOpenAIRegistration],
@@ -177,6 +262,8 @@ export function patchOpenClawMedia(openclawDir) {
     [locate(dist, 'image-generation-provider-', ['function buildOpenRouterImageGenerationProvider(']), patchOpenRouterFactory],
     [locate(dist, 'generation-request-context-', ['async function resolveOpenRouterGenerationRequestContext(params)']), patchOpenRouterContext],
     [locate(dist, 'runtime-', ['async function generateImage(params, deps = {})']), patchImageModelDefaults],
+    [locate(dist, 'store-', ['async function saveMediaBuffer(', 'async function deleteMediaBuffer(']), patchMediaStore],
+    [locate(dist, 'server-restart-sentinel-', ['async function deliverQueuedGeneratedMediaAgentTurn(']), (source) => patchGeneratedMediaDelivery(source, workspaceRootsImport, workspaceRootsExport)],
   ].map(([file, transform]) => {
     const before = read(file);
     return { file, before, after: transform(before) };

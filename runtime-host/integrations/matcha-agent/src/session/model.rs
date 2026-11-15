@@ -68,6 +68,7 @@ pub enum ClassifiedErrorKind {
 pub struct SessionRecord {
     pub session_id: SessionId,
     pub agent_id: String,
+    pub cwd: String,
     pub status: String,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -85,6 +86,8 @@ impl SessionRecord {
         self.session_id.as_str() == id
             && valid_agent_id(&self.agent_id)
             && agent.is_none_or(|agent| agent == self.agent_id)
+            && !self.cwd.contains('\0')
+            && std::path::Path::new(&self.cwd).is_absolute()
             && matches!(self.status.as_str(), "open" | "closed" | "deleting")
             && self.created_at_ms <= sessions_module::state::MAX_SAFE_INTEGER
             && self.updated_at_ms <= sessions_module::state::MAX_SAFE_INTEGER

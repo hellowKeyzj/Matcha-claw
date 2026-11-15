@@ -32,7 +32,7 @@ pub use control::{OpenClawControlReadiness, OpenClawGatewayControl};
 pub use cron::await_cron_execution;
 pub use outcome::{
     OpenClawGatewayRequestOutcome, OpenClawPeerRejection, OpenClawSessionError,
-    OpenClawSessionMutationFailure, OpenClawSurfaceFailure, SessionModelPatchFailure,
+    OpenClawSessionMutationFailure, OpenClawSurfaceFailure, OpenClawVideoTaskRejection, SessionModelPatchFailure,
 };
 pub use session::OpenClawSessionGateway;
 pub(crate) use session::validate_observation_identity;

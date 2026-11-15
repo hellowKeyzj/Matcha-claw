@@ -6,9 +6,16 @@ fn key(kind: RecordKind, scope: &str, id: &str) -> RecordKey {
 }
 
 impl OrganizationFacts {
-    pub(crate) fn changed_records(&self, contents: &ContentStore) -> Result<Vec<RecordChange>, StoreFault> {
+    pub(crate) fn changed_records(
+        &self,
+        contents: &ContentStore,
+        transaction: &crate::store::sqlite::WriteTransaction<'_>,
+    ) -> Result<Vec<RecordChange>, StoreFault> {
         self.validate_changed().map_err(|_| StoreFault::InvalidFacts)?;
         let mut changes = Vec::new();
+        if self.journal.team_prompts.is_some() {
+            changes.push(RecordChange::Put(crate::store::records::prompts::encode(&self.team_prompts)?));
+        }
         for id in self.journal.teams.keys() {
             match self.teams.get(id) {
                 Some(value) => changes.push(RecordChange::Put(team::encode_team(value)?)),
@@ -46,7 +53,9 @@ impl OrganizationFacts {
                     if value.team != old.team || value.frozen_team_revision != old.revision
                         || value.runtime != old.runtime || value.lifecycle != old.lifecycle || value.start_gate != old.start_gate
                         || value.retired_executions != old.retired_executions
+                        || value.workspace != old.workspace
                         || value.role_session_intents != old.role_session_intents
+                        || value.deletion_confirmations != old.deletion_confirmations
                     { changes.push(RecordChange::Put(run::encode_header(value)?)); }
                     changes.extend(run::encode_graph_changes(value, contents)?);
                 }
@@ -69,7 +78,7 @@ impl OrganizationFacts {
         execution_keys.extend(self.deliveries.changed_ids().map(|id| key(RecordKind::Delivery, "", id.as_str())));
         execution_keys.extend(self.evidence.changed_ids().map(|id| key(RecordKind::Evidence, "", id.as_str())));
         execution_keys.extend(self.artifacts.changed_ids().map(|id| key(RecordKind::Artifact, "", id.as_str())));
-        execution_keys.extend(self.decisions.changed_decision_ids().map(|(run, id)| key(RecordKind::Decision, &run, &id)));
+        execution_keys.extend(self.decisions.changed_ids().map(|(run, id)| key(RecordKind::Decision, run, id)));
         execution_keys.extend(self.decisions.changed_event_ids().map(|id| key(RecordKind::DecisionEvent, "", id)));
         for changed in self.task_board.changed_keys() {
             use crate::run::task_board::TaskBoardKey;
@@ -81,8 +90,61 @@ impl OrganizationFacts {
             execution_keys.push(key(kind, &execution::scoped_key(team, run), id));
         }
         for key in execution_keys {
-            changes.push(match execution::encode_key(self, &key, contents)? {
-                Some(record) => RecordChange::Put(record), None => RecordChange::Delete(key),
+            let record = match key.kind {
+                RecordKind::Activity => {
+                    let id = ActivityId::new(&key.id).map_err(|_| StoreFault::CorruptRecord)?;
+                    self.activities.activity(&id).map(|value| {
+                        let owner = self.runs.get(value.facts().run_id.as_str()).ok_or(StoreFault::InvalidFacts)?;
+                        let previous = self.activities.previous(&id);
+                        let record = if previous.is_some() { transaction.read_record(&key)? } else { None };
+                        execution::encode_activity_change(owner.team(), value, previous, record.as_ref(), contents)
+                    }).transpose()?
+                }
+                RecordKind::Delivery => {
+                    let id = crate::DeliveryId::new(&key.id).map_err(|_| StoreFault::CorruptRecord)?;
+                    self.deliveries.delivery(&id).map(|value| {
+                        let team = TeamId::try_new(value.facts().team_id.clone()).map_err(|_| StoreFault::CorruptRecord)?;
+                        let previous = self.deliveries.previous(&id);
+                        let record = if previous.is_some() { transaction.read_record(&key)? } else { None };
+                        execution::encode_delivery_change(&team, value, previous, record.as_ref(), contents)
+                    }).transpose()?
+                }
+                RecordKind::Evidence => self.evidence
+                    .evidence(&crate::EvidenceId::new(&key.id).map_err(|_| StoreFault::CorruptRecord)?)
+                    .map(|value| {
+                        let owner = self.runs.get(value.run_id()).ok_or(StoreFault::InvalidFacts)?;
+                        execution::encode_evidence(owner.team(), value, contents)
+                    }).transpose()?,
+                RecordKind::Artifact => self.artifacts
+                    .artifact(&crate::run::artifact::ArtifactId::new(&key.id).map_err(|_| StoreFault::CorruptRecord)?)
+                    .map(|value| {
+                        let owner = self.runs.get(value.run_id()).ok_or(StoreFault::InvalidFacts)?;
+                        execution::encode_artifact(owner.team(), value, contents)
+                    }).transpose()?,
+                RecordKind::Decision => self.decisions.decision_by_id(&key.scope, &key.id)
+                    .map(execution::encode_decision).transpose()?,
+                RecordKind::DecisionEvent => self.decisions.event(&key.id)
+                    .map(execution::encode_decision_event).transpose()?,
+                RecordKind::Task | RecordKind::Runner | RecordKind::Mailbox => {
+                    let (team, run) = execution::split_scope(&key.scope)?;
+                    match key.kind {
+                        RecordKind::Task => self.task_board.task_record(team, run, &key.id)
+                            .map(|(ordinal, value)| execution::encode_task(ordinal, value, contents)).transpose()?,
+                        RecordKind::Runner => self.task_board.runner_record(team, run, &key.id)
+                            .map(|(ordinal, value)| execution::encode_runner(ordinal, value, contents)).transpose()?,
+                        RecordKind::Mailbox => self.task_board.mailbox_record(team, run, &key.id)
+                            .map(|(ordinal, value)| execution::encode_mailbox(ordinal, value, contents)).transpose()?,
+                        _ => unreachable!(),
+                    }
+                }
+                _ => return Err(StoreFault::InvalidFacts),
+            };
+            changes.push(match record {
+                Some(record) => {
+                    if record.key != key { return Err(StoreFault::InvalidFacts); }
+                    RecordChange::Put(record)
+                }
+                None => RecordChange::Delete(key),
             });
         }
         for (run_id, id) in self.triggers.changed_keys() {

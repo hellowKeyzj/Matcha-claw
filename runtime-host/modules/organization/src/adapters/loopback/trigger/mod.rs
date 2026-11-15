@@ -1,3 +1,4 @@
+use futures_util::future::BoxFuture;
 use platform::capability::CapabilityDecisionVerifier;
 
 pub(crate) mod handler;
@@ -129,6 +130,7 @@ pub(crate) enum Delivery {
     Triggers(Vec<ArmedTrigger>),
     Fired { run_id: String },
     NotFound,
+    Busy,
     Rejected,
     Unavailable,
 }
@@ -138,7 +140,7 @@ impl Delivery {
         match self {
             Self::Auth(_) | Self::Triggers(_) | Self::Fired { .. } => 200,
             Self::NotFound => 404,
-            Self::Rejected => 409,
+            Self::Busy | Self::Rejected => 409,
             Self::Unavailable => 503,
         }
     }
@@ -152,6 +154,10 @@ impl Delivery {
             }),
             Self::Fired { run_id } => json!({ "success": true, "runId": run_id }),
             Self::NotFound => json!({ "success": false, "error": "Team trigger is unavailable" }),
+            Self::Busy => json!({
+                "success": false, "error": "The trigger scope is busy; wait for its current batch to settle.",
+                "errorCode": "scope_busy",
+            }),
             Self::Rejected => json!({ "success": false, "error": "Team trigger was rejected" }),
             Self::Unavailable => {
                 json!({ "success": false, "error": "Team trigger is unavailable" })
@@ -236,40 +242,45 @@ pub(crate) fn decode(
     }
 }
 
-pub(crate) async fn handle(
-    owner: &OrganizationHandle,
+pub(crate) fn handle<'a>(
+    owner: &'a OrganizationHandle,
     _webhook_token: &WebhookToken,
     request: Request,
     fired_at: u64,
-) -> Delivery {
+) -> BoxFuture<'a, Delivery> {
     match request {
-        Request::List { team_id } => match owner.trigger_list(Some(team_id)).await {
-            Ok(triggers) => Delivery::Triggers(triggers),
-            Err(_) => Delivery::Unavailable,
-        },
-        Request::Fire { request } => fire(owner, request, fired_at).await,
+        Request::List { team_id } => crate::future::boxed(move || async move {
+            match owner.trigger_list(Some(team_id)).await {
+                Ok(triggers) => Delivery::Triggers(triggers),
+                Err(_) => Delivery::Unavailable,
+            }
+        }),
+        Request::Fire { request } => crate::future::boxed(move || fire(owner, request, fired_at)),
         Request::Webhook {
             path,
             idempotency_key,
-        } => match owner
-            .webhook_trigger_fire(path, idempotency_key, fired_at)
-            .await
-        {
-            Ok(Ok(
-                organization::TeamTriggerFireOutcome::Recorded(request)
-                | organization::TeamTriggerFireOutcome::Replayed(request),
-            )) => Delivery::Fired {
-                run_id: request.trigger.run_id,
-            },
-            Ok(Ok(organization::TeamTriggerFireOutcome::NotFound)) => Delivery::NotFound,
-            Ok(Ok(
-                organization::TeamTriggerFireOutcome::Rejected
-                | organization::TeamTriggerFireOutcome::Conflicting { .. },
-            )) => Delivery::Rejected,
-            Ok(Ok(organization::TeamTriggerFireOutcome::Unknown)) | Ok(Err(_)) | Err(_) => {
-                Delivery::Unavailable
+        } => crate::future::boxed(move || async move {
+            match owner
+                .webhook_trigger_fire(path, idempotency_key, fired_at)
+                .await
+            {
+                Ok(Ok(
+                    organization::TeamTriggerFireOutcome::Recorded(request)
+                    | organization::TeamTriggerFireOutcome::Replayed(request),
+                )) => Delivery::Fired {
+                    run_id: request.trigger.run_id,
+                },
+                Ok(Ok(organization::TeamTriggerFireOutcome::NotFound)) => Delivery::NotFound,
+                Ok(Ok(organization::TeamTriggerFireOutcome::Busy)) => Delivery::Busy,
+                Ok(Ok(
+                    organization::TeamTriggerFireOutcome::Rejected
+                    | organization::TeamTriggerFireOutcome::Conflicting { .. },
+                )) => Delivery::Rejected,
+                Ok(Ok(organization::TeamTriggerFireOutcome::Unknown)) | Ok(Err(_)) | Err(_) => {
+                    Delivery::Unavailable
+                }
             }
-        },
+        }),
     }
 }
 
@@ -281,6 +292,7 @@ async fn fire(
     let run_id = request.run_id.clone();
     match owner.trigger_fire(request, fired_at).await {
         Ok(Ok(_)) => Delivery::Fired { run_id },
+        Ok(Err(organization::StoreFault::TriggerFire(organization::TriggerFireError::Busy))) => Delivery::Busy,
         Ok(Err(_)) => Delivery::Rejected,
         Err(_) => Delivery::Unavailable,
     }

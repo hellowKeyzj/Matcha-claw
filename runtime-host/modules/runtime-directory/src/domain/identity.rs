@@ -1,4 +1,32 @@
 use platform::endpoint::runtime_address::RuntimeEndpoint;
+use serde::Deserialize;
+
+pub fn endpoint_reference(endpoint: &RuntimeEndpoint) -> String {
+    [RuntimeDriverIdentity::open_claw(), RuntimeDriverIdentity::matcha_agent()]
+        .into_iter()
+        .find(|identity| identity.endpoint() == *endpoint)
+        .map_or_else(|| endpoint.canonical_key(), |identity| identity.runtime_endpoint_reference().to_owned())
+}
+
+pub fn endpoint_from_reference(reference: &str) -> Option<RuntimeEndpoint> {
+    if let Some(identity) = RuntimeDriverIdentity::from_reference(reference) {
+        return Some(identity.endpoint());
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Address {
+        #[serde(rename = "type")]
+        address_type: String,
+        kind: String,
+        runtime_adapter_id: String,
+        runtime_instance_id: String,
+    }
+    let address: Address = serde_json::from_str(reference).ok()?;
+    if address.address_type != "runtime-endpoint" || address.kind != "native-runtime" {
+        return None;
+    }
+    RuntimeEndpoint::try_new(address.runtime_adapter_id, address.runtime_instance_id).ok()
+}
 
 const OPENCLAW_PROTOCOL_ID: &str = "openclaw-v4";
 const OPENCLAW_RUNTIME_ADAPTER_ID: &str = "openclaw";

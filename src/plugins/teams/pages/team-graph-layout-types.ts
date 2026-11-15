@@ -1,5 +1,6 @@
 export type GraphPoint = { x: number; y: number };
 export type GraphNodeSize = { width: number; height: number };
+export type GraphLayoutDirection = 'vertical' | 'horizontal';
 
 export type GraphLayoutNode = GraphNodeSize & {
   id: string;
@@ -15,6 +16,7 @@ export type GraphLayoutEdge = {
 };
 
 export type GraphLayoutInput = {
+  direction: GraphLayoutDirection;
   nodes: GraphLayoutNode[];
   edges: GraphLayoutEdge[];
   fixedPositions: Record<string, GraphPoint>;
@@ -31,3 +33,8 @@ export type GraphLayoutResult = {
   routes: Record<string, GraphEdgeRoute>;
   bounds: { x: number; y: number; width: number; height: number };
 };
+
+export type GraphEdgeRouter = (
+  input: GraphLayoutInput,
+  positions: Record<string, GraphPoint>,
+) => Pick<GraphLayoutResult, 'routes' | 'bounds'>;

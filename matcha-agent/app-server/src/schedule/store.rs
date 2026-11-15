@@ -193,7 +193,7 @@ impl Store {
     pub async fn state(&self, id: &str) -> rpc::Result<Option<TriggerState>> {
         let id = id.to_owned();
         self.0
-            .call(move |connection| {
+            .read(move |connection| {
                 connection
                     .query_row(
                         "SELECT next_fire_ms,owned_session_id FROM schedule_triggers WHERE id=?1",
@@ -212,7 +212,7 @@ impl Store {
     }
 
     pub async fn earliest(&self) -> rpc::Result<Option<(String, u64)>> {
-        self.0.call(|connection| {
+        self.0.read(|connection| {
             connection.query_row("SELECT id,next_fire_ms FROM schedule_triggers WHERE next_fire_ms IS NOT NULL ORDER BY next_fire_ms,id LIMIT 1", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             }).optional().map_err(storage)
@@ -324,20 +324,20 @@ impl Store {
 
     pub async fn finished(&self, id: &str) -> rpc::Result<Option<Receipt>> {
         let id = id.to_owned();
-        self.0.call(move |connection| {
+        self.0.read(move |connection| {
             connection.query_row(&format!("SELECT {RECEIPT_COLUMNS} FROM schedule_receipts WHERE schedule_id=?1 AND status NOT IN ('dispatching','submitted') ORDER BY observed_at_ms DESC,receipt_id DESC LIMIT 1"), [id], receipt).optional().map_err(storage)
         }).await
     }
 
     pub async fn running(&self, id: &str) -> rpc::Result<Option<Receipt>> {
         let id = id.to_owned();
-        self.0.call(move |connection| {
+        self.0.read(move |connection| {
             connection.query_row(&format!("SELECT {RECEIPT_COLUMNS} FROM schedule_receipts WHERE schedule_id=?1 AND status IN ('dispatching','submitted') ORDER BY observed_at_ms DESC,receipt_id DESC LIMIT 1"), [id], receipt).optional().map_err(storage)
         }).await
     }
 
     pub async fn pending(&self) -> rpc::Result<Vec<Receipt>> {
-        self.0.call(|connection| {
+        self.0.read(|connection| {
             let mut query = connection.prepare(&format!("SELECT {RECEIPT_COLUMNS} FROM schedule_receipts WHERE status='submitted' ORDER BY observed_at_ms")).map_err(storage)?;
             query.query_map([], receipt).map_err(storage)?.collect::<rusqlite::Result<Vec<_>>>().map_err(storage)
         }).await
@@ -347,7 +347,7 @@ impl Store {
         let limit = i64::try_from(limit)
             .map_err(|_| Error::invalid("limit exceeds the database integer range"))?;
         let id = id.to_owned();
-        self.0.call(move |connection| {
+        self.0.read(move |connection| {
             let mut query = connection.prepare(&format!("SELECT {RECEIPT_COLUMNS} FROM schedule_receipts WHERE schedule_id=?1 ORDER BY observed_at_ms DESC,receipt_id DESC LIMIT ?2")).map_err(storage)?;
             query.query_map(params![id, limit], receipt).map_err(storage)?.collect::<rusqlite::Result<Vec<_>>>().map_err(storage)
         }).await

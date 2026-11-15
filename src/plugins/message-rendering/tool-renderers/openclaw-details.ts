@@ -194,6 +194,12 @@ export function isOpenClawTool(tool: SessionRenderToolCard): boolean {
   return tool.runtimeAdapterId === 'openclaw';
 }
 
+export function isOpenClawMediaGenerationTool(tool: SessionRenderToolCard): boolean {
+  if (!isOpenClawTool(tool) || tool.name !== 'image_generate' && tool.name !== 'video_generate') return false;
+  const action = isRecord(tool.input) && typeof tool.input.action === 'string' ? tool.input.action.trim().toLowerCase() : undefined;
+  return !action || action === 'generate';
+}
+
 export function readMcpAppPreview(details: unknown): OpenClawMcpAppPreview | undefined {
   const detailRecord = isRecord(details) ? details : undefined;
   const preview = isRecord(detailRecord?.mcpAppPreview) ? detailRecord.mcpAppPreview : undefined;

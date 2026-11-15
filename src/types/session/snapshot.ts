@@ -353,6 +353,7 @@ export type SessionView = {
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
   inputReceipts?: SessionInputReceipt[];
+  requestPending: boolean;
   runTimings: SessionRunTiming[];
   goal: SessionGoalView;
   ownership: SessionOwnership | null;
@@ -390,6 +391,7 @@ export type SessionChange =
   | { kind: 'toolUpdated'; tool: SessionWireTool }
   | { kind: 'approvalUpdated'; approval: SessionWireApproval }
   | { kind: 'goalChanged'; goal: SessionGoalView }
+  | { kind: 'requestPendingChanged'; pending: boolean }
   | { kind: 'runtimeChanged'; runtime: SessionWireRuntime }
   | { kind: 'runtimeNoticeUpdated'; notice: SessionWireRuntimeNotice }
   | { kind: 'windowChanged'; window: SessionWireWindow }
@@ -407,6 +409,7 @@ export type SessionDelta = {
 
 export type SessionProjectionSnapshot = {
   sessionKey: string;
+  requestPending: boolean;
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
   runTimings: SessionRunTiming[];
@@ -1102,6 +1105,9 @@ function decodeChange(value: unknown): SessionChange | null {
       return hasExactKeys(value, ['kind', 'tool']) ? (() => { const tool = decodeTool(value.tool); return tool ? { kind: 'toolUpdated', tool } : null; })() : null;
     case 'approvalUpdated':
       return hasExactKeys(value, ['kind', 'approval']) ? (() => { const approval = decodeApproval(value.approval); return approval ? { kind: 'approvalUpdated', approval } : null; })() : null;
+    case 'requestPendingChanged':
+      return hasExactKeys(value, ['kind', 'pending']) && typeof value.pending === 'boolean'
+        ? { kind: 'requestPendingChanged', pending: value.pending } : null;
     case 'goalChanged':
       return hasExactKeys(value, ['kind', 'goal']) ? (() => { const goal = tryDecodeSessionGoalView(value.goal); return goal ? { kind: 'goalChanged', goal } : null; })() : null;
     case 'runtimeChanged':
@@ -1125,7 +1131,7 @@ function isRecoveryReason(value: unknown): value is SessionRecoveryReason {
 }
 
 function decodeView(value: unknown): SessionView | null {
-  if (!isRecord(value) || !hasAllowedKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'goal', 'ownership', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'], ['inputReceipts', 'runTimings'])) return null;
+  if (!isRecord(value) || !hasAllowedKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'goal', 'ownership', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness', 'requestPending'], ['inputReceipts', 'runTimings'])) return null;
   const identity = decodeIdentity(value.identity);
   const modelState = value.modelState === null ? null : decodeModelState(value.modelState);
   const inputReceipts = Object.hasOwn(value, 'inputReceipts') ? decodeInputReceipts(value.inputReceipts) : undefined;
@@ -1139,6 +1145,7 @@ function decodeView(value: unknown): SessionView | null {
   if (!identity || !isNonEmptyIdentifier(value.sessionKey, MAX_SESSION_KEY_BYTES)
     || (value.endpointSessionId !== null && !isNonEmptyIdentifier(value.endpointSessionId, MAX_SESSION_KEY_BYTES))
     || (value.modelState !== null && !modelState)
+    || typeof value.requestPending !== 'boolean'
     || inputReceipts === null
     || Object.hasOwn(value, 'runTimings') && !isSessionRunTimings(value.runTimings)
     || (value.ownership !== null && !isSessionOwnership(value.ownership))
@@ -1147,7 +1154,7 @@ function decodeView(value: unknown): SessionView | null {
     || !isSafeInteger(value.seq) || value.seq < 0 || value.seq > MAX_SAFE_INTEGER
     || !isSafeInteger(value.cursor) || value.cursor < 0 || value.cursor > MAX_SAFE_INTEGER
     || !goal || !items || !tools || !approvals || !runtime || !window || !completeness) return null;
-  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, modelState, ...(inputReceipts === undefined ? {} : { inputReceipts }), runTimings: ((value.runTimings as SessionRunTiming[] | undefined) ?? []).map((timing) => ({ ...timing })), goal, ownership: value.ownership, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
+  return { sessionKey: value.sessionKey, requestPending: value.requestPending, endpointSessionId: value.endpointSessionId, modelState, ...(inputReceipts === undefined ? {} : { inputReceipts }), runTimings: ((value.runTimings as SessionRunTiming[] | undefined) ?? []).map((timing) => ({ ...timing })), goal, ownership: value.ownership, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
 }
 
 function decodeDelta(value: unknown): SessionDelta | null {

@@ -67,7 +67,7 @@ export async function dispatchSessionSend(
   const request = await adaptSessionSendRequest(body);
   const requestedRunId = request.input.intent === undefined
     ? request.input.runId ?? request.input.idempotencyKey : undefined;
-  const demand = deps.sessionObservers.beginSend(sessionPage, request.scope.identity, requestedRunId);
+  const demand = deps.sessionObservers.beginSend(sessionPage, request.scope.identity, requestedRunId, request.input.endpointSessionId);
   try {
     logSessionTrace('capability.send.request', traceId, () => ({
       adapter: request.scope.identity.endpoint.runtimeAdapterId,

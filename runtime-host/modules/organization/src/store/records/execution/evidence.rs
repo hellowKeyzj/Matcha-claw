@@ -21,9 +21,18 @@ enum Kind {
     InlineText,
 }
 
-pub(super) fn encode(value: &EvidenceRecord, bodies: &Bodies<'_>) -> Result<Vec<u8>, StoreFault> {
+pub(crate) fn encode(
+    team: &TeamId,
+    value: &EvidenceRecord,
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let bodies = Bodies {
+        contents,
+        team,
+        run: GraphRunId::new(value.run_id()),
+    };
     let reference = value.reference();
-    serialize(&Row {
+    let payload = serialize(&Row {
         id: value.evidence_id().as_str().to_owned(),
         run: value.run_id().to_owned(),
         execution: value.node_execution_id().to_owned(),
@@ -31,6 +40,16 @@ pub(super) fn encode(value: &EvidenceRecord, bodies: &Bodies<'_>) -> Result<Vec<
         reference: bodies.put(reference.reference())?,
         label: bodies.optional(reference.label())?,
         recorded_at: value.recorded_at(),
+    })?;
+    Ok(StoredRecord {
+        key: RecordKey {
+            kind: RecordKind::Evidence,
+            scope: String::new(),
+            id: value.evidence_id().as_str().to_owned(),
+        },
+        team_id: Some(team.as_str().to_owned()),
+        run_id: Some(value.run_id().to_owned()),
+        payload,
     })
 }
 pub(super) fn decode(bytes: &[u8], bodies: &Bodies<'_>) -> Result<EvidenceRecord, StoreFault> {

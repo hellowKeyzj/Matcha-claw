@@ -79,7 +79,7 @@ impl SessionOps for MatchaRuntimeDriver {
             let Ok(id) = SessionId::try_new(command.endpoint_session_id().to_owned()) else {
                 return SessionCreateOutcome::TargetRejected;
             };
-            match crate::peer::session_create::create(&client, command.agent_id(), &id).await {
+            match crate::peer::session_create::create(&client, command.agent_id(), &id, None).await {
                 Ok(record) => project_matcha_create(
                     command.session_key().to_owned(),
                     record.session_id.as_str().to_owned(),
@@ -294,6 +294,11 @@ impl SessionOps for MatchaRuntimeDriver {
                 Ok(record) => record,
                 Err(error) => return send_failure(error),
             };
+            if command.expected_workspace.as_deref().is_some_and(|root| {
+                !root.is_absolute() || root != std::path::Path::new(&record.cwd)
+            }) {
+                return SessionSendOutcome::Rejected;
+            }
             let content = match super::model::content(&command) {
                 Ok(content) => content,
                 Err(outcome) => return outcome,
@@ -423,15 +428,18 @@ impl SessionOps for MatchaRuntimeDriver {
             {
                 return Outcome::Unknown;
             }
+            let result = native.result.as_ref().filter(|result| {
+                result["session_id"].as_str() == Some(record.session_id.as_str())
+                    && result["input_message_id"].as_str().is_some_and(valid_uuid)
+                    && match result.get("request_message_id") {
+                        Some(id) => id.as_str() == Some(native.message_id.as_str()),
+                        None => {
+                            result["input_message_id"].as_str() == Some(native.message_id.as_str())
+                        }
+                    }
+            });
             let measurement = if native.status.terminal() {
-                native
-                    .result
-                    .as_ref()
-                    .filter(|result| {
-                        result["session_id"].as_str() == Some(record.session_id.as_str())
-                            && result["input_message_id"].as_str()
-                                == Some(native.message_id.as_str())
-                    })
+                result
                     .and_then(|result| result.get("native_measurement"))
                     .cloned()
                     .and_then(|value| serde_json::from_value(value).ok())
@@ -440,15 +448,11 @@ impl SessionOps for MatchaRuntimeDriver {
             } else {
                 SessionRunMeasurement::Unavailable
             };
-            let assistant_texts = native
-                .result
-                .as_ref()
+            let assistant_texts = result
                 .filter(|result| {
                     native.status == RunStatus::Succeeded
                         && result["subtype"] == "success"
                         && result["is_error"] == false
-                        && result["session_id"].as_str() == Some(record.session_id.as_str())
-                        && result["input_message_id"].as_str() == Some(native.message_id.as_str())
                 })
                 .and_then(|result| result["result"].as_str())
                 .filter(|text| !text.is_empty())

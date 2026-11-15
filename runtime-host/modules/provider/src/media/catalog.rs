@@ -32,6 +32,7 @@ pub struct Capabilities {
     pub max_images: u8,
     pub max_count: u8,
     pub mask: bool,
+    pub endpoint_validates_options: bool,
     pub pixel_size: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pixel_size_limits: Option<pixel_size::Limits>,
@@ -83,6 +84,6 @@ pub(super) fn capabilities(
         return Err(Failure::Unsupported);
     }
     let protocol = super::protocol(account)?;
-    super::endpoint(account, protocol)?;
-    protocol.capabilities(model, kind)
+    let endpoint = super::endpoint(account, protocol)?;
+    protocol.capabilities(model, kind, protocol.endpoint_validates_options(&endpoint))
 }

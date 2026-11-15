@@ -66,6 +66,7 @@ import {
   sessionScope,
   sessionIdentitiesEqual,
   type AgentScope,
+  type TeamRunScope,
   type RuntimeEndpointRef,
   type RuntimeScope,
   type SessionIdentity,
@@ -78,6 +79,10 @@ import {
   type OpenClawQuestionResolveInput,
   type OpenClawQuestionResolveResult,
 } from '../types/openclaw-question';
+import {
+  decodeOpenClawVideoTaskRefreshResult, isOpenClawVideoTaskRefreshInput,
+  type OpenClawVideoTaskRefreshInput, type OpenClawVideoTaskRefreshResult,
+} from '../types/openclaw-video-task';
 import {
   decodeSessionQuestionListResult, decodeSessionQuestionRespondResult,
   type SessionQuestionListInput, type SessionQuestionListResult,
@@ -227,9 +232,11 @@ export interface StagedFilePayload {
   sourcePath?: string;
 }
 
+export type WorkspaceFileScope = AgentScope | (TeamRunScope & { readonly teamId: string });
+
 export interface WorkspaceFileContext {
-  workspaceRoot?: string;
-  agentScope?: AgentScope;
+  workspaceRoot?: string | null;
+  scope?: AgentScope | TeamRunScope;
 }
 
 export interface ReadBinaryFileResult {
@@ -1125,19 +1132,25 @@ export async function hostWikiDismissGraphInsight(payload: { projectId?: string;
   return hostApiFetch('/api/wiki/graph/insights/dismiss', { method: 'POST', body: JSON.stringify(payload) });
 }
 
-type WorkspaceFileRequest = {
-  endpoint: RuntimeEndpointRef;
-  agentId: string;
-  relativePath: string;
-};
+type WorkspaceFileRequest = { relativePath: string } & (
+  | { scope: AgentScope | TeamRunScope; endpoint?: never; agentId?: never }
+  | { endpoint: RuntimeEndpointRef; agentId: string; scope?: never }
+);
+
+function workspaceFileScope(payload: WorkspaceFileRequest): WorkspaceFileScope {
+  const scope = 'scope' in payload ? payload.scope : agentScope(payload.endpoint, payload.agentId);
+  if (!scope || scope.kind === 'team-run' && !scope.teamId) throw new Error('Workspace file scope is invalid');
+  return scope as WorkspaceFileScope;
+}
 
 function workspaceFileInput(
+  scope: WorkspaceFileScope,
   payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; data?: string; includeHidden?: boolean },
   includeHiddenDefault: boolean,
 ): Record<string, unknown> {
   return {
-    endpoint: payload.endpoint,
-    agentId: payload.agentId,
+    endpoint: scope.endpoint,
+    ...(scope.kind === 'agent' ? { agentId: scope.agentId } : { teamId: scope.teamId, runId: scope.runId }),
     relativePath: payload.relativePath,
     ...(payload.maxBytes === undefined ? {} : { maxBytes: payload.maxBytes }),
     ...(payload.content === undefined ? {} : { content: payload.content }),
@@ -1150,12 +1163,13 @@ function workspaceFilePayload(
   operationId: string,
   payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; data?: string; includeHidden?: boolean },
 ) {
+  const scope = workspaceFileScope(payload);
   return buildCapabilityExecutePayload({
     id: WORKSPACE_FILE_CAPABILITY_ID,
     operationId,
-    scope: agentScope(payload.endpoint, payload.agentId),
+    scope,
     target: { kind: 'workspace-file' },
-    body: workspaceFileInput(payload, operationId === 'files.listDir'),
+    body: workspaceFileInput(scope, payload, operationId === 'files.listDir'),
   });
 }
 
@@ -1701,7 +1715,7 @@ function isMediaThumbnailResult(value: unknown): value is FileThumbnailResult {
     && isSafeNonNegativeInteger(value.fileSize);
 }
 
-function resolveWorkspaceRelativePath(value: string, workspaceRoot?: string): string | null {
+function resolveWorkspaceRelativePath(value: string, workspaceRoot?: string | null): string | null {
   const normalized = value.trim().replace(/\\/g, '/');
   if (isSafeWorkspaceRelativePath(normalized)) return normalized;
   if (!workspaceRoot) return null;
@@ -2057,6 +2071,21 @@ export async function hostOpenClawQuestionResolve(
   return result;
 }
 
+export async function hostOpenClawVideoTaskRefresh(
+  input: OpenClawVideoTaskRefreshInput,
+): Promise<OpenClawVideoTaskRefreshResult> {
+  if (!isOpenClawVideoTaskRefreshInput(input)) throw new AppError('CONFIG', 'Invalid video task refresh request');
+  const result = decodeOpenClawVideoTaskRefreshResult(await hostCapabilityExecute({
+    id: 'openclaw.videoTask',
+    operationId: 'video.task.refresh',
+    scope: runtimeInstanceScope(input.sessionIdentity.endpoint),
+    target: null,
+    input,
+  }, { timeoutMs: 40_000 }));
+  if (!result || result.taskId !== input.taskId) throw new AppError('INVALID_RESPONSE', 'Invalid video task refresh response');
+  return result;
+}
+
 export async function hostSessionQuestionList(input: SessionQuestionListInput): Promise<SessionQuestionListResult> {
   const result = decodeSessionQuestionListResult(await hostCapabilityExecute({
     id: 'session.question', operationId: 'sessions.questions.list',
@@ -2090,7 +2119,7 @@ function bindSessionIdentityInput<T extends { sessionIdentity: SessionIdentity }
   };
 }
 
-export async function hostSessionObserve(payload: { sessionIdentity: SessionIdentity; leaseId: string; limit?: number; inputIds?: string[] }, options?: SessionCapabilityOptions): Promise<SessionObservationResult> {
+export async function hostSessionObserve(payload: { sessionIdentity: SessionIdentity; endpointSessionId?: string; leaseId: string; limit?: number; inputIds?: string[] }, options?: SessionCapabilityOptions): Promise<SessionObservationResult> {
   const traceId = options?.traceId ?? createSessionTraceId('session.observe');
   const result = await sessionIdentityCapabilityExecute<unknown>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,

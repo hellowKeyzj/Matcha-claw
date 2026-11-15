@@ -229,7 +229,7 @@ async fn configure(
     validate_scope(&request.scope)?;
     validate_id(&request.agent_id)?;
     crate::cli::skills::validate_name(&request.name)?;
-    let (_guard, instances) = sessions.stable_agent_instances(&request.agent_id).await?;
+    let instances = sessions.stable_agent_instances(&request.agent_id).await?;
     let catalog =
         crate::cli::skills::list(&config.checked_snapshot().await?, &request.agent_id).await?;
     if !catalog.iter().any(|skill| skill.name == request.name) {
@@ -250,7 +250,7 @@ async fn configure(
         })
         .await?;
     let mut checks = tokio::task::JoinSet::new();
-    for (session_id, instance_id) in &instances {
+    for (session_id, instance_id) in instances.instances() {
         let sessions = sessions.clone();
         let session_id = session_id.clone();
         let instance_id = instance_id.clone();
@@ -271,7 +271,8 @@ async fn configure(
         }
     }
     let receipts = instances
-        .into_iter()
+        .instances()
+        .iter()
         .map(|(session_id, instance_id)| {
             let status = if acknowledged.contains(&(session_id.clone(), instance_id.clone())) {
                 "acknowledged"

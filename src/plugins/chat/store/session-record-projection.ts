@@ -178,6 +178,7 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
   return {
     activeRunId: null,
     runPhase: 'idle',
+    requestPending: false,
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
@@ -328,6 +329,7 @@ function areImageGenerationRuntimeEquivalent(
 function areSessionRuntimeEquivalent(left: ChatSessionRuntimeState, right: ChatSessionRuntimeState): boolean {
   return left.activeRunId === right.activeRunId
     && left.runPhase === right.runPhase
+    && left.requestPending === right.requestPending
     && left.activeTurnItemKey === right.activeTurnItemKey
     && left.pendingTurnKey === right.pendingTurnKey
     && left.pendingTurnLaneKey === right.pendingTurnLaneKey

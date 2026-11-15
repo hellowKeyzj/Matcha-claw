@@ -184,6 +184,43 @@ impl OpenClawGateway {
         }
     }
 
+    pub async fn video_task_refresh(
+        &self,
+        request: crate::gateway::request::OpenClawVideoTaskRefreshGatewayRequest,
+    ) -> OpenClawGatewayRequestOutcome {
+        if super::validate_observation_identity(&request.session_identity).is_err()
+            || request.task_id.is_empty() || request.task_id.len() > 4_096
+            || request.task_id.trim() != request.task_id || request.task_id.chars().any(char::is_control)
+        {
+            return OpenClawGatewayRequestOutcome::Rejected;
+        }
+        let rpc = match wire::session_request(
+            next_request_id("video-task-refresh"),
+            "tools.invoke",
+            serde_json::json!({
+                "name": "video_generate",
+                "args": { "action": "refresh", "taskId": request.task_id },
+                "sessionKey": request.session_identity.session_key,
+                "agentId": request.session_identity.agent_id,
+            }),
+        ) {
+            Ok(rpc) => rpc,
+            Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
+        };
+        match gateway_request_outcome(self.client.rpc_mutation(rpc).await) {
+            OpenClawGatewayRequestOutcome::Succeeded(payload) => {
+                match crate::gateway::request::project_video_task_refresh_result(payload, &request.task_id) {
+                    Ok(outcome) => outcome,
+                    Err(_) => OpenClawGatewayRequestOutcome::OutcomeUnknown,
+                }
+            }
+            OpenClawGatewayRequestOutcome::Rejected => OpenClawGatewayRequestOutcome::VideoTaskRejected {
+                task_id: request.task_id, reason: super::OpenClawVideoTaskRejection::QueryRejected,
+            },
+            outcome => outcome,
+        }
+    }
+
     pub fn control_ui_url(&self) -> String {
         self.client.control_ui_url()
     }

@@ -1,4 +1,8 @@
-use platform::capability::CapabilityDecisionVerifier;
+use futures_util::future::BoxFuture;
+use platform::{
+    capability::CapabilityDecisionVerifier,
+    loopback::{Request, Response},
+};
 
 use std::{
     sync::Arc,
@@ -25,46 +29,29 @@ pub(crate) const WEBHOOK_AUTH_ROUTE: &str = "/api/team/webhook-auth";
 pub(crate) const WEBHOOK_ROUTE_PREFIX: &str = "/api/team-runtime/webhooks";
 pub(crate) const WEBHOOK_SUBROUTE_PREFIX: &str = "/api/team-runtime/webhooks/";
 
-pub(crate) async fn handle_loopback(
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    webhook_token: WebhookToken,
-    owner: crate::OrganizationHandle,
-) -> platform::loopback::Response {
-    handle_request(
-        Request {
-            method,
-            path,
-            headers,
-            body,
-        },
-        verifier,
-        webhook_token,
-        owner,
-    )
-    .await
-    .into_loopback()
-}
-
-async fn handle_request(
+pub(crate) fn handle_request(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     webhook_token: WebhookToken,
     owner: crate::OrganizationHandle,
-) -> Response {
-    if request.path == MANAGEMENT_ROUTE {
-        return handle_management_request(request, verifier, &webhook_token, owner).await;
+) -> BoxFuture<'static, Response> {
+    let path = super::super::pathname(request.path());
+    if path == MANAGEMENT_ROUTE {
+        return Box::pin(async move {
+            handle_management_request(request, verifier, &webhook_token, owner).await
+        });
     }
-    if request.path == WEBHOOK_AUTH_ROUTE {
-        return handle_webhook_auth_request(request, verifier, &webhook_token).await;
+    if path == WEBHOOK_AUTH_ROUTE {
+        return Box::pin(async move {
+            handle_webhook_auth_request(request, verifier, &webhook_token).await
+        });
     }
-    if is_webhook_route(&request.path) {
-        return handle_webhook_request(request, &webhook_token, owner).await;
+    if is_webhook_route(path) {
+        return Box::pin(async move {
+            handle_webhook_request(request, &webhook_token, owner).await
+        });
     }
-    Response::not_found()
+    Box::pin(std::future::ready(Response::error(404, "Team trigger is unavailable")))
 }
 
 async fn handle_webhook_auth_request(
@@ -72,21 +59,24 @@ async fn handle_webhook_auth_request(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     webhook_token: &WebhookToken,
 ) -> Response {
-    if request.method != "POST" {
-        return Response::not_found();
+    if request.method() != "POST" {
+        return Response::error(404, "Team trigger is unavailable");
     }
-    let Some(authorization) = request.header("authorization").and_then(bearer_token) else {
-        return Response::unauthorized();
+    let Some(authorization) = header(&request, "authorization").and_then(bearer_token) else {
+        return Response::error(401, "Team trigger is unavailable");
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
-        Err(_) => return Response::bad_request(),
+        Err(_) => return Response::error(400, "Team trigger request is invalid"),
     };
     let mut verifier = verifier.lock().await;
     match decode_webhook_auth(value, authorization, &mut verifier, now_millis()) {
-        Ok(()) => Response::from_delivery(Delivery::Auth(webhook_token.public_auth_projection())),
-        Err(DecodeError::Unauthorized) => Response::unauthorized(),
-        Err(DecodeError::Invalid) => Response::bad_request(),
+        Ok(()) => {
+            let delivery = Delivery::Auth(webhook_token.public_auth_projection());
+            Response::json(delivery.status_code(), delivery.body())
+        }
+        Err(DecodeError::Unauthorized) => Response::error(401, "Team trigger is unavailable"),
+        Err(DecodeError::Invalid) => Response::error(400, "Team trigger request is invalid"),
     }
 }
 
@@ -96,24 +86,29 @@ async fn handle_management_request(
     webhook_token: &WebhookToken,
     owner: crate::OrganizationHandle,
 ) -> Response {
-    if request.method != "POST" {
-        return Response::not_found();
+    if request.method() != "POST" {
+        return Response::error(404, "Team trigger is unavailable");
     }
-    let Some(authorization) = request.header("authorization").and_then(bearer_token) else {
-        return Response::unauthorized();
+    let Some(authorization) = header(&request, "authorization").and_then(bearer_token) else {
+        return Response::error(401, "Team trigger is unavailable");
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
-        Err(_) => return Response::bad_request(),
+        Err(_) => return Response::error(400, "Team trigger request is invalid"),
     };
     let mut verifier = verifier.lock().await;
     let request = match decode(value, authorization, &mut verifier, now_millis()) {
         Ok(request) => request,
-        Err(DecodeError::Unauthorized) => return Response::unauthorized(),
-        Err(DecodeError::Invalid) => return Response::bad_request(),
+        Err(DecodeError::Unauthorized) => {
+            return Response::error(401, "Team trigger is unavailable");
+        }
+        Err(DecodeError::Invalid) => {
+            return Response::error(400, "Team trigger request is invalid");
+        }
     };
     drop(verifier);
-    Response::from_delivery(handle(&owner, webhook_token, request, now_millis()).await)
+    let delivery = handle(&owner, webhook_token, request, now_millis()).await;
+    Response::json(delivery.status_code(), delivery.body())
 }
 
 async fn handle_webhook_request(
@@ -121,30 +116,29 @@ async fn handle_webhook_request(
     webhook_token: &WebhookToken,
     owner: crate::OrganizationHandle,
 ) -> Response {
-    if request.method != "POST" {
-        return Response::method_not_allowed();
+    if request.method() != "POST" {
+        return Response::error(405, "TeamRun webhook only accepts POST requests");
     }
-    let Some(token) = request
-        .header("authorization")
+    let Some(token) = header(&request, "authorization")
         .and_then(bearer_token)
-        .or_else(|| request.header("x-matchaclaw-webhook-token"))
+        .or_else(|| header(&request, "x-matchaclaw-webhook-token"))
     else {
-        return Response::webhook_unauthorized();
+        return Response::error(401, "TeamRun webhook token is required");
     };
     if !webhook_token.matches(token) {
-        return Response::webhook_unauthorized();
+        return Response::error(401, "TeamRun webhook token is required");
     }
-    let Some(path) = webhook_path(&request.path) else {
-        return Response::not_found();
+    let Some(path) = webhook_path(super::super::pathname(request.path())) else {
+        return Response::error(404, "Team trigger is unavailable");
     };
-    let idempotency_key = match request.header("x-idempotency-key") {
+    let idempotency_key = match header(&request, "x-idempotency-key") {
         Some(value) => match opaque_id(value) {
             Some(value) => value,
-            None => return Response::bad_request(),
+            None => return Response::error(400, "Team trigger request is invalid"),
         },
         None => match generated_idempotency_key() {
             Some(value) => value,
-            None => return Response::unavailable(),
+            None => return Response::error(503, "Team trigger is unavailable"),
         },
     };
 
@@ -158,7 +152,11 @@ async fn handle_webhook_request(
         now_millis(),
     )
     .await;
-    Response::from_webhook_delivery(delivery)
+    let status = match delivery {
+        Delivery::Fired { .. } => 202,
+        _ => delivery.status_code(),
+    };
+    Response::json(status, delivery.body())
 }
 
 fn bearer_token(value: &str) -> Option<&str> {
@@ -231,80 +229,12 @@ fn generated_idempotency_key() -> Option<String> {
     Some(format!("webhook:{}", URL_SAFE_NO_PAD.encode(entropy)))
 }
 
-struct Request {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-impl Request {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(header, _)| header == name)
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-struct Response {
-    status: u16,
-    body: Value,
-}
-
-impl Response {
-    fn from_delivery(delivery: Delivery) -> Self {
-        Self {
-            status: delivery.status_code(),
-            body: delivery.body(),
-        }
-    }
-
-    fn from_webhook_delivery(delivery: Delivery) -> Self {
-        let status = match delivery {
-            Delivery::Fired { .. } => 202,
-            _ => delivery.status_code(),
-        };
-        Self {
-            status,
-            body: delivery.body(),
-        }
-    }
-
-    fn bad_request() -> Self {
-        Self::fixed(400, "Team trigger request is invalid")
-    }
-
-    fn unauthorized() -> Self {
-        Self::fixed(401, "Team trigger is unavailable")
-    }
-
-    fn webhook_unauthorized() -> Self {
-        Self::fixed(401, "TeamRun webhook token is required")
-    }
-
-    fn method_not_allowed() -> Self {
-        Self::fixed(405, "TeamRun webhook only accepts POST requests")
-    }
-
-    fn not_found() -> Self {
-        Self::fixed(404, "Team trigger is unavailable")
-    }
-
-    fn unavailable() -> Self {
-        Self::fixed(503, "Team trigger is unavailable")
-    }
-
-    fn fixed(status: u16, error: &'static str) -> Self {
-        Self {
-            status,
-            body: serde_json::json!({"success": false, "error": error}),
-        }
-    }
-
-    fn into_loopback(self) -> platform::loopback::Response {
-        platform::loopback::Response::json(self.status, self.body)
-    }
+fn header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    request
+        .headers()
+        .iter()
+        .find(|(header, _)| header == name)
+        .map(|(_, value)| value.as_str())
 }
 
 fn now_millis() -> u64 {
@@ -354,8 +284,8 @@ mod tests {
 
     #[test]
     fn external_responses_do_not_echo_request_secrets() {
-        let response = Response::webhook_unauthorized();
-        let encoded = serde_json::to_string(&response.body).unwrap();
+        let response = Response::error(401, "TeamRun webhook token is required");
+        let encoded = serde_json::to_string(response.body()).unwrap();
         assert!(!encoded.contains("private-webhook-token"));
         assert!(!encoded.contains("authorization"));
     }

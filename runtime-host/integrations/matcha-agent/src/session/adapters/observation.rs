@@ -468,6 +468,7 @@ impl Projection {
                     cursor: Some(event.seq),
                     history_refresh: projected.history_refresh,
                     changes: projected.changes,
+                    work_pending: None,
                 },
             ))
         };
@@ -646,6 +647,7 @@ impl Projection {
                 contiguous: true,
             },
             replay_baseline: None,
+            work_pending: None,
             terminal_runs,
             retired_item_ids,
             retired_tool_ids: Vec::new(),
@@ -1024,6 +1026,7 @@ async fn unavailable(
             run_id: None,
             cursor: None,
             history_refresh: false,
+            work_pending: None,
             changes: vec![SessionChange::RecoveryRequired {
                 reason: RecoveryReason::NativeUnavailable,
             }],

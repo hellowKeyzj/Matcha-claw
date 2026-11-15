@@ -1,7 +1,8 @@
+import { useId } from 'react';
 import { ArrowDown, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
-import type { TeamGraphEdgeAction, TeamGraphEdgeRecord, TeamGraphNodeRecord } from '@/types/team-design';
+import type { TeamGraphEdgeAction, TeamGraphEdgeRecord, TeamGraphNodeRecord, TeamGraphReworkCounter } from '@/types/team-design';
 import { EdgeActionEditor, PortEditor } from '@/plugins/teams/pages/TeamGraphPortRepair';
 import type { TeamRunGraphCanvasLabels } from '@/plugins/teams/pages/TeamRunGraphCanvas';
 
@@ -11,12 +12,17 @@ type TeamEdgeInspectorProps = {
   targetNode: TeamGraphNodeRecord | null;
   editable: boolean;
   pending: boolean;
+  mutationDisabled?: boolean;
   isNew: boolean;
   sourcePort: string;
   targetPort: string;
   action: TeamGraphEdgeAction | '';
   actions: TeamGraphEdgeAction[];
   includeUpstreamResult: boolean;
+  reworkLimit: string | null;
+  reworkLimitValid: boolean;
+  reworkCounters: TeamGraphReworkCounter[];
+  onReworkLimitChange: (value: string) => void;
   canSave: boolean;
   status: string;
   statusClassName: string;
@@ -31,7 +37,8 @@ type TeamEdgeInspectorProps = {
   onClose: () => void;
 };
 
-export function TeamEdgeInspector({ edge, sourceNode, targetNode, editable, pending, isNew, sourcePort, targetPort, action, actions, includeUpstreamResult, canSave, status, statusClassName, labels, error, onSourcePortChange, onTargetPortChange, onActionChange, onIncludeUpstreamResultChange, onSave, onDelete, onClose }: TeamEdgeInspectorProps) {
+export function TeamEdgeInspector({ edge, sourceNode, targetNode, editable, pending, mutationDisabled = false, isNew, sourcePort, targetPort, action, actions, includeUpstreamResult, reworkLimit, reworkLimitValid, reworkCounters, onReworkLimitChange, canSave, status, statusClassName, labels, error, onSourcePortChange, onTargetPortChange, onActionChange, onIncludeUpstreamResultChange, onSave, onDelete, onClose }: TeamEdgeInspectorProps) {
+  const id = useId();
   const sourcePorts = sourceNode?.sourcePorts ?? [];
   const targetPorts = targetNode?.targetPorts ?? [];
   const sourceValid = sourcePorts.includes(sourcePort);
@@ -76,6 +83,27 @@ export function TeamEdgeInspector({ edge, sourceNode, targetNode, editable, pend
             {action ? <p className="text-xs leading-relaxed text-muted-foreground">{labels.edgeActionDescriptions[action]}</p> : null}
             {targetNode?.kind === 'join' ? <p className="text-xs leading-relaxed text-muted-foreground">{labels.edgeJoinGateHint}</p> : null}
           </section>
+          {reworkLimit !== null ? <section aria-label={labels.reworkLimit} className="space-y-2">
+            <label className="grid gap-2 text-sm font-medium">
+              {labels.reworkLimit}
+              {editable ? <input
+                type="number"
+                min={0}
+                max={0xffff_ffff}
+                step={1}
+                className="h-10 w-full rounded-md border border-input bg-background px-3 font-normal text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                aria-describedby={`${id}-rework-hint${reworkLimitValid ? '' : ` ${id}-rework-error`}`}
+                aria-invalid={!reworkLimitValid}
+                value={reworkLimit}
+                onChange={(event) => onReworkLimitChange(event.target.value)}
+              /> : <span className="font-normal">{reworkLimit}</span>}
+            </label>
+            <p id={`${id}-rework-hint`} className="text-xs leading-relaxed text-muted-foreground">{labels.reworkLimitHint}</p>
+            {!reworkLimitValid ? <p id={`${id}-rework-error`} role="alert" className="text-xs text-destructive">{labels.reworkLimitInvalid}</p> : null}
+            {reworkCounters.map((counter) => <p key={counter.batchId} className="text-xs tabular-nums text-muted-foreground">{labels.reworkUsage
+              .replace('{{batch}}', String(counter.batchId)).replace('{{used}}', String(counter.used))
+              .replace('{{max}}', String(sourceNode!.reworkLimits[counter.sourcePort]))}</p>)}
+          </section> : null}
           <section aria-label={labels.edgeDataTransfer} className="space-y-3">
             <h3 className="text-sm font-medium">{labels.edgeDataTransfer}</h3>
             <label className="flex items-start gap-3 text-sm">
@@ -97,9 +125,9 @@ export function TeamEdgeInspector({ edge, sourceNode, targetNode, editable, pend
       <footer className="shrink-0 border-t px-6 py-4">
         {error ? <p role="alert" className="mb-3 text-sm text-destructive">{error}</p> : null}
         <div className="flex items-center justify-end gap-2">
-          {editable && !isNew ? <Button type="button" variant="ghost" size="icon" className="mr-auto h-9 w-9 text-muted-foreground hover:text-destructive" aria-label={labels.deleteEdge} title={labels.deleteEdge} disabled={pending} onClick={onDelete}><Trash2 aria-hidden="true" className="h-4 w-4" /></Button> : null}
+          {editable && !isNew ? <Button type="button" variant="ghost" size="icon" className="mr-auto h-9 w-9 text-muted-foreground hover:text-destructive" aria-label={labels.deleteEdge} title={labels.deleteEdge} disabled={pending || mutationDisabled} onClick={onDelete}><Trash2 aria-hidden="true" className="h-4 w-4" /></Button> : null}
           <Button type="button" variant="ghost" size="sm" onClick={onClose} disabled={pending}>{editable ? labels.cancelEdge : labels.closeEdge}</Button>
-          {editable ? <Button type="button" size="sm" disabled={pending || !canSave} onClick={onSave}>{labels.saveEdge}</Button> : null}
+          {editable ? <Button type="button" size="sm" disabled={pending || mutationDisabled || !canSave} onClick={onSave}>{labels.saveEdge}</Button> : null}
         </div>
       </footer>
     </SheetContent>

@@ -8,6 +8,7 @@ type TaskStartedEvent = {
   subtype: 'task_started'
   task_id: string
   tool_use_id?: string
+  request_message_id?: string
   description: string
   task_type?: string
   workflow_name?: string
@@ -19,6 +20,7 @@ type TaskProgressEvent = {
   subtype: 'task_progress'
   task_id: string
   tool_use_id?: string
+  request_message_id?: string
   description: string
   usage: {
     total_tokens: number
@@ -33,16 +35,14 @@ type TaskProgressEvent = {
   workflow_progress?: SdkWorkflowProgress[]
 }
 
-// Emitted when a foreground agent completes without being backgrounded.
-// Drained by drainSdkEvents() directly into the output stream — does NOT
-// go through the print.ts XML task_notification parser and does NOT trigger
-// the LLM loop. Consumers (e.g. VS Code session.ts) use this to remove the
-// task from the subagent panel.
+// Terminal bookend for registered tasks. Structured notification producers emit
+// it directly; only legacy XML notifications are translated by print.ts.
 type TaskNotificationSdkEvent = {
   type: 'system'
   subtype: 'task_notification'
   task_id: string
   tool_use_id?: string
+  request_message_id?: string
   status: 'completed' | 'failed' | 'stopped'
   output_file: string
   summary: string
@@ -101,21 +101,16 @@ export function drainSdkEvents(): Array<
 }
 
 /**
- * Emit a task_notification SDK event for a task reaching a terminal state.
- *
- * registerTask() always emits task_started; this is the closing bookend.
- * Call this from any exit path that sets a task terminal WITHOUT going
- * through enqueuePendingNotification-with-<task-id> (print.ts parses that
- * XML into the same SDK event, so paths that do both would double-emit).
- * Paths that suppress the XML notification (notified:true pre-set, kill
- * paths, abort branches) must call this directly so SDK consumers
- * (Scuttle's bg-task dot, VS Code subagent panel) see the task close.
+ * Emit the terminal SDK bookend once at the task's notification handoff, or
+ * directly when that exit path does not enqueue a model notification.
+ * Structured notifications must not also be translated from XML by print.ts.
  */
 export function emitTaskTerminatedSdk(
   taskId: string,
   status: 'completed' | 'failed' | 'stopped',
   opts?: {
     toolUseId?: string
+    requestMessageId?: string
     summary?: string
     outputFile?: string
     usage?: { total_tokens: number; tool_uses: number; duration_ms: number }
@@ -126,6 +121,7 @@ export function emitTaskTerminatedSdk(
     subtype: 'task_notification',
     task_id: taskId,
     tool_use_id: opts?.toolUseId,
+    request_message_id: opts?.requestMessageId,
     status,
     output_file: opts?.outputFile ?? '',
     summary: opts?.summary ?? '',

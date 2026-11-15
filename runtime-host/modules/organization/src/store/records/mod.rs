@@ -1,4 +1,5 @@
 pub(crate) mod execution;
+pub(crate) mod prompts;
 pub(crate) mod run;
 pub(crate) mod team;
 
@@ -7,11 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     OrganizationFacts, StoreFault,
     content::ContentStore,
-    facts::MaterializationLifecycleFactsRestoreInput,
+    facts::FactsRestoreInput,
     schema::{RecordKind, StoredRecord},
 };
 use crate::{
-    ActivityLedgerSnapshot, DeliveryLedgerSnapshot, TeamDecisionLedgerSnapshot,
+    ActivityLedger, DeliveryLedger, TeamDecisionLedger, TeamDecisionLedgerSnapshot,
     run::{TaskBoardFacts, event::EventLedgerSnapshot},
 };
 use execution::ExecutionRecord;
@@ -22,7 +23,7 @@ pub(crate) fn encode_all(
     facts: &OrganizationFacts,
     contents: &ContentStore,
 ) -> Result<Vec<StoredRecord>, StoreFault> {
-    let mut records = Vec::new();
+    let mut records = vec![prompts::encode(facts.team_prompts())?];
     let run_teams = facts
         .runs()
         .map(|run| (run.run_id().as_str(), run.team()))
@@ -36,7 +37,7 @@ pub(crate) fn encode_all(
     for value in facts.teams() {
         records.push(team::encode_team(value)?);
     }
-    for value in facts.materialization_lifecycles() {
+    for value in facts.materialization_groups() {
         records.push(team::encode_materialization(value, contents)?);
     }
     for value in facts.templates() {
@@ -79,77 +80,51 @@ pub(crate) fn encode_all(
         records.push(run::encode_event(team_for_run(value.run_id())?, value)?);
     }
     for value in facts.activities().activities() {
-        records.push(execution::encode(
-            &ExecutionRecord::Activity(value.clone()),
-            Some(team_for_run(value.facts().run_id.as_str())?),
+        records.push(execution::encode_activity(
+            team_for_run(value.facts().run_id.as_str())?,
+            value,
             contents,
         )?);
     }
     for value in facts.deliveries().deliveries() {
-        records.push(execution::encode(
-            &ExecutionRecord::Delivery(value.clone()),
-            Some(team_for_run(&value.facts().run_id)?),
+        records.push(execution::encode_delivery(
+            team_for_run(&value.facts().run_id)?,
+            value,
             contents,
         )?);
     }
     for value in facts.evidence_records() {
-        records.push(execution::encode(
-            &ExecutionRecord::Evidence(value.clone()),
-            Some(team_for_run(value.run_id())?),
+        records.push(execution::encode_evidence(
+            team_for_run(value.run_id())?,
+            value,
             contents,
         )?);
     }
     for value in facts.artifacts() {
-        records.push(execution::encode(
-            &ExecutionRecord::Artifact(value.clone()),
-            Some(team_for_run(value.run_id())?),
+        records.push(execution::encode_artifact(
+            team_for_run(value.run_id())?,
+            value,
             contents,
         )?);
     }
-    let decisions = facts.decision_snapshot();
-    for value in decisions.decisions {
-        records.push(execution::encode(
-            &ExecutionRecord::Decision(value),
-            None,
-            contents,
-        )?);
+    let mut decision_runs = BTreeSet::new();
+    for value in facts.decisions() {
+        records.push(execution::encode_decision(value)?);
+        decision_runs.insert(value.run_id());
     }
-    for value in decisions.events {
-        records.push(execution::encode(
-            &ExecutionRecord::DecisionEvent(value),
-            None,
-            contents,
-        )?);
+    for run in decision_runs {
+        for value in facts.decision_ledger().events_for_run(run) {
+            records.push(execution::encode_decision_event(value)?);
+        }
     }
     for (ordinal, value) in facts.task_board().ordered_tasks() {
-        records.push(execution::encode(
-            &ExecutionRecord::Task {
-                ordinal,
-                record: value.clone(),
-            },
-            Some(value.team_id()),
-            contents,
-        )?);
+        records.push(execution::encode_task(ordinal, value, contents)?);
     }
     for (ordinal, value) in facts.task_board().ordered_runners() {
-        records.push(execution::encode(
-            &ExecutionRecord::Runner {
-                ordinal,
-                record: value.clone(),
-            },
-            Some(value.team_id()),
-            contents,
-        )?);
+        records.push(execution::encode_runner(ordinal, value, contents)?);
     }
     for (ordinal, value) in facts.task_board().ordered_mailbox() {
-        records.push(execution::encode(
-            &ExecutionRecord::Mailbox {
-                ordinal,
-                record: value.clone(),
-            },
-            Some(value.team_id()),
-            contents,
-        )?);
+        records.push(execution::encode_mailbox(ordinal, value, contents)?);
     }
     Ok(records)
 }
@@ -187,7 +162,12 @@ pub(crate) fn decode_all(
     let mut tasks = Vec::new();
     let mut runners = Vec::new();
     let mut mailbox = Vec::new();
+    let mut team_prompts = crate::prompts::TeamPromptSettings::default();
     for record in records {
+        if record.key.kind == RecordKind::TeamPrompts {
+            team_prompts = prompts::decode(record)?;
+            continue;
+        }
         match record.key.kind {
             RecordKind::Team
             | RecordKind::Materialization
@@ -249,8 +229,8 @@ pub(crate) fn decode_all(
             | RecordKind::Task
             | RecordKind::Runner
             | RecordKind::Mailbox => match execution::decode(record, contents)? {
-                ExecutionRecord::Activity(value) => activities.push(value.snapshot()),
-                ExecutionRecord::Delivery(value) => deliveries.push(value.snapshot()),
+                ExecutionRecord::Activity(value) => activities.push(value),
+                ExecutionRecord::Delivery(value) => deliveries.push(value),
                 ExecutionRecord::Evidence(value) => evidence.push(value),
                 ExecutionRecord::Artifact(value) => artifacts.push(value),
                 ExecutionRecord::Decision(value) => decisions.push(value),
@@ -259,6 +239,7 @@ pub(crate) fn decode_all(
                 ExecutionRecord::Runner { ordinal, record } => runners.push((ordinal, record)),
                 ExecutionRecord::Mailbox { ordinal, record } => mailbox.push((ordinal, record)),
             },
+            RecordKind::TeamPrompts => unreachable!("prompt settings were decoded above"),
             RecordKind::Team
             | RecordKind::Materialization
             | RecordKind::WorkflowTemplate
@@ -276,31 +257,33 @@ pub(crate) fn decode_all(
             .cmp(right.run_id())
             .then(left.sequence().cmp(&right.sequence()))
     });
-    let approvals = run::restore_approvals(records, contents)?
-        .into_iter()
-        .map(|approval| approval.durable_snapshot())
-        .collect();
+    let approvals = run::restore_approvals(records, contents)?;
     let task_board = TaskBoardFacts::restore_ordered(tasks, runners, mailbox)
         .map_err(|_| StoreFault::InvalidFacts)?;
-    OrganizationFacts::restore_with_materialization_lifecycles_and_decisions_and_artifacts_and_task_board_and_purged_runs(
-        MaterializationLifecycleFactsRestoreInput {
-            teams,
-            materializations,
-            runs,
-            pending_workflow_plan_admissions,
-            templates,
-            deliveries: DeliveryLedgerSnapshot::new(deliveries),
-            activities: ActivityLedgerSnapshot::new(activities),
-            triggers,
-            control_resolutions,
-            approvals,
-            events: EventLedgerSnapshot::from_durable(commands, events),
-            evidence,
-        },
-        TeamDecisionLedgerSnapshot::from_durable(decisions, decision_events),
+    let deliveries = DeliveryLedger::from_restored(deliveries)
+        .map_err(|_| StoreFault::InvalidFacts)?;
+    let activities = ActivityLedger::from_restored(activities)
+        .map_err(|_| StoreFault::InvalidFacts)?;
+    let decisions = TeamDecisionLedger::restore(TeamDecisionLedgerSnapshot::from_durable(decisions, decision_events))
+        .map_err(|_| StoreFault::InvalidFacts)?;
+    OrganizationFacts::from_restored(FactsRestoreInput {
+        teams,
+        materializations,
+        runs,
+        pending_workflow_plan_admissions,
+        templates,
+        deliveries,
+        activities,
+        triggers,
+        control_resolutions,
+        approvals,
+        events: EventLedgerSnapshot::from_durable(commands, events),
+        evidence,
+        decisions,
         artifacts,
         task_board,
         purged_runs,
-    )
+        team_prompts,
+    })
     .map_err(|_| StoreFault::InvalidFacts)
 }

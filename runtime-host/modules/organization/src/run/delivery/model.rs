@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use serde_json::Value;
 
@@ -387,9 +387,10 @@ const TEAM_MESSAGE_CLOSE: &str = "</team_message>";
 #[derive(Clone, Eq, PartialEq)]
 pub struct TeamNodeOutput {
     final_assistant_text: String,
-    business_messages: Vec<String>,
+    business_messages: Arc<[String]>,
     summary: String,
     decision: String,
+    files: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -408,10 +409,27 @@ pub enum TeamNodeOutputError {
 impl TeamNodeOutput {
     pub fn parse(final_assistant_text: impl Into<String>) -> Result<Self, TeamNodeOutputError> {
         let final_assistant_text = final_assistant_text.into();
-        let json = extract_team_message(&final_assistant_text)?;
-        let value = serde_json::from_str::<Value>(json.trim())
-            .map_err(|_| TeamNodeOutputError::InvalidJson)?;
-        Self::from_value(final_assistant_text, value)
+        let object = parse_team_message_fields(extract_team_message(&final_assistant_text)?)?;
+        Self::from_fields(final_assistant_text, object)
+    }
+
+    pub fn declared_files(text: &str) -> Option<Vec<String>> {
+        let (_, json) = split_team_message(text).ok()?;
+        let object = parse_team_message_fields(json).ok()?;
+        crate::run::artifact::normalize_delivery_files(message_files(&object).ok()?).ok()
+    }
+
+    pub(crate) fn declared_result(text: &str) -> Option<(String, Vec<String>)> {
+        let (_, json) = split_team_message(text).ok()?;
+        let object = parse_team_message_fields(json).or_else(|error| {
+            // A root trailing comma can freeze a declaration, never validate a terminal output.
+            let prefix = json.trim().strip_suffix('}').and_then(|prefix| prefix.trim_end().strip_suffix(','))
+                .ok_or(error)?;
+            parse_team_message_fields(&format!("{prefix}}}"))
+        }).ok()?;
+        let decision = required_message_string(&object, "decision").ok()?;
+        let files = crate::run::artifact::normalize_delivery_files(message_files(&object).ok()?).ok()?;
+        Some((decision, files))
     }
 
     pub fn restore(
@@ -428,24 +446,26 @@ impl TeamNodeOutput {
         let business_messages = Self::business_messages_from(std::slice::from_ref(&final_assistant_text));
         Ok(Self {
             final_assistant_text,
-            business_messages,
+            business_messages: business_messages.into(),
             summary,
             decision,
+            files: Vec::new(),
         })
     }
 
-    fn from_value(final_assistant_text: String, value: Value) -> Result<Self, TeamNodeOutputError> {
-        let Some(object) = value.as_object() else {
-            return Err(TeamNodeOutputError::InvalidField("root"));
-        };
-        for field in object.keys() {
-            if !matches!(field.as_str(), "summary" | "decision") {
-                return Err(TeamNodeOutputError::UnexpectedField(field.clone()));
-            }
-        }
-        let summary = required_message_string(object, "summary")?;
-        let decision = required_message_string(object, "decision")?;
-        Self::restore(final_assistant_text, summary, decision)
+    pub fn with_files(mut self, files: Vec<String>) -> Result<Self, TeamNodeOutputError> {
+        self.files = crate::run::artifact::normalize_delivery_files(files)
+            .map_err(|_| TeamNodeOutputError::InvalidField("files"))?;
+        Ok(self)
+    }
+
+    fn from_fields(
+        final_assistant_text: String,
+        object: serde_json::Map<String, Value>,
+    ) -> Result<Self, TeamNodeOutputError> {
+        let summary = required_message_string(&object, "summary")?;
+        let decision = required_message_string(&object, "decision")?;
+        Self::restore(final_assistant_text, summary, decision)?.with_files(message_files(&object)?)
     }
 
     pub(crate) fn validate_decision_for(
@@ -474,11 +494,15 @@ impl TeamNodeOutput {
     }
 
     pub(crate) fn with_business_messages(mut self, messages: Vec<String>) -> Self {
-        self.business_messages = messages;
+        self.business_messages = messages.into();
         self
     }
 
     pub(crate) fn business_messages(&self) -> &[String] {
+        &self.business_messages
+    }
+
+    pub(crate) fn business_messages_identity(&self) -> &Arc<[String]> {
         &self.business_messages
     }
 
@@ -493,6 +517,10 @@ impl TeamNodeOutput {
     pub fn decision(&self) -> &str {
         &self.decision
     }
+
+    pub fn files(&self) -> &[String] {
+        &self.files
+    }
 }
 
 impl fmt::Debug for TeamNodeOutput {
@@ -502,6 +530,7 @@ impl fmt::Debug for TeamNodeOutput {
             .field("final_assistant_text", &"<redacted>")
             .field("summary", &"<redacted>")
             .field("decision", &"<redacted>")
+            .field("file_count", &self.files.len())
             .finish()
     }
 }
@@ -528,15 +557,54 @@ fn split_team_message(text: &str) -> Result<(&str, &str), TeamNodeOutputError> {
         &suffix[..close]
     } else {
         // Without a closing tag, only an otherwise identifiable control object is a suffix.
-        let value = serde_json::from_str::<Value>(suffix.trim())
+        let object = parse_team_message_fields(suffix)
             .map_err(|_| TeamNodeOutputError::InvalidEnvelope)?;
-        let object = value.as_object().ok_or(TeamNodeOutputError::InvalidEnvelope)?;
-        if object.is_empty() || object.keys().any(|key| !matches!(key.as_str(), "summary" | "decision")) {
+        if object.is_empty() {
             return Err(TeamNodeOutputError::InvalidEnvelope);
         }
         suffix
     };
     Ok((body, json))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TeamMessageFields {
+    #[serde(default)]
+    summary: Value,
+    #[serde(default)]
+    decision: Value,
+    #[serde(default)]
+    files: Value,
+}
+
+fn parse_team_message_fields(json: &str) -> Result<serde_json::Map<String, Value>, TeamNodeOutputError> {
+    let value = serde_json::from_str::<Value>(json.trim())
+        .map_err(|_| TeamNodeOutputError::InvalidJson)?;
+    let Value::Object(object) = value else {
+        return Err(TeamNodeOutputError::InvalidField("root"));
+    };
+    for field in object.keys() {
+        if !matches!(field.as_str(), "summary" | "decision" | "files") {
+            return Err(TeamNodeOutputError::UnexpectedField(field.clone()));
+        }
+    }
+    // Value maps overwrite duplicate keys; validate the same object with named fields first.
+    let fields: TeamMessageFields = serde_json::from_str(json.trim())
+        .map_err(|_| TeamNodeOutputError::InvalidJson)?;
+    let _ = (fields.summary, fields.decision, fields.files);
+    Ok(object)
+}
+
+fn message_files(object: &serde_json::Map<String, Value>) -> Result<Vec<String>, TeamNodeOutputError> {
+    match object.get("files") {
+        None => Ok(Vec::new()),
+        Some(Value::Array(files)) => files.iter().map(|file| {
+            file.as_str().map(ToOwned::to_owned)
+                .ok_or(TeamNodeOutputError::InvalidField("files"))
+        }).collect(),
+        Some(_) => Err(TeamNodeOutputError::InvalidField("files")),
+    }
 }
 
 fn required_message_string(
@@ -551,10 +619,7 @@ fn required_message_string(
 }
 
 fn validate_summary(summary: String) -> Result<String, TeamNodeOutputError> {
-    if summary.trim().is_empty()
-        || summary.len() > crate::run::MAX_SUMMARY_BYTES
-        || summary.chars().any(char::is_control)
-    {
+    if !crate::run::is_valid_summary(&summary) {
         return Err(TeamNodeOutputError::InvalidSummary);
     }
     Ok(summary)

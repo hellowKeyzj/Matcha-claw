@@ -141,6 +141,11 @@ pub enum GraphPatchOperation {
     RemoveEdge {
         edge_id: String,
     },
+    SetReworkLimit {
+        source_node_id: String,
+        source_port: String,
+        max_reworks: u32,
+    },
     SetNodePosition {
         node_id: String,
         x: i64,
@@ -252,6 +257,9 @@ fn graph_patch_operation_has_valid_identity(operation: &GraphPatchOperation) -> 
                 && is_graph_patch_identity(target_node_id)
         }
         GraphPatchOperation::RemoveEdge { edge_id } => is_graph_patch_identity(edge_id),
+        GraphPatchOperation::SetReworkLimit { source_node_id, source_port, .. } => {
+            is_graph_patch_identity(source_node_id) && is_graph_patch_identity(source_port)
+        }
         GraphPatchOperation::SetNodePosition { node_id, .. } => is_graph_patch_identity(node_id),
         GraphPatchOperation::SetMetadata { .. } => true,
     }
@@ -271,6 +279,7 @@ pub struct ApprovalCommand {
     node_execution_id: OpaqueId,
     role_id: OpaqueId,
     action: ApprovalAction,
+    submission: Option<crate::run::approval::ApprovalSubmission>,
 }
 
 impl ApprovalCommand {
@@ -285,7 +294,17 @@ impl ApprovalCommand {
             node_execution_id,
             role_id,
             action,
+            submission: None,
         }
+    }
+
+    pub fn with_submission(mut self, submission: crate::run::approval::ApprovalSubmission) -> Self {
+        self.submission = Some(submission);
+        self
+    }
+
+    pub fn submission(&self) -> Option<&crate::run::approval::ApprovalSubmission> {
+        self.submission.as_ref()
     }
 
     pub fn approval_id(&self) -> &OpaqueId {
@@ -358,6 +377,7 @@ impl NodeProgressCommand {
 pub enum CommandType {
     GraphPatch,
     GraphReplace,
+    ReworkContinue,
     NodeProgress,
     ApprovalRequest,
 }
@@ -389,6 +409,14 @@ pub enum CommandPayload {
     GraphPatch(GraphPatch),
     GraphReplace(crate::GraphDefinition),
     HistoricalGraphReplace(HistoricalGraphReplace),
+    ReworkContinue {
+        batch_id: u64,
+        source_node_id: String,
+        source_port: String,
+        source_node_execution_id: String,
+        max_reworks: u32,
+        expected_graph_version: String,
+    },
     NodeProgress(NodeProgressCommand),
     ApprovalRequest(ApprovalCommand),
 }
@@ -410,6 +438,7 @@ impl CommandPayload {
         match self {
             Self::GraphPatch(_) => CommandType::GraphPatch,
             Self::GraphReplace(_) | Self::HistoricalGraphReplace(_) => CommandType::GraphReplace,
+            Self::ReworkContinue { .. } => CommandType::ReworkContinue,
             Self::NodeProgress(_) => CommandType::NodeProgress,
             Self::ApprovalRequest(_) => CommandType::ApprovalRequest,
         }
@@ -596,6 +625,7 @@ impl CommandRecord {
 pub enum TeamEventType {
     GraphPatchAccepted,
     GraphReplaced,
+    ReworkContinued,
     NodeProgressed,
     ApprovalRequested,
     ApprovalResolved,
@@ -611,6 +641,14 @@ pub enum TeamEventPayload {
     GraphReplaced {
         graph_id: String,
         workflow_plan_id: String,
+    },
+    ReworkContinued {
+        batch_id: u64,
+        source_node_id: String,
+        source_port: String,
+        source_node_execution_id: String,
+        max_reworks: u32,
+        expected_graph_version: String,
     },
     NodeProgressed {
         node_execution_id: OpaqueId,
@@ -635,6 +673,7 @@ impl TeamEventPayload {
             | Self::ApprovalResolved { approval_id, .. } => Some(approval_id.as_str()),
             Self::GraphPatchAccepted { .. }
             | Self::GraphReplaced { .. }
+            | Self::ReworkContinued { .. }
             | Self::NodeProgressed { .. } => None,
         }
     }
@@ -740,6 +779,24 @@ impl TeamEvent {
                 TeamEventPayload::GraphReplaced {
                     graph_id: definition.graph_id().to_owned(),
                     workflow_plan_id: definition.workflow_plan_id().to_owned(),
+                },
+            ),
+            CommandPayload::ReworkContinue {
+                batch_id,
+                source_node_id,
+                source_port,
+                source_node_execution_id,
+                max_reworks,
+                expected_graph_version,
+            } => (
+                TeamEventType::ReworkContinued,
+                TeamEventPayload::ReworkContinued {
+                    batch_id: *batch_id,
+                    source_node_id: source_node_id.clone(),
+                    source_port: source_port.clone(),
+                    source_node_execution_id: source_node_execution_id.clone(),
+                    max_reworks: *max_reworks,
+                    expected_graph_version: expected_graph_version.clone(),
                 },
             ),
             CommandPayload::NodeProgress(progress) => (

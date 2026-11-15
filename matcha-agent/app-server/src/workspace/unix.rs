@@ -81,13 +81,7 @@ impl Directory {
                 "Only regular workspace files may be read",
             ));
         }
-        if metadata.nlink() != 1 {
-            return Err(rpc::Error::new(
-                -32007,
-                "workspace_hardlink_forbidden",
-                "Files with multiple hard links cannot be read through the workspace API",
-            ));
-        }
+        require_single_link(&metadata)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|error| io_error("read", error))?;
@@ -115,6 +109,7 @@ impl Directory {
         };
         let metadata = file.metadata().map_err(|error| io_error("stat", error))?;
         let kind = if metadata.is_file() {
+            require_single_link(&metadata)?;
             Kind::File
         } else if metadata.is_dir() {
             Kind::Directory
@@ -256,6 +251,17 @@ impl Directory {
     }
 }
 
+fn require_single_link(metadata: &std::fs::Metadata) -> rpc::Result<()> {
+    if metadata.nlink() != 1 {
+        return Err(rpc::Error::new(
+            -32007,
+            "workspace_hardlink_forbidden",
+            "Files with multiple hard links cannot be read through the workspace API",
+        ));
+    }
+    Ok(())
+}
+
 fn component(name: &OsStr) -> rpc::Result<CString> {
     CString::new(name.as_bytes()).map_err(|_| rpc::Error::invalid("Path contains a NUL byte"))
 }
@@ -263,11 +269,7 @@ fn component(name: &OsStr) -> rpc::Result<CString> {
 fn owned_file(descriptor: libc::c_int, operation: &'static str) -> rpc::Result<File> {
     if descriptor == -1 {
         let error = io::Error::last_os_error();
-        return if error.raw_os_error() == Some(libc::ELOOP) {
-            Err(denied().with_source(error))
-        } else {
-            Err(io_error(operation, error))
-        };
+        return Err(io_error(operation, error));
     }
     // SAFETY: the preceding open/openat returned a new descriptor owned by the caller.
     Ok(unsafe { File::from_raw_fd(descriptor) })

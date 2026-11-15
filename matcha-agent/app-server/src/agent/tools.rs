@@ -118,7 +118,7 @@ pub(super) async fn dispatch(
     }
     let params: Set = rpc::params(params)?;
     crate::config::validate_id(&params.agent_id)?;
-    let _guard = sessions.agent_guard(&params.agent_id).await;
+    let _scope = sessions.agent_scope(&params.agent_id).await;
     config
         .update(move |current| {
             let agent = current

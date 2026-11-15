@@ -1,11 +1,11 @@
-import { memo, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode, type RefObject } from 'react';
+import { memo, Suspense, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useContributions } from '@/plugin-host/react';
 import { chatComposerContent, type ChatComposerContentProps, type ChatComposerContribution } from './extensions';
 import { useChatStore } from '@/plugins/chat/store';
 import { selectCurrentChatSendGate, selectRuntimeAgentScope } from '@/plugins/chat/store/selectors';
-import { hasPendingSessionSend } from '@/plugins/chat/store/session-presentation';
+import { hasPendingSessionSend, isSessionAbortPending } from '@/plugins/chat/store/session-presentation';
 import { currentSessionSend } from '@/plugins/chat/store/send-state';
 import { isRunActive } from '@/plugins/chat/store/types';
 import { supportsSessionGoal } from '@/plugins/runtime/directory';
@@ -45,7 +45,7 @@ type ChatSkillPreviewState = {
 const EMPTY_AGENTS: never[] = [];
 const composerLoads = new WeakMap<readonly ChatComposerContribution[], Promise<readonly { id: string; component: ComponentType<ChatComposerContentProps> }[]>>();
 
-function ChatComposerContributions({ children, ...context }: ChatComposerContentProps) {
+function ChatComposerContributions(context: ChatComposerContentProps) {
   const contributions = useContributions(chatComposerContent);
   let loaded = composerLoads.get(contributions);
   if (!loaded) {
@@ -55,15 +55,7 @@ function ChatComposerContributions({ children, ...context }: ChatComposerContent
     composerLoads.set(contributions, loaded);
   }
   const content = use(loaded);
-  const render = (index: number, preceding: ReactNode): ReactNode => {
-    const entry = content[index];
-    if (!entry) return children(preceding);
-    const Content = entry.component;
-    return <Content key={entry.id} {...context}>
-      {(next) => render(index + 1, <>{preceding}{next}</>)}
-    </Content>;
-  };
-  return render(0, null);
+  return content.map(({ id, component: Content }) => <Content key={id} {...context} />);
 }
 
 export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, viewportPaneRef, children }: {
@@ -97,7 +89,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
     meta: { sessionIdentity: facts.sessionIdentity, endpointSessionId: facts.endpointSessionId,
       ownership: facts.ownership, goal: facts.goal, modelState: facts.modelState, historyStatus: facts.historyStatus },
     contextTokens: facts.contextTokens,
-    runtime: { runPhase: facts.runPhase, activeRunId: facts.activeRunId, imageGeneration: { active: facts.imageGenerationActive } },
+    runtime: { runPhase: facts.runPhase, activeRunId: facts.activeRunId },
   };
   const connectorEndpointSessionId = currentSession.meta.endpointSessionId;
   const { runtime: currentConversationRuntime, directory: runtimeEndpointDirectory } = useChatRuntime();
@@ -113,6 +105,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
   const currentSendGate = useChatStore(selectCurrentChatSendGate);
   const approvalStatus = useChatStore((state) => currentSessionRecordKey ? getSessionApprovalStatus(state, currentSessionRecordKey) : 'idle');
   const sessionSendPending = useChatStore((state) => hasPendingSessionSend(selectChatSession(state)));
+  const sessionAbortPending = useChatStore((state) => isSessionAbortPending(selectChatSession(state)));
   const thinkingSendPending = useChatStore((state) => {
     const record = selectChatSession(state);
     const send = currentSessionSend(record);
@@ -137,7 +130,6 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
   const currentSkillsScope = useMemo(() => isOpenClawModelSession && currentConversationEndpoint
     ? runtimeInstanceScope(currentConversationEndpoint) : isMatchaModelSession ? currentConfigurationScope : null,
   [currentConfigurationScope, currentConversationEndpoint, isMatchaModelSession, isOpenClawModelSession]);
-  const imageGenerationActive = currentSession.runtime.imageGeneration?.active === true;
   const usesHostModelCandidates = isOpenClawModelSession || isMatchaModelSession;
   const availableModels = usesHostModelCandidates ? providerModels : EMPTY_AGENTS;
   const modelsLoading = usesHostModelCandidates && providerModelsLoading;
@@ -277,7 +269,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
     currentModelId: currentSessionModelId,
     availableModels: isOpenClawModelSession ? availableModels : EMPTY_AGENTS,
   }), [availableModels, currentSession.contextTokens, currentSessionModelId, isOpenClawModelSession]);
-  const activeRun = isRunActive(currentSession.runtime) || imageGenerationActive;
+  const activeRun = isRunActive(currentSession.runtime);
   const handlePermissionIntent = useCallback<Parameters<typeof useChatPermissions>[0]['onSelectIntent']>((selection) => {
     setPermissionSelection(currentComposerDraftKey, selection);
   }, [currentComposerDraftKey, setPermissionSelection]);
@@ -536,17 +528,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
     thinking: thinkingPicker,
     onSelect: (modelSelectionId: string) => { void handleSelectModel(modelSelectionId); },
   } : null, [handleSelectModel, modelPicker, thinkingPicker]);
-  return <ChatComposerContributions
-    sessionIdentity={currentWorkspaceIdentity}
-    ownership={ownership}
-    enabled={chatSideEffectsActive}
-    runActive={isRunActive(currentSession.runtime)}
-    imageGenerationActive={imageGenerationActive}
-    approvalWaiting={approvalStatus === 'awaiting_approval'}
-    canSend={currentSendGate.canSend}
-    focusComposer={focusComposer}
-  >
-    {(composerContent) => children((topContent) => <ChatInput
+  return children((topContent) => <ChatInput
       ref={composerRef}
       topContent={<>
         {topContent}
@@ -563,19 +545,26 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
       modelPicker={inputModelPicker}
       permissionPicker={permissionPicker}
       contextUsage={contextUsage}
-      composerContent={composerContent}
+      composerContent={<Suspense fallback={null}><ChatComposerContributions
+        sessionIdentity={currentWorkspaceIdentity}
+        ownership={ownership}
+        enabled={chatSideEffectsActive}
+        runActive={activeRun}
+        imageGenerationActive={facts.imageGenerationActive}
+        approvalWaiting={approvalStatus === 'awaiting_approval'}
+        canSend={currentSendGate.canSend}
+        focusComposer={focusComposer}
+      /></Suspense>}
       disabled={!currentChatRuntimeAvailable}
       reconnecting={currentRuntimeReconnecting}
-      sending={isRunActive(currentSession.runtime)}
-      imageGenerationActive={imageGenerationActive}
+      sending={activeRun}
       sendGate={currentSendGate}
-      stopping={currentSession.runtime.runPhase === 'stopping'}
+      stopping={sessionAbortPending}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
       allowedSkillIds={allowedSkillIdsForChat}
       sessionIdentity={connectorSessionIdentity}
       endpointSessionId={connectorEndpointSessionId}
       activeRunId={currentSession.runtime.activeRunId}
       runPhase={currentSession.runtime.runPhase}
-    />)}
-  </ChatComposerContributions>;
+    />);
 });

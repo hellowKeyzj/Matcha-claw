@@ -217,7 +217,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoWrite',
     label: 'Todo Write',
-    description: 'Create and manage the current session todo list for multi-step work. Requires oldTodos and newTodos; newTodos is the full replacement list. Use newTodos: [] to clear completed temporary todos.',
+    description: 'Create and manage the current session todo list for multi-step work. Every call requires both oldTodos (the previous list) and newTodos (the complete updated list). Use newTodos: [] to clear completed temporary todos.',
     parameters: todoWriteParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoWrite(api, toolCtx, params)

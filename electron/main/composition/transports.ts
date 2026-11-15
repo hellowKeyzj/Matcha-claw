@@ -52,6 +52,7 @@ import { createTaskManagerTransport } from '../runtime-host-delivery/transport/t
 import { createTeamApprovalsTransport } from '../runtime-host-delivery/transport/teams/approvals';
 import { createTeamHumanDecisionTransport } from '../runtime-host-delivery/transport/teams/decision';
 import { createTeamGraphTransport } from '../runtime-host-delivery/transport/teams/graph';
+import { createTeamPromptsTransport } from '../runtime-host-delivery/transport/teams/prompts';
 import { createTeamLifecycleTransport } from '../runtime-host-delivery/transport/teams/lifecycle';
 import { createManualTeamTransport } from '../runtime-host-delivery/transport/teams/manual';
 import { createTeamPublicTransport } from '../runtime-host-delivery/transport/teams/public';
@@ -162,6 +163,7 @@ export function createRuntimeHostTransportBundle(
     teamRoleSessionsTransport: createTeamRoleSessionsTransport(issuer, runtimeHostTransportPort),
     teamApprovalsTransport: createTeamApprovalsTransport(issuer, runtimeHostTransportPort),
     teamGraphTransport: createTeamGraphTransport(issuer, runtimeHostTransportPort),
+    teamPromptsTransport: createTeamPromptsTransport(issuer, runtimeHostTransportPort),
     teamSkillTransport: createTeamSkillTransport(issuer, runtimeHostTransportPort),
     teamTriggerTransport: createTeamTriggerTransport(issuer, runtimeHostTransportPort),
     teamWebhookAuthTransport: createTeamWebhookAuthTransport(issuer, runtimeHostTransportPort),

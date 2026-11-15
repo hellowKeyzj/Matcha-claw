@@ -1,7 +1,7 @@
 import type { ReplyTiming } from './reply-timing';
 import type { ThreadItemPresentation } from './thread-presentation';
 import type { SessionAssistantTurnSegment, SessionRenderToolCard } from '@/types/session/tool-card';
-import { readBrowserTabPreview, readMcpAppPreview } from '@/plugins/message-rendering/tool-renderers/openclaw-details';
+import { isOpenClawMediaGenerationTool, readBrowserTabPreview, readMcpAppPreview } from '@/plugins/message-rendering/tool-renderers/openclaw-details';
 
 /** Renderer-only grouping; neither this key nor its segments define a native run. */
 export interface ThreadWorkPresentation {
@@ -13,7 +13,7 @@ export interface ThreadWorkPresentation {
 }
 
 function preservesToolResult(tool: SessionRenderToolCard): boolean {
-  return tool.result.kind === 'canvas' || !!readMcpAppPreview(tool.details) || !!readBrowserTabPreview(tool.details);
+  return isOpenClawMediaGenerationTool(tool) || tool.result.kind === 'canvas' || !!readMcpAppPreview(tool.details) || !!readBrowserTabPreview(tool.details);
 }
 
 function collapseInterval(

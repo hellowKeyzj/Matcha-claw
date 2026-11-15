@@ -27,6 +27,7 @@ struct Target {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
     session_identity: SessionIdentity,
+    endpoint_session_id: Option<String>,
     session_key: String,
     lease_id: String,
     limit: Option<usize>,
@@ -54,7 +55,9 @@ pub(super) async fn handle(request: &loopback::Request, verifier: Arc<Mutex<Capa
         || input.input.lease_id.trim() != input.input.lease_id || input.input.lease_id.chars().any(char::is_control)
         || input.input.limit.is_some_and(|limit| !(1..=200).contains(&limit))
         || input.input.input_ids.as_deref().is_some_and(|ids| ids.is_empty() || !crate::state::valid_input_ids(ids))
-        || (release && (input.input.limit.is_some() || input.input.input_ids.is_some())) {
+        || input.input.endpoint_session_id.as_deref().is_some_and(|id| id.is_empty() || id.len() > 4096
+            || id.trim() != id || id.chars().any(char::is_control))
+        || (release && (input.input.endpoint_session_id.is_some() || input.input.limit.is_some() || input.input.input_ids.is_some())) {
         return invalid();
     }
     let Some(window) = WindowRequest::new(Direction::Latest, input.input.limit.unwrap_or(WindowRequest::latest().limit()), None) else { return invalid(); };
@@ -66,7 +69,7 @@ pub(super) async fn handle(request: &loopback::Request, verifier: Arc<Mutex<Capa
             Ok(SessionReleaseOutcome::Unavailable) | Err(()) => unavailable(),
         }
     } else {
-        match session.observe_session(SessionObserveCommand { identity: input.input.session_identity, lease_id: input.input.lease_id, window, input_ids: input.input.input_ids.unwrap_or_default() }).await {
+        match session.observe_session(SessionObserveCommand { identity: input.input.session_identity, endpoint_session_id: input.input.endpoint_session_id, lease_id: input.input.lease_id, window, input_ids: input.input.input_ids.unwrap_or_default() }).await {
             Ok(SessionObserveOutcome::Observed { lease_id, view }) => loopback::Response::json(200, serde_json::json!({ "leaseId": lease_id, "view": super::presenter::session_view(&view) })),
             Ok(SessionObserveOutcome::Released { lease_id }) => loopback::Response::json(200, serde_json::json!({ "leaseId": lease_id, "outcome": "released" })),
             Ok(SessionObserveOutcome::Rejected) => invalid(),

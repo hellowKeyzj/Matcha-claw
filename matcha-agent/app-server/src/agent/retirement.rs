@@ -1,4 +1,4 @@
-use super::{Delete, active_error, check_deletable, delete_guarded, finish_deletion, storage};
+use super::{active_error, check_deletable, delete_in_scope, finish_deletion, storage};
 use crate::{
     config::{
         AgentDeletion, AgentDeletionState, Config, ConfigStore, validate_agent_id_available,
@@ -29,7 +29,7 @@ pub(super) async fn retire(
             "expectedOwner must not be empty or contain NUL",
         ));
     }
-    let _guard = sessions.agent_guard(&params.agent_id).await;
+    let scope = sessions.agent_scope(&params.agent_id).await;
     let snapshot = config.checked_snapshot().await?;
     check_aliases(&snapshot, &params.agent_id)?;
     if let Some(receipt) = snapshot.agent_deletions.get(&params.agent_id) {
@@ -53,28 +53,23 @@ pub(super) async fn retire(
         return finish_deletion(receipt.clone(), config).await;
     }
     if let Some(agent) = snapshot.agents.get(&params.agent_id) {
-        return delete_guarded(
-            Delete {
-                agent_id: params.agent_id,
-                delete_files: true,
-                expected_custody: agent.custody.clone(),
-                expected_owner: Some(params.expected_owner),
-            },
+        return delete_in_scope(
+            scope,
             config,
-            sessions,
+            true,
+            agent.custody.clone(),
+            Some(params.expected_owner),
         )
         .await;
     }
-    if sessions.is_agent_active(&params.agent_id).await {
+    if scope.is_active().await {
         return Err(active_error());
     }
     check_references(&snapshot, &params.agent_id)?;
     let custody =
         storage::orphan_custody(config.paths(), &params.agent_id, &params.expected_owner).await?;
     crate::mcp::stop_agent_oauth(&params.agent_id).await?;
-    let removed_sessions = sessions
-        .delete_agent_sessions_guarded(&params.agent_id)
-        .await?;
+    let removed_sessions = scope.delete_sessions().await?;
     let receipt = AgentDeletion {
         agent_id: params.agent_id.clone(),
         state: if custody.is_some() {

@@ -121,11 +121,13 @@ pub trait OrganizationNativeRuntime: Send + Sync {
     fn confirm_team_run_receipt(
         &self,
         receipt: RunRuntimeReceipt,
+        workspace: Option<crate::RunWorkspace>,
     ) -> OwnedRuntimeFuture<RuntimeReceiptOutcome>;
 
     fn create_team_role_session_cancellable(
         &self,
         binding: RoleSessionReceipt,
+        workspace: Option<crate::RunWorkspace>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<RoleSessionCreationOutcome>;
 
@@ -133,8 +135,17 @@ pub trait OrganizationNativeRuntime: Send + Sync {
     fn readback_team_role_session_cancellable(
         &self,
         binding: RoleSessionReceipt,
+        workspace: Option<crate::RunWorkspace>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)>;
+
+    fn validate_run_files(
+        &self,
+        binding: RoleSessionReceipt,
+        workspace: crate::RunWorkspace,
+        paths: Vec<String>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<Result<(), crate::RunFileValidationError>>;
 
     fn abort_role_sessions(
         &self,
@@ -169,9 +180,10 @@ pub trait OrganizationNativeRuntime: Send + Sync {
     fn confirm_team_run_receipt_cancellable(
         &self,
         receipt: RunRuntimeReceipt,
+        workspace: Option<crate::RunWorkspace>,
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)> {
-        let confirmation = self.confirm_team_run_receipt(receipt);
+        let confirmation = self.confirm_team_run_receipt(receipt, workspace);
         Box::pin(async move { (confirmation.await, None) })
     }
 
@@ -181,6 +193,15 @@ pub trait OrganizationNativeRuntime: Send + Sync {
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<RoleAbortOutcome> {
         self.abort_role_sessions(bindings)
+    }
+
+    /// Reads native stop completion without resubmitting a cancellation.
+    fn readback_role_cancellation_cancellable(
+        &self,
+        _bindings: Vec<RoleSessionReceipt>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<RoleAbortOutcome> {
+        Box::pin(async { RoleAbortOutcome::OutcomeUnknown })
     }
 
     fn delete_role_sessions_cancellable(

@@ -69,7 +69,7 @@ export async function createSessionTarget(input: CreateSessionInput): Promise<Se
   }, view.endpointSessionId);
 }
 
-export async function observeChatSession(input: { sessionIdentity: SessionIdentity; leaseId: string; limit?: number; inputIds?: string[] }, options?: { timeoutMs?: number; traceId?: string | null }) {
+export async function observeChatSession(input: { sessionIdentity: SessionIdentity; endpointSessionId?: string; leaseId: string; limit?: number; inputIds?: string[] }, options?: { timeoutMs?: number; traceId?: string | null }) {
   const result = await hostSessionObserve(input, options);
   if ('view' in result && buildSessionIdentityKey(result.view.identity) !== buildSessionIdentityKey(input.sessionIdentity)) throw new Error('Session observation identity mismatch');
   return result;

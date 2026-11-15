@@ -1,10 +1,18 @@
+mod activity_prompt;
+mod approval;
 mod changes;
+mod prompts;
+mod deletion;
 mod refresh;
 mod role_sessions;
+mod workspace;
 mod transaction;
 
-use transaction::{DeliveryIndexes, FactsJournal};
-pub(crate) use role_sessions::RoleSessionIntent;
+use approval::validate_approval_resolutions;
+use transaction::{DeliveryIndexEntries, DeliveryIndexes, FactsJournal};
+pub(crate) use role_sessions::{RoleSessionIntent, RoleSessionPhase};
+use crate::team::lifecycle::{TeamMaterializationGroups, materialization_matches_request};
+use crate::{ConfirmedTeamMaterialization, RuntimeEndpointReference};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,14 +22,17 @@ use std::{
 use platform::trace::{identifier_hash, runtime_trace};
 use serde_json::json;
 
+#[cfg(test)]
+use crate::{ActivityLedgerSnapshot, DeliveryLedgerSnapshot, run::approval::ApprovalDurableSnapshot};
+
 use crate::{
     Activity, ActivityClaim, ActivityClaimOutcome, ActivityDispatchOutcome, ActivityId,
-    ActivityKind, ActivityLedger, ActivityLedgerSnapshot, ActivityPhase,
+    ActivityKind, ActivityLedger, ActivityPhase,
     ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
     ActivityTarget, ActivityTransitionError, AgentNodeEventResolution,
     AgentNodeEventResolutionError, Approval, ControlAuthority, ControlNodeResolution,
     ControlNodeResolutionError, ControlNodeResolutionOutcome, DeliveryLedger,
-    DeliveryLedgerSnapshot, DeliveryPhase, GraphDefinition, GraphRunId, GraphState, IdempotencyKey,
+    DeliveryPhase, GraphDefinition, GraphRunId, GraphState, IdempotencyKey,
     MaterializationLifecycleError, MaterializationOperationOutcome, MaterializationReceipt,
     MaterializationRecordOutcome, NodeKind, RunRuntimeReceipt, TeamDefinition, TeamId,
     TeamMaterializationLifecycle, TeamMaterializationRequest, TeamRevision,
@@ -30,7 +41,7 @@ use crate::{
         CompletionMetadata, build_graph_completion_artifact,
     },
     run::{
-        approval::{ApprovalDurableSnapshot, HumanDecisionCommand, HumanDecisionOutcome},
+        approval::{ApprovalBinding, HumanDecisionCommand, HumanDecisionOutcome},
         control::ControlResolutionLedger,
         decision::{
             TeamDecisionCommand, TeamDecisionLedger, TeamDecisionReceipt, TeamDecisionRecordError,
@@ -67,6 +78,7 @@ pub(crate) struct TeamFacts {
     definition: TeamDefinition,
     revision: TeamRevision,
     tombstoned: bool,
+    workspace_directory_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -353,6 +365,7 @@ impl WorkflowTemplateFacts {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct TeamRunFactsRestoreInput {
     pub teams: Vec<TeamFacts>,
     pub materializations: Vec<MaterializationReceipt>,
@@ -368,19 +381,25 @@ pub(crate) struct TeamRunFactsRestoreInput {
     pub evidence: Vec<EvidenceRecord>,
 }
 
-pub(crate) struct MaterializationLifecycleFactsRestoreInput {
+#[derive(Default)]
+pub(crate) struct FactsRestoreInput {
     pub(crate) teams: Vec<TeamFacts>,
-    pub(crate) materializations: Vec<(TeamId, TeamMaterializationLifecycle)>,
+    pub(crate) materializations: Vec<(TeamId, TeamMaterializationGroups)>,
     pub(crate) runs: Vec<GraphRunFacts>,
     pub(crate) pending_workflow_plan_admissions: Vec<PendingWorkflowPlanAdmission>,
     pub(crate) templates: Vec<WorkflowTemplateFacts>,
-    pub(crate) deliveries: DeliveryLedgerSnapshot,
-    pub(crate) activities: ActivityLedgerSnapshot,
+    pub(crate) deliveries: DeliveryLedger,
+    pub(crate) activities: ActivityLedger,
     pub(crate) triggers: Vec<TriggerFireRequest>,
     pub(crate) control_resolutions: Vec<ControlNodeResolution>,
-    pub(crate) approvals: Vec<ApprovalDurableSnapshot>,
+    pub(crate) approvals: Vec<Approval>,
     pub(crate) events: EventLedgerSnapshot,
     pub(crate) evidence: Vec<EvidenceRecord>,
+    pub(crate) decisions: TeamDecisionLedger,
+    pub(crate) artifacts: Vec<ArtifactRecord>,
+    pub(crate) task_board: crate::run::TaskBoardFacts,
+    pub(crate) purged_runs: Vec<PurgedRunMarker>,
+    pub(crate) team_prompts: crate::prompts::TeamPromptSettings,
 }
 
 pub(crate) struct ApprovalResolutionInput {
@@ -400,7 +419,21 @@ impl TeamFacts {
             definition,
             revision,
             tombstoned,
+            workspace_directory_name: None,
         }
+    }
+
+    pub(crate) fn workspace_directory_name(&self) -> Option<&str> {
+        self.workspace_directory_name.as_deref()
+    }
+
+    pub(crate) fn restore_workspace_directory_name(&mut self, name: Option<String>) -> Result<(), OrganizationFactsError> {
+        if name.as_ref().is_some_and(|name| !crate::run::workspace::valid_directory_name(name))
+            || self.workspace_directory_name.as_ref().is_some_and(|old| Some(old) != name.as_ref()) {
+            return Err(OrganizationFactsError::InvalidTeamTransition);
+        }
+        self.workspace_directory_name = name;
+        Ok(())
     }
 
     pub fn definition(&self) -> &TeamDefinition {
@@ -435,7 +468,9 @@ pub(crate) struct GraphRunFacts {
     frozen_team_revision: TeamRevision,
     graph: GraphState,
     runtime: Option<RunRuntimeReceipt>,
+    workspace: Option<crate::RunWorkspace>,
     role_session_intents: BTreeMap<String, RoleSessionIntent>,
+    deletion_confirmations: Vec<crate::RoleSessionDeletionConfirmation>,
     lifecycle: GraphRunLifecycle,
     pub(super) start_gate: RunStartGate,
     pub(super) retired_executions: BTreeSet<(NodeId, ExecutionFence)>,
@@ -501,12 +536,39 @@ impl GraphRunFacts {
             frozen_team_revision,
             graph,
             runtime,
+            workspace: None,
             role_session_intents: BTreeMap::new(),
+            deletion_confirmations: Vec::new(),
             lifecycle,
             start_gate,
             retired_executions: BTreeSet::new(),
             task_execution_context: None,
         })
+    }
+
+    pub(crate) fn workspace(&self) -> Option<&crate::RunWorkspace> {
+        self.workspace.as_ref()
+    }
+
+    pub(crate) fn workspace_ready(&self) -> bool {
+        self.workspace().is_some_and(crate::RunWorkspace::is_prepared) && self.runtime().is_some()
+    }
+
+    pub(crate) fn restore_workspace(&mut self, workspace: Option<crate::RunWorkspace>) -> Result<(), OrganizationFactsError> {
+        self.validate_workspace_transition(self.workspace.as_ref(), workspace.as_ref())?;
+        self.workspace = workspace;
+        Ok(())
+    }
+
+    fn validate_workspace_transition(
+        &self, previous: Option<&crate::RunWorkspace>, current: Option<&crate::RunWorkspace>,
+    ) -> Result<(), OrganizationFactsError> {
+        if previous.is_some_and(|previous| current.is_none_or(|current| {
+            previous.root() != current.root() || (previous.is_prepared() && !current.is_prepared())
+        })) {
+            return Err(OrganizationFactsError::RunOwnershipChanged);
+        }
+        Ok(())
     }
 
     pub(crate) fn task_execution_context(&self) -> Option<&crate::TaskExecutionContext> {
@@ -629,13 +691,14 @@ impl GraphRunFacts {
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub(crate) struct OrganizationFacts {
     teams: BTreeMap<String, TeamFacts>,
-    materializations: BTreeMap<String, TeamMaterializationLifecycle>,
+    materializations: BTreeMap<String, TeamMaterializationGroups>,
     runs: BTreeMap<String, GraphRunFacts>,
     deliveries: DeliveryLedger,
     activities: ActivityLedger,
     triggers: TriggerLedger,
     control_resolutions: ControlResolutionLedger,
     approvals: BTreeMap<String, Approval>,
+    approval_ids_by_run: BTreeMap<String, BTreeSet<String>>,
     events: EventLedger,
     evidence: EvidenceLedger,
     artifacts: ArtifactLedger,
@@ -644,11 +707,13 @@ pub(crate) struct OrganizationFacts {
     pending_workflow_plan_admissions: BTreeMap<String, PendingWorkflowPlanAdmission>,
     task_board: crate::run::TaskBoardFacts,
     purged_runs: BTreeMap<String, PurgedRunMarker>,
+    team_prompts: crate::prompts::TeamPromptSettings,
     journal: FactsJournal,
     delivery_indexes: DeliveryIndexes,
 }
 
 impl OrganizationFacts {
+    #[cfg(test)]
     pub fn restore(
         teams: impl IntoIterator<Item = TeamFacts>,
         materializations: impl IntoIterator<Item = MaterializationReceipt>,
@@ -658,30 +723,13 @@ impl OrganizationFacts {
         Self::restore_with_triggers(teams, materializations, runs, deliveries, [])
     }
 
+    #[cfg(test)]
     pub(crate) fn restore_with_triggers(
         teams: impl IntoIterator<Item = TeamFacts>,
         materializations: impl IntoIterator<Item = MaterializationReceipt>,
         runs: impl IntoIterator<Item = GraphRunFacts>,
         deliveries: DeliveryLedgerSnapshot,
         triggers: impl IntoIterator<Item = TriggerFireRequest>,
-    ) -> Result<Self, OrganizationFactsError> {
-        Self::restore_with_triggers_and_control_resolutions(
-            teams,
-            materializations,
-            runs,
-            deliveries,
-            triggers,
-            [],
-        )
-    }
-
-    pub(crate) fn restore_with_triggers_and_control_resolutions(
-        teams: impl IntoIterator<Item = TeamFacts>,
-        materializations: impl IntoIterator<Item = MaterializationReceipt>,
-        runs: impl IntoIterator<Item = GraphRunFacts>,
-        deliveries: DeliveryLedgerSnapshot,
-        triggers: impl IntoIterator<Item = TriggerFireRequest>,
-        control_resolutions: impl IntoIterator<Item = ControlNodeResolution>,
     ) -> Result<Self, OrganizationFactsError> {
         Self::restore_with_teamrun_ledgers(TeamRunFactsRestoreInput {
             teams: teams.into_iter().collect(),
@@ -692,110 +740,63 @@ impl OrganizationFacts {
             deliveries,
             activities: ActivityLedgerSnapshot::new(Vec::new()),
             triggers: triggers.into_iter().collect(),
-            control_resolutions: control_resolutions.into_iter().collect(),
+            control_resolutions: Vec::new(),
             approvals: Vec::new(),
             events: EventLedgerSnapshot::default(),
             evidence: Vec::new(),
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn restore_with_teamrun_ledgers(
         input: TeamRunFactsRestoreInput,
     ) -> Result<Self, OrganizationFactsError> {
-        let TeamRunFactsRestoreInput {
-            teams,
-            materializations,
-            runs,
-            pending_workflow_plan_admissions,
-            deliveries,
-            activities,
-            triggers,
-            control_resolutions,
-            approvals,
-            events,
-            evidence,
-            templates,
-        } = input;
-        Self::restore_with_materialization_lifecycles_and_decisions_and_artifacts(
-            MaterializationLifecycleFactsRestoreInput {
-                teams,
-                materializations: materializations
-                    .into_iter()
-                    .map(|receipt| {
-                        let team = receipt.team().clone();
-                        (team, TeamMaterializationLifecycle::Confirmed(receipt))
-                    })
-                    .collect(),
-                runs,
-                pending_workflow_plan_admissions,
-                templates,
-                deliveries,
-                activities,
-                triggers,
-                control_resolutions,
-                approvals,
-                events,
-                evidence,
-            },
-            crate::TeamDecisionLedgerSnapshot {
-                decisions: Vec::new(),
-                events: Vec::new(),
-            },
-            [],
-        )
+        let mut headers = FactsRestoreInput {
+            teams: input.teams,
+            materializations: input.materializations.into_iter().map(|receipt| {
+                (receipt.team().clone(), TeamMaterializationGroups {
+                    requests: None,
+                    groups: vec![TeamMaterializationLifecycle::Confirmed(receipt)],
+                })
+            }).collect(),
+            runs: input.runs,
+            pending_workflow_plan_admissions: input.pending_workflow_plan_admissions,
+            templates: input.templates,
+            ..FactsRestoreInput::default()
+        };
+        let mut facts = Self::restore_headers(&mut headers)?;
+        facts.deliveries = DeliveryLedger::restore(input.deliveries)
+            .map_err(OrganizationFactsError::InvalidDeliveryLedger)?;
+        facts.activities = ActivityLedger::restore(input.activities)
+            .map_err(OrganizationFactsError::InvalidActivityLedger)?;
+        facts.restore_registrations(input.triggers, input.evidence, input.control_resolutions)?;
+        for snapshot in input.approvals {
+            let approval = Approval::restore(snapshot)
+                .map_err(|_| OrganizationFactsError::InvalidApprovalLedger)?;
+            facts.restore_approval(approval)?;
+        }
+        facts.finish_restore(Vec::new(), input.events)?;
+        Ok(facts)
     }
 
-    pub(crate) fn restore_with_materialization_lifecycles_and_decisions_and_artifacts(
-        input: MaterializationLifecycleFactsRestoreInput,
-        decision_snapshot: crate::TeamDecisionLedgerSnapshot,
-        artifact_records: impl IntoIterator<Item = ArtifactRecord>,
-    ) -> Result<Self, OrganizationFactsError> {
-        Self::restore_with_materialization_lifecycles_and_decisions_and_artifacts_and_task_board(
-            input,
-            decision_snapshot,
-            artifact_records,
-            crate::run::TaskBoardFacts::default(),
-        )
+    pub(crate) fn from_restored(mut input: FactsRestoreInput) -> Result<Self, OrganizationFactsError> {
+        let mut facts = Self::restore_headers(&mut input)?;
+        facts.deliveries = input.deliveries;
+        facts.activities = input.activities;
+        facts.decisions = input.decisions;
+        facts.task_board = input.task_board;
+        facts.team_prompts = input.team_prompts;
+        facts.restore_registrations(input.triggers, input.evidence, input.control_resolutions)?;
+        for approval in input.approvals {
+            facts.restore_approval(approval)?;
+        }
+        facts.finish_restore(input.artifacts, input.events)?;
+        Ok(facts)
     }
 
-    pub(crate) fn restore_with_materialization_lifecycles_and_decisions_and_artifacts_and_task_board(
-        input: MaterializationLifecycleFactsRestoreInput,
-        decision_snapshot: crate::TeamDecisionLedgerSnapshot,
-        artifact_records: impl IntoIterator<Item = ArtifactRecord>,
-        task_board: crate::run::TaskBoardFacts,
-    ) -> Result<Self, OrganizationFactsError> {
-        Self::restore_with_materialization_lifecycles_and_decisions_and_artifacts_and_task_board_and_purged_runs(
-            input,
-            decision_snapshot,
-            artifact_records,
-            task_board,
-            [],
-        )
-    }
-
-    pub(crate) fn restore_with_materialization_lifecycles_and_decisions_and_artifacts_and_task_board_and_purged_runs(
-        input: MaterializationLifecycleFactsRestoreInput,
-        decision_snapshot: crate::TeamDecisionLedgerSnapshot,
-        artifact_records: impl IntoIterator<Item = ArtifactRecord>,
-        task_board: crate::run::TaskBoardFacts,
-        purged_runs: impl IntoIterator<Item = PurgedRunMarker>,
-    ) -> Result<Self, OrganizationFactsError> {
-        let MaterializationLifecycleFactsRestoreInput {
-            teams,
-            materializations,
-            runs,
-            pending_workflow_plan_admissions,
-            deliveries,
-            activities,
-            triggers,
-            control_resolutions,
-            approvals,
-            events,
-            evidence,
-            templates,
-        } = input;
+    fn restore_headers(input: &mut FactsRestoreInput) -> Result<Self, OrganizationFactsError> {
         let mut team_facts = BTreeMap::new();
-        for team in teams {
+        for team in std::mem::take(&mut input.teams) {
             if team_facts
                 .insert(team.team_id().as_str().to_owned(), team)
                 .is_some()
@@ -805,24 +806,17 @@ impl OrganizationFacts {
         }
 
         let mut materialization_facts = BTreeMap::new();
-        for (team_id, lifecycle) in materializations {
+        for (team_id, lifecycle) in std::mem::take(&mut input.materializations) {
             let team = team_id.as_str().to_owned();
-            if lifecycle.team() != Some(&team_id) || !team_facts.contains_key(&team) {
-                return Err(OrganizationFactsError::UnknownMaterializationTeam);
-            }
+            validate_materialization(&team_facts, &team_id, &lifecycle)?;
             if materialization_facts.insert(team, lifecycle).is_some() {
                 return Err(OrganizationFactsError::DuplicateMaterialization);
             }
         }
 
         let mut template_facts = BTreeMap::new();
-        for template in templates {
-            if !team_facts.contains_key(template.team().as_str()) {
-                return Err(OrganizationFactsError::UnknownWorkflowTemplateTeam);
-            }
-            if template.source_identity().trim().is_empty() {
-                return Err(OrganizationFactsError::InvalidWorkflowTemplate);
-            }
+        for template in std::mem::take(&mut input.templates) {
+            validate_template(&team_facts, &template)?;
             if template_facts
                 .insert(template.team().as_str().to_owned(), template)
                 .is_some()
@@ -831,20 +825,10 @@ impl OrganizationFacts {
             }
         }
 
+        validate_team_workspaces(&team_facts)?;
         let mut run_facts = BTreeMap::new();
-        for run in runs {
-            if run.task_execution_context.as_ref().is_some_and(|context| {
-                !context.valid() || context.root_request_id != run.lifecycle().creation_idempotency_key()
-            }) {
-                return Err(OrganizationFactsError::InvalidGraphRun);
-            }
-            run.validate_retired_executions(&run.retired_executions)?;
-            let team = team_facts
-                .get(run.team().as_str())
-                .ok_or(OrganizationFactsError::UnknownRunTeam)?;
-            if team.revision().get() < run.frozen_team_revision().get() {
-                return Err(OrganizationFactsError::FrozenTeamRevisionMismatch);
-            }
+        for run in std::mem::take(&mut input.runs) {
+            validate_restored_run(&team_facts, &run)?;
             if run_facts
                 .insert(run.run_id().as_str().to_owned(), run)
                 .is_some()
@@ -853,7 +837,7 @@ impl OrganizationFacts {
             }
         }
         let mut purged_run_facts = BTreeMap::new();
-        for marker in purged_runs {
+        for marker in std::mem::take(&mut input.purged_runs) {
             if run_facts.contains_key(marker.run_id().as_str())
                 || purged_run_facts
                     .insert(marker.run_id().as_str().to_owned(), marker)
@@ -864,25 +848,8 @@ impl OrganizationFacts {
         }
 
         let mut pending_admissions = BTreeMap::new();
-        for admission in pending_workflow_plan_admissions {
-            let team = team_facts
-                .get(admission.team_id().as_str())
-                .ok_or(OrganizationFactsError::UnknownWorkflowPlanAdmissionTeam)?;
-            if team.tombstoned() || team.revision().get() < admission.team_revision().get() {
-                return Err(OrganizationFactsError::InvalidWorkflowPlanAdmission);
-            }
-            if run_facts.contains_key(admission.run_id().as_str()) {
-                return Err(OrganizationFactsError::WorkflowPlanAdmissionRunConflict);
-            }
-            if pending_admissions
-                .values()
-                .any(|existing: &PendingWorkflowPlanAdmission| {
-                    existing.creation_idempotency_key() == admission.creation_idempotency_key()
-                        && existing != &admission
-                })
-            {
-                return Err(OrganizationFactsError::WorkflowPlanAdmissionIdempotencyConflict);
-            }
+        for admission in std::mem::take(&mut input.pending_workflow_plan_admissions) {
+            validate_admission(&team_facts, &run_facts, pending_admissions.values(), &admission)?;
             if pending_admissions
                 .insert(admission.run_id().as_str().to_owned(), admission)
                 .is_some()
@@ -891,61 +858,111 @@ impl OrganizationFacts {
             }
         }
 
-        for run in run_facts.values() {
+        let facts = Self {
+            teams: team_facts,
+            materializations: materialization_facts,
+            runs: run_facts,
+            templates: template_facts,
+            pending_workflow_plan_admissions: pending_admissions,
+            purged_runs: purged_run_facts,
+            ..Self::default()
+        };
+        facts.validate_runtime_receipts()?;
+        Ok(facts)
+    }
+
+    fn restore_registrations(
+        &mut self,
+        triggers: Vec<TriggerFireRequest>,
+        evidence: Vec<EvidenceRecord>,
+        control_resolutions: Vec<ControlNodeResolution>,
+    ) -> Result<(), OrganizationFactsError> {
+        self.triggers = TriggerLedger::restore(triggers)
+            .map_err(OrganizationFactsError::InvalidTriggerLedger)?;
+        self.validate_trigger_attempts()?;
+        self.evidence = EvidenceLedger::restore(evidence)
+            .map_err(|_| OrganizationFactsError::InvalidEvidenceLedger)?;
+        for record in self.evidence.records() {
+            validate_evidence_provenance(&self.runs, record)?;
+        }
+
+        self.control_resolutions = ControlResolutionLedger::restore(control_resolutions)
+            .map_err(|_| OrganizationFactsError::InvalidControlResolutionLedger)?;
+        for resolution in self.control_resolutions.resolutions() {
+            validate_control_node_resolution(&self.runs, resolution)?;
+        }
+
+        Ok(())
+    }
+
+    fn restore_approval(&mut self, approval: Approval) -> Result<(), OrganizationFactsError> {
+        if !self.runs.contains_key(&approval.facts().run_id) {
+            return Err(OrganizationFactsError::UnknownApprovalRun);
+        }
+        if self.approvals.contains_key(&approval.facts().approval_id) {
+            return Err(OrganizationFactsError::DuplicateApproval);
+        }
+        self.insert_approval(approval);
+        Ok(())
+    }
+
+    fn finish_restore(
+        &mut self,
+        artifact_records: Vec<ArtifactRecord>,
+        events: EventLedgerSnapshot,
+    ) -> Result<(), OrganizationFactsError> {
+        self.artifacts = ArtifactLedger::restore(artifact_records)
+            .map_err(|_| OrganizationFactsError::InvalidArtifactLedger)?;
+        for artifact in self.artifacts.records() {
+            validate_artifact_provenance(&self.runs, artifact)?;
+        }
+        self.validate_activities()?;
+
+        self.events =
+            EventLedger::restore(events).map_err(|_| OrganizationFactsError::InvalidEventLedger)?;
+        self.validate_event_dependents()?;
+        self.delivery_indexes = self.validate_deliveries()?.into_owned();
+        Ok(())
+    }
+
+    fn validate_runtime_receipts(&self) -> Result<(), OrganizationFactsError> {
+        for run in self.runs.values() {
             run.validate_role_session_intents()?;
+            run.validate_deletion_confirmations(&run.deletion_confirmations)?;
             if let Some(receipt) = run.runtime() {
-                let materialization = materialization_facts
+                let materialization = self.materializations
                     .get(run.team().as_str())
-                    .and_then(TeamMaterializationLifecycle::receipt)
+                    .and_then(TeamMaterializationGroups::retained_receipts)
                     .ok_or(OrganizationFactsError::RuntimeMaterializationMissing)?;
                 validate_runtime_receipt_alignment(run, receipt, materialization)?;
             }
         }
 
-        let deliveries = DeliveryLedger::restore(deliveries)
-            .map_err(OrganizationFactsError::InvalidDeliveryLedger)?;
-        let activities = ActivityLedger::restore(activities)
-            .map_err(OrganizationFactsError::InvalidActivityLedger)?;
-        for activity in activities.activities() {
-            validate_activity(&run_facts, activity)?;
+        Ok(())
+    }
+
+    fn validate_activities(&self) -> Result<(), OrganizationFactsError> {
+        for activity in self.activities.activities() {
+            validate_activity(&self.runs, &self.artifacts, activity)?;
             if let Some(proof) = activity.settlement_proof() {
-                validate_agent_activity_settlement(&deliveries, activity, proof)?;
+                validate_agent_activity_settlement(&self.runs, &self.deliveries, activity, proof)?;
             }
             if let Some(claim) = activity.native_terminal_claim() {
-                validate_native_confirmed_activity_claim(&run_facts, &deliveries, activity, claim)?;
+                validate_native_confirmed_activity_claim(&self.runs, &self.deliveries, activity, claim)?;
             }
         }
-        let triggers = TriggerLedger::restore(triggers)
-            .map_err(OrganizationFactsError::InvalidTriggerLedger)?;
-        for request in triggers.requests() {
-            validate_trigger_registration(&run_facts, request)?;
-        }
+        Ok(())
+    }
+
+    fn validate_trigger_attempts(&self) -> Result<(), OrganizationFactsError> {
         let mut trigger_counts = BTreeMap::new();
-        for request in triggers.requests() {
+        for request in self.triggers.requests() {
+            validate_trigger_registration(&self.runs, request)?;
             *trigger_counts
-                .entry((request.run_id.clone(), request.start_node_id.clone()))
+                .entry((request.run_id.as_str(), request.start_node_id.as_str()))
                 .or_insert(0_usize) += 1;
         }
-        for ((run_id, start_node_id), count) in &trigger_counts {
-            let run = run_facts
-                .get(run_id)
-                .expect("trigger registration run was just validated");
-            let history = run
-                .graph()
-                .executions()
-                .get(&NodeId::new(start_node_id.clone()))
-                .expect("trigger registration node belongs to the graph");
-            if history
-                .attempts()
-                .iter()
-                .filter(|attempt| matches!(attempt.reason(), crate::AttemptReason::Trigger))
-                .count()
-                != *count
-            {
-                return Err(OrganizationFactsError::InvalidTriggerRegistration);
-            }
-        }
-        for (run_id, run) in &run_facts {
+        for (run_id, run) in &self.runs {
             for node in run
                 .graph()
                 .definition()
@@ -954,7 +971,7 @@ impl OrganizationFacts {
                 .filter(|node| node.is_armed_start())
             {
                 let registered = trigger_counts
-                    .get(&(run_id.clone(), node.id().as_str().to_owned()))
+                    .get(&(run_id.as_str(), node.id().as_str()))
                     .copied()
                     .unwrap_or_default();
                 let attempts = run
@@ -971,114 +988,53 @@ impl OrganizationFacts {
                 }
             }
         }
-        let evidence = EvidenceLedger::restore(evidence)
-            .map_err(|_| OrganizationFactsError::InvalidEvidenceLedger)?;
-        for record in evidence.records() {
-            validate_evidence_provenance(&run_facts, record)?;
-        }
+        Ok(())
+    }
 
-        let control_resolutions = ControlResolutionLedger::restore(control_resolutions)
-            .map_err(|_| OrganizationFactsError::InvalidControlResolutionLedger)?;
-        for resolution in control_resolutions.resolutions() {
-            validate_control_node_resolution(&run_facts, resolution)?;
-        }
-
-        let mut approval_facts = BTreeMap::new();
-        for snapshot in approvals {
-            let approval = Approval::restore(snapshot)
-                .map_err(|_| OrganizationFactsError::InvalidApprovalLedger)?;
-            if !run_facts.contains_key(&approval.facts().run_id) {
-                return Err(OrganizationFactsError::UnknownApprovalRun);
-            }
-            if approval_facts
-                .insert(approval.facts().approval_id.clone(), approval)
-                .is_some()
-            {
-                return Err(OrganizationFactsError::DuplicateApproval);
-            }
-        }
-
-        let decisions = TeamDecisionLedger::restore(decision_snapshot)
-            .map_err(|_| OrganizationFactsError::InvalidDecisionLedger)?;
-        let artifacts = ArtifactLedger::restore(artifact_records)
-            .map_err(|_| OrganizationFactsError::InvalidArtifactLedger)?;
-        for artifact in artifacts.records() {
-            validate_artifact_provenance(&run_facts, artifact)?;
-        }
-
-        let events =
-            EventLedger::restore(events).map_err(|_| OrganizationFactsError::InvalidEventLedger)?;
-        let event_snapshot = events.snapshot();
-        for record in event_snapshot.commands() {
-            if !run_facts.contains_key(record.run_id().as_str()) {
+    fn validate_event_dependents(&self) -> Result<(), OrganizationFactsError> {
+        for record in self.events.commands() {
+            if !self.runs.contains_key(record.run_id().as_str()) {
                 return Err(OrganizationFactsError::UnknownEventRun);
             }
         }
-        for event in event_snapshot.events() {
-            if !run_facts.contains_key(event.run_id()) {
+        for event in self.events.events() {
+            if !self.runs.contains_key(event.run_id()) {
                 return Err(OrganizationFactsError::UnknownEventRun);
             }
         }
-        validate_approval_resolution_events(&approval_facts, event_snapshot.events())?;
-        validate_human_decision_approvals(&run_facts, approval_facts.values(), &control_resolutions)?;
+        validate_approval_resolution_events(&self.approvals, self.events.events())?;
+        validate_approvals(&self.runs, self.approvals.values(), &self.control_resolutions)?;
 
-        let mut resolved_receipts = BTreeSet::new();
-        let mut matcha_terminal_correlations = Vec::new();
-        for delivery in deliveries.deliveries() {
-            let correlation = match delivery.phase() {
-                DeliveryPhase::Delivered {
-                    native_correlation: Some(correlation),
-                    ..
-                } => Some(correlation),
-                DeliveryPhase::TerminalObserved { observation } => Some(observation.correlation()),
-                _ => None,
-            };
-            if correlation
-                .is_some_and(|correlation| matcha_terminal_correlations.contains(correlation))
+        Ok(())
+    }
+
+    fn validate_deliveries(&self) -> Result<DeliveryIndexEntries<'_>, OrganizationFactsError> {
+        let mut indexes = DeliveryIndexEntries::default();
+        for delivery in self.deliveries.deliveries() {
+            let id = &delivery.facts().delivery_id;
+            if let Some(key) = transaction::correlation_key(delivery, self.runs.get(&delivery.facts().run_id))?
+                && indexes.correlations.insert(key, id).is_some()
             {
                 return Err(OrganizationFactsError::DuplicateMatchaTerminalCorrelation);
             }
-            if let Some(correlation) = correlation {
-                matcha_terminal_correlations.push(correlation.clone());
-            }
-            if !run_facts.contains_key(&delivery.facts().run_id) {
+            if !self.runs.contains_key(&delivery.facts().run_id) {
                 return Err(OrganizationFactsError::UnknownDeliveryRun);
             }
             if let DeliveryPhase::TerminalObserved { observation } = delivery.phase() {
-                let run = run_facts
+                let run = self.runs
                     .get(&delivery.facts().run_id)
                     .expect("delivery run was just verified to exist");
                 validate_terminal_observation(delivery, run, observation)?;
                 if let TerminalObservationResolution::GraphResolved(resolution) =
                     observation.resolution()
-                    && !resolved_receipts.insert(resolution.receipt().clone())
+                    && indexes.receipts.insert(resolution.receipt().as_str(), id).is_some()
                 {
                     return Err(OrganizationFactsError::DuplicateAuthorizedGraphResolution);
                 }
             }
         }
 
-        let delivery_indexes = DeliveryIndexes::restore(&deliveries)?;
-        Ok(Self {
-            teams: team_facts,
-            materializations: materialization_facts,
-            runs: run_facts,
-            templates: template_facts,
-            pending_workflow_plan_admissions: pending_admissions,
-            deliveries,
-            activities,
-            triggers,
-            control_resolutions,
-            approvals: approval_facts,
-            events,
-            evidence,
-            artifacts,
-            decisions,
-            task_board,
-            purged_runs: purged_run_facts,
-            journal: FactsJournal::default(),
-            delivery_indexes,
-        })
+        Ok(indexes)
     }
 
     pub fn teams(&self) -> impl Iterator<Item = &TeamFacts> {
@@ -1090,47 +1046,56 @@ impl OrganizationFacts {
     }
 
     pub fn materializations(&self) -> impl Iterator<Item = &MaterializationReceipt> {
-        self.materializations
-            .values()
-            .filter_map(TeamMaterializationLifecycle::receipt)
+        self.materialization_lifecycles().filter_map(TeamMaterializationLifecycle::receipt)
     }
 
-    pub fn materialization(&self, team_id: &TeamId) -> Option<&MaterializationReceipt> {
-        self.materializations
-            .get(team_id.as_str())
-            .and_then(TeamMaterializationLifecycle::receipt)
+    pub fn materialization(&self, team_id: &TeamId) -> Option<ConfirmedTeamMaterialization<'_>> {
+        self.materializations.get(team_id.as_str())?.retained_receipts()
     }
 
-    pub(crate) fn materialization_lifecycle(&self, team_id: &TeamId) -> Option<&TeamMaterializationLifecycle> {
-        self.materializations.get(team_id.as_str())
+    pub(crate) fn materialization_requests(&self, team_id: &TeamId) -> Option<&[TeamMaterializationRequest]> {
+        self.materializations.get(team_id.as_str())?.requests.as_deref()
     }
 
-    pub(crate) fn materialization_lifecycles(
+    pub(crate) fn materialization_lifecycle(
         &self,
-    ) -> impl Iterator<Item = &TeamMaterializationLifecycle> {
+        team_id: &TeamId,
+        endpoint: &RuntimeEndpointReference,
+    ) -> Option<&TeamMaterializationLifecycle> {
+        self.materializations.get(team_id.as_str())?.groups.iter()
+            .find(|group| group.endpoint() == endpoint)
+    }
+
+    pub(crate) fn materialization_groups(&self) -> impl Iterator<Item = &TeamMaterializationGroups> {
         self.materializations.values()
+    }
+
+    pub(crate) fn materialization_lifecycles(&self) -> impl Iterator<Item = &TeamMaterializationLifecycle> {
+        self.materializations.values().flat_map(|value| value.groups())
     }
 
     pub(crate) fn materialization_recovery_request(
         &self,
         team_id: &TeamId,
+        endpoint: &RuntimeEndpointReference,
     ) -> Option<TeamMaterializationRequest> {
-        self.materializations
-            .get(team_id.as_str())
-            .and_then(TeamMaterializationLifecycle::receipt_recovery_request)
-            .cloned()
+        self.materialization_lifecycle(team_id, endpoint)?
+            .receipt_recovery_request().cloned()
     }
 
     pub(crate) fn create_team_materialization(
         &mut self,
         definition: &crate::TeamDefinition,
-        request: TeamMaterializationRequest,
+        requests: Vec<TeamMaterializationRequest>,
     ) -> Result<MaterializationRecordOutcome, OrganizationFactsError> {
-        if definition.team_id() != request.intent().team() {
-            return Err(OrganizationFactsError::UnknownMaterializationTeam);
-        }
+        let materialization = TeamMaterializationGroups {
+            groups: requests.iter().cloned().map(TeamMaterializationLifecycle::requested).collect(),
+            requests: Some(requests),
+        };
+        validate_materialization_definition(definition, &materialization)?;
         match self.teams.get(definition.team_id().as_str()) {
             Some(team) if team.tombstoned() => return Err(OrganizationFactsError::TeamTombstoned),
+            Some(team) if team.definition() != definition => return Err(OrganizationFactsError::MaterializationChanged),
             Some(_) => {}
             None => {
                 self.touch_team(definition.team_id().as_str());
@@ -1140,46 +1105,36 @@ impl OrganizationFacts {
                 );
             }
         }
-        self.request_materialization(request)
+        match self.materializations.get(definition.team_id().as_str()) {
+            None => {
+                self.touch_materialization(definition.team_id().as_str());
+                self.materializations.insert(definition.team_id().as_str().to_owned(), materialization);
+                Ok(MaterializationRecordOutcome::Recorded)
+            }
+            Some(existing) if existing.requests == materialization.requests => Ok(MaterializationRecordOutcome::Replayed),
+            Some(_) => Err(OrganizationFactsError::MaterializationChanged),
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn request_materialization(
         &mut self,
         request: TeamMaterializationRequest,
     ) -> Result<MaterializationRecordOutcome, OrganizationFactsError> {
-        let team_id = request.intent().team();
-        let team = self
-            .teams
-            .get(team_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownMaterializationTeam)?;
-        if team.tombstoned() {
-            return Err(OrganizationFactsError::TeamTombstoned);
-        }
-        match self.materializations.get(team_id.as_str()) {
-            None => {
-                self.touch_materialization(team_id.as_str());
-                self.materializations.insert(
-                    team_id.as_str().to_owned(),
-                    TeamMaterializationLifecycle::requested(request),
-                );
-                Ok(MaterializationRecordOutcome::Recorded)
-            }
-            Some(
-                TeamMaterializationLifecycle::Requested(existing)
-                | TeamMaterializationLifecycle::OutcomeUnknown(existing),
-            ) if existing == &request => Ok(MaterializationRecordOutcome::Replayed),
-            Some(_) => Err(OrganizationFactsError::MaterializationChanged),
-        }
+        let definition = self.team(request.intent().team())
+            .ok_or(OrganizationFactsError::UnknownMaterializationTeam)?.definition().clone();
+        self.create_team_materialization(&definition, vec![request])
     }
 
     pub(crate) fn record_materialization_outcome(
         &mut self,
         team_id: &TeamId,
+        endpoint: &RuntimeEndpointReference,
         outcome: MaterializationOperationOutcome,
     ) -> Result<MaterializationRecordOutcome, OrganizationFactsError> {
         self.touch_materialization(team_id.as_str());
-        self.materializations
-            .get_mut(team_id.as_str())
+        self.materializations.get_mut(team_id.as_str())
+            .and_then(|value| value.groups.iter_mut().find(|group| group.endpoint() == endpoint))
             .ok_or(OrganizationFactsError::UnknownMaterializationTeam)?
             .record_materialization_outcome(outcome)
             .map_err(map_materialization_lifecycle_error)
@@ -1191,8 +1146,8 @@ impl OrganizationFacts {
     ) -> Result<MaterializationRecordOutcome, OrganizationFactsError> {
         let team_id = receipt.team().clone();
         self.touch_materialization(team_id.as_str());
-        self.materializations
-            .get_mut(team_id.as_str())
+        self.materializations.get_mut(team_id.as_str())
+            .and_then(|value| value.groups.iter_mut().find(|group| group.endpoint() == receipt.endpoint()))
             .ok_or(OrganizationFactsError::UnknownMaterializationTeam)?
             .confirm(receipt)
             .map_err(map_materialization_lifecycle_error)
@@ -1204,96 +1159,76 @@ impl OrganizationFacts {
         cleanup_idempotency_key: IdempotencyKey,
     ) -> Result<TeamTombstoneOutcome, OrganizationFactsError> {
         self.touch_team(team_id.as_str());
-        let outcome = self
-            .teams
-            .get_mut(team_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownTeam)?
-            .tombstone();
-        if outcome == TeamTombstoneOutcome::Tombstoned
-            && self.materializations.contains_key(team_id.as_str())
-        {
+        let outcome = self.teams.get_mut(team_id.as_str())
+            .ok_or(OrganizationFactsError::UnknownTeam)?.tombstone();
+        if outcome == TeamTombstoneOutcome::Tombstoned && self.materializations.contains_key(team_id.as_str()) {
             self.touch_materialization(team_id.as_str());
-            let lifecycle = self.materializations.remove(team_id.as_str()).expect("existing materialization");
-            self.materializations.insert(
-                team_id.as_str().to_owned(),
-                lifecycle.tombstone(|receipt| {
-                    crate::TeamMaterializationRemoval::new(receipt.clone(), cleanup_idempotency_key)
-                }),
-            );
+            let materialization = self.materializations.get_mut(team_id.as_str()).expect("existing materialization");
+            let grouped = materialization.groups.len() > 1;
+            for lifecycle in &mut materialization.groups {
+                let key = if grouped {
+                    crate::team::materialization::endpoint_idempotency_key(&cleanup_idempotency_key, lifecycle.endpoint())
+                } else {
+                    cleanup_idempotency_key.clone()
+                };
+                *lifecycle = lifecycle.clone().tombstone(|receipt| {
+                    crate::TeamMaterializationRemoval::new(receipt.clone(), key)
+                });
+            }
         }
         Ok(outcome)
+    }
+
+    fn team_materialization_cleanup_allowed(&self, team_id: &TeamId) -> bool {
+        self.team(team_id).is_some_and(TeamFacts::tombstoned)
+            && self.runs.values().filter(|run| run.team() == team_id).all(|run| {
+                run.runtime().is_none()
+                    && matches!(run.lifecycle().state(), GraphRunLifecycleState::Tombstoned { .. })
+            })
     }
 
     pub(crate) fn team_materialization_removal(
         &self,
         team_id: &TeamId,
+        endpoint: &RuntimeEndpointReference,
     ) -> Option<crate::TeamMaterializationRemoval> {
-        self.teams
-            .get(team_id.as_str())
-            .filter(|team| team.tombstoned())?;
-        self.runs
-            .values()
-            .filter(|run| run.team() == team_id)
-            .all(|run| {
-                run.runtime().is_none()
-                    && matches!(
-                        run.lifecycle().state(),
-                        GraphRunLifecycleState::Tombstoned { .. }
-                    )
-            })
-            .then_some(())?;
-        self.materializations
-            .get(team_id.as_str())?
-            .cleanup_request()
-            .cloned()
+        self.team_materialization_cleanup_allowed(team_id).then_some(())?;
+        self.materialization_lifecycle(team_id, endpoint)?.cleanup_request().cloned()
     }
 
     pub(crate) fn team_unconfirmed_materialization_cleanup_request(
         &self,
         team_id: &TeamId,
+        endpoint: &RuntimeEndpointReference,
     ) -> Option<TeamMaterializationRequest> {
-        self.teams
-            .get(team_id.as_str())
-            .filter(|team| team.tombstoned())?;
-        self.runs
-            .values()
-            .filter(|run| run.team() == team_id)
-            .all(|run| {
-                run.runtime().is_none()
-                    && matches!(
-                        run.lifecycle().state(),
-                        GraphRunLifecycleState::Tombstoned { .. }
-                    )
-            })
-            .then_some(())?;
-        match self.materializations.get(team_id.as_str())? {
-            TeamMaterializationLifecycle::Tombstoned(
-                crate::TombstonedMaterialization::OutcomeUnknown(request),
-            ) => Some(request.clone()),
+        self.team_materialization_cleanup_allowed(team_id).then_some(())?;
+        match self.materialization_lifecycle(team_id, endpoint)? {
+            TeamMaterializationLifecycle::Tombstoned(crate::TombstonedMaterialization::OutcomeUnknown(request)) => Some(request.clone()),
             _ => None,
         }
     }
 
     pub(crate) fn team_materialization_cleanup_confirmed(&self, team_id: &TeamId) -> bool {
-        matches!(
-            self.materializations.get(team_id.as_str()),
-            Some(TeamMaterializationLifecycle::Tombstoned(
-                crate::TombstonedMaterialization::Confirmed {
-                    cleanup: crate::TeamMaterializationCleanup::Confirmed(_),
-                    ..
-                }
-            ))
-        )
+        self.team(team_id).is_some_and(TeamFacts::tombstoned)
+            && self.materializations.get(team_id.as_str()).is_some_and(|value| {
+                value.groups.iter().all(|group| matches!(group,
+                    TeamMaterializationLifecycle::Tombstoned(crate::TombstonedMaterialization::None(_))
+                    | TeamMaterializationLifecycle::Tombstoned(crate::TombstonedMaterialization::Confirmed {
+                        cleanup: crate::TeamMaterializationCleanup::Confirmed(_), ..
+                    })
+                ))
+            })
     }
 
     pub(crate) fn record_team_materialization_cleanup_outcome(
         &mut self,
         team_id: &TeamId,
+        endpoint: &RuntimeEndpointReference,
         outcome: MaterializationOperationOutcome,
     ) -> Result<MaterializationRecordOutcome, OrganizationFactsError> {
         self.touch_materialization(team_id.as_str());
-        self.materializations
-            .get_mut(team_id.as_str())
+        self.materializations.get_mut(team_id.as_str())
+            .and_then(|value| value.groups.iter_mut().find(|group| group.endpoint() == endpoint))
             .ok_or(OrganizationFactsError::UnknownMaterializationTeam)?
             .record_cleanup_outcome(outcome)
             .map_err(map_materialization_lifecycle_error)
@@ -1499,10 +1434,9 @@ impl OrganizationFacts {
         if team_facts.revision() != admission.team_revision() {
             return Err(OrganizationFactsError::WorkflowPlanAdmissionRevisionMismatch);
         }
-        if !matches!(
-            self.materializations.get(team.as_str()),
-            Some(TeamMaterializationLifecycle::Confirmed(_))
-        ) {
+        if self.materializations.get(team.as_str())
+            .and_then(TeamMaterializationGroups::confirmed).is_none()
+        {
             return Err(OrganizationFactsError::WorkflowPlanAdmissionMaterializationMissing);
         }
         if plan.run_id() != run_id.as_str() {
@@ -1644,8 +1578,16 @@ impl OrganizationFacts {
         &self.deliveries
     }
 
+    pub(crate) fn deliveries_for_run(&self, run_id: &str) -> impl Iterator<Item = &crate::Delivery> {
+        self.deliveries.deliveries_for_run(run_id)
+    }
+
     pub fn activities(&self) -> &ActivityLedger {
         &self.activities
+    }
+
+    pub(crate) fn activities_for_run(&self, run_id: &str) -> impl Iterator<Item = &Activity> {
+        self.activities.activities_for_run(run_id)
     }
 
     pub fn triggers(&self) -> &TriggerLedger {
@@ -1671,10 +1613,6 @@ impl OrganizationFacts {
         self.decisions.record(command)
     }
 
-    pub(crate) fn decision_snapshot(&self) -> crate::TeamDecisionLedgerSnapshot {
-        self.decisions.snapshot()
-    }
-
     pub fn control_node_resolution(&self, idempotency_key: &str) -> Option<&ControlNodeResolution> {
         self.control_resolutions.resolution(idempotency_key)
     }
@@ -1687,8 +1625,17 @@ impl OrganizationFacts {
         self.approvals.values()
     }
 
+    pub(crate) fn approvals_for_run(&self, run_id: &str) -> impl Iterator<Item = &Approval> {
+        self.approval_ids_by_run.get(run_id).into_iter().flatten()
+            .map(|id| self.approvals.get(id).expect("approval Run index references its approval"))
+    }
+
     pub(crate) fn events(&self) -> &EventLedger {
         &self.events
+    }
+
+    pub(super) fn accept_run_command(&mut self, command: crate::RunCommand) -> Result<(), super::StoreFault> {
+        self.events.try_accept(command).map(|_| ()).map_err(super::StoreFault::EventLedger)
     }
 
     pub(crate) fn event_snapshot(&self) -> EventLedgerSnapshot {
@@ -1709,6 +1656,10 @@ impl OrganizationFacts {
 
     pub fn artifacts(&self) -> impl Iterator<Item = &ArtifactRecord> {
         self.artifacts.records()
+    }
+
+    pub(crate) fn artifacts_for_run(&self, run_id: &str) -> impl Iterator<Item = &ArtifactRecord> {
+        self.artifacts.records_for_run(run_id)
     }
 
     pub fn task_board(&self) -> &crate::run::TaskBoardFacts {
@@ -1781,18 +1732,20 @@ impl OrganizationFacts {
         use sha2::{Digest, Sha256};
         use crate::run::event::{ApprovalAction, ApprovalCommand, CommandPayload, OpaqueId, RunCommand};
         let run = self.require_started_run(run_id)?;
-        if run.graph().definition().node(&node_id).is_none_or(|node| node.kind() != NodeKind::HumanDecision) {
-            return Err(OrganizationFactsError::InvalidApprovalLedger);
-        }
+        let node = run.graph().definition().node(&node_id)
+            .filter(|node| node.kind() == NodeKind::HumanDecision)
+            .ok_or(OrganizationFactsError::InvalidApprovalLedger)?;
         let attempt = run.graph().current_attempt(&node_id)
             .filter(|attempt| attempt.fence() == &fence)
             .ok_or(OrganizationFactsError::InvalidApprovalLedger)?;
-        if self.approvals.values().any(|approval| {
+        if self.approvals_for_run(run_id.as_str()).any(|approval| {
             let facts = approval.facts();
-            facts.run_id == run_id.as_str()
-                && facts.subject == (crate::ApprovalSubject::HumanDecision { node_id: node_id.as_str().to_owned() })
-                && facts.execution_fence.as_deref() == Some(fence.node_execution_id().as_str())
+            matches!(facts.binding(), Some(ApprovalBinding::HumanDecision { node_id: approval_node, execution_fence })
+                if approval_node == node_id.as_str() && execution_fence == fence.node_execution_id().as_str())
         }) {
+            return Ok(false);
+        }
+        if run.graph().is_rework_blocked(&node_id) {
             return Ok(false);
         }
         if attempt.status() != crate::AttemptStatus::Ready {
@@ -1813,12 +1766,17 @@ impl OrganizationFacts {
         let opaque = |value: &str| OpaqueId::try_new(value).map_err(|_| OrganizationFactsError::InvalidEventLedger);
         let approval_id = opaque(&identity)?;
         let role_id = opaque(leader.role_id().as_str())?;
+        let content = crate::run::approval::ApprovalContent {
+            title: node.title().to_owned(),
+            body: node.approval_prompt().map(str::to_owned),
+            artifact_ids: self.approval_input_artifacts(run_id, run.graph(), &node_id),
+        };
         let command = RunCommand::new(opaque(run_id.as_str())?, approval_id.clone(), approval_id.clone(),
             CommandPayload::ApprovalRequest(ApprovalCommand::new(approval_id.clone(), opaque(fence.node_execution_id().as_str())?, role_id.clone(), ApprovalAction::ContinueNode)), requested_at);
         let approval = Approval::request(crate::ApprovalRequest {
             approval_id: identity.clone(), run_id: run_id.as_str().to_owned(), stage_id: node_id.as_str().to_owned(),
             role_id: role_id.as_str().to_owned(), reason: "Human decision required.".to_owned(),
-            requested_action: "continue_node".to_owned(), risk_summary: "Review this decision before continuing.".to_owned(),
+            requested_action: "continue_node".to_owned(), risk_summary: String::new(), content: Some(content),
             idempotency_key: identity.clone(), requested_at,
             subject: crate::ApprovalSubject::HumanDecision { node_id: node_id.as_str().to_owned() },
             origin: crate::ApprovalOrigin::HumanDecision, effect: crate::ApprovalEffect::RouteDecisionPorts,
@@ -1847,17 +1805,11 @@ impl OrganizationFacts {
         if facts.run_id != command.run_id().as_str() {
             return Err(OrganizationFactsError::UnknownApprovalRun);
         }
-        let (node_id, execution_fence, route_decision) = match (&facts.subject, facts.execution_fence.as_deref()) {
-            (crate::ApprovalSubject::HumanDecision { node_id }, Some(execution_fence))
-                if facts.origin == crate::ApprovalOrigin::HumanDecision
-                    && facts.effect == crate::ApprovalEffect::RouteDecisionPorts =>
-            {
+        let (node_id, execution_fence, route_decision) = match facts.binding() {
+            Some(ApprovalBinding::HumanDecision { node_id, execution_fence }) => {
                 (node_id, execution_fence, true)
             }
-            (crate::ApprovalSubject::WorkNode { node_id }, Some(execution_fence))
-                if facts.origin == crate::ApprovalOrigin::WorkNode
-                    && facts.effect == crate::ApprovalEffect::KeepNodeWaiting =>
-            {
+            Some(ApprovalBinding::WorkNode { node_id, execution_fence }) => {
                 (node_id, execution_fence, false)
             }
             _ => return Err(OrganizationFactsError::InvalidApprovalResolution),
@@ -1870,7 +1822,7 @@ impl OrganizationFacts {
             };
         }
         let run = self.require_started_run(command.run_id())?;
-        let node_id = NodeId::new(node_id.clone());
+        let node_id = NodeId::new(node_id);
         let attempt = run
             .graph()
             .current_attempt(&node_id)
@@ -1924,6 +1876,14 @@ impl OrganizationFacts {
         &mut self,
         input: ApprovalResolutionInput,
     ) -> Result<ApprovalResolutionOutcome, OrganizationFactsError> {
+        self.resolve_approval_with_cause(input, crate::run::approval::ApprovalResolutionCause::HumanDecision)
+    }
+
+    fn resolve_approval_with_cause(
+        &mut self,
+        input: ApprovalResolutionInput,
+        cause: crate::run::approval::ApprovalResolutionCause,
+    ) -> Result<ApprovalResolutionOutcome, OrganizationFactsError> {
         let ApprovalResolutionInput {
             run_id,
             approval_id,
@@ -1945,15 +1905,21 @@ impl OrganizationFacts {
         }
         let idempotency_key = crate::run::event::OpaqueId::try_new(idempotency_key)
             .map_err(|_| OrganizationFactsError::InvalidEventLedger)?;
-        self.touch_approval(&approval_id);
         let approval = self
             .approvals
-            .get_mut(&approval_id)
+            .get(&approval_id)
             .filter(|approval| {
                 let facts = approval.facts();
                 facts.run_id == run_id && facts.stage_id == stage_id && facts.role_id == role_id
             })
             .ok_or(OrganizationFactsError::UnknownApproval)?;
+        if cause == crate::run::approval::ApprovalResolutionCause::HumanDecision
+            && approval.resolution_for_idempotency(idempotency_key.as_str()).is_none()
+        {
+            self.require_started_run(&GraphRunId::new(run_id))?;
+        }
+        self.touch_approval(&approval_id);
+        let approval = self.approvals.get_mut(&approval_id).expect("validated approval");
         let resolution_count = approval.resolutions().len();
         approval
             .resolve_with_receipt(
@@ -1961,7 +1927,7 @@ impl OrganizationFacts {
                 resolved_at,
                 note,
                 idempotency_key.as_str().to_owned(),
-                crate::run::approval::ApprovalResolutionCause::HumanDecision,
+                cause,
             )
             .map_err(|error| match error {
                 crate::run::approval::ApprovalResolutionError::InvalidResolution => {
@@ -2201,7 +2167,7 @@ impl OrganizationFacts {
             .activities
             .activity(&activity_id)
             .ok_or(OrganizationFactsError::InvalidActivity)?;
-        validate_activity(&self.runs, activity)?;
+        validate_activity(&self.runs, &self.artifacts, activity)?;
         if activity.facts().run_id != *target.graph_run_id()
             || activity.facts().node_id != *target.node_id()
             || activity.facts().fence != *target.fence()
@@ -2209,7 +2175,7 @@ impl OrganizationFacts {
             return Err(OrganizationFactsError::InvalidActivity);
         }
         if let Some(proof) = activity.settlement_proof() {
-            validate_agent_activity_settlement(&self.deliveries, activity, proof)?;
+            validate_agent_activity_settlement(&self.runs, &self.deliveries, activity, proof)?;
         }
         if let Some(claim) = activity
             .active_claim()
@@ -2244,43 +2210,86 @@ impl OrganizationFacts {
     }
 
     pub fn validate(&self) -> Result<(), OrganizationFactsError> {
-        Self::restore_with_materialization_lifecycles_and_decisions_and_artifacts(
-            MaterializationLifecycleFactsRestoreInput {
-                teams: self.teams.values().cloned().collect(),
-                materializations: self
-                    .materializations
-                    .iter()
-                    .map(|(team_id, lifecycle)| {
-                        (
-                            TeamId::try_new(team_id.clone())
-                                .expect("materialization index is derived from TeamId"),
-                            lifecycle.clone(),
-                        )
-                    })
-                    .collect(),
-                runs: self.runs.values().cloned().collect(),
-                pending_workflow_plan_admissions: self
-                    .pending_workflow_plan_admissions
-                    .values()
-                    .cloned()
-                    .collect(),
-                templates: self.templates.values().cloned().collect(),
-                deliveries: self.deliveries.snapshot(),
-                activities: self.activities.snapshot(),
-                triggers: self.triggers.requests().cloned().collect(),
-                control_resolutions: self.control_resolutions.resolutions().cloned().collect(),
-                approvals: self
-                    .approvals
-                    .values()
-                    .map(Approval::durable_snapshot)
-                    .collect(),
-                events: self.events.snapshot(),
-                evidence: self.evidence.records().cloned().collect(),
-            },
-            self.decision_snapshot(),
-            self.artifacts.records().cloned(),
-        )
-        .map(|_| ())
+        let mut team_ids = BTreeSet::new();
+        for team in self.teams.values() {
+            if !team_ids.insert(team.team_id().as_str()) {
+                return Err(OrganizationFactsError::DuplicateTeam);
+            }
+        }
+        for (team_id, lifecycle) in &self.materializations {
+            let team_id = TeamId::try_new(team_id.clone())
+                .expect("materialization index is derived from TeamId");
+            validate_materialization(&self.teams, &team_id, lifecycle)?;
+        }
+        let mut template_teams = BTreeSet::new();
+        for template in self.templates.values() {
+            validate_template(&self.teams, template)?;
+            if !template_teams.insert(template.team().as_str()) {
+                return Err(OrganizationFactsError::DuplicateWorkflowTemplate);
+            }
+        }
+        validate_team_workspaces(&self.teams)?;
+        let mut run_ids = BTreeSet::new();
+        for run in self.runs.values() {
+            validate_restored_run(&self.teams, run)?;
+            if !run_ids.insert(run.run_id()) {
+                return Err(OrganizationFactsError::DuplicateRun);
+            }
+        }
+        let mut admissions = Vec::new();
+        let mut admission_runs = BTreeSet::new();
+        for admission in self.pending_workflow_plan_admissions.values() {
+            validate_admission(&self.teams, &self.runs, admissions.iter().copied(), admission)?;
+            if !admission_runs.insert(admission.run_id()) {
+                return Err(OrganizationFactsError::DuplicateWorkflowPlanAdmission);
+            }
+            admissions.push(admission);
+        }
+        self.validate_runtime_receipts()?;
+        self.deliveries.validate().map_err(OrganizationFactsError::InvalidDeliveryLedger)?;
+        self.activities.validate().map_err(OrganizationFactsError::InvalidActivityLedger)?;
+        self.validate_activities()?;
+        let mut trigger_keys = BTreeSet::new();
+        for request in self.triggers.requests() {
+            request.validate().map_err(|error| OrganizationFactsError::InvalidTriggerLedger(
+                RestoreTriggerLedgerError::InvalidRequest(error),
+            ))?;
+            if !trigger_keys.insert((&request.run_id, &request.idempotency_key)) {
+                return Err(OrganizationFactsError::InvalidTriggerLedger(
+                    RestoreTriggerLedgerError::DuplicateIdempotencyKey(request.idempotency_key.clone()),
+                ));
+            }
+        }
+        self.validate_trigger_attempts()?;
+        for record in self.evidence.records() {
+            validate_evidence_provenance(&self.runs, record)?;
+        }
+        let mut resolution_keys = BTreeSet::new();
+        for resolution in self.control_resolutions.resolutions() {
+            if !resolution_keys.insert(resolution.idempotency_key()) {
+                return Err(OrganizationFactsError::InvalidControlResolutionLedger);
+            }
+        }
+        for resolution in self.control_resolutions.resolutions() {
+            validate_control_node_resolution(&self.runs, resolution)?;
+        }
+        let mut approval_ids = BTreeSet::new();
+        for approval in self.approvals.values() {
+            approval.validate().map_err(|_| OrganizationFactsError::InvalidApprovalLedger)?;
+            if !self.runs.contains_key(&approval.facts().run_id) {
+                return Err(OrganizationFactsError::UnknownApprovalRun);
+            }
+            if !approval_ids.insert(&approval.facts().approval_id) {
+                return Err(OrganizationFactsError::DuplicateApproval);
+            }
+        }
+        self.decisions.validate().map_err(|_| OrganizationFactsError::InvalidDecisionLedger)?;
+        for artifact in self.artifacts.records() {
+            validate_artifact_provenance(&self.runs, artifact)?;
+        }
+        self.events.validate().map_err(|_| OrganizationFactsError::InvalidEventLedger)?;
+        self.validate_event_dependents()?;
+        self.validate_deliveries().map(|_| ())
     }
 
     pub(crate) fn validate_transition_from(
@@ -2300,6 +2309,7 @@ impl OrganizationFacts {
                 || (current.revision() == previous_team.revision()
                     && current.definition() != previous_team.definition())
                 || (previous_team.tombstoned() && !current.tombstoned())
+                || previous_team.workspace_directory_name.as_ref().is_some_and(|name| current.workspace_directory_name.as_ref() != Some(name))
             {
                 return Err(OrganizationFactsError::InvalidTeamTransition);
             }
@@ -2356,6 +2366,11 @@ impl OrganizationFacts {
                 .get(run_id)
                 .ok_or(OrganizationFactsError::RemovedRun)?;
             current.validate_session_transition(previous_run.runtime(), &previous_run.role_session_intents)?;
+            if previous_run.deletion_confirmations.iter().any(|confirmation| !current.deletion_confirmations.contains(confirmation)) {
+                return Err(OrganizationFactsError::InvalidGraphRun);
+            }
+            if previous_run.workspace().is_none() && current.workspace().is_some() { return Err(OrganizationFactsError::RunOwnershipChanged); }
+            current.validate_workspace_transition(previous_run.workspace(), current.workspace())?;
             if current.team() != previous_run.team()
                 || current.frozen_team_revision() != previous_run.frozen_team_revision()
                 || current.task_execution_context != previous_run.task_execution_context
@@ -2403,7 +2418,7 @@ impl OrganizationFacts {
         }
         for activity in self.activities.activities() {
             if previous.activities.activity(&activity.facts().activity_id).is_none() {
-                validate_new_activity_prompt(&self.runs, activity.facts())?;
+                validate_new_activity_prompt(&self.runs, activity.facts(), self.team_prompts())?;
             }
         }
         for request in previous.triggers.requests() {
@@ -2450,17 +2465,7 @@ impl OrganizationFacts {
                 return Err(OrganizationFactsError::ApprovalChanged);
             }
         }
-        let previous_events = previous.events.snapshot();
-        let current_events = self.events.snapshot();
-        if !previous_events
-            .commands()
-            .iter()
-            .all(|record| current_events.commands().contains(record))
-            || !previous_events
-                .events()
-                .iter()
-                .all(|event| current_events.events().contains(event))
-        {
+        if !self.events.preserves_history(&previous.events) {
             return Err(OrganizationFactsError::EventLedgerChanged);
         }
         Ok(())
@@ -2534,8 +2539,12 @@ impl OrganizationFacts {
             .ok_or(OrganizationFactsError::UnknownRun)?;
         let plan = crate::run::lifecycle::cancellation_plan(run);
         let outcome = run.lifecycle.begin_cancellation(plan, idempotency_key, requested_at);
-        let pending = self.activities.activities()
-            .filter(|activity| activity.facts().run_id == *run_id)
+        if let GraphRunLifecycleState::Cancelled { idempotency_key, .. } = run.lifecycle.state() {
+            // The durable cancellation settles remaining approvals now, without another native abort.
+            let key = idempotency_key.clone();
+            self.settle_graph_run_cancellation(run_id, &key, RoleAbortOutcome::Confirmed, requested_at)?;
+        }
+        let pending = self.activities_for_run(run_id.as_str())
             .filter(|activity| matches!(activity.phase(), ActivityPhase::Pending | ActivityPhase::RetryScheduled { .. }))
             .map(|activity| activity.facts().activity_id.clone())
             .collect::<Vec<_>>();
@@ -2592,6 +2601,23 @@ impl OrganizationFacts {
             }
             result
         };
+        if matches!(result, SettleCancellationOutcome::Cancelled | SettleCancellationOutcome::Replayed) {
+            let resolution_key = approval::cancellation_resolution_key(idempotency_key);
+            let pending = self.approvals_for_run(run_id.as_str())
+                .filter(|approval| approval.is_pending())
+                .map(|approval| {
+                    let facts = approval.facts();
+                    ApprovalResolutionInput {
+                        run_id: run_id.clone(), approval_id: facts.approval_id.clone(),
+                        stage_id: facts.stage_id.clone(), role_id: facts.role_id.clone(),
+                        decision: crate::ApprovalDecision::Abort, resolved_at: observed_at.max(facts.requested_at),
+                        note: None, idempotency_key: resolution_key.clone(),
+                    }
+                }).collect::<Vec<_>>();
+            for input in pending {
+                self.resolve_approval_with_cause(input, crate::run::approval::ApprovalResolutionCause::RunCancelled)?;
+            }
+        }
         Ok(result)
     }
 
@@ -2625,24 +2651,23 @@ impl OrganizationFacts {
                 GraphRunPurgeRejection::NotTombstoned,
             ));
         }
-        let Some(runtime) = run.runtime() else {
-            return Ok(GraphRunPurgeOutcome::Rejected(
-                GraphRunPurgeRejection::ProofMismatch,
-            ));
-        };
+        if run.runtime().is_none() && run.workspace().is_none() {
+            return Ok(GraphRunPurgeOutcome::Rejected(GraphRunPurgeRejection::ProofMismatch));
+        }
+        let confirmed = run.confirmed_role_sessions();
         match request.native() {
-            NativeDeletionEvidence::Rejected => {
+            NativeDeletionEvidence::Rejected | NativeDeletionEvidence::Partial { failure: crate::NativeDeletionFailure::Rejected, .. } => {
                 return Ok(GraphRunPurgeOutcome::Rejected(
                     GraphRunPurgeRejection::NativeDeletionRejected,
                 ));
             }
-            NativeDeletionEvidence::OutcomeUnknown => {
+            NativeDeletionEvidence::OutcomeUnknown | NativeDeletionEvidence::Partial { failure: crate::NativeDeletionFailure::OutcomeUnknown, .. } => {
                 return Ok(GraphRunPurgeOutcome::OutcomeUnknown(
                     GraphRunPurgeUnknown::NativeDeletionOutcomeUnknown,
                 ));
             }
             NativeDeletionEvidence::Confirmed(proof)
-                if proof.run_id() != request.run_id() || !proof.covers(runtime.bindings()) =>
+                if proof.run_id() != request.run_id() || !proof.covers(&confirmed) =>
             {
                 return Ok(GraphRunPurgeOutcome::Rejected(
                     GraphRunPurgeRejection::ProofMismatch,
@@ -2667,9 +2692,8 @@ impl OrganizationFacts {
         self.triggers.retain_without_run(request.run_id().as_str());
         self.control_resolutions
             .retain_without_run(request.run_id());
-        let approvals = self.approvals.iter()
-            .filter(|(_, approval)| approval.facts().run_id == request.run_id().as_str())
-            .map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let approvals = self.approvals_for_run(request.run_id().as_str())
+            .map(|approval| approval.facts().approval_id.clone()).collect::<Vec<_>>();
         for id in approvals { self.remove_approval(&id); }
         self.events.retain_without_run(request.run_id().as_str());
         self.evidence.retain_without_run(request.run_id().as_str());
@@ -2742,10 +2766,7 @@ impl OrganizationFacts {
         if !matches!(run.lifecycle().state(), GraphRunLifecycleState::Active) {
             return Err(OrganizationFactsError::InvalidGraphRunLifecycle);
         }
-        let materialization = self
-            .materializations
-            .get(run.team().as_str())
-            .and_then(TeamMaterializationLifecycle::receipt)
+        let materialization = self.materialization(run.team())
             .ok_or(OrganizationFactsError::RuntimeMaterializationMissing)?;
         validate_runtime_receipt_alignment(run, &receipt, materialization)?;
         if run.runtime.is_some() {
@@ -2811,6 +2832,25 @@ impl OrganizationFacts {
             return Err(TriggerFireError::SourceMismatch);
         }
 
+        let scope = run.graph().trigger_scope(node.id()).map_err(TriggerFireError::Reduce)?;
+        if !run.graph().trigger_busy_nodes(node.id()).map_err(TriggerFireError::Reduce)?.is_empty()
+            || self.activities_for_run(&request.run_id).any(|activity| {
+                run.graph().execution_scope(&activity.facts().node_id)
+                    .is_ok_and(|occupied| !occupied.is_disjoint(&scope))
+                    && matches!(activity.phase(), ActivityPhase::Claimed(_) | ActivityPhase::Dispatched(_)
+                        | ActivityPhase::OutcomeUnknown { .. } | ActivityPhase::TerminalObserved { .. })
+            })
+            || self.deliveries_for_run(&request.run_id).any(|delivery| {
+                run.graph().execution_scope(&NodeId::new(&delivery.facts().node_id))
+                    .is_ok_and(|occupied| !occupied.is_disjoint(&scope))
+                    && (matches!(delivery.phase(), DeliveryPhase::Delivering(_) | DeliveryPhase::Delivered { .. }
+                        | DeliveryPhase::OutcomeUnknown { .. })
+                        || matches!(delivery.phase(), DeliveryPhase::TerminalObserved { observation }
+                            if matches!(observation.resolution(), TerminalObservationResolution::AwaitingAuthorizedGraphResolution)))
+            })
+        {
+            return Err(TriggerFireError::Busy);
+        }
         self.touch_run(&request.run_id);
         self.runs.get_mut(&request.run_id).expect("validated trigger run").graph.apply_event(
             GraphEvent::TriggerFired {
@@ -2969,9 +3009,7 @@ impl OrganizationFacts {
             return;
         };
         let cancelled = self
-            .activities
-            .activities()
-            .filter(|activity| activity.facts().run_id == *run_id)
+            .activities_for_run(run_id.as_str())
             .filter(|activity| {
                 matches!(
                     activity.phase(),
@@ -3208,6 +3246,27 @@ impl OrganizationFacts {
         if command.payload() != &payload {
             return Err(crate::RecordCommandError::IdempotencyConflict);
         }
+        let approval_content = if matches!(event.kind(), crate::TeamNodeEventKind::RequestApproval { .. }) {
+            let submission = event.approval_submission();
+            let mut artifact_ids = self.approval_input_artifacts(&run_id, run.graph(), &node_id);
+            if let Some(submission) = submission {
+                for id in submission.artifact_ids() {
+                    let artifact_id = crate::run::ArtifactId::new(id).map_err(|_| crate::RecordCommandError::InvalidEventId)?;
+                    if self.artifacts.artifact(&artifact_id).is_none_or(|artifact| artifact.run_id() != run_id.as_str()) {
+                        return Err(crate::RecordCommandError::InvalidEventId);
+                    }
+                }
+                artifact_ids.extend(submission.artifact_ids().iter().cloned());
+                artifact_ids.sort();
+                artifact_ids.dedup();
+            }
+            let node = run.graph().definition().node(&node_id).ok_or(crate::RecordCommandError::InvalidEventId)?;
+            Some(crate::run::approval::ApprovalContent {
+                title: node.title().to_owned(),
+                body: submission.map(|submission| submission.body().to_owned()),
+                artifact_ids,
+            })
+        } else { None };
         let existing = self.events.try_accept(command.clone())?;
         if existing.is_replay() {
             return Ok(match event.kind() {
@@ -3247,7 +3306,8 @@ impl OrganizationFacts {
                     role_id: role_id.expect("approval request resolves a role"),
                     reason: "Agent requested approval.".to_owned(),
                     requested_action: approval_action_name(action).to_owned(),
-                    risk_summary: "Agent supplied no public risk summary.".to_owned(),
+                    risk_summary: event.approval_submission().and_then(|submission| submission.risk()).unwrap_or("").to_owned(),
+                    content: approval_content,
                     idempotency_key: command.idempotency_key().as_str().to_owned(),
                     requested_at: command.created_at(),
                     subject: crate::ApprovalSubject::WorkNode {
@@ -3354,7 +3414,11 @@ impl OrganizationFacts {
                     resolution.resolved_at(),
                 )
                 .map_err(|_| AgentNodeEventResolutionError::CompletionReceiptMismatch)?
-                .artifact,
+                .artifact.with_delivery_files(
+                    Some(crate::RoleSessionRef::try_new(delivery.facts().session_ref.clone())
+                        .map_err(|_| AgentNodeEventResolutionError::CompletionReceiptMismatch)?),
+                    Vec::new(),
+                ).map_err(|_| AgentNodeEventResolutionError::CompletionReceiptMismatch)?,
             )
         } else {
             None
@@ -3534,11 +3598,16 @@ impl OrganizationFacts {
                         crate::run::artifact::ArtifactRecordError::InvalidTitle => "invalid_title",
                         crate::run::artifact::ArtifactRecordError::InvalidContentReference => "invalid_content_reference",
                         crate::run::artifact::ArtifactRecordError::InvalidSummary => "invalid_summary",
+                        crate::run::artifact::ArtifactRecordError::InvalidFiles => "invalid_files",
                     },
                 }));
                 crate::NativeRunOutputResolutionError::InvalidOutput
             })?
-            .artifact;
+            .artifact.with_delivery_files(
+                Some(crate::RoleSessionRef::try_new(delivery.facts().session_ref.clone())
+                    .map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?),
+                output.files().to_vec(),
+            ).map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?;
             self.record_terminal_completion_artifact(delivery_id, artifact)
                 .map_err(|error| {
                     runtime_trace("runtime.team_run.terminal.facts.artifact", || json!({
@@ -3760,11 +3829,11 @@ impl OrganizationFacts {
             return Err(ControlNodeResolutionError::GraphRunMismatch);
         }
         if resolution.authority() == ControlAuthority::HumanDecision
-            && !self.approvals.values().any(|approval| {
+            && !self.approvals_for_run(resolution.graph_run_id().as_str()).any(|approval| {
                 let facts = approval.facts();
-                facts.run_id == resolution.graph_run_id().as_str()
-                    && matches!(&facts.subject, crate::ApprovalSubject::HumanDecision { node_id } if node_id == resolution.node_id().as_str())
-                    && facts.execution_fence.as_deref() == Some(resolution.fence().node_execution_id().as_str())
+                matches!(facts.binding(), Some(ApprovalBinding::HumanDecision { node_id, execution_fence })
+                    if node_id == resolution.node_id().as_str()
+                        && execution_fence == resolution.fence().node_execution_id().as_str())
                     && approval.resolution().is_some_and(|receipt| {
                         receipt.cause == crate::run::approval::ApprovalResolutionCause::HumanDecision
                             && receipt.resolved_at == resolution.resolved_at()
@@ -3821,20 +3890,7 @@ impl OrganizationFacts {
             crate::run::control::require_join_ready(run.graph(), resolution.node_id())?;
         }
         require_control_output_port(run.graph(), resolution.node_id(), resolution.output_port())?;
-        let event = match resolution.outcome() {
-            crate::AuthorizedGraphOutcome::Completed => GraphEvent::NodeCompleted {
-                node_id: resolution.node_id().clone(),
-                fence: resolution.fence().clone(),
-                output_port: resolution.output_port().to_owned(),
-                completed_at: resolution.resolved_at(),
-            },
-            crate::AuthorizedGraphOutcome::Failed => GraphEvent::NodeFailed {
-                node_id: resolution.node_id().clone(),
-                fence: resolution.fence().clone(),
-                output_port: resolution.output_port().to_owned(),
-                failed_at: resolution.resolved_at(),
-            },
-        };
+        let event = resolution.graph_event();
         let run_id = resolution.graph_run_id().clone();
         self.touch_run(run_id.as_str());
         self.runs.get_mut(run_id.as_str()).expect("validated control run").graph
@@ -3869,7 +3925,7 @@ impl OrganizationFacts {
         &mut self,
         request: ActivityRequest,
     ) -> Result<ActivityRegistrationOutcome, OrganizationFactsError> {
-        validate_activity_request(&self.runs, &request)?;
+        validate_activity_request(&self.runs, &self.artifacts, &request)?;
         if self.activities.activity(&request.activity_id).is_none()
             && self.activities.activity_by_idempotency_key(
                 request.run_id.as_str(),
@@ -3877,11 +3933,13 @@ impl OrganizationFacts {
             ).is_none()
         {
             let run = self.require_started_run(&request.run_id)?;
-            if run.graph().current_attempt(&request.node_id).is_none_or(|attempt| attempt.fence() != &request.fence || attempt.status() != crate::AttemptStatus::Ready) {
+            if run.graph().is_rework_blocked(&request.node_id)
+                || run.graph().current_attempt(&request.node_id).is_none_or(|attempt| attempt.fence() != &request.fence || attempt.status() != crate::AttemptStatus::Ready)
+            {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
             run.graph().definition().validate_node_configuration().map_err(|_| OrganizationFactsError::InvalidActivity)?;
-            validate_new_activity_prompt(&self.runs, &request)?;
+            validate_new_activity_prompt(&self.runs, &request, self.team_prompts())?;
         }
         self.activities
             .register(request)
@@ -3897,8 +3955,9 @@ impl OrganizationFacts {
             .ok_or(OrganizationFactsError::UnknownActivity)?;
         if matches!(activity.phase(), ActivityPhase::Pending | ActivityPhase::RetryScheduled { .. }) {
             let run = self.require_started_run(&activity.facts().run_id)?;
-            if run.graph().current_attempt(&activity.facts().node_id)
-                .is_none_or(|attempt| attempt.fence() != &activity.facts().fence)
+            if run.graph().is_rework_blocked(&activity.facts().node_id)
+                || run.graph().current_attempt(&activity.facts().node_id)
+                    .is_none_or(|attempt| attempt.fence() != &activity.facts().fence)
             {
                 return Err(OrganizationFactsError::InvalidActivityTransition);
             }
@@ -3946,7 +4005,7 @@ impl OrganizationFacts {
         activity: &Activity,
         proof: &crate::run::activity::SettlementProof,
     ) -> Result<(), OrganizationFactsError> {
-        validate_agent_activity_settlement(&self.deliveries, activity, proof)
+        validate_agent_activity_settlement(&self.runs, &self.deliveries, activity, proof)
     }
 
     pub(crate) fn record_agent_activity_settlement(
@@ -3957,7 +4016,38 @@ impl OrganizationFacts {
             .activities
             .activity(proof.claim.activity_id())
             .ok_or(OrganizationFactsError::UnknownActivity)?;
-        validate_agent_activity_settlement(&self.deliveries, activity, &proof)?;
+        validate_agent_activity_settlement(&self.runs, &self.deliveries, activity, &proof)?;
+        if matches!(proof.receipt, crate::DeliveryReceipt::Rejected { .. })
+            && let ActivityPhase::Failed { failed_at, .. } = activity.phase()
+        {
+            let request = activity.facts();
+            let (run_id, node_id, fence, failed_at) = (
+                request.run_id.clone(),
+                request.node_id.clone(),
+                request.fence.clone(),
+                *failed_at,
+            );
+            self.touch_run(run_id.as_str());
+            let run = self.runs.get_mut(run_id.as_str())
+                .ok_or(OrganizationFactsError::UnknownActivityRun)?;
+            if !run.execution_is_retired(&node_id, &fence) {
+                let history = run.graph.executions().get(&node_id)
+                    .ok_or(OrganizationFactsError::InvalidActivityTransition)?;
+                let attempt = history.attempts().iter().find(|attempt| attempt.fence() == &fence)
+                    .ok_or(OrganizationFactsError::InvalidActivityTransition)?;
+                if attempt.status().accepts_outcome() {
+                    let superseded = history.current().fence() != &fence;
+                    let event = GraphEvent::NodeFailed {
+                        node_id, fence, output_port: "failed".to_owned(), failed_at,
+                    };
+                    if superseded {
+                        run.graph.settle_superseded(event)
+                    } else {
+                        run.graph.apply_event(event)
+                    }.map_err(|_| OrganizationFactsError::InvalidActivityTransition)?;
+                }
+            }
+        }
         let activity = self
             .activities
             .activity_mut(proof.claim.activity_id())
@@ -4001,13 +4091,15 @@ impl OrganizationFacts {
     /// than allowing startup to issue the external effect again.
     pub(crate) fn recover_interrupted_materializations(&mut self) -> bool {
         let keys = self.materializations.iter()
-            .filter(|(_, value)| matches!(value, TeamMaterializationLifecycle::Requested(_)))
+            .filter(|(_, value)| value.groups.iter().any(|group| matches!(group, TeamMaterializationLifecycle::Requested(_))))
             .map(|(key, _)| key.clone()).collect::<Vec<_>>();
         for key in &keys {
             self.touch_materialization(key);
-            let lifecycle = self.materializations.get_mut(key).expect("selected materialization");
-            if let TeamMaterializationLifecycle::Requested(request) = lifecycle {
-                *lifecycle = TeamMaterializationLifecycle::OutcomeUnknown(request.clone());
+            let materialization = self.materializations.get_mut(key).expect("selected materialization");
+            for lifecycle in &mut materialization.groups {
+                if let TeamMaterializationLifecycle::Requested(request) = lifecycle {
+                    *lifecycle = TeamMaterializationLifecycle::OutcomeUnknown(request.clone());
+                }
             }
         }
         !keys.is_empty()
@@ -4102,6 +4194,147 @@ fn approval_action_name(action: crate::ApprovalAction) -> &'static str {
     }
 }
 
+pub(super) fn validate_materialization(
+    teams: &BTreeMap<String, TeamFacts>,
+    team_id: &TeamId,
+    materialization: &TeamMaterializationGroups,
+) -> Result<(), OrganizationFactsError> {
+    let team = teams.get(team_id.as_str()).ok_or(OrganizationFactsError::UnknownMaterializationTeam)?;
+    validate_materialization_definition(team.definition(), materialization)
+}
+
+fn validate_materialization_definition(
+    definition: &TeamDefinition,
+    materialization: &TeamMaterializationGroups,
+) -> Result<(), OrganizationFactsError> {
+    if materialization.groups.is_empty() {
+        return Err(OrganizationFactsError::InvalidMaterializationLifecycle);
+    }
+    let mut endpoints = BTreeSet::new();
+    let mut roles = BTreeSet::new();
+    let mut agents = BTreeSet::new();
+    for group in &materialization.groups {
+        if group.team() != Some(definition.team_id()) {
+            return Err(OrganizationFactsError::UnknownMaterializationTeam);
+        }
+        if !endpoints.insert(group.endpoint()) {
+            return Err(OrganizationFactsError::DuplicateMaterialization);
+        }
+        if let Some(request) = group.request() {
+            for role in request.intent().agents() {
+                if !roles.insert(role.role().as_str()) {
+                    return Err(OrganizationFactsError::MaterializationReceiptDoesNotMatchIntent);
+                }
+                if let crate::RoleMaterializationAgent::External { agent } = role.agent()
+                    && !agents.insert((group.endpoint(), agent)) {
+                    return Err(OrganizationFactsError::MaterializationReceiptDoesNotMatchIntent);
+                }
+            }
+        } else if let Some(receipt) = group.receipt() {
+            for role in receipt.roles() {
+                if !roles.insert(role.role().as_str()) || !agents.insert((role.endpoint(), role.agent())) {
+                    return Err(OrganizationFactsError::MaterializationReceiptDoesNotMatchIntent);
+                }
+            }
+        }
+    }
+    if roles.len() != definition.roles().len()
+        || definition.roles().iter().any(|role| !roles.contains(role.role_id().as_str())) {
+        return Err(OrganizationFactsError::MaterializationReceiptDoesNotMatchIntent);
+    }
+    if let Some(requests) = &materialization.requests {
+        let mut requested_endpoints = BTreeSet::new();
+        if requests.len() != materialization.groups.len() {
+            return Err(OrganizationFactsError::MaterializationChanged);
+        }
+        for request in requests {
+            let intent = request.intent();
+            if intent.team() != definition.team_id()
+                || !requested_endpoints.insert(intent.endpoint())
+                || (requests.len() > 1 && intent.source() != crate::MaterializationSource::Manual) {
+                return Err(OrganizationFactsError::MaterializationChanged);
+            }
+            let group = materialization.groups.iter().find(|group| group.endpoint() == intent.endpoint())
+                .ok_or(OrganizationFactsError::MaterializationChanged)?;
+            if group.request().is_some_and(|saved| saved != request)
+                || group.receipt().is_some_and(|receipt| !materialization_matches_request(receipt, request)) {
+                return Err(OrganizationFactsError::MaterializationReceiptDoesNotMatchIntent);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_template(
+    team_facts: &BTreeMap<String, TeamFacts>,
+    template: &WorkflowTemplateFacts,
+) -> Result<(), OrganizationFactsError> {
+    if !team_facts.contains_key(template.team().as_str()) {
+        return Err(OrganizationFactsError::UnknownWorkflowTemplateTeam);
+    }
+    if template.source_identity().trim().is_empty() {
+        return Err(OrganizationFactsError::InvalidWorkflowTemplate);
+    }
+    Ok(())
+}
+
+fn validate_team_workspaces(team_facts: &BTreeMap<String, TeamFacts>) -> Result<(), OrganizationFactsError> {
+    let mut workspace_names = BTreeSet::new();
+    for team in team_facts.values() {
+        if let Some(name) = team.workspace_directory_name()
+            && (!crate::run::workspace::valid_directory_name(name) || !workspace_names.insert(name.to_lowercase())) {
+            return Err(OrganizationFactsError::InvalidTeamTransition);
+        }
+    }
+    Ok(())
+}
+
+fn validate_restored_run(
+    team_facts: &BTreeMap<String, TeamFacts>,
+    run: &GraphRunFacts,
+) -> Result<(), OrganizationFactsError> {
+    if run.task_execution_context.as_ref().is_some_and(|context| {
+        !context.valid() || context.root_request_id != run.lifecycle().creation_idempotency_key()
+    }) {
+        return Err(OrganizationFactsError::InvalidGraphRun);
+    }
+    run.validate_retired_executions(&run.retired_executions)?;
+    let team = team_facts
+        .get(run.team().as_str())
+        .ok_or(OrganizationFactsError::UnknownRunTeam)?;
+    OrganizationFacts::validate_run_workspace(run, team)?;
+    if team.revision().get() < run.frozen_team_revision().get() {
+        return Err(OrganizationFactsError::FrozenTeamRevisionMismatch);
+    }
+    Ok(())
+}
+
+fn validate_admission<'a>(
+    team_facts: &BTreeMap<String, TeamFacts>,
+    run_facts: &BTreeMap<String, GraphRunFacts>,
+    mut pending_admissions: impl Iterator<Item = &'a PendingWorkflowPlanAdmission>,
+    admission: &PendingWorkflowPlanAdmission,
+) -> Result<(), OrganizationFactsError> {
+    let team = team_facts
+        .get(admission.team_id().as_str())
+        .ok_or(OrganizationFactsError::UnknownWorkflowPlanAdmissionTeam)?;
+    if team.tombstoned() || team.revision().get() < admission.team_revision().get() {
+        return Err(OrganizationFactsError::InvalidWorkflowPlanAdmission);
+    }
+    if run_facts.contains_key(admission.run_id().as_str()) {
+        return Err(OrganizationFactsError::WorkflowPlanAdmissionRunConflict);
+    }
+    if pending_admissions
+        .any(|existing: &PendingWorkflowPlanAdmission| {
+            existing.creation_idempotency_key() == admission.creation_idempotency_key()
+                && existing != admission
+        })
+    {
+        return Err(OrganizationFactsError::WorkflowPlanAdmissionIdempotencyConflict);
+    }
+    Ok(())
+}
+
 fn validate_artifact_provenance(
     runs: &BTreeMap<String, GraphRunFacts>,
     record: &ArtifactRecord,
@@ -4190,9 +4423,9 @@ fn evidence_replay_matches(existing: &EvidenceRecord, record: &EvidenceRecord) -
         && existing.reference() == record.reference()
 }
 
-fn validate_approval_resolution_events(
+fn validate_approval_resolution_events<'a>(
     approvals: &BTreeMap<String, Approval>,
-    events: &[crate::run::event::TeamEvent],
+    events: impl Iterator<Item = &'a crate::run::event::TeamEvent>,
 ) -> Result<(), OrganizationFactsError> {
     let mut resolution_counts = BTreeMap::new();
     for approval in approvals.values() {
@@ -4209,7 +4442,7 @@ fn validate_approval_resolution_events(
         }
     }
 
-    for event in events.iter().filter(|event| {
+    for event in events.filter(|event| {
         matches!(
             event.payload(),
             crate::run::event::TeamEventPayload::ApprovalResolved { .. }
@@ -4247,80 +4480,15 @@ fn validate_approval_resolution_events(
         .ok_or(OrganizationFactsError::InvalidApprovalLedger)
 }
 
-fn validate_human_decision_approvals<'a>(
+fn validate_approvals<'a>(
     runs: &BTreeMap<String, GraphRunFacts>,
     approvals: impl Iterator<Item = &'a Approval>,
     resolutions: &ControlResolutionLedger,
 ) -> Result<(), OrganizationFactsError> {
-    for approval in approvals.filter(|approval| {
-        matches!(
-            (
-                &approval.facts().subject,
-                approval.facts().origin,
-                approval.facts().effect
-            ),
-            (
-                crate::ApprovalSubject::HumanDecision { .. },
-                crate::ApprovalOrigin::HumanDecision,
-                crate::ApprovalEffect::RouteDecisionPorts
-            )
-        )
-    }) {
-        let facts = approval.facts();
-        let node_id = match &facts.subject {
-            crate::ApprovalSubject::HumanDecision { node_id } => NodeId::new(node_id.clone()),
-            _ => unreachable!("human-decision approval filter preserves subject"),
-        };
-        let fence = facts
-            .execution_fence
-            .as_deref()
-            .ok_or(OrganizationFactsError::InvalidApprovalLedger)?;
-        let run = runs
-            .get(&facts.run_id)
+    for approval in approvals {
+        let run = runs.get(&approval.facts().run_id)
             .ok_or(OrganizationFactsError::UnknownApprovalRun)?;
-        if !run
-            .graph()
-            .executions()
-            .get(&node_id)
-            .is_some_and(|history| {
-                history
-                    .attempts()
-                    .iter()
-                    .any(|attempt| attempt.fence().node_execution_id().as_str() == fence)
-            })
-            && !run.retired_executions.iter().any(|(node, retired)| {
-                node == &node_id
-                    && retired.node_execution_id().as_str() == fence
-                    && run.retired_execution_has_attempt(node, retired)
-            })
-        {
-            return Err(OrganizationFactsError::InvalidApprovalLedger);
-        }
-        for receipt in approval.resolutions() {
-            let human_decision = match receipt.decision {
-                crate::ApprovalDecision::Approve => crate::HumanDecision::Approve,
-                crate::ApprovalDecision::Deny => crate::HumanDecision::Deny,
-                crate::ApprovalDecision::Abort => crate::HumanDecision::Abort,
-            };
-            let control = resolutions
-                .resolutions()
-                .find(|control| {
-                    control.authority() == ControlAuthority::HumanDecision
-                        && control.graph_run_id().as_str() == facts.run_id
-                        && control.node_id() == &node_id
-                        && control.fence().node_execution_id().as_str() == fence
-                        && control.resolved_at() == receipt.resolved_at
-                })
-                .ok_or(OrganizationFactsError::InvalidApprovalLedger)?;
-            let expected = match human_decision {
-                crate::HumanDecision::Approve => "approved",
-                crate::HumanDecision::Deny => "rejected",
-                crate::HumanDecision::Abort => "aborted",
-            };
-            if control.output_port() != expected {
-                return Err(OrganizationFactsError::InvalidApprovalLedger);
-            }
-        }
+        validate_approval_resolutions(run, approval, approval.resolutions(), resolutions)?;
     }
     Ok(())
 }
@@ -4423,7 +4591,7 @@ fn map_materialization_lifecycle_error(
 fn validate_runtime_receipt_alignment(
     run: &GraphRunFacts,
     receipt: &RunRuntimeReceipt,
-    materialization: &MaterializationReceipt,
+    materialization: ConfirmedTeamMaterialization<'_>,
 ) -> Result<(), OrganizationFactsError> {
     if receipt.team_run() != run.run_id() {
         return Err(OrganizationFactsError::RuntimeRunMismatch);
@@ -4432,18 +4600,11 @@ fn validate_runtime_receipt_alignment(
         if binding.team() != run.team() {
             return Err(OrganizationFactsError::RuntimeBindingTeamMismatch);
         }
-        if !materialization
-            .roles()
-            .iter()
-            .any(|role| role.role() == binding.role())
-        {
+        if !materialization.roles().any(|role| {
+            role.role() == binding.role() && role.agent() == binding.agent() && role.endpoint() == binding.endpoint()
+        }) {
             return Err(OrganizationFactsError::RuntimeRoleBindingSetMismatch);
         }
-    }
-    if run.role_session_intents.values().any(|intent| !materialization.roles().iter().any(|role| {
-        role.role() == intent.binding.role() && role.agent() == intent.binding.agent() && role.endpoint() == intent.binding.endpoint()
-    })) {
-        return Err(OrganizationFactsError::RuntimeRoleBindingSetMismatch);
     }
 
     Ok(())
@@ -4556,14 +4717,13 @@ fn validate_native_confirmed_activity_claim(
     let request = delivery.facts();
     let run = runs.get(facts.run_id.as_str())
         .ok_or(OrganizationFactsError::UnknownActivityRun)?;
-    let snapshot = delivery.snapshot();
     if claim.activity_id() != &facts.activity_id
         || claim.attempt() == 0
         || claim.attempt() > facts.max_attempts
         || claim.generation() != u64::from(claim.attempt())
-        || claim.generation().checked_add(1) != Some(activity.snapshot().next_claim_generation())
-        || snapshot.completed_attempts() != claim.attempt()
-        || claim.generation().checked_add(1) != Some(snapshot.next_claim_generation())
+        || claim.generation().checked_add(1) != Some(activity.next_claim_generation())
+        || delivery.completed_attempts() != claim.attempt()
+        || claim.generation().checked_add(1) != Some(delivery.next_claim_generation())
         || request.team_id != run.team().as_str()
         || request.run_id != facts.run_id.as_str()
         || request.node_id != facts.node_id.as_str()
@@ -4590,7 +4750,7 @@ fn validate_native_confirmed_activity_claim(
             if activity.active_claim() == Some(claim)
                 && matches!(activity.phase(), ActivityPhase::Dispatched(_))
                 && activity.completed_attempts() == claim.attempt() - 1
-                && *accepted_at == claim.claimed_at() => correlation,
+                && *accepted_at >= claim.claimed_at() => correlation,
         DeliveryPhase::TerminalObserved { observation }
             if activity.native_terminal_claim() == Some(claim)
                 && activity.valid_native_terminal_claim()
@@ -4631,6 +4791,7 @@ fn validate_native_confirmed_activity_claim(
 }
 
 fn validate_agent_activity_settlement(
+    runs: &BTreeMap<String, GraphRunFacts>,
     deliveries: &DeliveryLedger,
     activity: &Activity,
     proof: &crate::run::activity::SettlementProof,
@@ -4646,15 +4807,14 @@ fn validate_agent_activity_settlement(
         .ok_or(OrganizationFactsError::InvalidActivityTransition)?;
     let request = delivery.facts();
     let facts = activity.facts();
-    let snapshot = delivery.snapshot();
     let claim = &proof.claim;
     if request.run_id != facts.run_id.as_str()
         || request.node_id != facts.node_id.as_str()
         || request.node_execution_id != facts.fence.node_execution_id().as_str()
         || request.idempotency_key != facts.idempotency_key
         || request.max_attempts != facts.max_attempts
-        || snapshot.completed_attempts() != claim.attempt()
-        || claim.generation().checked_add(1) != Some(snapshot.next_claim_generation())
+        || delivery.completed_attempts() != claim.attempt()
+        || claim.generation().checked_add(1) != Some(delivery.next_claim_generation())
     {
         return Err(invalid);
     }
@@ -4699,10 +4859,41 @@ fn validate_agent_activity_settlement(
         // Runtime-native confirmation can advance an already committed unknown receipt.
         (
             R::OutcomeUnknown { observed_at },
-            DeliveryPhase::Delivered { accepted_at, .. },
-        ) => observed_at == accepted_at,
+            DeliveryPhase::Delivered { accepted_at, native_correlation: Some(correlation), .. },
+        ) => {
+            let binding = runs.get(facts.run_id.as_str()).and_then(|run| run.runtime())
+                .and_then(|runtime| runtime.bindings().iter().find(|binding| {
+                    binding.role().as_str() == request.role_id
+                        && binding.session_ref().as_str() == request.session_ref
+                }));
+            *observed_at >= claim.claimed_at()
+                && *accepted_at >= claim.claimed_at()
+                && binding.is_some_and(|binding| binding.endpoint_session_id() == correlation.endpoint_session_id())
+                && matches!(activity.phase(), ActivityPhase::OutcomeUnknown { observed_at: stored } if stored == observed_at)
+        }
         (R::OutcomeUnknown { .. }, DeliveryPhase::TerminalObserved { observation }) => {
+            let run = runs.get(facts.run_id.as_str()).ok_or(invalid.clone())?;
+            let binding = run.runtime().and_then(|runtime| runtime.bindings().iter().find(|binding| {
+                binding.role().as_str() == request.role_id
+                    && binding.session_ref().as_str() == request.session_ref
+            }));
+            let matching_phase = match (observation.resolution(), activity.phase()) {
+                (TerminalObservationResolution::AwaitingAuthorizedGraphResolution,
+                    ActivityPhase::TerminalObserved { observed_at }) => *observed_at == observation.observed_at(),
+                (TerminalObservationResolution::GraphResolved(resolution),
+                    ActivityPhase::Completed { completed_at }) => resolution.outcome() == crate::AuthorizedGraphOutcome::Completed
+                        && *completed_at == resolution.resolved_at(),
+                (TerminalObservationResolution::GraphResolved(resolution),
+                    ActivityPhase::Failed { failed_at, failure: crate::ActivityFailure::Rejected }) => resolution.outcome() == crate::AuthorizedGraphOutcome::Failed
+                        && *failed_at == resolution.resolved_at(),
+                (TerminalObservationResolution::NodeCancelled,
+                    ActivityPhase::Cancelled { cancelled_at }) => *cancelled_at == observation.observed_at(),
+                _ => false,
+            };
             observation.fence() == &facts.fence
+                && binding.is_some_and(|binding| binding.endpoint_session_id() == observation.correlation().endpoint_session_id())
+                && matching_phase
+                && validate_terminal_observation(delivery, run, observation).is_ok()
         }
         _ => false,
     };
@@ -4715,13 +4906,15 @@ fn validate_agent_activity_settlement(
 
 fn validate_activity(
     runs: &BTreeMap<String, GraphRunFacts>,
+    artifacts: &ArtifactLedger,
     activity: &Activity,
 ) -> Result<(), OrganizationFactsError> {
-    validate_activity_request(runs, activity.facts())
+    validate_activity_request(runs, artifacts, activity.facts())
 }
 
 fn validate_activity_request(
     runs: &BTreeMap<String, GraphRunFacts>,
+    artifacts: &ArtifactLedger,
     request: &ActivityRequest,
 ) -> Result<(), OrganizationFactsError> {
     request
@@ -4748,6 +4941,12 @@ fn validate_activity_request(
             && run.retired_execution_has_attempt(&request.node_id, &request.fence)))
         || request.fence.node_execution_id() != &request.node_execution_id
     {
+        return Err(OrganizationFactsError::InvalidActivity);
+    }
+    if request.input_artifact_ids.as_ref().is_some_and(|ids| {
+        ids.iter().any(|id| artifacts.artifact(id)
+            .is_none_or(|artifact| artifact.run_id() != request.run_id.as_str()))
+    }) {
         return Err(OrganizationFactsError::InvalidActivity);
     }
     match (&request.activity_kind, node.kind()) {
@@ -4797,6 +4996,7 @@ fn validate_activity_request(
 fn validate_new_activity_prompt(
     runs: &BTreeMap<String, GraphRunFacts>,
     request: &ActivityRequest,
+    prompts: &crate::prompts::TeamPromptSettings,
 ) -> Result<(), OrganizationFactsError> {
     let ActivityKind::AgentTask { prompt, .. } = &request.activity_kind else {
         return Ok(());
@@ -4813,20 +5013,13 @@ fn validate_new_activity_prompt(
     if let ActivityKind::AgentTask { prompt, .. } = &mut raw_request.activity_kind {
         *prompt = base_prompt.to_owned();
     }
-    let composed = crate::run::scheduler::compose_agent_task_prompt_with_upstream_context(
-        run.team(), node, &raw_request, &[],
+    let (prefix, suffix) = crate::run::scheduler::agent_task_prompt_parts(
+        run.team(), node, &raw_request, prompts,
     ).ok_or(OrganizationFactsError::InvalidActivity)?;
-    if prompt == &composed {
-        return Ok(());
-    }
-    let Some((prefix, suffix)) = composed.rsplit_once("\n\n任务执行与调整：") else {
-        return Err(OrganizationFactsError::InvalidActivity);
-    };
-    let upstream = prompt.strip_prefix(prefix)
-        .and_then(|rest| rest.strip_suffix(&format!("\n\n任务执行与调整：{suffix}")));
+    let upstream = prompt.strip_prefix(&prefix).and_then(|rest| rest.strip_suffix(&suffix));
     if upstream.is_some_and(|context| {
-        context.starts_with("\n\n<teamrun_upstream_context>\n")
-            && context.ends_with("\n</teamrun_upstream_context>")
+        context.is_empty() || (context.starts_with("\n\n<teamrun_upstream_context>\n")
+            && context.ends_with("\n</teamrun_upstream_context>"))
     })
     {
         Ok(())
@@ -4911,11 +5104,11 @@ fn validate_activity_transition(
         | (ActivityPhase::Dispatched(_), ActivityPhase::Cancelled { .. }) => Ok(()),
         (ActivityPhase::RetryScheduled { retry_at, .. }, ActivityPhase::Dispatched(dispatch))
             if previous.completed_attempts() == current.completed_attempts()
-                && dispatch.claim().generation() == previous.snapshot().next_claim_generation()
+                && dispatch.claim().generation() == previous.next_claim_generation()
                 && dispatch.claim().claimed_at() >= *retry_at
                 && dispatch.dispatched_at() == dispatch.claim().claimed_at()
                 && current.settlement_proof().is_none()
-                && Activity::restore(current.snapshot()).is_ok() => Ok(()),
+                && current.validate_restored().is_ok() => Ok(()),
         (ActivityPhase::RetryScheduled { .. }, ActivityPhase::RetryScheduled { .. })
         | (ActivityPhase::RetryScheduled { .. }, ActivityPhase::Claimed(_))
         | (ActivityPhase::RetryScheduled { .. }, ActivityPhase::Cancelled { .. }) => Ok(()),
@@ -5008,49 +5201,11 @@ fn validate_terminal_observation(
         | (NativeTerminalStatus::Cancelled, TerminalObservationResolution::NodeCancelled) => {}
         _ => return Err(OrganizationFactsError::InvalidTerminalObservation),
     }
-    let node_id = crate::NodeId::new(facts.node_id.clone());
-    let history = run
-        .graph()
-        .executions()
-        .get(&node_id)
-        .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
-    let attempt = history
-        .attempts()
-        .iter()
-        .find(|attempt| attempt.fence() == observation.fence())
-        .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
-    match observation.resolution() {
-        TerminalObservationResolution::AwaitingAuthorizedGraphResolution
-            if (attempt.status() == crate::AttemptStatus::Waiting
-                || (history.current().fence() != observation.fence()
-                    && matches!(
-                        attempt.status(),
-                        crate::AttemptStatus::Ready | crate::AttemptStatus::Running
-                    )))
-                && attempt.output_port().is_none() => {}
-        TerminalObservationResolution::GraphResolved(resolution)
-            if observation
-                .output()
-                .is_none_or(|output| output.decision() == resolution.output_port())
-                && resolution.delivery_id() == observation.delivery_id()
-                && resolution.graph_run_id() == observation.graph_run_id()
-                && resolution.fence() == observation.fence()
-                && resolution.resolved_at() >= observation.observed_at()
-                && attempt.output_port() == Some(resolution.output_port())
-                && matches!(
-                    (resolution.outcome(), attempt.status()),
-                    (
-                        crate::AuthorizedGraphOutcome::Completed,
-                        crate::AttemptStatus::Completed,
-                    ) | (
-                        crate::AuthorizedGraphOutcome::Failed,
-                        crate::AttemptStatus::Failed,
-                    )
-                ) => {}
-        TerminalObservationResolution::NodeCancelled
-            if attempt.status() == crate::AttemptStatus::Cancelled
-                && attempt.output_port().is_none() => {}
-        _ => return Err(OrganizationFactsError::InvalidTerminalObservation),
+    if !crate::run::delivery::terminal_observation_matches_graph(run.graph(), observation)
+        || matches!(observation.resolution(), TerminalObservationResolution::GraphResolved(resolution)
+            if observation.output().is_some_and(|output| output.decision() != resolution.output_port()))
+    {
+        return Err(OrganizationFactsError::InvalidTerminalObservation);
     }
     Ok(())
 }

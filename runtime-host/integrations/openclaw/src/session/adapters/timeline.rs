@@ -57,6 +57,7 @@ impl OpenClawDriver {
             Ok(mut view) => {
                 view.identity = command.identity().clone();
                 view.input_receipts = window.take_input_receipts();
+                if let Some(pending) = window.state().work_pending() { view.request_pending = pending; }
                 Outcome::Incomplete(view)
             },
             Err(_) => Outcome::unavailable(UnavailableReason::OpenClawProjectionInvalid),
@@ -368,6 +369,7 @@ fn project_openclaw_replay_view(
         ownership: None,
         model_state: None,
         input_receipts: None,
+        request_pending: false,
         goal: sessions_module::goal::SessionGoalView::Unknown,
         identity: identity.clone(),
         epoch,
@@ -540,6 +542,13 @@ impl OpenClawReplayProjection {
                 error_kind,
                 stop_reason,
             ),
+            crate::session::projection::CanonicalSessionChange::RunErrorUpdated { phase, error_kind, error_message, stop_reason, error_detail, .. } => {
+                self.runtime.phase = *phase;
+                self.runtime.error_detail = crate::driver::projection::terminal_runtime_error_detail(
+                    error_detail, error_message, error_kind, stop_reason,
+                );
+                Some(())
+            }
             crate::session::projection::CanonicalSessionChange::RecoveryRequired { .. } => {
                 self.apply_recovery()
             }
@@ -1459,7 +1468,7 @@ fn merge_tool_details(
     mut incoming: Option<serde_json::Value>,
     preferred: bool,
 ) {
-    crate::session::image_tasks::preserve_task_details(existing, &mut incoming);
+    crate::session::media_tasks::preserve_task_details(existing, &mut incoming);
     if let (Some(serde_json::Value::Object(current)), Some(serde_json::Value::Object(next)))
         = (existing.as_mut(), incoming.as_ref())
     {
@@ -1495,7 +1504,7 @@ pub(in crate::session) fn upsert_replay_tool(tools: &mut Vec<ToolView>, mut tool
             existing.output = tool.output;
         }
         if tool.details.is_some() {
-            crate::session::image_tasks::preserve_task_details(&existing.details, &mut tool.details);
+            crate::session::media_tasks::preserve_task_details(&existing.details, &mut tool.details);
             existing.details = tool.details;
         }
         if tool.is_error.is_some() {

@@ -39,16 +39,19 @@ describe('Windows Git Bash delivery', () => {
     expect(scripts.release).toBe('pnpm run package:win -- --publish always');
   });
 
-  it('packages the matching Windows Git Bash distribution into bin and targets x64 plus arm64', () => {
+  it('packages the matching Windows Git Bash distribution into bin and leaves architecture selection to the CLI', () => {
     const builder = parseYaml(readFileSync(resolve(root, 'electron-builder.yml'), 'utf8')) as {
-      win: { extraResources: Array<{ from: string; to: string }>; target: Array<{ arch: string[] }> };
+      win: { extraResources: Array<{ from: string; to: string }>; target: Array<{ target: string; arch?: string[] }> };
     };
 
     expect(builder.win.extraResources).toContainEqual({
       from: 'resources/bin/win32-${arch}',
       to: 'bin',
     });
-    expect(builder.win.target).toContainEqual({ target: 'nsis', arch: ['x64', 'arm64'] });
+    expect(builder.win.target).toEqual([{ target: 'nsis' }]);
+    const scripts = readPackageScripts();
+    expect(scripts['package:win']).toContain('node scripts/run-electron-builder.mjs --win --x64 --arm64 --publish never');
+    expect(scripts['package:win:x64']).toContain('node scripts/run-electron-builder.mjs --win --x64 --publish never');
   });
 
   it('ships the tracked Git-for-Windows redistribution notice through generic resources', () => {

@@ -8,15 +8,21 @@ use crate::{
     rpc,
 };
 
-use super::{Execution, Session, Sessions, history, native, record};
+use super::{AgentInstances, Session, Sessions, history, native, record};
+
+impl AgentInstances {
+    pub(crate) fn instances(&self) -> &[(String, String)] {
+        &self.instances
+    }
+}
 
 impl Sessions {
     pub(crate) async fn stable_agent_instances(
         &self,
         agent_id: &str,
-    ) -> rpc::Result<(tokio::sync::OwnedMutexGuard<()>, Vec<(String, String)>)> {
+    ) -> rpc::Result<AgentInstances> {
         'stable: loop {
-            let admission = self.agent_guard(agent_id).await;
+            let scope = self.agent_scope(agent_id).await;
             self.accepting()?;
             let sessions: Vec<_> = self.0.sessions.read().await.values().cloned().collect();
             let mut instances = Vec::new();
@@ -25,24 +31,25 @@ impl Sessions {
                 tokio::pin!(changed);
                 changed.as_mut().enable();
                 let execution = session.data.lock().await;
-                if execution.record.agent_id != agent_id {
+                let record = session.record();
+                if record.agent_id != agent_id {
                     continue;
                 }
                 if execution.launching {
-                    // Launch captures its spec under the Agent guard, then starts without it.
+                    // Launch captures its spec under the Agent scope, then starts without it.
                     drop(execution);
-                    drop(admission);
+                    drop(scope);
                     changed.await;
                     continue 'stable;
                 }
                 if let Some(cli) = &execution.cli {
                     instances.push((
-                        execution.record.session_id.clone(),
+                        record.session_id.clone(),
                         cli.instance_id().to_owned(),
                     ));
                 }
             }
-            return Ok((admission, instances));
+            return Ok(AgentInstances { _scope: scope, instances });
         }
     }
 
@@ -76,24 +83,25 @@ impl Sessions {
     }
 
     async fn ensure_instance(&self, session: Arc<Session>) -> rpc::Result<Value> {
-        let agent_id = session.data.lock().await.record.agent_id.clone();
+        let agent_id = session.record().agent_id.clone();
         let mut waited = false;
         loop {
             let changed = session.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let admission = self.agent_guard(&agent_id).await;
+            let (admission, operation) = self.session_admission(&session, &agent_id).await;
             self.accepting()?;
             let config = self.0.config.snapshot().await;
             let mut execution = session.data.lock().await;
-            execution.record.mutable()?;
-            if execution.closing || execution.record.status == record::Status::Closed {
+            session.mutable()?;
+            let record = session.record();
+            if execution.closing || record.status == record::Status::Closed {
                 return Err(super::not_sent(rpc::Error::conflict(
                     "session_closed",
                     "Resume the session before starting its native instance",
                 )));
             }
-            if execution.record.native_cleanup_failed {
+            if execution.cleanup_failed || record.native_cleanup_failed {
                 return Err(super::not_sent(rpc::Error::conflict(
                     "native_cleanup_unconfirmed",
                     "The previous CLI instance cleanup was not confirmed",
@@ -119,6 +127,7 @@ impl Sessions {
             {
                 let launching = execution.launching;
                 drop(execution);
+                drop(operation);
                 drop(admission);
                 changed.await;
                 waited |= launching;
@@ -128,17 +137,18 @@ impl Sessions {
                 execution.idle.activity();
                 session.wake.notify_one();
                 let mut snapshot = execution.native.view(
-                    &execution.record.session_id,
-                    &execution.record.agent_id,
+                    &record.session_id,
+                    &record.agent_id,
                     execution.cli.as_ref().map(Cli::instance_id),
                 );
                 snapshot["launching"] = json!(false);
                 return Ok(snapshot);
             }
-            let spec = self.launch_spec(config, &execution)?;
+            let spec = self.launch_spec(config, &record)?;
             execution.launching = true;
             execution.launch_error = None;
             drop(execution);
+            drop(operation);
             drop(admission);
             let started = self.start_instance(&session, spec).await;
             let mut execution = session.data.lock().await;
@@ -147,7 +157,7 @@ impl Sessions {
             session.changed.notify_waiters();
             session.wake.notify_one();
             let cli = started?;
-            execution.record.mutable()?;
+            session.mutable()?;
             if execution.closing
                 || execution
                     .cli
@@ -161,8 +171,8 @@ impl Sessions {
                 ));
             }
             let mut snapshot = execution.native.view(
-                &execution.record.session_id,
-                &execution.record.agent_id,
+                &record.session_id,
+                &record.agent_id,
                 Some(cli.instance_id()),
             );
             snapshot["launching"] = json!(false);
@@ -173,35 +183,36 @@ impl Sessions {
     pub(super) fn launch_spec(
         &self,
         config: Config,
-        execution: &Execution,
+        record: &record::Record,
     ) -> rpc::Result<LaunchSpec> {
-        let agent_id = execution.record.agent_id.clone();
+        let agent_id = record.agent_id.clone();
         let mut agent = config
             .agents
             .get(&agent_id)
             .cloned()
             .ok_or_else(|| rpc::Error::not_found("Agent"))?;
-        if let Some(provider) = &execution.record.provider_id {
+        if let Some(provider) = &record.provider_id {
             agent.provider = Some(provider.clone());
         }
-        if let Some(model) = &execution.record.model {
+        if let Some(model) = &record.model {
             agent.model = Some(model.clone());
         }
-        if let Some(mode) = &execution.record.mode {
+        if let Some(mode) = &record.mode {
             agent.settings["permissions"]["defaultMode"] = json!(mode);
         }
         Ok(LaunchSpec {
             config,
             agent,
             agent_id,
-            session_id: execution.record.session_id.clone(),
+            session_id: record.session_id.clone(),
             paths: self.0.config.paths().clone(),
-            resume: execution.record.native_started,
-            effort: execution.record.effort,
-            fork_from: if execution.record.native_started {
+            workspace: record.workspace.clone(),
+            resume: record.native_started,
+            effort: record.effort,
+            fork_from: if record.native_started {
                 None
             } else {
-                execution.record.forked_from.clone()
+                record.forked_from.clone()
             },
         })
     }
@@ -240,7 +251,7 @@ impl Sessions {
     ) -> rpc::Result<Cli> {
         match history::locate(
             &self.0.config.paths().runtime(&spec.agent_id)?,
-            &self.0.config.paths().workspace(&spec.agent_id)?,
+            &spec.workspace,
             &spec.session_id,
         )
         .await?
@@ -252,9 +263,12 @@ impl Sessions {
             None if spec.resume => return Err(rpc::Error::not_found("Native transcript")),
             None => {}
         }
-        let _search_guard = self.search_guard().await;
-        // The launch spec may predate a concurrent search projection commit.
-        spec.config.search = self.0.config.checked_snapshot().await?.search;
+        {
+            let _search = self.search_guard().await;
+            // Only the search projection is live-reconciled; other launch settings use this startup snapshot.
+            spec.config.search = self.0.config.checked_snapshot().await?.search;
+        }
+        let initial_search = spec.config.search.clone();
         let provider = spec
             .agent
             .provider
@@ -292,7 +306,7 @@ impl Sessions {
                 return Err(error);
             }
         };
-        let started = {
+        let (started, closing) = {
             let mut execution = session.data.lock().await;
             if execution.closing {
                 cli.revoke_iab();
@@ -304,10 +318,11 @@ impl Sessions {
             if let Some(active) = execution.active.as_mut() {
                 active.ownership_ambiguous |= cli.has_autonomous_inputs();
             }
-            self.0
+            let record = session.record();
+            let started = self.0
                 .events
                 .append(
-                    &execution.record.session_id,
+                    &record.session_id,
                     execution
                         .active
                         .as_ref()
@@ -315,7 +330,8 @@ impl Sessions {
                     "cli.started",
                     json!({ "instanceId": cli.instance_id() }),
                 )
-                .await
+                .await;
+            (started, execution.closing)
         };
         let owner = self.clone();
         let observed = session.clone();
@@ -329,24 +345,55 @@ impl Sessions {
                     rpc::Error::internal("session_consumer_task").with_source(error)
                 })?;
             }
+            if closing {
+                return Err(rpc::Error::new(
+                    -32006, "native_instance_changed", "The Session closed during native startup",
+                ));
+            }
             started?;
             let initialize = cli.initialized().await?;
             cli.confirm_selection(model.as_deref(), provider).await?;
-            let mut execution = session.data.lock().await;
-            if execution.closing
-                || execution
-                    .cli
-                    .as_ref()
-                    .is_none_or(|current| current.instance_id() != cli.instance_id())
-            {
+            if !cli.apply_search(initial_search.as_ref()).await? {
                 return Err(rpc::Error::new(
                     -32006,
-                    "native_instance_changed",
-                    "The initialized CLI instance is no longer current",
+                    "search_native_readback",
+                    "The initialized CLI search projection could not be confirmed",
                 ));
             }
-            execution.native.initialize = Some(initialize);
-            Ok(())
+            let mut applied_search = initial_search;
+            loop {
+                self.accepting()?;
+                let search = self.search_guard().await;
+                let current = self.0.config.checked_snapshot().await?.search;
+                let mut execution = session.data.lock().await;
+                if execution.closing
+                    || execution
+                        .cli
+                        .as_ref()
+                        .is_none_or(|current| current.instance_id() != cli.instance_id())
+                {
+                    return Err(rpc::Error::new(
+                        -32006,
+                        "native_instance_changed",
+                        "The initialized CLI instance is no longer current",
+                    ));
+                }
+                if current == applied_search {
+                    // Publish readiness with the projection check. A later project must see this instance.
+                    execution.native.initialize = Some(initialize);
+                    return Ok(());
+                }
+                drop(execution);
+                drop(search);
+                if !cli.apply_search(current.as_ref()).await? {
+                    return Err(rpc::Error::new(
+                        -32006,
+                        "search_native_readback",
+                        "The initialized CLI search projection could not be confirmed",
+                    ));
+                }
+                applied_search = current;
+            }
         }
         .await;
         if let Err(error) = initialized {

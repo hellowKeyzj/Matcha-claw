@@ -24,6 +24,7 @@ pub(crate) enum PeerLaneKey {
     Lifecycle(PeerKey),
     McpApp { identity: String },
     Question { identity: String, id: String },
+    VideoTask { identity: String, task_id: String },
 }
 
 pub(crate) type PeerGlobalState = ();

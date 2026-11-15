@@ -8,13 +8,13 @@ import {
   sendLoopbackJson,
 } from '../client';
 import {
-  type Endpoint,
   type FileTarget,
-  type AgentScope,
-  isEndpoint,
+  type FileScope,
+  type FileInputIdentity,
   isFileRelativePath,
   isFileTarget,
-  isAgentScope,
+  isFileScope,
+  isFileInput,
 } from './contract';
 
 const MAX_BINARY_BYTES = 50 * 1024 * 1024;
@@ -27,11 +27,9 @@ const UNAVAILABLE = {
 type WorkspaceBinaryRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.readBinary' | 'files.stat';
-  scope: AgentScope;
+  scope: FileScope;
   target: FileTarget;
-  input: Readonly<{
-    endpoint: Endpoint;
-    agentId: string;
+  input: FileInputIdentity & Readonly<{
     relativePath: string;
     maxBytes?: number;
   }>;
@@ -87,12 +85,9 @@ function isWorkspaceBinaryRequest(value: unknown): value is WorkspaceBinaryReque
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && (value.operationId === 'files.readBinary' || value.operationId === 'files.stat')
-    && isAgentScope(value.scope)
+    && isFileScope(value.scope)
     && isFileTarget(value.target)
-    && isInput(value.input, value.operationId)
-    && value.scope.agentId === value.input.agentId
-    && value.scope.endpoint.runtimeAdapterId === value.input.endpoint.runtimeAdapterId
-    && value.scope.endpoint.runtimeInstanceId === value.input.endpoint.runtimeInstanceId;
+    && isInput(value.input, value.scope, value.operationId);
 }
 
 function withBoundedMaxBytes(request: WorkspaceBinaryRequest): WorkspaceBinaryRequest {
@@ -110,20 +105,12 @@ function withBoundedMaxBytes(request: WorkspaceBinaryRequest): WorkspaceBinaryRe
 
 function isInput(
   value: unknown,
+  scope: FileScope,
   operationId: WorkspaceBinaryRequest['operationId'],
 ): value is WorkspaceBinaryRequest['input'] {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const hasRequiredFields = operationId === 'files.readBinary'
-    ? hasExactKeys(value, ['endpoint', 'agentId', 'relativePath'])
-      || hasExactKeys(value, ['endpoint', 'agentId', 'relativePath', 'maxBytes'])
-    : hasExactKeys(value, ['endpoint', 'agentId', 'relativePath']);
-  return hasRequiredFields
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.agentId)
+  return isFileInput(value, scope, ['relativePath'], operationId === 'files.readBinary' ? ['maxBytes'] : [])
     && isFileRelativePath(value.relativePath)
-    && (operationId === 'files.stat' || value.maxBytes === undefined || isSafeInteger(value.maxBytes));
+    && (!Object.hasOwn(value, 'maxBytes') || isSafeInteger(value.maxBytes));
 }
 
 function isWorkspaceBinaryResponse(

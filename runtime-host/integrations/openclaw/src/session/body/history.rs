@@ -62,7 +62,6 @@ impl Body {
 
     pub(in crate::session) fn apply_history(&mut self, previous: &[SessionItem]) -> Option<()> {
         self.history_rebuilding = false;
-        self.reconcile_terminals()?;
         // A removed history row may have been a live slice's placement anchor.
         for stream in self.streams.values_mut() {
             for part in stream.all_parts_mut() {

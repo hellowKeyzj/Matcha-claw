@@ -23,6 +23,8 @@ import { getToolDisclosureKey, getToolGroupDisclosureKey } from '@/plugins/messa
 import { useToolActivityDisclosure } from '@/plugins/message-rendering/useToolActivityDisclosure';
 import ToolBrowserCard from '@/plugins/message-rendering/tool-browser-card';
 import { ToolWidgetCard } from '@/plugins/message-rendering/tool-widget-card';
+import { ToolMediaGenerationTask } from '@/plugins/message-rendering/tool-media-generation-task';
+import { isOpenClawMediaGenerationTool } from '@/plugins/message-rendering/tool-renderers/openclaw-details';
 
 export { UserMessageMedia, AssistantMessageMedia, type MessageLightboxState } from './chat-message-media';
 
@@ -494,6 +496,7 @@ export const ToolCardList = memo(function ToolCardList({
   onOpenToolSurface,
   onRuntimeSendMessage,
   onRuntimeOpenLink,
+  onRefreshMediaTask,
 }: {
   tools: ReadonlyArray<SessionRenderToolCard>;
   collapseVersion: number;
@@ -504,6 +507,7 @@ export const ToolCardList = memo(function ToolCardList({
   onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
+  onRefreshMediaTask?: (taskId: string) => Promise<void>;
 }) {
   const renderers = useToolRenderers();
   const { t } = useTranslation('chat');
@@ -567,8 +571,8 @@ export const ToolCardList = memo(function ToolCardList({
           {runningTool ? <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-500" /> : expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </span>
       </button>
-      {expanded || collapsedPreviews.some(Boolean) ? <div className={expanded ? 'flex w-full flex-col items-start gap-1.5 border-l border-border/40 pl-4' : 'w-full space-y-2 pl-7'}>
-        {tools.map((tool, index) => expanded || collapsedPreviews[index] ? (
+      {expanded || collapsedPreviews.some(Boolean) || tools.some(isOpenClawMediaGenerationTool) ? <div className={expanded ? 'flex w-full flex-col items-start gap-1.5 border-l border-border/40 pl-4' : 'w-full space-y-2 pl-7'}>
+        {tools.map((tool, index) => expanded || collapsedPreviews[index] || isOpenClawMediaGenerationTool(tool) ? (
           <ToolCard
             key={getToolDisclosureKey(tool)}
             tool={tool}
@@ -581,6 +585,7 @@ export const ToolCardList = memo(function ToolCardList({
             onOpenToolSurface={onOpenToolSurface}
             onRuntimeSendMessage={onRuntimeSendMessage}
             onRuntimeOpenLink={onRuntimeOpenLink}
+            onRefreshMediaTask={onRefreshMediaTask}
           />
         ) : null)}
       </div> : null}
@@ -870,6 +875,7 @@ const ToolCard = memo(function ToolCard({
   onOpenToolSurface,
   onRuntimeSendMessage,
   onRuntimeOpenLink,
+  onRefreshMediaTask,
 }: {
   tool: SessionRenderToolCard;
   preview: ToolActivityViewModel | null;
@@ -881,6 +887,7 @@ const ToolCard = memo(function ToolCard({
   onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
   onRuntimeSendMessage?: (text: string) => void | Promise<void>;
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
+  onRefreshMediaTask?: (taskId: string) => Promise<void>;
 }) {
   const renderers = useToolRenderers();
   const { t } = useTranslation('chat');
@@ -890,7 +897,8 @@ const ToolCard = memo(function ToolCard({
   const expanded = groupExpanded && disclosure.expandedKeys.has(key);
   const activity = groupExpanded ? preview : collapsedPreview;
   const onOpen = activity?.canOpenSurface && onOpenToolSurface && sessionIdentity ? () => onOpenToolSurface(tool, sessionIdentity) : undefined;
-  if (!groupExpanded && !activity) return null;
+  const persistentMediaTask = isOpenClawMediaGenerationTool(tool);
+  if (!groupExpanded && !activity && !persistentMediaTask) return null;
   return (
     <div data-compact-rail={groupExpanded ? 'tool' : undefined} className={groupExpanded ? `${COMPACT_SIDE_RAIL_TRACK} text-sm` : 'w-full'}>
       {groupExpanded ? <div className="flex w-full min-w-0 items-center gap-1">
@@ -908,6 +916,9 @@ const ToolCard = memo(function ToolCard({
           {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
         </button>
         {!preview?.browserTabPreview && !preview?.canvasPreview && onOpen ? <ToolActivitySurfaceButton title={descriptor.title} onOpen={onOpen} /> : null}
+      </div> : null}
+      {persistentMediaTask ? <div className={groupExpanded ? 'w-full pt-1 pl-7' : 'w-full'}>
+        <ToolMediaGenerationTask tool={tool} onRefreshMediaTask={onRefreshMediaTask} />
       </div> : null}
       {activity || expanded ? <div className={groupExpanded ? `${expanded ? '' : 'mt-1 '}w-full pl-7` : 'w-full'}>
         <ToolActivityPreview tool={tool} activity={activity} showTitle={!groupExpanded} expanded={expanded} sessionIdentity={sessionIdentity} latestBrowserTool={latestBrowserTool} onOpen={onOpen} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />

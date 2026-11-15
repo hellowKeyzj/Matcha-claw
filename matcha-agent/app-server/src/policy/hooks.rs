@@ -262,7 +262,7 @@ pub(super) async fn set(
         }
     }
     let incoming = rpc::value(&request.hooks)?;
-    let _guard = sessions.agent_guard(&target.agent_id).await;
+    let _guard = sessions.agent_scope(&target.agent_id).await;
     let native = settings::native_settings(&target, sessions).await?;
     config
         .update(|config| {

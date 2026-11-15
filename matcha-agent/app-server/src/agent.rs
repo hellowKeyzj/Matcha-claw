@@ -4,13 +4,15 @@ mod retirement;
 mod storage;
 mod tools;
 
+pub(crate) use storage::{RuntimeDirectoryError, runtime_directory};
+
 use crate::{
     config::{
         AgentConfig, AgentDeletion, AgentDeletionState, ConfigStore, DEFAULT_AGENT_ID,
         validate_agent_id_available, validate_id,
     },
     rpc,
-    session::Sessions,
+    session::{AgentScope, Sessions},
 };
 use definition::{Definition, Patch};
 use serde::Deserialize;
@@ -131,7 +133,7 @@ pub async fn dispatch(
                     _ => {
                         let target: AgentParams =
                             rpc::params(json!({"agentId":params.get("agentId")}))?;
-                        let _guard = sessions.agent_guard(&target.agent_id).await;
+                        let _scope = sessions.agent_scope(&target.agent_id).await;
                         files::dispatch(&method, params, &config).await
                     }
                 }
@@ -188,11 +190,11 @@ async fn create(params: Create, config: &ConfigStore, sessions: &Sessions) -> rp
     let token = Uuid::new_v4().to_string();
     agent.custody = Some(token.clone());
     agent.owner = params.owner;
-    let _guard = sessions.agent_guard(&params.agent_id).await;
+    let scope = sessions.agent_scope(&params.agent_id).await;
     let snapshot = config.checked_snapshot().await?;
     validate_agent_id_available(&snapshot, &params.agent_id)?;
     definition::validate(&agent, &snapshot)?;
-    if sessions.is_agent_active(&params.agent_id).await {
+    if scope.is_active().await {
         return Err(active_error());
     }
     let created = storage::create(
@@ -243,8 +245,8 @@ async fn create(params: Create, config: &ConfigStore, sessions: &Sessions) -> rp
 
 async fn replace(params: Replace, config: &ConfigStore, sessions: &Sessions) -> rpc::Result<Value> {
     validate_id(&params.agent_id)?;
-    let _guard = sessions.agent_guard(&params.agent_id).await;
-    let active = sessions.is_agent_active(&params.agent_id).await;
+    let scope = sessions.agent_scope(&params.agent_id).await;
+    let active = scope.is_active().await;
     let paths = config.paths().clone();
     config
         .update(move |current| {
@@ -276,8 +278,8 @@ async fn replace(params: Replace, config: &ConfigStore, sessions: &Sessions) -> 
 
 async fn mutate(params: Mutate, config: &ConfigStore, sessions: &Sessions) -> rpc::Result<Value> {
     validate_id(&params.agent_id)?;
-    let _guard = sessions.agent_guard(&params.agent_id).await;
-    let active = sessions.is_agent_active(&params.agent_id).await;
+    let scope = sessions.agent_scope(&params.agent_id).await;
+    let active = scope.is_active().await;
     let paths = config.paths().clone();
     config
         .update(move |current| {
@@ -306,15 +308,30 @@ async fn mutate(params: Mutate, config: &ConfigStore, sessions: &Sessions) -> rp
 
 async fn delete(params: Delete, config: &ConfigStore, sessions: &Sessions) -> rpc::Result<Value> {
     validate_id(&params.agent_id)?;
-    let _guard = sessions.agent_guard(&params.agent_id).await;
-    delete_guarded(params, config, sessions).await
+    let scope = sessions.agent_scope(&params.agent_id).await;
+    delete_in_scope(
+        scope,
+        config,
+        params.delete_files,
+        params.expected_custody,
+        params.expected_owner,
+    )
+    .await
 }
 
-async fn delete_guarded(
-    params: Delete,
+async fn delete_in_scope(
+    scope: AgentScope,
     config: &ConfigStore,
-    sessions: &Sessions,
+    delete_files: bool,
+    expected_custody: Option<String>,
+    expected_owner: Option<String>,
 ) -> rpc::Result<Value> {
+    let params = Delete {
+        agent_id: scope.agent_id().to_owned(),
+        delete_files,
+        expected_custody,
+        expected_owner,
+    };
     check_deletable(&params.agent_id)?;
     let snapshot = config.checked_snapshot().await?;
     if let Some(receipt) = snapshot.agent_deletions.get(&params.agent_id) {
@@ -339,7 +356,7 @@ async fn delete_guarded(
         .agents
         .get(&params.agent_id)
         .ok_or_else(|| rpc::Error::not_found("Agent"))?;
-    if sessions.is_agent_active(&params.agent_id).await {
+    if scope.is_active().await {
         return Err(active_error());
     }
     check_ownership(&params, agent.custody.as_deref(), agent.owner.as_deref())?;
@@ -366,9 +383,7 @@ async fn delete_guarded(
         .await?;
     }
     crate::mcp::stop_agent_oauth(&params.agent_id).await?;
-    let removed_sessions = sessions
-        .delete_agent_sessions_guarded(&params.agent_id)
-        .await?;
+    let removed_sessions = scope.delete_sessions().await?;
     // Retire the identity durably before purging. Retry never requires a live definition.
     let receipt = AgentDeletion {
         agent_id: params.agent_id.clone(),

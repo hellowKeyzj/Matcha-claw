@@ -117,6 +117,13 @@ impl OrganizationStore {
             .transpose()
     }
 
+    pub(crate) fn read_team_prompts(path: &Path) -> Result<crate::prompts::TeamPromptSettings, StoreFault> {
+        let key = RecordKey { kind: RecordKind::TeamPrompts, scope: String::new(), id: String::new() };
+        Database::read_record(path, &key)?.as_ref()
+            .map(records::prompts::decode).transpose()
+            .map(Option::unwrap_or_default)
+    }
+
     pub(crate) fn facts(&self) -> &OrganizationFacts {
         &self.facts
     }
@@ -464,11 +471,21 @@ impl OrganizationStore {
         &mut self,
         request: ActivityRequest,
         started_at: u64,
-    ) -> Result<ActivityRegistrationOutcome, StoreFault> {
+    ) -> Result<Option<ActivityRegistrationOutcome>, StoreFault> {
         self.transact(|facts| {
             let run_id = request.run_id.clone();
             let node_id = request.node_id.clone();
             let fence = request.fence.clone();
+            if facts.run(&run_id).is_some_and(|run| run.graph().is_rework_blocked(&node_id)) {
+                return Ok(None);
+            }
+            let request = if facts.activities().activity(&request.activity_id).is_none()
+                && facts.activities().activity_by_idempotency_key(request.run_id.as_str(), &request.idempotency_key).is_none()
+            {
+                facts.compose_activity_prompt(request)?
+            } else {
+                request
+            };
             let outcome = facts
                 .register_activity(request)
                 .map_err(|_| StoreFault::InvalidFacts)?;
@@ -484,7 +501,7 @@ impl OrganizationStore {
                     )
                     .map_err(|_| StoreFault::InvalidFacts)?;
             }
-            Ok(outcome)
+            Ok(Some(outcome))
         })
     }
 
@@ -551,36 +568,36 @@ impl OrganizationStore {
     /// Returns only materializations which may be settled by native readback.
     /// These requests must never be replayed as mutations after process recovery.
     pub(crate) fn materialization_receipt_recovery_teams(&self) -> Vec<TeamId> {
-        self.facts
-            .materialization_lifecycles()
-            .filter_map(|lifecycle| {
-                lifecycle
-                    .receipt_recovery_request()
-                    .map(|request| request.intent().team().clone())
-            })
+        self.facts.materialization_groups()
+            .filter(|materialization| materialization.groups().iter()
+                .any(|group| group.receipt_recovery_request().is_some()))
+            .filter_map(|materialization| materialization.team().cloned())
             .collect()
     }
 
     pub(crate) fn team_materialization_recovery_request(
         &self,
         team_id: &TeamId,
+        endpoint: &crate::RuntimeEndpointReference,
     ) -> Option<crate::TeamMaterializationRequest> {
-        self.facts.materialization_recovery_request(team_id)
+        self.facts.materialization_recovery_request(team_id, endpoint)
     }
 
     pub(crate) fn team_materialization_removal(
         &self,
         team_id: &TeamId,
+        endpoint: &crate::RuntimeEndpointReference,
     ) -> Option<crate::TeamMaterializationRemoval> {
-        self.facts.team_materialization_removal(team_id)
+        self.facts.team_materialization_removal(team_id, endpoint)
     }
 
     pub(crate) fn team_unconfirmed_materialization_cleanup_request(
         &self,
         team_id: &TeamId,
+        endpoint: &crate::RuntimeEndpointReference,
     ) -> Option<crate::TeamMaterializationRequest> {
         self.facts
-            .team_unconfirmed_materialization_cleanup_request(team_id)
+            .team_unconfirmed_materialization_cleanup_request(team_id, endpoint)
     }
 
     pub(crate) fn team_materialization_cleanup_confirmed(&self, team_id: &TeamId) -> bool {
@@ -590,11 +607,12 @@ impl OrganizationStore {
     pub(crate) fn record_team_materialization_cleanup_outcome(
         &mut self,
         team_id: &TeamId,
+        endpoint: &crate::RuntimeEndpointReference,
         outcome: crate::MaterializationOperationOutcome,
     ) -> Result<crate::MaterializationRecordOutcome, StoreFault> {
         self.transact(|facts| {
             let recorded = facts
-                .record_team_materialization_cleanup_outcome(team_id, outcome)
+                .record_team_materialization_cleanup_outcome(team_id, endpoint, outcome)
                 .map_err(|_| StoreFault::InvalidFacts)?;
             Ok(recorded)
         })
@@ -608,7 +626,7 @@ impl OrganizationStore {
             facts
                 .create_team_materialization(
                     materialization.definition(),
-                    materialization.request().clone(),
+                    materialization.requests().to_vec(),
                 )
                 .map_err(|_| StoreFault::InvalidFacts)
         })
@@ -617,11 +635,12 @@ impl OrganizationStore {
     pub(crate) fn record_team_materialization_outcome(
         &mut self,
         team_id: &crate::TeamId,
+        endpoint: &crate::RuntimeEndpointReference,
         outcome: crate::MaterializationOperationOutcome,
     ) -> Result<crate::MaterializationRecordOutcome, StoreFault> {
         self.transact(|facts| {
             facts
-                .record_materialization_outcome(team_id, outcome)
+                .record_materialization_outcome(team_id, endpoint, outcome)
                 .map_err(|_| StoreFault::InvalidFacts)
         })
     }
@@ -654,11 +673,31 @@ impl OrganizationStore {
         activity_id: &ActivityId,
         delivery: crate::DeliveryRequest,
         claimed_at: u64,
-    ) -> Result<ActivityClaim, StoreFault> {
+    ) -> Result<Option<ActivityClaimOutcome>, StoreFault> {
         if delivery.delivery_id.as_str() != activity_id.as_str() {
             return Err(StoreFault::InvalidFacts);
         }
         self.transact(|facts| {
+            let activity = facts.activities().activity(activity_id).ok_or(StoreFault::InvalidFacts)?;
+            match activity.phase() {
+                crate::ActivityPhase::Claimed(_) | crate::ActivityPhase::Dispatched(_) => {
+                    return Ok(Some(ActivityClaimOutcome::AlreadyClaimed(
+                        activity.active_claim().cloned().ok_or(StoreFault::InvalidFacts)?,
+                    )));
+                }
+                crate::ActivityPhase::RetryScheduled { retry_at, .. } if *retry_at > claimed_at => {
+                    return Ok(None);
+                }
+                phase if activity.is_terminal() => {
+                    return Ok(Some(ActivityClaimOutcome::Terminal(phase.clone())));
+                }
+                _ => {}
+            }
+            let run = facts.require_started_run(&activity.facts().run_id)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            if run.graph().is_rework_blocked(&activity.facts().node_id) {
+                return Ok(None);
+            }
             match facts
                 .register_delivery(delivery)
                 .map_err(StoreFault::DeliveryRequest)?
@@ -691,7 +730,7 @@ impl OrganizationStore {
                 .claim_delivery(&delivery_id, claimed_at)
                 .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?
             {
-                DeliveryStart::Claimed(_) => Ok(claim),
+                DeliveryStart::Claimed(_) => Ok(Some(ActivityClaimOutcome::Claimed(claim))),
                 DeliveryStart::AlreadyClaimed(_)
                 | DeliveryStart::AwaitingRetry { .. }
                 | DeliveryStart::Terminal(_) => Err(StoreFault::InvalidFacts),
@@ -780,7 +819,7 @@ impl OrganizationStore {
                 DeliveryReceipt::OutcomeUnknown { observed_at },
                 Some(ActivitySettlement::OutcomeUnknown { observed_at: settled_at }),
             ) = (&receipt, &activity_settlement)
-                && *observed_at == claim.claimed_at()
+                && *observed_at >= claim.claimed_at()
                 && settled_at == observed_at
                 && matches!(delivery.phase(), crate::DeliveryPhase::Delivered { .. }
                     | crate::DeliveryPhase::TerminalObserved { .. })
@@ -845,7 +884,7 @@ impl OrganizationStore {
                             ..
                         }),
                     ) => {
-                        *observed_at == claim.claimed_at()
+                        *observed_at >= claim.claimed_at()
                             && activity_observed_at == observed_at
                             && *retry_at == crate::run::delivery::delivery_retry_at(*observed_at)
                             // A saturated retry deadline no longer proves the original claim time.
@@ -855,13 +894,13 @@ impl OrganizationStore {
                     (
                         DeliveryReceipt::Rejected { observed_at, .. },
                         Some(ActivitySettlement::Failed { failed_at, .. }),
-                    ) => *observed_at == claim.claimed_at() && failed_at == observed_at,
+                    ) => *observed_at >= claim.claimed_at() && failed_at == observed_at,
                     (
                         DeliveryReceipt::OutcomeUnknown { observed_at },
                         Some(ActivitySettlement::OutcomeUnknown {
                             observed_at: activity_observed_at,
                         }),
-                    ) => *observed_at == claim.claimed_at() && activity_observed_at == observed_at,
+                    ) => *observed_at >= claim.claimed_at() && activity_observed_at == observed_at,
                     _ => false,
                 };
                 let activity_request = activity.facts();
@@ -1156,6 +1195,7 @@ impl OrganizationStore {
             crate::application::team_message::TeamMessageFailure,
         >,
         settled_at: u64,
+        file_validation: Option<(crate::run::workspace::RunFileValidationPlan, Result<(), crate::RunFileValidationError>)>,
     ) -> Result<super::NativeTerminalSettlement, StoreFault> {
         runtime_trace("runtime.team_run.terminal.store.settle", || {
             json!({
@@ -1181,6 +1221,11 @@ impl OrganizationStore {
                 return Ok(super::NativeTerminalSettlement::Retired);
             }
             phase = "settle_facts";
+            let output = output.and_then(|output| {
+                let Some(output) = output else { return Ok(None); };
+                facts.validate_terminal_files(&target, &output, file_validation.as_ref())?;
+                Ok(Some(output))
+            });
             let outcome = facts.settle_native_terminal(&target, status, output, settled_at)?;
             phase = "commit";
             Ok(match outcome {
@@ -1434,49 +1479,54 @@ impl OrganizationStore {
         run_id: &GraphRunId,
         step: ControlExecutionStep,
     ) -> Result<(), StoreFault> {
-        match step {
-            ControlExecutionStep::GraphEvent(event) => self.transact(|facts| {
-                let run = facts
-                    .require_started_run(run_id)
-                    .map_err(|_| StoreFault::InvalidFacts)?;
-                let GraphEvent::NodeCompleted {
+        self.transact(|facts| {
+            if facts.run(run_id).is_some_and(|run| run.graph().is_rework_blocked(step.node_id())) {
+                return Ok(());
+            }
+            match step {
+                ControlExecutionStep::GraphEvent(event) => {
+                    let run = facts.require_started_run(run_id).map_err(|_| StoreFault::InvalidFacts)?;
+                    let GraphEvent::NodeCompleted {
+                        node_id,
+                        fence,
+                        output_port,
+                        ..
+                    } = &event
+                    else {
+                        return Err(StoreFault::InvalidFacts);
+                    };
+                    if output_port != "completed"
+                        || run.graph().definition().node(node_id).is_none_or(|node| {
+                            !matches!(node.kind(), crate::NodeKind::Start | crate::NodeKind::End)
+                        })
+                        || run.graph().current_attempt(node_id).is_none_or(|attempt| {
+                            attempt.fence() != fence || attempt.status() != crate::AttemptStatus::Ready
+                        })
+                    {
+                        return Err(StoreFault::InvalidFacts);
+                    }
+                    facts.apply_graph_event(run_id, event)
+                }
+                ControlExecutionStep::ControlResolution(resolution) => {
+                    if resolution.graph_run_id() != run_id {
+                        return Err(StoreFault::InvalidFacts);
+                    }
+                    facts.apply_control_node_resolution(resolution)
+                        .map(|_| ())
+                        .map_err(StoreFault::ControlNodeResolution)
+                }
+                ControlExecutionStep::HumanDecisionApproval {
                     node_id,
                     fence,
-                    output_port,
-                    ..
-                } = &event
-                else {
-                    return Err(StoreFault::InvalidFacts);
-                };
-                if output_port != "completed"
-                    || run.graph().definition().node(node_id).is_none_or(|node| {
-                        !matches!(node.kind(), crate::NodeKind::Start | crate::NodeKind::End)
-                    })
-                    || run.graph().current_attempt(node_id).is_none_or(|attempt| {
-                        attempt.fence() != fence || attempt.status() != crate::AttemptStatus::Ready
-                    })
-                {
-                    return Err(StoreFault::InvalidFacts);
+                    requested_at,
+                } => {
+                    facts
+                        .request_human_decision(run_id, node_id, fence, requested_at)
+                        .map_err(|_| StoreFault::InvalidFacts)?;
+                    Ok(())
                 }
-                facts.apply_graph_event(run_id, event)
-            }),
-            ControlExecutionStep::ControlResolution(resolution) => {
-                if resolution.graph_run_id() != run_id {
-                    return Err(StoreFault::InvalidFacts);
-                }
-                self.apply_control_node_resolution(resolution).map(|_| ())
             }
-            ControlExecutionStep::HumanDecisionApproval {
-                node_id,
-                fence,
-                requested_at,
-            } => self.transact(|facts| {
-                facts
-                    .request_human_decision(run_id, node_id, fence, requested_at)
-                    .map_err(|_| StoreFault::InvalidFacts)?;
-                Ok(())
-            }),
-        }
+        })
     }
 
     pub(crate) fn apply_control_node_resolution(
@@ -1520,7 +1570,8 @@ impl OrganizationStore {
         self.facts.begin_transaction();
         let prepared: Result<T, StoreFault> = (|| {
             let result = mutation(&mut self.facts)?;
-            for change in self.facts.changed_records(&self.contents)? {
+            self.facts.initialize_run_workspaces(self.path.parent().ok_or(StoreFault::InvalidFacts)?)?;
+            for change in self.facts.changed_records(&self.contents, &transaction)? {
                 match change {
                     RecordChange::Put(record) => transaction.put(&record)?,
                     RecordChange::Delete(key) => transaction.delete(&key)?,

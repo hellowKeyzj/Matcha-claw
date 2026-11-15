@@ -12,7 +12,7 @@ use crate::{
     rpc,
 };
 
-use super::{Execution, Sessions, record};
+use super::{Execution, Session, Sessions, record};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -23,8 +23,8 @@ pub(super) struct Set {
 }
 
 impl Sessions {
-    fn thinking_config(&self, config: Config, execution: &Execution) -> rpc::Result<Config> {
-        let spec = self.launch_spec(config, execution)?;
+    fn thinking_config(&self, config: Config, record: &record::Record) -> rpc::Result<Config> {
+        let spec = self.launch_spec(config, record)?;
         let mut config = spec.config;
         config.agents.insert(spec.agent_id, spec.agent);
         Ok(config)
@@ -32,41 +32,39 @@ impl Sessions {
 
     pub(super) async fn get_thinking(&self, session_id: &str) -> rpc::Result<Value> {
         let session = self.session(session_id).await?;
-        let agent_id = session.data.lock().await.record.agent_id.clone();
-        let guard = self.agent_guard(&agent_id).await;
+        let agent_id = session.record().agent_id.clone();
+        let (guard, closing) = self.session_admission(&session, &agent_id).await;
         self.accepting()?;
-        let closing = session.close_guard.lock().await;
         let snapshot = self.0.config.snapshot().await;
         let execution = session.data.lock().await;
-        readable(&execution)?;
-        let level = execution.record.effort;
+        readable(&session, &execution)?;
+        let level = session.record().effort;
         let cli = execution.cli.clone();
         let control = cli.as_ref().map(Cli::admit).transpose()?;
-        let config = self.thinking_config(snapshot, &execution)?;
+        let config = self.thinking_config(snapshot, &session.record())?;
         drop(execution);
+        drop(guard);
         if let Some(control) = &control {
             let response =
                 control_request(control, json!({"subtype":"get_settings"}), false).await?;
             let capabilities = effort::readback(&response)?;
             let execution = session.data.lock().await;
-            readable(&execution)?;
+            readable(&session, &execution)?;
             current_instance(&execution, cli.as_ref(), false)?;
             return Ok(capabilities.view(level));
         }
         let launch =
             effort::prepare(&config, self.0.config.paths(), &agent_id, level, None).await?;
         drop(closing);
-        drop(guard);
         let capabilities = effort::inspect(&launch).await?;
-        let _guard = self.agent_guard(&agent_id).await;
+        let (_guard, _closing) = self.session_admission(&session, &agent_id).await;
         self.accepting()?;
-        let _closing = session.close_guard.lock().await;
         let snapshot = self.0.config.snapshot().await;
         let execution = session.data.lock().await;
-        readable(&execution)?;
+        readable(&session, &execution)?;
         current_instance(&execution, None, false)?;
-        let current_level = execution.record.effort;
-        let current = self.thinking_config(snapshot, &execution)?;
+        let current_level = session.record().effort;
+        let current = self.thinking_config(snapshot, &session.record())?;
         drop(execution);
         effort::ensure_current(
             &launch,
@@ -142,17 +140,16 @@ impl Sessions {
         trace: &mut Value,
     ) -> rpc::Result<Value> {
         let session = self.session(session_id).await.map_err(super::not_sent)?;
-        let agent_id = session.data.lock().await.record.agent_id.clone();
-        let _guard = self.agent_guard(&agent_id).await;
+        let agent_id = session.record().agent_id.clone();
+        let (guard, _closing) = self.session_admission(&session, &agent_id).await;
         self.accepting().map_err(super::not_sent)?;
-        let _closing = session.close_guard.lock().await;
         let snapshot = self.0.config.snapshot().await;
         let mut execution = session.data.lock().await;
-        readable(&execution).map_err(super::not_sent)?;
+        readable(&session, &execution).map_err(super::not_sent)?;
         let cli = execution.cli.clone();
         let control = cli.as_ref().map(Cli::admit).transpose()?;
         let config = self
-            .thinking_config(snapshot, &execution)
+            .thinking_config(snapshot, &session.record())
             .map_err(super::not_sent)?;
         if !trace.is_null()
             && let Some(agent) = config.agents.get(&agent_id)
@@ -178,6 +175,13 @@ impl Sessions {
         execution.idle.activity();
         session.wake.notify_one();
         drop(execution);
+        drop(guard);
+        let launch = if cli.is_none() {
+            Some(effort::prepare(&config, self.0.config.paths(), &agent_id, level, None)
+                .await.map_err(super::not_sent)?)
+        } else {
+            None
+        };
         let capabilities = if let Some(control) = &control {
             if !trace.is_null() {
                 trace["applied"] = Value::Null;
@@ -197,11 +201,8 @@ impl Sessions {
                     .with_source(source)
             })?
         } else {
-            let capabilities =
-                effort::query(&config, self.0.config.paths(), &agent_id, level, None)
-                    .await
-                    .map_err(super::not_sent)?;
-            capabilities
+            effort::inspect(launch.as_ref().expect("offline thinking launch"))
+                .await.map_err(super::not_sent)?
         };
         if !trace.is_null() {
             trace["modelHash"] = json!(format!(
@@ -213,10 +214,16 @@ impl Sessions {
             trace["effective"] = json!(capabilities.effective_level);
         }
         ensure_supported(&capabilities, level)?;
+        self.accepting()?;
         let applied = cli.is_some();
+        let snapshot = self.0.config.snapshot().await;
         let mut execution = session.data.lock().await;
+        if let Some(launch) = &launch {
+            let current = self.thinking_config(snapshot, &session.record())?;
+            effort::ensure_current(launch, &current, self.0.config.paths(), &agent_id, level, None)?;
+        }
         current_instance(&execution, cli.as_ref(), applied)?;
-        readable(&execution).map_err(|error| {
+        readable(&session, &execution).map_err(|error| {
             if applied {
                 unknown("thinking_session_changed", "The Session changed after native acknowledgement; the setting was not persisted")
                     .with_data(json!({"nativeAcknowledged":true,"persisted":false}))
@@ -226,15 +233,14 @@ impl Sessions {
             }
         })?;
         // Native metadata can advance while control is pending; merge only into the latest locked record.
-        let mut updated = execution.record.clone();
+        let mut updated = (*session.record()).clone();
         updated.effort = level;
         updated.updated_at_ms = rpc::now_ms();
-        record::save_session(&self.0.database, &updated)
+        session.commit(&self.0.database, &mut execution, updated)
             .await
             .map_err(|error| {
                 error.with_data(json!({"nativeAcknowledged":applied,"persisted":false}))
             })?;
-        execution.record = updated;
         if !trace.is_null() {
             trace["persisted"] = json!(true);
         }
@@ -246,14 +252,14 @@ impl Sessions {
 
     pub(super) async fn validate_model_thinking(
         &self,
-        execution: &Execution,
+        cli: Option<&Cli>,
+        level: Option<Level>,
         spec: &LaunchSpec,
     ) -> rpc::Result<()> {
-        let Some(level) = execution.record.effort else {
+        let Some(level) = level else {
             return Ok(());
         };
-        writable(execution)?;
-        let capabilities = if let Some(cli) = &execution.cli
+        let capabilities = if let Some(cli) = cli
             && cli.connection_matches(spec)?
         {
             let control = cli.admit()?;
@@ -279,8 +285,8 @@ impl Sessions {
     }
 }
 
-fn readable(execution: &Execution) -> rpc::Result<()> {
-    execution.record.mutable()?;
+fn readable(session: &Session, execution: &Execution) -> rpc::Result<()> {
+    session.mutable()?;
     if execution.closing
         || execution.idle.handing_off()
         || execution.launching
@@ -291,7 +297,7 @@ fn readable(execution: &Execution) -> rpc::Result<()> {
             "Wait for native Session startup or cleanup before reading or changing thinking",
         ));
     }
-    if execution.record.native_cleanup_failed {
+    if execution.cleanup_failed || session.record().native_cleanup_failed {
         return Err(rpc::Error::conflict(
             "native_cleanup_unconfirmed",
             "The previous CLI instance cleanup was not confirmed",
@@ -299,22 +305,6 @@ fn readable(execution: &Execution) -> rpc::Result<()> {
     }
     if let Some(error) = &execution.storage_fault {
         return Err(error.clone());
-    }
-    Ok(())
-}
-
-fn writable(execution: &Execution) -> rpc::Result<()> {
-    readable(execution)?;
-    if execution.active.is_some()
-        || !execution.queue.is_empty()
-        || execution.sending
-        || execution.cancel_in_flight
-        || execution.native.busy
-    {
-        return Err(rpc::Error::conflict(
-            "session_busy",
-            "Wait for the Session Run and native execution to finish before changing thinking",
-        ));
     }
     Ok(())
 }

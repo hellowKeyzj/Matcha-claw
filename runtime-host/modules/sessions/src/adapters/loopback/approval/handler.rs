@@ -69,6 +69,7 @@ async fn handle_request(
                 Err(super::DecodeError::Unauthorized) => return Response::unauthorized(),
                 Err(super::DecodeError::Invalid) => return Response::bad_request(),
             };
+            drop(verifier);
             let command = match request.into_command() {
                 Ok(command) => command,
                 Err(_) => return Response::bad_request(),
@@ -77,7 +78,6 @@ async fn handle_request(
                 session.record_boundary_outcome("sessions.approvals.list", crate::call::SessionsCallOutcome::Unsupported).await;
                 return Response::from_pending(PendingApprovalsDelivery::Unsupported);
             }
-            drop(verifier);
             let outcome = match session.pending_approvals(command).await {
                 Ok(outcome) => outcome,
                 Err(_) => return Response::unavailable(),
@@ -95,6 +95,7 @@ async fn handle_request(
                 Err(super::DecodeError::Unauthorized) => return Response::unauthorized(),
                 Err(super::DecodeError::Invalid) => return Response::bad_request(),
             };
+            drop(verifier);
             let command = match request.into_command() {
                 Ok(command) => command,
                 Err(_) => return Response::bad_request(),
@@ -103,7 +104,6 @@ async fn handle_request(
                 session.record_boundary_outcome("sessions.approvals.respond", crate::call::SessionsCallOutcome::Unsupported).await;
                 return Response::from_response(SessionApprovalDelivery::Unsupported);
             }
-            drop(verifier);
             let outcome = match session.respond_to_approval(command).await {
                 Ok(outcome) => outcome,
                 Err(_) => return Response::unavailable(),

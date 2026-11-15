@@ -6,8 +6,8 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    MemberIntroductionError, OrganizationRuntimeDirectory,
-    OrganizationFacts, RoleMaterializationAgent, TeamMaterialization, TeamMemberIntroductions,
+    MemberIntroductionError,
+    OrganizationFacts, RoleMaterializationAgent, TeamMaterialization,
     TeamCreationFailure, TeamCreationFailureReason, TeamCreationStage,
     TeamProvisionMemberStatus, TeamProvisionObserver, TeamProvisionProgress, TeamProvisionStage,
     TeamProvisionUpdate, team::LEADER_ROLE_ID,
@@ -26,8 +26,7 @@ pub(super) enum PreparationError {
 pub(super) async fn prepare_manual_team(
     materialization: TeamMaterialization,
     facts: &OrganizationFacts,
-    runtimes: &dyn OrganizationRuntimeDirectory,
-    introductions: Option<&Arc<dyn TeamMemberIntroductions>>,
+    shared: &super::actor::OrganizationShared,
     observer: Option<&TeamProvisionObserver>,
     cancellation: CancellationToken,
 ) -> Result<TeamMaterialization, PreparationError> {
@@ -53,7 +52,7 @@ pub(super) async fn prepare_manual_team(
             )));
         }
         let saved = facts
-            .materialization_recovery_request(team_id)
+            .materialization_requests(team_id)
             .ok_or_else(|| {
                 preparation_end(started, "saved_request_missing");
                 PreparationError::Unavailable(TeamCreationFailure::new(
@@ -61,9 +60,8 @@ pub(super) async fn prepare_manual_team(
                 ))
             })?;
         let saved_markdown = saved
-            .intent()
-            .agents()
             .iter()
+            .flat_map(|request| request.intent().agents())
             .find(|agent| agent.role().as_str() == LEADER_ROLE_ID)
             .and_then(|agent| agent.agents_markdown());
         let materialization = match saved_markdown {
@@ -77,16 +75,16 @@ pub(super) async fn prepare_manual_team(
                 })?,
             None => materialization,
         };
-        return if materialization.request() == &saved {
+        return if materialization.requests() == saved {
             if let Some(observer) = observer {
                 observer
                     .report(TeamProvisionUpdate::Started(TeamProvisionProgress {
                         stage: TeamProvisionStage::ConfiguringTeam,
-                        members: saved
-                            .intent()
-                            .agents()
+                        members: materialization
+                            .definition()
+                            .roles()
                             .iter()
-                            .filter(|agent| agent.role().as_str() != LEADER_ROLE_ID)
+                            .filter(|role| role.role_id().as_str() != LEADER_ROLE_ID)
                             .map(|_| TeamProvisionMemberStatus::Completed)
                             .collect(),
                         member_errors: Default::default(),
@@ -118,29 +116,29 @@ pub(super) async fn prepare_manual_team(
     }
 
     let mut members = Vec::new();
-    let mut agents = Vec::new();
-    for intent in materialization.request().intent().agents() {
-        if intent.role().as_str() == LEADER_ROLE_ID {
+    let mut profile_groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for role in definition.roles() {
+        if role.role_id().as_str() == LEADER_ROLE_ID {
             continue;
         }
-        let role = definition
-            .roles()
-            .iter()
-            .find(|role| role.role_id() == intent.role())
-            .ok_or_else(|| {
-                preparation_end(started, "role_binding_missing");
-                PreparationError::Rejected(TeamCreationFailure::new(
-                    TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
-                ))
-            })?;
+        let (request, intent) = materialization.requests().iter().find_map(|request| {
+            request.intent().agents().iter().find(|intent| intent.role() == role.role_id())
+                .map(|intent| (request, intent))
+        }).ok_or_else(|| {
+            preparation_end(started, "role_binding_missing");
+            PreparationError::Rejected(TeamCreationFailure::new(
+                TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
+            ))
+        })?;
         let RoleMaterializationAgent::External { agent } = intent.agent() else {
             preparation_end(started, "invalid_agent_binding");
             return Err(PreparationError::Rejected(TeamCreationFailure::new(
                 TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
             )));
         };
+        profile_groups.entry(request.intent().endpoint().clone()).or_default()
+            .push((members.len(), agent.clone()));
         members.push((role.name().to_owned(), role.role_id().clone()));
-        agents.push(agent.clone());
     }
 
     if let Some(observer) = observer {
@@ -158,44 +156,57 @@ pub(super) async fn prepare_manual_team(
     }
     let mut markdown = String::from("## 团队成员");
     if !members.is_empty() {
-        let introductions = introductions.ok_or_else(|| {
+        let introductions = shared.member_introductions.as_ref().ok_or_else(|| {
             preparation_end(started, "introduction_port_missing");
             PreparationError::Unavailable(TeamCreationFailure::new(
                 TeamCreationStage::GeneratingIntroductions, TeamCreationFailureReason::Unavailable,
             ))
         })?;
-        let runtime = runtimes
-            .team_runtime_for_endpoint(materialization.request().intent().endpoint())
-            .ok_or_else(|| {
-                preparation_end(started, "runtime_missing");
-                PreparationError::Unavailable(TeamCreationFailure::new(
-                    TeamCreationStage::ReadingProfiles, TeamCreationFailureReason::Unavailable,
-                ))
-            })?;
         let cancellation = cancellation.child_token();
         let profiles_started = platform::trace::enabled().then(Instant::now);
         session_trace(
             "runtime.team.profiles.start",
             || json!({"memberCount": members.len()}),
         );
-        let profiles = runtime
-            .read_team_member_profiles_cancellable(agents, cancellation.clone())
-            .await
-            .map_err(|error| {
-                session_trace("runtime.team.profiles.end", || json!({"failure": error, "elapsedMs": profiles_started.map(|started| started.elapsed().as_millis())}));
-                preparation_end(started, "read_profiles_failed");
-                PreparationError::Unavailable(error)
-            })?;
+        let grouped_profiles = map_concurrent(
+            INTRODUCTION_CONCURRENCY,
+            profile_groups.into_iter().collect(),
+            |(endpoint, agents)| {
+                let runtime = shared.runtime_directory.team_runtime_for_endpoint(&endpoint);
+                let cancellation = cancellation.clone();
+                async move {
+                    let indexes = agents.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+                    let result = match runtime {
+                        Some(runtime) => runtime.read_team_member_profiles_cancellable(
+                            agents.into_iter().map(|(_, agent)| agent).collect(), cancellation,
+                        ).await,
+                        None => Err(TeamCreationFailure::new(
+                            TeamCreationStage::ReadingProfiles, TeamCreationFailureReason::Unavailable,
+                        )),
+                    };
+                    let profiles = result.map_err(|mut failure| {
+                        failure.member_index = failure.member_index.and_then(|index| indexes.get(index).copied());
+                        failure
+                    })?;
+                    if profiles.len() != indexes.len() {
+                        return Err(TeamCreationFailure::new(
+                            TeamCreationStage::ReadingProfiles, TeamCreationFailureReason::InvalidResponse,
+                        ));
+                    }
+                    Ok(indexes.into_iter().zip(profiles).collect::<Vec<_>>())
+                }
+            },
+        ).await.map_err(|error| {
+            session_trace("runtime.team.profiles.end", || json!({"failure": error, "elapsedMs": profiles_started.map(|started| started.elapsed().as_millis())}));
+            preparation_end(started, "read_profiles_failed");
+            PreparationError::Unavailable(error)
+        })?;
+        let mut profiles = grouped_profiles.into_iter().flatten().collect::<Vec<_>>();
+        profiles.sort_by_key(|(index, _)| *index);
         session_trace(
             "runtime.team.profiles.end",
             || json!({"reason": "read", "profileCount": profiles.len(), "elapsedMs": profiles_started.map(|started| started.elapsed().as_millis())}),
         );
-        if profiles.len() != members.len() {
-            preparation_end(started, "profile_count_mismatch");
-            return Err(PreparationError::Unavailable(TeamCreationFailure::new(
-                TeamCreationStage::ReadingProfiles, TeamCreationFailureReason::InvalidResponse,
-            )));
-        }
         if let Some(observer) = observer {
             observer
                 .report(TeamProvisionUpdate::Stage(
@@ -205,7 +216,7 @@ pub(super) async fn prepare_manual_team(
         }
         let requests = members
             .into_iter()
-            .zip(profiles)
+            .zip(profiles.into_iter().map(|(_, profile)| profile))
             .enumerate()
             .map(|(index, ((name, role_id), profile))| (index, name, role_id, profile))
             .collect();
@@ -232,10 +243,12 @@ pub(super) async fn prepare_manual_team(
                     if cancellation.is_cancelled() {
                         return Err(MemberIntroductionError::Cancelled);
                     }
+                    let prompts = shared.team_prompt_settings()?;
                     let request = crate::application::member_introduction::prepare(
                         &member_name,
                         member_role_id,
                         profile,
+                        &prompts,
                     );
                     let output = introductions.generate(request, cancellation.clone()).await?;
                     if !output.complete {

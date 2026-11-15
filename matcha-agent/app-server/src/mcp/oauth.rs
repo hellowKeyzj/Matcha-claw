@@ -140,7 +140,7 @@ pub(super) async fn dispatch(
     if action == Action::Start && input.flow_id.is_some() {
         return Err(Error::invalid("OAuth start does not accept flowId"));
     }
-    let _agent = sessions.agent_guard(&input.agent_id).await;
+    let _agent = sessions.agent_scope(&input.agent_id).await;
     // Configuration replacement and registration share this native owner fence.
     let mut flows = flows().lock().await;
     if flows.stopping {

@@ -226,6 +226,7 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     icon: 'A',
     placeholder: 'your-ark-api-key',
     model: 'Doubao',
+    modelCapabilities: ['chat', 'imageUnderstand', 'imageGenerate', 'videoGenerate'],
     requiresApiKey: true,
     defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     showBaseUrl: true,

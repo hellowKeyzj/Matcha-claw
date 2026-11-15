@@ -66,13 +66,18 @@ fn check_scope(team: &str, run: &str, bodies: &Bodies<'_>) -> Result<(), StoreFa
     }
     Ok(())
 }
-pub(super) fn encode_task(
+pub(crate) fn encode_task(
     ordinal: u64,
     value: &TaskRecord,
-    bodies: &Bodies<'_>,
-) -> Result<Vec<u8>, StoreFault> {
-    check_scope(value.team_id().as_str(), value.run_id().as_str(), bodies)?;
-    serialize(&TaskRow {
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let bodies = Bodies {
+        contents,
+        team: value.team_id(),
+        run: value.run_id().clone(),
+    };
+    check_scope(value.team_id().as_str(), value.run_id().as_str(), &bodies)?;
+    let payload = serialize(&TaskRow {
         ordinal,
         team: value.team_id().as_str().to_owned(),
         run: value.run_id().as_str().to_owned(),
@@ -95,6 +100,16 @@ pub(super) fn encode_task(
         created_at: value.created_at(),
         updated_at: value.updated_at(),
         fingerprint: value.command_fingerprint().to_owned(),
+    })?;
+    Ok(StoredRecord {
+        key: RecordKey {
+            kind: RecordKind::Task,
+            scope: scoped_key(value.team_id().as_str(), value.run_id().as_str()),
+            id: value.task_id().as_str().to_owned(),
+        },
+        team_id: Some(value.team_id().as_str().to_owned()),
+        run_id: Some(value.run_id().as_str().to_owned()),
+        payload,
     })
 }
 pub(super) fn decode_task(
@@ -128,13 +143,18 @@ pub(super) fn decode_task(
     }))?;
     Ok((row.ordinal, record))
 }
-pub(super) fn encode_runner(
+pub(crate) fn encode_runner(
     ordinal: u64,
     value: &AutoRunnerFacts,
-    bodies: &Bodies<'_>,
-) -> Result<Vec<u8>, StoreFault> {
-    check_scope(value.team_id().as_str(), value.run_id().as_str(), bodies)?;
-    serialize(&RunnerRow {
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let bodies = Bodies {
+        contents,
+        team: value.team_id(),
+        run: value.run_id().clone(),
+    };
+    check_scope(value.team_id().as_str(), value.run_id().as_str(), &bodies)?;
+    let payload = serialize(&RunnerRow {
         ordinal,
         team: value.team_id().as_str().to_owned(),
         run: value.run_id().as_str().to_owned(),
@@ -146,6 +166,16 @@ pub(super) fn encode_runner(
             RunnerStatus::Closed => Status::Closed,
         },
         updated_at: value.updated_at(),
+    })?;
+    Ok(StoredRecord {
+        key: RecordKey {
+            kind: RecordKind::Runner,
+            scope: scoped_key(value.team_id().as_str(), value.run_id().as_str()),
+            id: value.runner_id().to_owned(),
+        },
+        team_id: Some(value.team_id().as_str().to_owned()),
+        run_id: Some(value.run_id().as_str().to_owned()),
+        payload,
     })
 }
 pub(super) fn decode_runner(
@@ -171,13 +201,18 @@ pub(super) fn decode_runner(
     );
     Ok((row.ordinal, record))
 }
-pub(super) fn encode_mailbox(
+pub(crate) fn encode_mailbox(
     ordinal: u64,
     value: &MailboxMessage,
-    bodies: &Bodies<'_>,
-) -> Result<Vec<u8>, StoreFault> {
-    check_scope(value.team_id().as_str(), value.run_id().as_str(), bodies)?;
-    serialize(&MailboxRow {
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let bodies = Bodies {
+        contents,
+        team: value.team_id(),
+        run: value.run_id().clone(),
+    };
+    check_scope(value.team_id().as_str(), value.run_id().as_str(), &bodies)?;
+    let payload = serialize(&MailboxRow {
         ordinal,
         team: value.team_id().as_str().to_owned(),
         run: value.run_id().as_str().to_owned(),
@@ -194,6 +229,16 @@ pub(super) fn encode_mailbox(
         },
         content: bodies.put(value.content())?,
         created_at: value.created_at(),
+    })?;
+    Ok(StoredRecord {
+        key: RecordKey {
+            kind: RecordKind::Mailbox,
+            scope: scoped_key(value.team_id().as_str(), value.run_id().as_str()),
+            id: value.msg_id().to_owned(),
+        },
+        team_id: Some(value.team_id().as_str().to_owned()),
+        run_id: Some(value.run_id().as_str().to_owned()),
+        payload,
     })
 }
 pub(super) fn decode_mailbox(

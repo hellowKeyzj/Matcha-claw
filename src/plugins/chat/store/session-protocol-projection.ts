@@ -1,8 +1,8 @@
 import { shallow } from 'zustand/vanilla/shallow';
 import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
-import { currentSessionSend, recordSendTerminals } from '@/plugins/chat/store/send-state';
-import { getSessionMessageReplacementIndex, reconcileSessionMessageItems, prepareSessionProjectionItems, projectSessionMessages, sessionTerminalRunIds } from '@/plugins/chat/store/session-presentation';
+import { currentSessionSend, isSendPending } from '@/plugins/chat/store/send-state';
+import { getSessionMessageReplacementIndex, reconcileSessionMessageItems, prepareSessionProjectionItems, projectSessionMessages, sessionTerminalRunIds, settleSessionReceipts, getSessionInputIds, type SessionReceiptProjection } from '@/plugins/chat/store/session-presentation';
 import type { ApprovalItem, ChatSessionRuntimeState, ChatSessionViewportState, ChatStoreState } from '@/plugins/chat/store/types';
 import { deriveSessionImageGenerationPendingStateFromItems, type SessionRenderItem } from '@/types/session/render-item';
 import type { SessionDelta, SessionFact, SessionRunTiming, SessionView, SessionWireItem, SessionWireRuntime, SessionWireTool, SessionWireWindow } from '@/types/session/snapshot';
@@ -210,6 +210,7 @@ function projectionRuntime(
   fact: SessionFact<SessionWireRuntime>,
   items: SessionRenderItem[],
   runtimeNotice: ChatSessionRuntimeState['runtimeNotice'],
+  requestPending: boolean,
   unchangedFact: boolean,
 ): ChatSessionRuntimeState {
   const runtime = factValue(fact);
@@ -222,7 +223,7 @@ function projectionRuntime(
   const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
   const runPhase = runtimeUnknown && !isTerminalRunPhase(runtime.phase) ? 'error' : projectionRuntimePhase(runtime.phase);
   // updatedAt is also the error-dismiss generation and the in-flight abort fence.
-  if (unchangedFact && runtime.issue === null && current.lastIssue === null && current.lastError === null
+  if (unchangedFact && current.requestPending === requestPending && runtime.issue === null && current.lastIssue === null && current.lastError === null
     && current.runPhase !== 'stopping' && runPhase !== 'stopping'
     && current.activeRunId === runtime.activeRunId && current.runPhase === runPhase
     && current.activeTurnItemKey === null && current.pendingTurnKey === null && current.pendingTurnLaneKey === null
@@ -233,6 +234,7 @@ function projectionRuntime(
     ...current,
     activeRunId: runtime.activeRunId,
     runPhase,
+    requestPending,
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
@@ -363,6 +365,54 @@ function isTaskToolTerminalTransition(tool: SessionWireTool, previous?: SessionW
     || (previous.phase !== 'completed' && previous.phase !== 'failed');
 }
 
+export function applySessionProjectionReceipts(
+  input: SessionProjectionApplyInput,
+  view: SessionProjectionState,
+  inputReceipts: SessionReceiptProjection['inputReceipts'],
+): void {
+  const identityKey = buildSessionIdentityKey(view.identity);
+  const recordKey = displayRecordKey(input.get(), view.identity);
+  const canonical = projectionStore(input.get).get(identityKey);
+  input.set((state) => {
+    const current = getSessionRecord(state, recordKey);
+    if (!current.meta.sessionIdentity || buildSessionIdentityKey(current.meta.sessionIdentity) !== identityKey) return state;
+    const sourceItems = factValue(view.items) ?? [];
+    const items = reconcileSessionMessageItems(current.meta.sessionIdentity, current.items, current.items, inputReceipts, sourceItems);
+    const runtime = canonical && factValue(canonical.runtime)
+      ? projectionRuntime(current.runtime, canonical.runtime, items, canonical.runtimeNotice ?? null, canonical.requestPending, true) : null;
+    const wireRuntime = factValue(view.runtime);
+    const terminals = sessionTerminalRunIds(current,
+      wireRuntime && isTerminalRunPhase(wireRuntime.phase) && wireRuntime.activeRunId !== null ? [wireRuntime.activeRunId] : [], []);
+    const failedRunIds = wireRuntime && isTerminalRunPhase(wireRuntime.phase) && wireRuntime.phase !== 'completed' ? terminals : [];
+    const settled = settleSessionReceipts({ ...current, items }, {
+      runtime,
+      terminalRunIds: terminals,
+      failedRunIds,
+      runTimings: view.runTimings,
+      inputReceipts,
+      sourceItems,
+    });
+    const send = currentSessionSend(settled);
+    const messages = send?.receipt.phase === 'handed-off'
+      && (send !== currentSessionSend(current) || current.runtime.pendingTurnKey !== null)
+      ? projectSessionMessages(current, items, {
+        identityKey,
+        runtime,
+        terminalRunIds: terminals,
+        failedRunIds,
+        terminatedRunIds: [],
+        retiredItemIds: canonical?.retiredItemIds ?? new Set(),
+        runTimings: view.runTimings,
+        send,
+      }) : { items, runtime: current.runtime, abort: current.abort ?? null };
+    const loadedSessions = patchSessionRecord(state, recordKey, { ...messages, send });
+    return loadedSessions === state.loadedSessions ? state : {
+      loadedSessions,
+      ...reconcileSessionDirectory(state, loadedSessions, [recordKey]),
+    };
+  });
+}
+
 function applyDecodedSessionView(
   input: SessionProjectionApplyInput,
   view: SessionProjectionState,
@@ -374,6 +424,7 @@ function applyDecodedSessionView(
   terminatedRunIds: readonly string[] = [],
   observedTerminalRunIds: readonly string[] = [],
   refreshPreviews = true,
+  receiptFacts?: Pick<SessionReceiptProjection, 'inputReceipts' | 'failedRunIds'>,
 ): boolean {
   const state = input.get();
   const identity = sessionIdentityForProjection(state, view);
@@ -421,18 +472,33 @@ function applyDecodedSessionView(
     const terminals = sessionTerminalRunIds(messageRecord,
       wireRuntime && isTerminalRunPhase(wireRuntime.phase) && wireRuntime.activeRunId !== null
         ? [...terminalRunIds, wireRuntime.activeRunId] : terminalRunIds, observedTerminalRunIds);
-    const send = currentSessionSend(current);
-    const nextSend = send?.identityKey === buildSessionIdentityKey(view.identity) ? recordSendTerminals(send, terminals) : send;
-    const reconciledItems = reconcileSessionMessageItems(nextIdentity ?? undefined, current.items, projectedItems, undefined,
-      buildSessionIdentityKey(nextIdentity!) === buildSessionIdentityKey(view.identity) ? factValue(view.items) ?? [] : []);
+    const sourceItems = buildSessionIdentityKey(nextIdentity!) === buildSessionIdentityKey(view.identity) ? factValue(view.items) ?? [] : [];
+    const reconciledItems = reconcileSessionMessageItems(nextIdentity ?? undefined, current.items, projectedItems,
+      receiptFacts?.inputReceipts, sourceItems);
+    const projectedRuntime = wireRuntime ? projectionRuntime(current.runtime, view.runtime, reconciledItems, view.runtimeNotice ?? null, view.requestPending,
+      previous?.epoch === view.epoch && previous.runtime === view.runtime
+        && previous.runtimeNotice === view.runtimeNotice && isSessionProjectionFact(wireRuntime))
+      : current.runtime.requestPending !== view.requestPending ? { ...current.runtime, requestPending: view.requestPending } : null;
+    const failedRunIds = wireRuntime && isTerminalRunPhase(wireRuntime.phase) && wireRuntime.phase !== 'completed' && wireRuntime.activeRunId !== null
+      ? [...(receiptFacts?.failedRunIds ?? []), wireRuntime.activeRunId] : receiptFacts?.failedRunIds ?? [];
+    const settled = buildSessionIdentityKey(nextIdentity!) === buildSessionIdentityKey(view.identity)
+      ? settleSessionReceipts({ ...messageRecord, items: reconciledItems }, {
+        runtime: projectedRuntime,
+        terminalRunIds: terminals,
+        failedRunIds,
+        runTimings: view.runTimings,
+        inputReceipts: receiptFacts?.inputReceipts ?? [],
+        sourceItems,
+      }) : messageRecord;
+    const nextSend = currentSessionSend(settled);
     const messages = projectSessionMessages(messageRecord, reconciledItems, {
       identityKey: buildSessionIdentityKey(view.identity),
-      runtime: wireRuntime ? projectionRuntime(current.runtime, view.runtime, reconciledItems, view.runtimeNotice ?? null,
-        previous?.epoch === view.epoch && previous.runtime === view.runtime
-          && previous.runtimeNotice === view.runtimeNotice && isSessionProjectionFact(wireRuntime)) : null,
+      runtime: projectedRuntime,
       terminalRunIds: terminals,
+      failedRunIds,
       terminatedRunIds: ownTerminatedRunIds,
       retiredItemIds: new Set([...(view.retiredItemIds ?? []), ...(display.retiredItemIds ?? [])]),
+      runTimings: view.runTimings,
       send: nextSend,
     });
     const nextRuntime = messages.runtime;
@@ -540,15 +606,9 @@ export function applySessionView(
   const projectionKey = buildSessionIdentityKey(view.identity);
   const previous = store.get(projectionKey);
   const { inputReceipts, ...timelineView } = { ...view, runTimings: mergeRunTimings(previous?.runTimings, view.runTimings) };
-  input.set((state) => {
-    const current = getSessionRecord(state, recordKey);
-    if (!current.meta.sessionIdentity || buildSessionIdentityKey(current.meta.sessionIdentity) !== projectionKey) return state;
-    const items = reconcileSessionMessageItems(current.meta.sessionIdentity, current.items, current.items,
-      inputReceipts, factValue(view.items) ?? []);
-    return items === current.items ? state : { loadedSessions: patchSessionRecord(state, recordKey, { items }) };
-  });
   view = timelineView;
   if (options.windowOnly) {
+    applySessionProjectionReceipts(input, view, inputReceipts ?? []);
     view = adoptProjectionView(view);
     const items = factValue(view.items);
     const window = factValue(view.window);
@@ -603,13 +663,16 @@ export function applySessionView(
   }
   if (previous) {
     if (view.epoch < previous.epoch) {
+      applySessionProjectionReceipts(input, view, inputReceipts ?? []);
       return finish({ status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
     }
     if (view.epoch === previous.epoch) {
       if (view.cursor < previous.cursor || view.seq < previous.seq) {
+        applySessionProjectionReceipts(input, view, inputReceipts ?? []);
         return finish({ status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
       }
       if (view.cursor === previous.cursor && view.seq === previous.seq) {
+        applySessionProjectionReceipts(input, view, inputReceipts ?? []);
         store.set(projectionKey, { ...previous, runTimings: view.runTimings.map(adoptSessionProjectionFact) });
         input.set((state) => {
           const current = getSessionRecord(state, recordKey);
@@ -671,7 +734,7 @@ export function applySessionView(
     ? previousRuntime?.activeRunId : null;
   store.set(projectionKey, projection);
   if (!applyDecodedSessionView(input, projection, modelState, display, traceId, timing, [], [],
-    observedTerminalRunId ? [observedTerminalRunId] : [])) {
+    observedTerminalRunId ? [observedTerminalRunId] : [], true, { inputReceipts: inputReceipts ?? [], failedRunIds: [] })) {
     return finish({ status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' });
   }
   refreshSessionTasks(input, view, true);
@@ -857,6 +920,8 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
         else next.push(change.approval);
         return next;
       }) };
+    case 'requestPendingChanged':
+      return { ...view, requestPending: change.pending };
     case 'goalChanged':
       return { ...view, goal: change.goal };
     case 'runtimeChanged':
@@ -912,7 +977,7 @@ export function applySessionDelta(
   const recordKey = displayRecordKey(state, delta.identity);
   let previous = store.get(projectionKey);
   if (!previous && delta.seq === 1 && delta.cursor === 1) {
-    previous = { sessionKey: delta.sessionKey, identity: adoptSessionProjectionFact(delta.identity), endpointSessionId: state.loadedSessions[recordKey]?.meta.endpointSessionId ?? null, ownership: state.loadedSessions[recordKey]?.meta.ownership ?? null, goal: { kind: 'unknown' }, runTimings: [], epoch: delta.epoch, seq: 0, cursor: 0, items: 'unknown', tools: 'unknown', approvals: 'unknown', runtime: 'unknown', window: 'unknown', completeness: { incomplete: { missing: ['event_only'] } } };
+    previous = { sessionKey: delta.sessionKey, identity: adoptSessionProjectionFact(delta.identity), endpointSessionId: state.loadedSessions[recordKey]?.meta.endpointSessionId ?? null, ownership: state.loadedSessions[recordKey]?.meta.ownership ?? null, goal: { kind: 'unknown' }, requestPending: false, runTimings: [], epoch: delta.epoch, seq: 0, cursor: 0, items: 'unknown', tools: 'unknown', approvals: 'unknown', runtime: 'unknown', window: 'unknown', completeness: { incomplete: { missing: ['event_only'] } } };
   }
   const traceTurnState = !!traceId && shouldTraceDeltaTurnState(delta);
   const traceRuntimeState = traceId && delta.changes.some((change) => (
@@ -1000,15 +1065,21 @@ export function applySessionDelta(
   let readingDisplay = loaded;
   let nextView: SessionProjectionState;
   const terminalRunIds: string[] = [];
+  const failedRunIds: string[] = [];
   const observedTerminalRunIds: string[] = [];
   const changes = delta.changes.map(adoptSessionProjectionFact);
   try {
     nextView = changes.reduce((view, change) => {
-    if (change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase)) terminalRunIds.push(change.runId);
+    if (change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase)) {
+      terminalRunIds.push(change.runId);
+      if (change.phase !== 'completed') failedRunIds.push(change.runId);
+    }
     if (change.kind === 'runtimeChanged' && isTerminalRunPhase(change.runtime.phase)) {
       const runId = change.runtime.activeRunId ?? delta.runId;
-      if (runId) terminalRunIds.push(runId);
-      else {
+      if (runId) {
+        terminalRunIds.push(runId);
+        if (change.runtime.phase !== 'completed') failedRunIds.push(runId);
+      } else {
         const observedRunId = epochChanged && view.runtime === previous.runtime ? null : factValue(view.runtime)?.activeRunId;
         if (observedRunId) observedTerminalRunIds.push(observedRunId);
       }
@@ -1024,7 +1095,7 @@ export function applySessionDelta(
     const projected = applyProjectionChange(view, change);
     if (reading && readingDisplay) readingDisplay = reconcileReadingWindow(readingDisplay, projected, view, change);
     return projected;
-    }, { ...previous, epoch: delta.epoch });
+    }, { ...previous, epoch: delta.epoch, requestPending: epochChanged ? false : previous.requestPending });
   } catch (error) {
     return finish({ status: 'gap', sessionKey: recordKey, reason: error instanceof Error ? error.message : 'invalid replacement' });
   }
@@ -1052,7 +1123,7 @@ export function applySessionDelta(
   if (!applyDecodedSessionView(input, projected, undefined, display, traceId, undefined,
     terminalRunIds, terminatedRunIds, observedTerminalRunIds,
     epochChanged || delta.changes.some((change) => change.kind === 'messageUpdated'
-      || change.kind === 'messageReplaced' || change.kind === 'itemsReplaced'))) {
+      || change.kind === 'messageReplaced' || change.kind === 'itemsReplaced'), { inputReceipts: [], failedRunIds })) {
     return finish({ status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' });
   }
   if (traceRuntimeState) {
@@ -1081,6 +1152,12 @@ export function applySessionDelta(
     }));
   }
   if (tasksChanged) refreshSessionTasks(input, projected, true);
+  const current = input.get().loadedSessions[recordKey];
+  if ((terminalRunIds.length > 0 || observedTerminalRunIds.length > 0) && current?.meta.sessionIdentity
+    && buildSessionIdentityKey(current.meta.sessionIdentity) === projectionKey
+    && isSendPending(currentSessionSend(current)) && getSessionInputIds(current).length > 0) {
+    void input.get().loadHistory({ sessionKey: recordKey, mode: 'quiet', scope: 'background', reason: 'send_receipt' });
+  }
   return finish({ status: 'applied', sessionKey: recordKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor });
 }
 

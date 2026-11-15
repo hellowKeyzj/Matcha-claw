@@ -9,6 +9,7 @@ mod history;
 mod identity;
 mod placement;
 mod reconciliation;
+pub(super) mod run;
 mod terminal;
 mod thinking;
 
@@ -26,7 +27,7 @@ pub(super) struct Body {
     evicted: Vec<String>,
     live_run: Option<String>,
     terminal_marker: Option<TerminalMarker>,
-    accepted_finals: HashSet<String>,
+    runs: run::Runs,
     last_terminal_run: Option<String>,
     history_rebuilding: bool,
 }
@@ -35,6 +36,8 @@ pub(super) struct Body {
 struct Persisted {
     id: String,
     message: Message,
+    source: Option<u64>,
+    terminal_owner: Option<String>,
 }
 
 impl std::ops::Deref for Persisted {
@@ -55,16 +58,11 @@ struct Stream {
     text: Option<String>,
     thinking: Vec<Thinking>,
     latest_boundary_run_id: Option<String>,
-    latest_tool: Option<String>,
     parts: Vec<Part>,
     closed: Vec<Closed>,
     boundary: bool,
-    body_closed: bool,
     anchors: Vec<String>,
     provisional: Vec<Provisional>,
-    final_content: Option<([u8; 32], [u8; 32])>,
-    terminal_observed: bool,
-    inferred: Option<identity::InferredTerminal>,
 }
 
 #[derive(Clone)]
@@ -80,11 +78,6 @@ struct Part {
     id: Option<String>,
     start: usize,
     end: usize,
-    covered: usize,
-    observed: bool,
-    content_before: bool,
-    after_tool: Option<String>,
-    before_tool: Option<String>,
     after: Option<String>,
     after_boundary_run_id: Option<String>,
     boundary_run_id: Option<String>,
@@ -175,6 +168,8 @@ impl Body {
         self.live_run.as_deref()
     }
 
+    pub(super) fn last_terminal_run(&self) -> Option<&str> { self.last_terminal_run.as_deref() }
+
     pub(super) fn stream_text(&self, run: &str) -> Option<&str> {
         self.streams.get(run).and_then(Stream::text)
     }
@@ -186,48 +181,55 @@ impl Body {
         {
             if !replies.iter().any(|reply| reply == signature) { replies.push(signature.to_owned()); }
         }
-        (self.accepted_finals.contains(run), replies)
+        (self.runs.accepted(run), replies)
     }
 
     pub(super) fn needs_terminal_history(&self) -> bool {
         self.terminal_marker.as_ref().is_some_and(|marker| !marker.history_applied)
     }
 
-    pub fn observe(&mut self, changes: &[CanonicalSessionChange], chat: Option<&ChatEvent>, cache: &OpenClawReplayProjection) -> Option<CanonicalSessionChange> {
-        let old = self.items.clone();
+    pub fn observe(&mut self, changes: &[CanonicalSessionChange], chat: Option<&ChatEvent>, transition: Option<&run::Transition>, cache: &OpenClawReplayProjection, old: Vec<SessionItem>) -> Option<CanonicalSessionChange> {
         self.reconcile_tool_refs(cache);
         let terminal_chat = chat.filter(|chat| matches!(chat.state, super::protocol::ChatState::Final | super::protocol::ChatState::Aborted | super::protocol::ChatState::Error));
-        let final_message = terminal_chat.and_then(|chat| chat.final_message.as_ref());
-        if let Some(chat) = terminal_chat {
+        let had_active = self.live_run().is_some();
+        let ignored = chat.zip(transition).is_some_and(|(chat, transition)| transition.ignores_body(chat));
+        if let Some(chat) = terminal_chat.filter(|_| !ignored) {
             let run = chat.run_id.as_str();
             let owned = self.live_run().is_none_or(|current| current == run);
-            if (chat.terminal_outcome() == Some(super::events::TerminalOutcome::Completed) || chat.is_yielded()) && let Some(message) = final_message {
-                if message.content().iter().any(|content| match content {
-                    super::window::MessageContent::Text { text } => !text.trim_matches(reconciliation::whitespace).is_empty(),
-                    super::window::MessageContent::Thinking { .. } => false,
-                    _ => true,
-                }) {
-                    self.accepted_finals.insert(run.to_owned());
-                }
-            }
+            let source = transition.and_then(|transition| transition.source);
             if !owned {
-                if chat.state == super::protocol::ChatState::Final && let Some(message) = final_message {
-                    if !message.hidden_control_reply() { self.apply_live_message(message, cache)?; }
+                if chat.state == super::protocol::ChatState::Final && let Some(message) = chat.final_message.as_ref().filter(|message| !message.hidden_control_reply()) {
+                    let entry = Provisional::final_message(String::new(), message, source);
+                    let existing = self.provisional_identity(&entry, true);
+                    let protected = message.identity_message_id().is_none() && existing.as_ref().is_some_and(|id|
+                        self.persisted.iter().any(|row| &row.id == id && row.identity_message_id().is_some()));
+                    if let Some(id) = self.apply_identified_message(message, true, existing, cache)?
+                        && !protected && let Some(row) = self.persisted.iter_mut().find(|row| row.id == id)
+                    { row.source = source; }
                 }
-            } else if chat.is_yielded() {
-                if let Some(message) = final_message { self.finish_message(run, message, super::events::TerminalOutcome::Completed, cache)?; }
-                self.rollover(run, None, false)?;
-                for item in &mut self.items {
-                    if let SessionItem::AssistantTurn { run_id: Some(owner), status, .. } = item
-                        && owner == run
-                    { *status = ItemStatus::Final; }
+            } else {
+                self.reconcile(run)?;
+                if let Some(message) = chat.final_message.as_ref().filter(|message|
+                    chat.state != super::protocol::ChatState::Error
+                        || (had_active && !message.is_projection_error_message(chat.error_message.as_deref())))
+                {
+                    self.finish_message(run, message, chat.state, source, cache)?;
+                } else if chat.state == super::protocol::ChatState::Final && self.history_applied_for_run(run) {
+                    self.retire_body(run)?;
                 }
+                if chat.state != super::protocol::ChatState::Error || had_active { self.finish_stream(run)?; }
+                if chat.is_yielded() { self.last_terminal_run = None; }
+                else if had_active { self.last_terminal_run = Some(run.to_owned()); }
                 if self.live_run() == Some(run) { self.live_run = None; }
             }
         }
         for change in changes {
             match change {
-                CanonicalSessionChange::RunStarted { run_id } | CanonicalSessionChange::RunProgress { run_id, .. } => {
+                CanonicalSessionChange::RunStarted { run_id } => {
+                    self.terminal.retain(|(run, _)| run != run_id.as_str());
+                    self.accept_live(run_id.as_str());
+                }
+                CanonicalSessionChange::RunProgress { run_id, .. } => {
                     self.accept_live(run_id.as_str());
                 }
                 CanonicalSessionChange::AssistantTurnChunk { run_id, message_id, kind, text, replace, status } => {
@@ -248,11 +250,7 @@ impl Body {
                     let id = format!("oc:tool:{tool_call_id}");
                     let stream = self.streams.entry(run_id.as_str().to_owned()).or_default();
                     let first_anchor = !stream.anchors.contains(&id);
-                    if first_anchor {
-                        for part in &mut stream.parts { part.before_tool = Some(tool_id.as_str().to_owned()); }
-                        self.rollover(run_id.as_str(), None, true)?;
-                        self.streams.get_mut(run_id.as_str())?.latest_tool = Some(tool_id.as_str().to_owned());
-                    }
+                    if first_anchor { self.rollover(run_id.as_str(), None, true)?; }
                     if !self.items.iter().any(|item| matches!(item, SessionItem::AssistantTurn { segments, .. }
                         if segments.iter().any(|segment| matches!(segment, SessionContent::ToolUse { tool_call_id: existing, .. } if existing == &tool_call_id))))
                         && !self.streams.values().any(|stream| stream.anchors.contains(&id))
@@ -268,16 +266,21 @@ impl Body {
                     }
                     if first_anchor { self.streams.get_mut(run_id.as_str())?.anchors.push(id); }
                 }
-                CanonicalSessionChange::Terminal { run_id, outcome, .. } => {
-                    self.reconcile(run_id.as_str())?;
-                    if let Some(message) = final_message {
-                        self.finish_message(run_id.as_str(), message, *outcome, cache)?;
-                    } else if *outcome == super::events::TerminalOutcome::Completed && self.history_applied_for_run(run_id.as_str()) {
-                        self.retire_body(run_id.as_str())?;
+                CanonicalSessionChange::RunYielded { run_id } => {
+                    for item in &mut self.items {
+                        if let SessionItem::AssistantTurn { run_id: Some(owner), status, .. } = item
+                            && owner == run_id.as_str() { *status = ItemStatus::Final; }
                     }
-                    if self.live_run.as_deref().is_none_or(|current| current == run_id.as_str()) { self.last_terminal_run = Some(run_id.as_str().to_owned()); }
+                }
+                CanonicalSessionChange::Terminal { run_id, outcome, .. } => {
+                    if terminal_chat.is_none() {
+                        self.reconcile(run_id.as_str())?;
+                        self.finish_stream(run_id.as_str())?;
+                    }
+                    if terminal_chat.is_none() && self.live_run.as_deref().is_none_or(|current| current == run_id.as_str()) {
+                        self.last_terminal_run = Some(run_id.as_str().to_owned());
+                    }
                     if self.live_run.as_deref() == Some(run_id.as_str()) { self.live_run = None; }
-                    if let Some(stream) = self.streams.get_mut(run_id.as_str()) { stream.body_closed = true; stream.boundary = true; }
                     let phase = match outcome {
                         super::events::TerminalOutcome::Completed => RunPhase::Completed,
                         super::events::TerminalOutcome::Aborted => RunPhase::Cancelled,
@@ -287,13 +290,6 @@ impl Body {
                         self.terminal.push((run_id.as_str().to_owned(), phase));
                     }
                     let status = self.status(run_id.as_str());
-                    if trace::enabled() {
-                        trace::log_unscoped("oc.body.terminal", || serde_json::json!({ "commitState": "candidate_only",
-                            "runHash": trace::fingerprint(run_id.as_str()), "phase": phase, "status": status,
-                            "finalMessagePresent": final_message.is_some(),
-                            "noMessageBranch": final_message.is_none().then(|| if *outcome == super::events::TerminalOutcome::Completed
-                                && self.history_applied_for_run(run_id.as_str()) { "retire_body" } else { "preserve_tail" }) }));
-                    }
                     for item in &mut self.items {
                         if let SessionItem::AssistantTurn { run_id: Some(run), status: current, .. } = item {
                             if run == run_id.as_str() { *current = status; }
@@ -303,7 +299,6 @@ impl Body {
                 _ => {}
             }
         }
-        self.reconcile_terminals()?;
         self.check()?;
         Some(self.replacement(old))
     }
@@ -316,10 +311,7 @@ impl Body {
         let producer = message.identity_run_id().filter(|run| message.event_run_id() == Some(*run));
         let finishing = self.live_run().filter(|active| producer.is_none_or(|run| run == *active))
             .or_else(|| self.last_terminal_run.as_deref().filter(|run| self.live_run().is_none()
-                && producer.map_or_else(|| self.items.iter().any(|item| matches!(item,
-                    SessionItem::AssistantTurn { run_id: Some(owner), text, .. }
-                        if owner == *run && !text.trim().is_empty() && text.trim() == message.text().trim())), |producer| producer == *run)));
-        let thinking_owner = message.identity_message_id().is_some() && self.owns_thinking(message);
+                && producer.map_or_else(|| self.runs.finishing_text(run, message.text()), |producer| producer == *run)));
         let owner = message.role() == MessageRole::Assistant && message.identity_message_id().is_some() && !message.is_imported()
             && (producer.is_some() || (message.identity_run_id().is_none() && message.has_active_run() != Some(true)))
             && finishing.is_some();
@@ -329,17 +321,17 @@ impl Body {
                 "runHash": message.identity_run_id().map(trace::fingerprint), "eventRunHash": message.event_run_id().map(trace::fingerprint),
                 "sdkSequence": message.identity_sequence(), "activeRunHash": self.live_run().map(trace::fingerprint),
                 "producerRunHash": producer.map(trace::fingerprint), "finishingRunHash": finishing.map(trace::fingerprint),
-                "previous": previous, "owner": owner, "thinkingOwner": thinking_owner, "imported": message.is_imported(),
+                "previous": previous, "owner": owner, "imported": message.is_imported(),
                 "importSequenceProven": message.import_sequence_proven(), "hasSendIdentity": message.has_send_identity(),
                 "hasActiveRun": message.has_active_run() }));
         }
-        if (message.role() != MessageRole::User && !previous && !owner && !thinking_owner)
+        if (message.role() != MessageRole::User && !previous && !owner)
             || (message.is_imported() && !message.import_sequence_proven())
             || (message.identity_message_id().is_none() && message.identity_sequence().is_none() && !message.has_send_identity())
         {
             if trace::enabled() {
                 trace::log_unscoped("oc.body.live_message.rejected", || serde_json::json!({
-                    "reason": if message.role() != MessageRole::User && !previous && !owner && !thinking_owner { "no_message_owner" }
+                    "reason": if message.role() != MessageRole::User && !previous && !owner { "no_message_owner" }
                         else if message.is_imported() && !message.import_sequence_proven() { "unproven_import_sequence" }
                         else { "missing_sdk_or_send_identity" }, "sdkSequencePresent": message.identity_sequence().is_some(),
                     "runHash": message.identity_run_id().map(trace::fingerprint), "activeRunHash": self.live_run().map(trace::fingerprint),
@@ -401,6 +393,11 @@ impl Body {
     }
 
     pub(super) fn apply_message(&mut self, message: &Message, live: bool, cache: &OpenClawReplayProjection) -> Option<Option<String>> {
+        let existing = self.message_identity(message, live);
+        self.apply_identified_message(message, live, existing, cache)
+    }
+
+    pub(super) fn apply_identified_message(&mut self, message: &Message, live: bool, mut existing: Option<String>, cache: &OpenClawReplayProjection) -> Option<Option<String>> {
         self.reconcile_tool_refs(cache);
         if trace::enabled() {
             trace::log_unscoped("oc.body.message.input", || serde_json::json!({ "commitState": "candidate_only",
@@ -421,7 +418,6 @@ impl Body {
                 ].into_iter().flatten().collect::<Vec<_>>()) }));
         }
         let mut item = transcript_session_item(message, self.items.len(), cache);
-        let mut existing = self.message_identity(message, live);
         if message.identity_message_id().is_none() && existing.as_ref().is_some_and(|id|
             self.persisted.iter().any(|row| &row.id == id && row.identity_message_id().is_some()))
         { return Some(existing); }
@@ -483,7 +479,7 @@ impl Body {
             for stream in self.streams.values_mut() {
                 stream.provisional.retain(|entry| entry.id != id);
             }
-            if let Some(entry) = adoption { self.adopt_entry(entry, &Provisional::new(id.clone(), message), false)?; }
+            if let Some(entry) = adoption { self.adopt_entry(entry, &Provisional::new(id.clone(), message))?; }
             self.adopt_thinking(message, &id);
             if let Some(SessionItem::AssistantTurn { message_id: Some(_), segments, .. }) = self.items.iter().find(|item| item.item_id() == id) {
                 let tool_ids = segments.iter().filter_map(|segment| match segment {
@@ -528,7 +524,7 @@ impl Body {
                 }
             }
             if live { self.history_ids.remove(&id); } else { self.history_ids.insert(id.clone()); }
-            let row = Persisted { id: id.clone(), message: message.clone() };
+            let row = Persisted { id: id.clone(), message: message.clone(), source: None, terminal_owner: None };
             if let Some(index) = self.persisted.iter().position(|row| row.id == id) {
                 self.persisted[index] = row;
             } else { self.persisted.push(row); }
@@ -560,7 +556,6 @@ impl Body {
                 }
             }
         }
-        if live { self.reconcile_terminals()?; }
         self.check()?;
         Some(projected_id.filter(|id| self.items.iter().any(|item| item.item_id() == id)))
     }
@@ -634,8 +629,8 @@ impl Body {
                     stream.parts.clear();
                     let after = insertion.map(|index| index.min(self.items.len())).unwrap_or(self.items.len())
                         .checked_sub(1).map(|index| self.items[index].item_id().to_owned());
-                    stream.parts.push(Part { id, start: 0, end: text.len(), covered: 0, observed: false, content_before: false,
-                        after_tool: stream.latest_tool.clone(), before_tool: None, after, after_boundary_run_id: stream.latest_boundary_run_id.clone(), boundary_run_id: None });
+                    stream.parts.push(Part { id, start: 0, end: text.len(), after,
+                        after_boundary_run_id: stream.latest_boundary_run_id.clone(), boundary_run_id: None });
                 }
                 current.clear(); current.push_str(text);
             }
@@ -648,19 +643,15 @@ impl Body {
                     part.id = Some(format!("oc:live:{}", self.next_id));
                 }
                 part.end = current.len();
-                if !growth { part.observed = false; }
-                if !part.observed { part.covered = part.start; }
             } else if !current.is_empty() {
                 self.next_id = self.next_id.checked_add(1)?;
                 let part_start = if open.is_some() || !stream.closed.is_empty() { start } else { 0 };
                 stream.parts.push(Part { id: Some(format!("oc:live:{}", self.next_id)),
-                    start: part_start, end: current.len(), covered: start, observed: false, content_before: false,
-                    after_tool: stream.latest_tool.clone(), before_tool: None,
+                    start: part_start, end: current.len(),
                     after: self.items.last().map(|item| item.item_id().to_owned()),
                     after_boundary_run_id: stream.latest_boundary_run_id.clone(), boundary_run_id: None });
             }
             stream.boundary = false;
-            stream.body_closed = false;
             return self.reconcile_mode(run, history_end.is_none() && self.live_run() == Some(run), history_end);
         }
         Some(())
@@ -762,7 +753,8 @@ impl Body {
         } else if !text.is_empty() {
             self.items.push(SessionItem::AssistantTurn { item_id: id.to_owned(), run_id: Some(run.to_owned()), message_id: None,
                 text: text.to_owned(), status, segments: vec![SessionContent::Text { text: text.to_owned() }] });
-            self.streams.entry(run.to_owned()).or_default().provisional.push(Provisional::commentary(id, run));
+            let stream = self.streams.entry(run.to_owned()).or_default();
+            stream.provisional.push(Provisional::commentary(id, run, stream.latest_boundary_run_id.clone()));
         }
         self.reconcile(run)?;
         self.check()?;
@@ -798,7 +790,6 @@ impl Body {
     fn accept_live(&mut self, run: &str) {
         if self.status(run) == ItemStatus::Streaming && self.live_run.as_deref().is_none_or(|current| current == run) {
             self.live_run = Some(run.to_owned());
-            if let Some(stream) = self.streams.get_mut(run) { stream.terminal_observed = false; }
         }
     }
 
@@ -813,7 +804,7 @@ impl Body {
 
     fn check(&mut self) -> Option<()> {
         placement::compose(&mut self.items, &self.persisted);
-        while self.items.len() + self.streams.values().filter(|stream| stream.inferred.is_some()).count() > 200 {
+        while self.items.len() > 200 {
             if trace::enabled() {
                 let available = self.items.iter().any(|item| match item {
                     SessionItem::AssistantTurn { run_id, status, .. } => matches!(status, ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted)
@@ -838,7 +829,6 @@ impl Body {
             if !self.evicted.iter().any(|id| id == item.item_id()) { self.evicted.push(item.item_id().to_owned()); }
             self.history_ids.remove(item.item_id());
             self.persisted.retain(|row| row.id != item.item_id());
-            self.evict_inferred(item.item_id());
         }
         self.history_ids.retain(|id| self.items.iter().any(|item| item.item_id() == id)
             || self.persisted.iter().any(|row| &row.id == id));
@@ -860,7 +850,6 @@ impl Body {
         }
         self.streams.retain(|run, stream| visible.iter().any(|item| matches!(item, SessionItem::AssistantTurn { run_id: Some(id), .. } if id == run))
             || stream.thinking.iter().any(|thinking| thinking.replacement.as_ref().is_some_and(|id| visible.iter().any(|item| item.item_id() == id)))
-            || stream.inferred.is_some()
             || !self.terminal.iter().any(|(id, _)| id == run)
             || (self.terminal_marker.as_ref().is_some_and(|marker| &marker.run_id == run)
                 && stream.anchors.iter().any(|id| self.retired.contains(id))));
@@ -872,13 +861,12 @@ impl Body {
             let index = self.terminal.iter().position(|(run, _)| !visible.iter().any(|item| matches!(item, SessionItem::AssistantTurn { run_id: Some(id), .. } if id == run)))?;
             self.terminal.remove(index);
         }
-        self.accepted_finals.retain(|run| self.streams.contains_key(run) || self.terminal.iter().any(|(id, _)| id == run));
         self.retired.retain(|id| self.streams.values().any(|stream| stream.all_parts().any(|part| part.id.as_ref() == Some(id))
             || stream.anchors.contains(&id)));
         if trace::enabled() {
-            let valid = self.items.len() + self.streams.values().filter(|stream| stream.inferred.is_some()).count() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
+            let valid = self.items.len() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
                 && self.terminal.len() <= 200 && self.retired.len() <= 200
-                && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                    && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 200 && stream.thinking_bytes() <= 1_000_000);
+                && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200 && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 200 && stream.thinking_bytes() <= 1_000_000);
             trace::log_unscoped(if valid { "oc.body.check.accepted" } else { "oc.body.check.failed" }, || serde_json::json!({ "commitState": "candidate_only",
                 "reason": if valid { "within_budget" } else { "budget_exceeded" }, "itemsCount": self.items.len(),
                 "persistedCount": self.persisted.len(), "streamsCount": self.streams.len(), "terminalCount": self.terminal.len(), "retiredCount": self.retired.len(),
@@ -894,9 +882,9 @@ impl Body {
                     "textExceeded": stream.text_bytes() > 1_000_000, "thinkingExceeded": stream.thinking.len() > 200 || stream.thinking_bytes() > 1_000_000,
                 })).collect::<Vec<_>>() }));
         }
-        (self.items.len() + self.streams.values().filter(|stream| stream.inferred.is_some()).count() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
+        (self.items.len() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
             && self.terminal.len() <= 200 && self.retired.len() <= 200
-            && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 200 && stream.thinking_bytes() <= 1_000_000))
+            && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200 && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 200 && stream.thinking_bytes() <= 1_000_000))
             .then_some(())
     }
 

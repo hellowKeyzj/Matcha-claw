@@ -255,7 +255,6 @@ impl Activity {
     }
 
     pub fn restore(snapshot: ActivitySnapshot) -> Result<Self, RestoreActivityError> {
-        validate_snapshot(&snapshot)?;
         let activity = Self {
             facts: snapshot.facts,
             phase: snapshot.phase.into_phase(),
@@ -265,15 +264,25 @@ impl Activity {
             native_terminal_claim: snapshot.native_terminal_claim
                 .map(ActivityClaimSnapshot::into_claim),
         };
-        if !activity.valid_native_terminal_claim()
-            || activity
+        activity.validate_restored()?;
+        Ok(activity)
+    }
+
+    pub(crate) fn next_claim_generation(&self) -> u64 {
+        self.next_claim_generation
+    }
+
+    pub(crate) fn validate_restored(&self) -> Result<(), RestoreActivityError> {
+        validate_activity(self)?;
+        if !self.valid_native_terminal_claim()
+            || self
                 .settlement_proof
                 .as_ref()
-                .is_some_and(|proof| !proof.valid_for(&activity))
+                .is_some_and(|proof| !proof.valid_for(self))
         {
             return Err(RestoreActivityError::TerminalAttemptMismatch);
         }
-        Ok(activity)
+        Ok(())
     }
 }
 
@@ -362,61 +371,61 @@ impl ActivityDispatchSnapshot {
     }
 }
 
-fn validate_snapshot(snapshot: &ActivitySnapshot) -> Result<(), RestoreActivityError> {
-    snapshot
+fn validate_activity(activity: &Activity) -> Result<(), RestoreActivityError> {
+    activity
         .facts
         .validate()
         .map_err(RestoreActivityError::InvalidRequest)?;
 
-    if snapshot.next_claim_generation == 0 || snapshot.next_claim_generation == u64::MAX {
+    if activity.next_claim_generation == 0 || activity.next_claim_generation == u64::MAX {
         return Err(RestoreActivityError::InvalidNextClaimGeneration);
     }
-    if snapshot.completed_attempts > snapshot.facts.max_attempts {
+    if activity.completed_attempts > activity.facts.max_attempts {
         return Err(RestoreActivityError::InvalidCompletedAttempts);
     }
 
-    let claim_generation = u64::from(snapshot.completed_attempts) + 1;
+    let claim_generation = u64::from(activity.completed_attempts) + 1;
     let next_generation_after_claim = claim_generation + 1;
 
-    match &snapshot.phase {
-        ActivityPhaseSnapshot::Pending => {
-            if snapshot.completed_attempts != 0 || snapshot.next_claim_generation != 1 {
+    match &activity.phase {
+        ActivityPhase::Pending => {
+            if activity.completed_attempts != 0 || activity.next_claim_generation != 1 {
                 return Err(RestoreActivityError::PendingAttemptMismatch);
             }
         }
-        ActivityPhaseSnapshot::Claimed(claim) => {
-            validate_active_claim(snapshot, claim).map_err(|error| match error {
+        ActivityPhase::Claimed(claim) => {
+            validate_active_claim(activity, claim).map_err(|error| match error {
                 ActiveClaimError::Attempt => RestoreActivityError::ClaimedAttemptMismatch,
                 ActiveClaimError::Generation => RestoreActivityError::ClaimedGenerationMismatch,
             })?;
         }
-        ActivityPhaseSnapshot::Dispatched(dispatch) => {
-            validate_active_claim(snapshot, dispatch.claim()).map_err(|error| match error {
+        ActivityPhase::Dispatched(dispatch) => {
+            validate_active_claim(activity, dispatch.claim()).map_err(|error| match error {
                 ActiveClaimError::Attempt => RestoreActivityError::DispatchedAttemptMismatch,
                 ActiveClaimError::Generation => RestoreActivityError::DispatchedGenerationMismatch,
             })?;
         }
-        ActivityPhaseSnapshot::RetryScheduled { .. } => {
-            if snapshot.completed_attempts == 0
-                || snapshot.completed_attempts >= snapshot.facts.max_attempts
-                || snapshot.next_claim_generation != claim_generation
+        ActivityPhase::RetryScheduled { .. } => {
+            if activity.completed_attempts == 0
+                || activity.completed_attempts >= activity.facts.max_attempts
+                || activity.next_claim_generation != claim_generation
             {
                 return Err(RestoreActivityError::TerminalAttemptMismatch);
             }
         }
-        ActivityPhaseSnapshot::TerminalObserved { .. }
-        | ActivityPhaseSnapshot::Completed { .. }
-        | ActivityPhaseSnapshot::Failed { .. }
-        | ActivityPhaseSnapshot::OutcomeUnknown { .. } => {
-            if snapshot.completed_attempts == 0
-                || snapshot.next_claim_generation != claim_generation
+        ActivityPhase::TerminalObserved { .. }
+        | ActivityPhase::Completed { .. }
+        | ActivityPhase::Failed { .. }
+        | ActivityPhase::OutcomeUnknown { .. } => {
+            if activity.completed_attempts == 0
+                || activity.next_claim_generation != claim_generation
             {
                 return Err(RestoreActivityError::TerminalAttemptMismatch);
             }
         }
-        ActivityPhaseSnapshot::Cancelled { .. } => {
-            if snapshot.next_claim_generation != claim_generation
-                && snapshot.next_claim_generation != next_generation_after_claim
+        ActivityPhase::Cancelled { .. } => {
+            if activity.next_claim_generation != claim_generation
+                && activity.next_claim_generation != next_generation_after_claim
             {
                 return Err(RestoreActivityError::TerminalAttemptMismatch);
             }
@@ -431,19 +440,19 @@ enum ActiveClaimError {
 }
 
 fn validate_active_claim(
-    snapshot: &ActivitySnapshot,
-    claim: &ActivityClaimSnapshot,
+    activity: &Activity,
+    claim: &ActivityClaim,
 ) -> Result<(), ActiveClaimError> {
-    if snapshot.completed_attempts >= snapshot.facts.max_attempts
-        || claim.activity_id() != &snapshot.facts.activity_id
-        || claim.attempt() != snapshot.completed_attempts + 1
+    if activity.completed_attempts >= activity.facts.max_attempts
+        || claim.activity_id() != &activity.facts.activity_id
+        || claim.attempt() != activity.completed_attempts + 1
     {
         return Err(ActiveClaimError::Attempt);
     }
-    let claim_generation = u64::from(snapshot.completed_attempts) + 1;
+    let claim_generation = u64::from(activity.completed_attempts) + 1;
     let next_generation_after_claim = claim_generation + 1;
     if claim.generation() != claim_generation
-        || snapshot.next_claim_generation != next_generation_after_claim
+        || activity.next_claim_generation != next_generation_after_claim
     {
         return Err(ActiveClaimError::Generation);
     }

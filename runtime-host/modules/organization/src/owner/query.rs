@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use organization::{
-    ActivityId, DeliveryId, GraphDefinition, GraphRunId, NativeTerminalReceiptTarget,
+    DeliveryId, GraphDefinition, GraphRunId, NativeTerminalReceiptTarget,
     ResumeOutcome, TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamRunQuery,
     TeamRunQueryOutcome,
     package::{TeamSkillDependencyPlanResult, TeamSkillPackageValidation, TeamSkillSelectionId},
@@ -14,9 +14,12 @@ use organization::{
 
 use crate::application::start_gate_control::{StartGatePromptPlan, StartGateRuntimeBindingLookup};
 
-use super::team_run::{ArmedTrigger, TeamRunActivityTarget};
+use super::team_run::ArmedTrigger;
 
 pub(crate) enum OrganizationQuery {
+    TeamPromptSettings {
+        reply: crate::call::CallReply<Result<crate::prompts::TeamPromptSettings, crate::TeamPromptSettingsError>>,
+    },
     WorkflowRunTeam {
         run_id: GraphRunId,
         reply: tokio::sync::oneshot::Sender<Option<TeamId>>,
@@ -43,6 +46,22 @@ pub(crate) enum OrganizationQuery {
         team_id: TeamId,
         reply: crate::call::CallReply<Result<Vec<crate::TeamRunListEntry>, crate::StoreFault>>,
     },
+    RunWorkspaceBinding {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        endpoint: crate::RuntimeEndpointReference,
+        access: crate::RunWorkspaceAccess,
+        reply: tokio::sync::oneshot::Sender<Result<Option<crate::RunWorkspaceBinding>, crate::StoreFault>>,
+    },
+    TeamMessageFileValidation {
+        identity: platform::endpoint::runtime_address::SessionIdentity,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
+        native_run_id: String,
+        delivery_context: Option<(DeliveryId, crate::EndpointSessionId)>,
+        native_request_id: Option<String>,
+        assistant_texts: Vec<String>,
+        reply: tokio::sync::oneshot::Sender<Result<Option<crate::run::workspace::RunFileValidationPlan>, crate::StoreFault>>,
+    },
     TaskInspect {
         identity: crate::task_execution::TaskExecutionIdentity,
         reply: crate::call::CallReply<(
@@ -68,7 +87,15 @@ pub(crate) enum OrganizationQuery {
         reply: crate::call::CallReply<(
             Option<TeamRunPublicSnapshotQueryOutcome>,
             Option<crate::TeamCreationFailure>,
+            Option<Vec<crate::RoleSessionReceipt>>,
         )>,
+    },
+    NodeReviewHistory {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        node_id: crate::NodeId,
+        query: crate::run::public_projection::TeamNodeReviewHistoryQuery,
+        reply: crate::call::CallReply<Result<Option<crate::run::public_projection::TeamNodeReviewHistoryResult>, crate::StoreFault>>,
     },
     TeamRunDiagnostics {
         run_id: GraphRunId,
@@ -85,6 +112,7 @@ pub(crate) enum OrganizationQuery {
     },
     StartGatePromptPlan {
         lookup: StartGateRuntimeBindingLookup,
+        inject_prompt: bool,
         resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
         trace_id: Option<String>,
         reply: tokio::sync::oneshot::Sender<
@@ -130,16 +158,15 @@ pub(crate) enum OrganizationQuery {
         team_id: TeamId,
         reply: crate::call::CallReply<Vec<ResumeOutcome>>,
     },
-    PendingRunActivityIds {
-        run_id: GraphRunId,
-        now: u64,
-        reply: tokio::sync::oneshot::Sender<Vec<ActivityId>>,
-    },
     NativeDeliveryByRun {
+        identity: platform::endpoint::runtime_address::SessionIdentity,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
         native_run_id: String,
         reply: tokio::sync::oneshot::Sender<Option<DeliveryId>>,
     },
     TeamMessageTerminalContext {
+        identity: platform::endpoint::runtime_address::SessionIdentity,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
         native_run_id: String,
         reply: tokio::sync::oneshot::Sender<Option<organization::TeamMessageTerminalContext>>,
     },
@@ -149,40 +176,8 @@ pub(crate) enum OrganizationQuery {
     ActiveRunIds {
         reply: tokio::sync::oneshot::Sender<Vec<GraphRunId>>,
     },
-    ActivityTarget {
-        activity_id: ActivityId,
-        reply: tokio::sync::oneshot::Sender<Option<TeamRunActivityTarget>>,
-    },
     MatchaTerminalTarget {
         delivery_id: DeliveryId,
         reply: tokio::sync::oneshot::Sender<Option<NativeTerminalReceiptTarget>>,
     },
-}
-
-impl OrganizationQuery {
-    pub(crate) async fn call_running(&self) -> bool {
-        match self {
-            Self::TeamSkillValidate { reply, .. } => reply.running().await,
-            Self::TeamSkillDependencyPlan { reply, .. } => reply.running().await,
-            Self::TeamSkillSelectionValidate { reply, .. } => reply.running().await,
-            Self::TeamSkillSelectionDependencyPlan { reply, .. } => reply.running().await,
-            Self::RunList { reply, .. } => reply.running().await,
-            Self::RunSnapshot { reply, .. } => reply.running().await,
-            Self::TaskInspect { reply, .. } => reply.running().await,
-            Self::TeamRunPublicProjection { reply, .. } => reply.running().await,
-            Self::TeamRunPublicSnapshot { reply, .. } => reply.running().await,
-            Self::TeamRunDiagnostics { reply, .. } => reply.running().await,
-            Self::RoleSessions { reply, .. } => reply.running().await,
-            Self::RoleSessionReceipts { reply, .. } => reply.running().await,
-            Self::TriggerList { reply, .. } => reply.running().await,
-            Self::GraphContext { reply, .. } => reply.running().await,
-            Self::GraphDefinition { reply, .. } => reply.running().await,
-            Self::GraphYaml { reply, .. } => reply.running().await,
-            Self::TaskBoardRead { reply, .. } => reply.running().await,
-            Self::PendingApprovals { reply, .. } => reply.running().await,
-            Self::NodePromptRetryDue { reply, .. } => reply.running().await,
-            Self::Resume { reply, .. } => reply.running().await,
-            _ => true
-        }
-    }
 }

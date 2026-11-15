@@ -182,22 +182,48 @@ enum Protocol {
 }
 
 impl Protocol {
-    fn capabilities(self, model: &ProviderModel, kind: Kind) -> Result<Capabilities, Failure> {
+    fn default_endpoint(self) -> &'static str {
         match self {
-            Self::OpenAi => openai::capabilities(model, kind),
-            Self::Google => google::capabilities(model, kind),
-            Self::OpenRouter => openrouter::capabilities(model, kind),
-            Self::DashScope => dashscope::capabilities(model, kind),
+            Self::OpenAi => "https://api.openai.com/v1",
+            Self::Google => "https://generativelanguage.googleapis.com/v1beta",
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::DashScope => "https://dashscope.aliyuncs.com/api/v1",
+            Self::Ark => "https://ark.cn-beijing.volces.com/api/v3",
+        }
+    }
+
+    fn endpoint_validates_options(self, endpoint: &Url) -> bool {
+        let default = Url::parse(self.default_endpoint()).expect("default media endpoint is valid");
+        endpoint.origin() != default.origin()
+            || endpoint.path().trim_end_matches('/') != default.path().trim_end_matches('/')
+    }
+
+    fn capabilities(
+        self,
+        model: &ProviderModel,
+        kind: Kind,
+        endpoint_validates_options: bool,
+    ) -> Result<Capabilities, Failure> {
+        match self {
+            Self::OpenAi => openai::capabilities(model, kind, endpoint_validates_options),
+            Self::Google => google::capabilities(model, kind, endpoint_validates_options),
+            Self::OpenRouter => openrouter::capabilities(model, kind, endpoint_validates_options),
+            Self::DashScope => dashscope::capabilities(model, kind, endpoint_validates_options),
             Self::Ark => ark::capabilities(model, kind),
         }
     }
 
-    fn validate(self, model: &ProviderModel, request: &Request) -> Result<(), Failure> {
+    fn validate(
+        self,
+        model: &ProviderModel,
+        request: &Request,
+        endpoint_validates_options: bool,
+    ) -> Result<(), Failure> {
         match self {
-            Self::OpenAi => openai::validate(model, request),
-            Self::Google => google::validate(model, request),
-            Self::OpenRouter => openrouter::validate(model, request),
-            Self::DashScope => dashscope::validate(model, request),
+            Self::OpenAi => openai::validate(model, request, endpoint_validates_options),
+            Self::Google => google::validate(model, request, endpoint_validates_options),
+            Self::OpenRouter => openrouter::validate(model, request, endpoint_validates_options),
+            Self::DashScope => dashscope::validate(model, request, endpoint_validates_options),
             Self::Ark => ark::validate(model, request),
         }
     }
@@ -209,6 +235,7 @@ impl Protocol {
         credential: &LlmCredential,
         model: &ProviderModel,
         request: Request,
+        endpoint_validates_options: bool,
     ) -> Result<Output, Failure> {
         match self {
             Self::OpenAi => openai::generate(client, endpoint, credential, model, request).await,
@@ -217,7 +244,15 @@ impl Protocol {
                 openrouter::generate(client, endpoint, credential, model, request).await
             }
             Self::DashScope => {
-                dashscope::generate(client, endpoint, credential, model, request).await
+                dashscope::generate(
+                    client,
+                    endpoint,
+                    credential,
+                    model,
+                    request,
+                    endpoint_validates_options,
+                )
+                .await
             }
             Self::Ark => ark::generate(client, endpoint, credential, model, request).await,
         }
@@ -312,14 +347,22 @@ pub(crate) async fn generate(
         request.selection_id.as_deref(),
     )?;
     let protocol = protocol(account)?;
-    // Validate options before resolving a credential or starting any charged submission.
-    protocol.validate(model, &request)?;
     let endpoint = endpoint(account, protocol)?;
+    let endpoint_validates_options = protocol.endpoint_validates_options(&endpoint);
+    // Validate options before resolving a credential or starting any charged submission.
+    protocol.validate(model, &request, endpoint_validates_options)?;
     let client = client.ok_or(Failure::ProviderUnavailable)?;
     let execution = async {
         let credential = credential(account, resolver).await?;
         protocol
-            .generate(client, &endpoint, &credential, model, request)
+            .generate(
+                client,
+                &endpoint,
+                &credential,
+                model,
+                request,
+                endpoint_validates_options,
+            )
             .await
     };
     tokio::select! {
@@ -352,13 +395,6 @@ async fn credential(
 }
 
 fn endpoint(account: &ProviderAccount, protocol: Protocol) -> Result<Url, Failure> {
-    let default_endpoint = match protocol {
-        Protocol::OpenAi => "https://api.openai.com/v1",
-        Protocol::Google => "https://generativelanguage.googleapis.com/v1beta",
-        Protocol::OpenRouter => "https://openrouter.ai/api/v1",
-        Protocol::DashScope => "https://dashscope.aliyuncs.com/api/v1",
-        Protocol::Ark => "https://ark.cn-beijing.volces.com/api/v3",
-    };
     let endpoint = match account.configuration().kind() {
         ProviderAccountKind::Chat => provider_execution_endpoint(account)
             .map_err(|_| Failure::Unsupported)?
@@ -368,7 +404,7 @@ fn endpoint(account: &ProviderAccount, protocol: Protocol) -> Result<Url, Failur
             .configuration()
             .endpoint()
             .map(|endpoint| endpoint.as_str())
-            .unwrap_or(default_endpoint)
+            .unwrap_or(protocol.default_endpoint())
             .to_owned(),
     };
     wire::endpoint(&endpoint, protocol)

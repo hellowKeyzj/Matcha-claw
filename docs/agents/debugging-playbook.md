@@ -166,6 +166,132 @@ runtime integration、connector status、provider SDK、gateway RPC、MCP/stdin-
 
 默认定位顺序由 Diagnostic Patterns 承载。完整案例只在仍会改变默认第一轮定位顺序时保留在本文主体；已被 pattern 覆盖的案例迁移到 [debugging-case-archive.md](./debugging-case-archive.md)。
 
+### Case: Organization schema 升级被包装为 bootstrap 配置错误
+
+#### Status
+
+active
+
+#### Source incident
+
+2026-11-12，TeamRun 从节点累计预算改为批次／出口返工预算，SQLite schema 从 1 升至 2；用户启动开发应用后 Host 退出。
+
+#### Symptom
+
+只显示 `runtime-host bootstrap configuration is invalid`，外层随后报 `Runtime-host process failed`，无法区分配置、目录与组织数据版本。
+
+#### Real minimum loop
+
+Electron 发送 bootstrap → Host `into_parts` 打开 Organization SQLite → store 校 schema → 回报启动结果。现场只读 `PRAGMA user_version` 为 1，当前 store 明确拒绝 1 并返回 `MigrationRequired`；Host 将该错误映射为无来源的 `BootstrapError`。
+
+#### Wrong path taken
+
+只提供显式离线迁移命令，没有闭合已有用户的应用升级流程；又保留了用户已不需要的旧 log 探测／迁移入口。不能仅凭 bootstrap 文案认定 JSON 配置坏了，也不能让用户删除数据库或手改版本号。
+
+#### Correct first-round plan
+
+同时核 bootstrap producer／consumer、实际使用的存储路径、数据库版本与拒绝分支；只读现场版本，不启动 recovery 或重放 native effect。区分历史 log 是否被访问，不能因其曾存在就归因于它。
+
+#### Fix boundary
+
+升级责任属于 Organization store 的 schema 升级与原启动结果链，不在 Renderer 吞错。只保留 SQLite 运行路径；可机械迁移的结构与无法无损推导的新业务额度分开，后者需要明确策略，不静默换算或清历史。
+
+#### Verification closure
+
+现场 SQLite v1 与旧 log 不存在已只读确认；旧 log 生产恢复／迁移及启动探测已删除。当前仍只有 SQLite v1→v2 显式离线转换；自动升级、业务额度确认与真实应用恢复尚未实现／验收。随后用户明确表示未发布且无需保留数据，授权本次重置；确认Host未运行后仅删除Organization的state.sqlite／-wal／-shm，其他目录与native数据保留。该特定授权不构成默认删库策略，且未证明重置后应用已启动。
+
+#### Reusable rule
+
+schema 升级的交付包含已有数据的升级体验，而不只是新库可用。使用 DP-001 的真实入口／双方协议归因，保留足以定位具体拒绝边界的安全错误；结构迁移成功不等于业务语义可无损推导。
+
+#### Applies to
+
+持久化格式升级、bootstrap 统一错误及旧数据导致的启动失败。
+
+#### Does not apply to
+
+OpenClaw 启动未就绪时提前关闭的排除场景；也不授权自动修改用户数据库。
+
+### Case: Windows Host PDB LIMIT 与运行期启动失败分层
+
+#### Status
+
+active
+
+#### Source incident
+
+2026-11-12，用户开发构建在最终 Host 链接报 `LNK1318: PDB LIMIT (12)`、Cargo101；此前已有独立的 Organization SQLite版本启动失败。
+
+#### Real minimum loop
+
+`pnpm dev` → `scripts/dev.mjs` → 原生build脚本 → Cargo／MSVC最终链接 → 复制dist → Electron启动。当前失败停在链接、尚未进入该次Host运行；只读E盘余0.240GiB，失败PDB为0.741GiB、header页4096，不将未完成产物当作成功二进制或“大于4GiB”的证据。
+
+#### Correct first-round plan
+
+先从最深层错误区分编译、链接、投递与运行；核失败产物、目标profile、实际linker参数和磁盘余量。LIMIT字样不能直接证明磁盘错误，低余量也不能支持无界重试、cargo clean或关闭所有调试信息。
+
+#### Fix boundary
+
+Host自身MSVC最终链接单点设置 `/PDBPAGESIZE:16384`，不向所有crate注入RUSTFLAGS、不新增构建入口；实际大Host重链与磁盘空间分别验证，不触业务库或dist。
+
+#### Verification closure
+
+Cargo metadata发现Host构建脚本；真实小规模MSVC链接产出的PDB页16384，脚本MSVC／GNU分支均通过、exit0／Job0，自有临时产物已清。E盘资源不足，完整Host重链与应用启动未验；此前schema自动升级仍未实现，两处不能相互替代验收。
+
+#### Reusable rule
+
+“起不来”先落到真实失败阶段；保留构建、投递、启动及业务恢复各自证据，未完成调试产物不证明成功，也不为恢复启动盲删缓存／数据。
+
+#### Applies to
+
+Windows MSVC PDB LIMIT、大型Rust Host链接失败、磁盘资源阻塞。
+
+#### Does not apply to
+
+证明本例LIMIT的唯一内部原因；该结论需资源恢复后的原大型链接验证，不能仅凭小载具或页大小推出。
+
+### Case: Organization async 分派耗尽 Windows worker 栈
+
+#### Status
+
+active
+
+#### Source incident
+
+2026-11-14，真实同 Run 的 OpenClaw＋Matcha Agent 已完成三段文件交接；第二 Run 两侧 running 时请求取消，Host 退出，多个页面随后 unavailable。
+
+#### Real minimum loop
+
+Renderer `team.runCancel` → 原 capability／HTTP／CallScope → Organization command dispatcher → `run_cancel` → `run_native_lease` → Foundation mailbox send → native 取消与原 Store 结算。此次崩溃停在 lease 查询的 mpsc send poll 序言，尚未成功发送 RunCancel，不能归为两个 runtime 的 native abort 故障。
+
+#### Root cause
+
+同次 Windows Event、dump、匹配 EXE／PDB 与 PE unwind／反汇编确认：旧通用 Team async dispatcher 的 poll 单帧 963,680 字节，叠加 HTTP、审计、trace、capability 与 lease/send 耗尽实际 2 MiB worker 栈。future 搬运尺寸为 15,880 字节，不能用 future 本体大小代替 poll 栈帧；未发现本次由取消递归或 drop 递归触发的证据。
+
+#### Correct first-round plan
+
+先核故障工件与 PDB 身份、实际线程栈边界及最后业务阶段，再分别测构造／搬运、poll、drop 和同步嵌套累计。异步 await 不保证父 poll 先退栈；源码出现 Box 或旧符号消失也不证明峰值已经下降。
+
+#### Fix boundary
+
+在真实异质分派边界同步选择操作，各分支独立 future；构造同样需隔离，非内联闭包工厂应接收 `FnOnce() -> Future`，不能先构造全部分支 future 再传给装箱函数。首轮真实工件仍有352,216B同步构造帧，证明仅将每个 arm 写成 `Box::pin(async ...)` 不足以闭环。全局与 lane 状态在原 owner 生命周期内稳定持有，避免完整状态反复按值穿 Work／Completion；恢复／删除管线在 item 边界隔离。保留原 owner、准入、审计、trace、lease／slot、取消与 join，不普遍装箱、不新增 spawn，也不增线程栈或切 release 掩盖。[VERIFY: runtime-host/modules/organization/src/future.rs] [VERIFY: runtime-host/modules/organization/src/owner/handle.rs] [VERIFY: runtime-host/modules/organization/src/owner/actor.rs] [VERIFY: runtime-host/modules/organization/src/owner/native_operations.rs] [VERIFY: runtime-host/modules/organization/src/call/workflow.rs]
+
+#### Verification closure
+
+根因由原运行证据确认；第三轮同配置 dev 工件的 Team selector 构造帧6,552B、run_cancel poll5,768B、ManualTeamCreate trace poll248B（PE 口径不含返回地址）。按源码与机器 call target 核对的取消前置链固定帧小计281,920B，含返回地址但不是完整线程动态峰值。第四轮已撤回 TeamDelete 回流的 reserve／permit.send，恢复原 send_command 的准入与关闭竞争语义，同时把命令与发送 future 构造留在非内联工厂；当前匹配工件的 batch／removal item poll 分别1,608／1,288B，submit selector776B。第四轮 Clippy／Host build通过；原样回归切片仍83／84通过，唯一失败在精确修前亦复现；前轮完整库测试有156项编译错误，第四轮未重跑全库，详见 [Organization Dev Notes](../architecture-knowledge/modules/team-task-organization/dev.md)。未重启用户实例、部署 dist 或重放真实 cancel/delete；离线测量不能代替业务闭环。
+
+#### Reusable rule
+
+async 栈故障分别核 future 本体、构造／搬运、poll 与 drop，并计算同线程同步嵌套；运行期故障必须使用匹配工件，不能把离线帧改善写成实机验收。
+
+#### Applies to
+
+Rust 宽异步分派、泛型并发管线与多层 async 包装累计耗栈。
+
+#### Does not apply to
+
+要求所有 async 机械 Box／spawn，或据此归因 OpenClaw 启动未就绪时提前关闭的排除场景。
+
 ### Promoted case index
 
 - [MCP schema 超大整数上限触发模型 502](./debugging-case-archive.md#case-mcp-schema-超大整数上限触发模型-502) — 新增/修改工具数值 schema，或裸 API 成功而带工具请求失败时，先核已有数值精度签名；2026-11-03 首次、2026-11-07 maintenance 复发，不能据此泛化所有 502。

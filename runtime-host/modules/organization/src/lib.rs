@@ -5,12 +5,17 @@ extern crate self as organization;
 mod adapters;
 mod api;
 mod call;
+mod future;
 mod application;
 pub mod capability;
 mod owner;
+mod rework;
+pub use rework::ReworkContinueRequest;
 pub mod package;
 pub mod ports;
+pub mod prompts;
 mod store;
+pub use store::TeamPromptSettingsError;
 mod trace;
 pub mod task_execution;
 pub use task_execution::{
@@ -70,7 +75,7 @@ pub mod team {
         TeamRemoved, TeamReplaced, TeamRevision, TeamRevisionOverflow,
     };
     pub use lifecycle::{
-        MaterializationLifecycleError, MaterializationRecordOutcome, TeamMaterializationCleanup,
+        ConfirmedTeamMaterialization, MaterializationLifecycleError, MaterializationRecordOutcome, TeamMaterializationCleanup,
         TeamMaterializationLifecycle, TombstonedMaterialization,
     };
     pub use materialization::{
@@ -88,7 +93,10 @@ pub mod team {
 }
 
 pub mod run {
-    pub(crate) const MAX_SUMMARY_BYTES: usize = 4096;
+    pub(crate) fn is_valid_summary(value: &str) -> bool {
+        !value.trim().is_empty()
+            && !value.chars().any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    }
 
     #[path = "activity/mod.rs"]
     pub mod activity;
@@ -134,6 +142,8 @@ pub mod run {
     pub mod task_board;
     #[path = "trigger/mod.rs"]
     pub mod trigger;
+    #[path = "workspace.rs"]
+    pub mod workspace;
 
     pub use activity::{
         Activity, ActivityClaim, ActivityClaimOutcome, ActivityClaimSnapshot, ActivityDispatch,
@@ -219,14 +229,14 @@ pub mod run {
         RestoreLedgerError as RestoreEvidenceLedgerError,
     };
     pub use graph::{
-        AttemptId, AttemptProjection, AttemptReason, AttemptStatus, DefinitionError,
+        AttemptId, AttemptProjection, AttemptReason, AttemptStatus, BlockedRework, DefinitionError,
         DependencyMetadata, DurableDependencyMetadata, DurableEdgeDefinition, DurableGraphLayout,
         DurableNodeDefinition, DurableNodePosition, DurableWorkAssignment, EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, EdgeProjection, EdgeStatus,
         ExecutionFence, ExecutorPolicy, GraphDefinition, GraphEvent, GraphLayout, GraphPatch,
         GraphPatchError, GraphPatchOperation, GraphProjection, GraphRunId, GraphState, GraphStatus,
         GraphYamlError, InputProjection, InputReceipt, NodeAttempt,
         NodeDefinition, NodeExecutionHistory, NodeExecutionId, NodeId, NodeKind, NodeOutputPort, NodePosition,
-        NodeProjection, ReadyQueueItem, ReduceError, RestoreError, ReviewAssignment, StartTrigger,
+        NodeProjection, ReadyQueueItem, ReduceError, RestoreError, ReviewAssignment, ReworkCounterKey, StartTrigger,
         WorkAssignment, WorkflowPlan,
         WorkflowPlanCompilation, WorkflowPlanCompileError, WorkflowTask, apply_graph_patch,
         compile_workflow_plan, export_yaml, import_for_run, import_yaml, project, reduce,
@@ -254,7 +264,7 @@ pub mod run {
     };
     pub use purge::{
         GraphRunPurgeOutcome, GraphRunPurgeRejection, GraphRunPurgeUnknown, NativeDeletionEvidence,
-        NativeDeletionProof, NativeDeletionProofError, RoleSessionDeletionConfirmation,
+        NativeDeletionFailure, NativeDeletionProof, NativeDeletionProofError, RoleSessionDeletionConfirmation,
         TeamRunPurgeRequest,
     };
     pub(crate) use purge::purge_team_run;
@@ -269,7 +279,6 @@ pub mod run {
         OrganizationRecoveryApply, OrganizationRecoveryPlan, RecoveryQueryError,
         ReviewRecoveryStatus, ReviewRecoverySummary, RunRecoveryStatus, TeamRunRecoveryPlan,
     };
-    pub(crate) use recovery::query_team_run_recovery;
     pub use scheduler::{
         ArmedCronTrigger, CronScheduleError, CronTriggerScheduleError, DueCronTriggerPlan,
         NodePromptRetryDueInvalidReason, NodePromptRetryDueItem, NodePromptRetryDuePlan,
@@ -300,7 +309,7 @@ pub use adapters::session_terminal::{
     TeamMessageRepairSessionOutcome, TeamMessageRepairSessionPort, TeamMessageRepairSessionRequest,
 };
 pub use adapters::start_gate_send_hook::{
-    PreparedStartGateSend, StartGateNativeEndpoint, StartGateSendHook,
+    PreparedStartGateSend, StartGateSendHook,
     StartGateSendRequest,
 };
 pub use api::{
@@ -354,6 +363,7 @@ pub use ports::{
     TeamProvisionReporter, TeamProvisionStage, TeamProvisionUpdate,
     TeamCreationFailure, TeamCreationFailureReason, TeamCreationFile, TeamCreationStage,
 };
+pub use run::workspace::{InvalidRunWorkspace, RunFileValidationError, RunWorkspace, RunWorkspaceAccess, RunWorkspaceBinding};
 pub use run::delivery::{NativeRunReceiptReference, NativeTerminalStatus};
 pub use run::event::{ApprovalAction, TeamRunWake, TeamRunWakeReason};
 pub use run::lifecycle::{
@@ -390,7 +400,7 @@ pub use run::{
     GraphRunPurgeOutcome, GraphRunPurgeRejection, GraphRunPurgeUnknown, GraphState, GraphStatus,
     GraphYamlError, HumanDecision, InputProjection, InputReceipt, InvalidAttemptIdentity,
     InvalidAuthorizedGraphResolution, InvalidAuthorizedGraphResolutionReceipt, LedgerRecoverySummary, MAX_DIAGNOSTICS_COUNT, MAX_DIAGNOSTICS_STALE_EXECUTIONS,
-    NativeDeletionEvidence, NativeDeletionProof, NativeDeletionProofError,
+    NativeDeletionEvidence, NativeDeletionFailure, NativeDeletionProof, NativeDeletionProofError,
     NativeDeliveryCorrelation, NativeRunOutputResolutionError, NodeAttempt, NodeDefinition,
     NodeExecutionHistory, NodeExecutionId, NodeId, NodeKind, NodeOutputPort, NodeProjection,
     OrganizationRecoveryApply, OrganizationRecoveryPlan, ReadyQueueItem, ReadyScheduleError, RecordCommandError,
@@ -430,11 +440,14 @@ pub use run::{
     resolve_webhook_trigger, restore_oracle, settle_activity, settle_delivery,
 };
 pub(crate) use run::{
-    query_team_graph_context, query_team_run, query_team_run_diagnostics, query_team_run_recovery,
+    query_team_graph_context, query_team_run, query_team_run_diagnostics,
 };
 pub use store::{
-    DesignError, MigrationError, MigrationReport, OrganizationFactsError, OrganizationStore,
-    RuntimeGraphError, StoreFault, TeamRunExecutionScope, migrate_legacy_log,
+    DesignError, OrganizationFactsError, OrganizationStore,
+    ReworkLimitOverride, ReworkMigrationError, ReworkMigrationLimits, ReworkMigrationPreview,
+    ReworkMigrationReport, ReworkNodeMigration,
+    RuntimeGraphError, StoreFault, TeamRunExecutionScope,
+    migrate_rework_budgets, preview_rework_migration,
 };
 pub(crate) use store::{
     GraphRunFacts, NativeTerminalReceiptTarget, OrganizationFacts, RunStartGate, WorkflowTemplateFacts,
@@ -444,18 +457,13 @@ pub(crate) use store::{TeamFacts, TeamTombstoneOutcome};
 pub fn open_organization_store(
     state_dir: &std::path::Path,
 ) -> Result<OrganizationStore, StoreFault> {
-    let database = state_dir.join("organization").join("state.sqlite");
-    if !database.try_exists().map_err(|error| StoreFault::Read(error.kind()))?
-        && state_dir.join("organization-facts.log").try_exists()
-            .map_err(|error| StoreFault::Read(error.kind()))?
-    {
-        return Err(StoreFault::MigrationRequired);
-    }
-    OrganizationStore::open(database)
+    let root = platform::state_dir::CanonicalStateDir::provision_private(state_dir.join("organization"))
+        .map_err(|_| StoreFault::Commit(std::io::ErrorKind::PermissionDenied))?;
+    OrganizationStore::open(root.as_path().join("state.sqlite"))
 }
 
 pub use team::{
-    CreateTeam, InvalidMemberId, InvalidMemberName, InvalidReplaceTeam, InvalidRoleId,
+    ConfirmedTeamMaterialization, CreateTeam, InvalidMemberId, InvalidMemberName, InvalidReplaceTeam, InvalidRoleId,
     InvalidTeamCreated, InvalidTeamDefinition, InvalidTeamId, InvalidTeamListPage,
     InvalidTeamPageSize, InvalidTeamReplaced, InvalidTeamRevision, InvalidTeamRole, LEADER_ROLE_ID,
     ListTeams, MAX_TEAM_PAGE_SIZE, ManualTeamRoleBinding, MaterializationLifecycleError,
@@ -501,6 +509,7 @@ pub fn spawn_owner(
     system: &OwnerRuntimeSystem,
     input: OrganizationOwnerInput,
 ) -> (OrganizationModule, OwnedTask<()>) {
+    let runtime_directory = Arc::clone(&input.runtime_directory);
     let owner = owner::actor::OrganizationOwner::new(input);
     let command_target = owner.command_target();
     let (handle, task) = system.spawn_owner(
@@ -509,7 +518,7 @@ pub fn spawn_owner(
     );
     let _ = command_target.set(handle.clone());
     (
-        OrganizationModule::new(OrganizationHandle::new(handle)),
+        OrganizationModule::new(OrganizationHandle::new(handle).with_runtime_directory(runtime_directory)),
         task,
     )
 }

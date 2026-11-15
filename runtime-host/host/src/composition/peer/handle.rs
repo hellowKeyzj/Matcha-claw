@@ -4,7 +4,7 @@ use foundation::execution::OwnerRuntimeHandle;
 use openclaw::gateway::request::{
     OpenClawBrowserGatewayRequest, OpenClawCanvasGatewayRequest, OpenClawMcpAppGatewayRequest,
     OpenClawProgressCardGatewayRequest, OpenClawQuestionListGatewayRequest,
-    OpenClawQuestionResolveGatewayRequest,
+    OpenClawQuestionResolveGatewayRequest, OpenClawVideoTaskRefreshGatewayRequest,
 };
 use platform::call::CallReceipt;
 use runtime_directory::{RuntimeControlLifecycleError, RuntimeDriverIdentity, call::RuntimeControlCallContext};
@@ -535,6 +535,16 @@ impl PeerHandle {
         .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
+    pub(crate) async fn open_claw_video_task_refresh(
+        &self,
+        request: OpenClawVideoTaskRefreshGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
+    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
+        self.request_query(|reply| PeerQuery::OpenClawVideoTaskRefresh { request, call, reply })
+            .await
+            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+    }
+
     async fn request_command<T>(
         &self,
         command: impl FnOnce(oneshot::Sender<T>) -> PeerCommand,
@@ -594,6 +604,12 @@ impl PeerHandle {
                 (
                     call,
                     openclaw::gateway::loopback::GatewayOperation::QuestionResolve,
+                )
+            }),
+            PeerQuery::OpenClawVideoTaskRefresh { call, .. } => call.clone().map(|call| {
+                (
+                    call,
+                    openclaw::gateway::loopback::GatewayOperation::VideoTaskRefresh,
                 )
             }),
             _ => None,

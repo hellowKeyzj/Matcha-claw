@@ -8,6 +8,7 @@ use crate::{
     TeamMaterializationCleanup, TeamMaterializationIntent, TeamMaterializationLifecycle,
     TeamMaterializationRemoval, TeamMaterializationRequest, TeamMember, TeamRevision, TeamRole,
     TombstonedMaterialization,
+    team::lifecycle::TeamMaterializationGroups,
     ports::materialization::NativeWorkspaceReceipt,
     run::{WorkflowPlan, WorkflowTask},
     store::{
@@ -20,41 +21,19 @@ use crate::{
 
 pub(in crate::store) enum TeamRecord {
     Team(TeamFacts),
-    Materialization(TeamMaterializationLifecycle),
+    Materialization(TeamMaterializationGroups),
     WorkflowTemplate(WorkflowTemplateFacts),
     WorkflowAdmission(PendingWorkflowPlanAdmission),
     PurgedRun(PurgedRunMarker),
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Body {
-    sha256: [u8; 32],
-    byte_len: u64,
-}
-
-impl Body {
-    fn put(content: &ContentStore, team: &TeamId, bytes: &[u8]) -> Result<Self, StoreFault> {
-        let reference = content.put(ContentScope::Team(team), bytes)?;
-        Ok(Self {
-            sha256: reference.sha256,
-            byte_len: reference.byte_len,
-        })
-    }
-
-    fn read(self, content: &ContentStore, team: &TeamId) -> Result<Vec<u8>, StoreFault> {
-        content.read(
-            ContentScope::Team(team),
-            &ContentRef {
-                sha256: self.sha256,
-                byte_len: self.byte_len,
-            },
-        )
-    }
-
-    fn text(self, content: &ContentStore, team: &TeamId) -> Result<String, StoreFault> {
-        String::from_utf8(self.read(content, team)?).map_err(|_| StoreFault::InvalidFacts)
-    }
+fn read_text(
+    content: &ContentStore,
+    team: &TeamId,
+    reference: &ContentRef,
+) -> Result<String, StoreFault> {
+    String::from_utf8(content.read(ContentScope::Team(team), reference)?)
+        .map_err(|_| StoreFault::InvalidFacts)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -67,6 +46,8 @@ struct TeamRow {
     assignments: Vec<(String, String)>,
     revision: u64,
     tombstoned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_directory_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,7 +60,12 @@ enum Kind {
 #[serde(deny_unknown_fields)]
 struct MaterializationRow {
     team_id: String,
-    lifecycle: Lifecycle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requests: Option<Vec<Request>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<Lifecycle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lifecycle: Option<Lifecycle>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,7 +134,7 @@ struct Agent {
     tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skills: Vec<String>,
-    agents_markdown: Option<Body>,
+    agents_markdown: Option<ContentRef>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -174,7 +160,7 @@ struct RoleReceipt {
     native_workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skills: Vec<(String, [u8; 32])>,
-    agents_markdown: Option<Body>,
+    agents_markdown: Option<ContentRef>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -228,7 +214,7 @@ struct Task {
     task_id: String,
     role_id: String,
     title: String,
-    prompt: Body,
+    prompt: ContentRef,
     depends_on_task_ids: Vec<String>,
     output_artifact_kind: Option<String>,
 }
@@ -298,14 +284,38 @@ pub(in crate::store) fn encode_team(team: &TeamFacts) -> Result<StoredRecord, St
                 .collect(),
             revision: team.revision().get(),
             tombstoned: team.tombstoned(),
+            workspace_directory_name: team.workspace_directory_name().map(str::to_owned),
         },
     )
 }
 
 pub(in crate::store) fn encode_materialization(
-    lifecycle: &TeamMaterializationLifecycle,
+    materialization: &TeamMaterializationGroups,
     content: &ContentStore,
 ) -> Result<StoredRecord, StoreFault> {
+    let team = materialization.team().ok_or(StoreFault::InvalidFacts)?;
+    let groups = materialization.groups().iter().map(|group| encode_lifecycle(group, content))
+        .collect::<Result<Vec<_>, _>>()?;
+    let requests = materialization.requests.as_ref().map(|requests| requests.iter()
+        .map(|request| Request::encode(request, content)).collect::<Result<Vec<_>, _>>()).transpose()?;
+    store_record(
+        RecordKind::Materialization,
+        team.as_str(),
+        Some(team.as_str()),
+        None,
+        MaterializationRow {
+            team_id: team.as_str().to_owned(),
+            requests,
+            groups,
+            lifecycle: None,
+        },
+    )
+}
+
+fn encode_lifecycle(
+    lifecycle: &TeamMaterializationLifecycle,
+    content: &ContentStore,
+) -> Result<Lifecycle, StoreFault> {
     let team = lifecycle.team().ok_or(StoreFault::InvalidFacts)?;
     let value = match lifecycle {
         TeamMaterializationLifecycle::Requested(request) => {
@@ -352,16 +362,7 @@ pub(in crate::store) fn encode_materialization(
             }
         }
     };
-    store_record(
-        RecordKind::Materialization,
-        team.as_str(),
-        Some(team.as_str()),
-        None,
-        MaterializationRow {
-            team_id: team.as_str().to_owned(),
-            lifecycle: value,
-        },
-    )
+    Ok(value)
 }
 
 pub(in crate::store) fn encode_template(
@@ -382,7 +383,7 @@ pub(in crate::store) fn encode_template(
                     task_id: task.task_id().to_owned(),
                     role_id: task.role_id().to_owned(),
                     title: task.title().to_owned(),
-                    prompt: Body::put(content, template.team(), task.prompt().as_bytes())?,
+                    prompt: content.put(ContentScope::Team(template.team()), task.prompt().as_bytes())?,
                     depends_on_task_ids: task.depends_on_task_ids().to_vec(),
                     output_artifact_kind: task.output_artifact_kind().map(str::to_owned),
                 })
@@ -492,65 +493,34 @@ pub(in crate::store) fn decode(
                 assignments,
             )
             .map_err(|_| StoreFault::InvalidFacts)?;
-            Ok(TeamRecord::Team(TeamFacts::new(
+            let mut team = TeamFacts::new(
                 definition,
                 TeamRevision::try_new(row.revision).map_err(|_| StoreFault::InvalidFacts)?,
                 row.tombstoned,
-            )))
+            );
+            team.restore_workspace_directory_name(row.workspace_directory_name).map_err(|_| StoreFault::InvalidFacts)?;
+            Ok(TeamRecord::Team(team))
         }
         RecordKind::Materialization => {
             let row: MaterializationRow = read_record(record)?;
             check_key(record, &row.team_id, Some(&row.team_id), None)?;
             let team = TeamId::try_new(row.team_id).map_err(|_| StoreFault::InvalidFacts)?;
-            let lifecycle = match row.lifecycle {
-                Lifecycle::Requested(request) => {
-                    TeamMaterializationLifecycle::Requested(request.decode(&team, content)?)
+            let (groups, requests) = match (row.groups.is_empty(), row.lifecycle) {
+                (true, Some(lifecycle)) if row.requests.is_none() => {
+                    let lifecycle = decode_lifecycle(lifecycle, &team, content)?;
+                    let requests = lifecycle.request().cloned().map(|request| vec![request]);
+                    (vec![lifecycle], requests)
                 }
-                Lifecycle::Rejected { request, rejection } => {
-                    TeamMaterializationLifecycle::Rejected {
-                        request: request.decode(&team, content)?,
-                        rejection: rejection.into(),
-                    }
+                (false, None) => {
+                    let groups = row.groups.into_iter().map(|group| decode_lifecycle(group, &team, content))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let requests = row.requests.map(|requests| requests.into_iter()
+                        .map(|request| request.decode(&team, content)).collect::<Result<Vec<_>, _>>()).transpose()?;
+                    (groups, requests)
                 }
-                Lifecycle::OutcomeUnknown(request) => {
-                    TeamMaterializationLifecycle::OutcomeUnknown(request.decode(&team, content)?)
-                }
-                Lifecycle::Confirmed(receipt) => {
-                    TeamMaterializationLifecycle::Confirmed(receipt.decode(&team, content)?)
-                }
-                Lifecycle::TombstonedNone(request) => TeamMaterializationLifecycle::Tombstoned(
-                    TombstonedMaterialization::None(request.decode(&team, content)?),
-                ),
-                Lifecycle::TombstonedUnknown(request) => TeamMaterializationLifecycle::Tombstoned(
-                    TombstonedMaterialization::OutcomeUnknown(request.decode(&team, content)?),
-                ),
-                Lifecycle::TombstonedConfirmed { receipt, cleanup } => {
-                    let cleanup = match cleanup {
-                        Cleanup::Pending(removal) => {
-                            TeamMaterializationCleanup::Pending(removal.decode(&team, content)?)
-                        }
-                        Cleanup::Confirmed(removal) => {
-                            TeamMaterializationCleanup::Confirmed(removal.decode(&team, content)?)
-                        }
-                        Cleanup::Rejected { removal, rejection } => {
-                            TeamMaterializationCleanup::Rejected {
-                                removal: removal.decode(&team, content)?,
-                                rejection: rejection.into(),
-                            }
-                        }
-                        Cleanup::OutcomeUnknown(removal) => {
-                            TeamMaterializationCleanup::OutcomeUnknown(
-                                removal.decode(&team, content)?,
-                            )
-                        }
-                    };
-                    TeamMaterializationLifecycle::Tombstoned(TombstonedMaterialization::Confirmed {
-                        receipt: receipt.decode(&team, content)?,
-                        cleanup,
-                    })
-                }
+                _ => return Err(StoreFault::CorruptRecord),
             };
-            Ok(TeamRecord::Materialization(lifecycle))
+            Ok(TeamRecord::Materialization(TeamMaterializationGroups { requests, groups }))
         }
         RecordKind::WorkflowTemplate => {
             let row: TemplateRow = read_record(record)?;
@@ -565,7 +535,7 @@ pub(in crate::store) fn decode(
                         task.task_id,
                         task.role_id,
                         task.title,
-                        task.prompt.text(content, &team)?,
+                        read_text(content, &team, &task.prompt)?,
                         task.depends_on_task_ids,
                         task.output_artifact_kind,
                     ))
@@ -621,6 +591,46 @@ pub(in crate::store) fn decode(
     }
 }
 
+fn decode_lifecycle(
+    lifecycle: Lifecycle,
+    team: &TeamId,
+    content: &ContentStore,
+) -> Result<TeamMaterializationLifecycle, StoreFault> {
+    Ok(match lifecycle {
+        Lifecycle::Requested(request) => TeamMaterializationLifecycle::Requested(request.decode(team, content)?),
+        Lifecycle::Rejected { request, rejection } => TeamMaterializationLifecycle::Rejected {
+            request: request.decode(team, content)?, rejection: rejection.into(),
+        },
+        Lifecycle::OutcomeUnknown(request) => TeamMaterializationLifecycle::OutcomeUnknown(request.decode(team, content)?),
+        Lifecycle::Confirmed(receipt) => TeamMaterializationLifecycle::Confirmed(receipt.decode(team, content)?),
+        Lifecycle::TombstonedNone(request) => TeamMaterializationLifecycle::Tombstoned(
+            TombstonedMaterialization::None(request.decode(team, content)?),
+        ),
+        Lifecycle::TombstonedUnknown(request) => TeamMaterializationLifecycle::Tombstoned(
+            TombstonedMaterialization::OutcomeUnknown(request.decode(team, content)?),
+        ),
+        Lifecycle::TombstonedConfirmed { receipt, cleanup } => {
+            let receipt = receipt.decode(team, content)?;
+            let cleanup = match cleanup {
+                Cleanup::Pending(removal) => TeamMaterializationCleanup::Pending(removal.decode(team, content)?),
+                Cleanup::Confirmed(removal) => TeamMaterializationCleanup::Confirmed(removal.decode(team, content)?),
+                Cleanup::Rejected { removal, rejection } => TeamMaterializationCleanup::Rejected {
+                    removal: removal.decode(team, content)?, rejection: rejection.into(),
+                },
+                Cleanup::OutcomeUnknown(removal) => TeamMaterializationCleanup::OutcomeUnknown(removal.decode(team, content)?),
+            };
+            let removal = match &cleanup {
+                TeamMaterializationCleanup::Pending(removal)
+                | TeamMaterializationCleanup::Confirmed(removal)
+                | TeamMaterializationCleanup::Rejected { removal, .. }
+                | TeamMaterializationCleanup::OutcomeUnknown(removal) => removal,
+            };
+            if removal.receipt() != &receipt { return Err(StoreFault::InvalidFacts); }
+            TeamMaterializationLifecycle::Tombstoned(TombstonedMaterialization::Confirmed { receipt, cleanup })
+        }
+    })
+}
+
 impl Request {
     fn encode(
         request: &TeamMaterializationRequest,
@@ -645,7 +655,7 @@ impl Request {
                     skills: agent.skills().to_vec(),
                     agents_markdown: agent
                         .agents_markdown()
-                        .map(|text| Body::put(content, intent.team(), text.as_bytes()))
+                        .map(|text| content.put(ContentScope::Team(intent.team()), text.as_bytes()))
                         .transpose()?,
                 })
             })
@@ -683,7 +693,7 @@ impl Request {
                 }
                 .with_tools(agent.tools).with_skills(agent.skills);
                 if let Some(body) = agent.agents_markdown {
-                    value = value.with_agents_markdown(body.text(content, team)?);
+                    value = value.with_agents_markdown(read_text(content, team, &body)?);
                 }
                 Ok(value)
             })
@@ -730,7 +740,7 @@ impl Receipt {
                         .map(|workspace| workspace.as_str().to_owned()),
                     agents_markdown: role
                         .agents_markdown()
-                        .map(|text| Body::put(content, receipt.team(), text.as_bytes()))
+                        .map(|text| content.put(ContentScope::Team(receipt.team()), text.as_bytes()))
                         .transpose()?,
                 })
             })
@@ -774,7 +784,7 @@ impl Receipt {
                 };
                 receipt = receipt.with_skills(role.skills);
                 if let Some(body) = role.agents_markdown {
-                    receipt = receipt.with_agents_markdown(body.text(content, team)?);
+                    receipt = receipt.with_agents_markdown(read_text(content, team, &body)?);
                 }
                 Ok(receipt)
             })

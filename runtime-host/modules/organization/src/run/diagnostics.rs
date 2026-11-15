@@ -8,8 +8,9 @@ use crate::{
         approval::{ApprovalDecision, ApprovalResolutionCause, ApprovalStatus},
         decision::TeamDecisionType,
         delivery::{DeliveryFailure, DeliveryPhase, TerminalObservationResolution},
-        graph::{AttemptReason, AttemptStatus, GraphStatus, project},
+        graph::{AttemptReason, AttemptStatus, GraphStatus, graph_status},
         lifecycle::GraphRunLifecycleState,
+        query::runtime_is_unknown,
     },
 };
 
@@ -562,9 +563,9 @@ fn project_diagnostics(
     let retry = project_retry_summary(facts, run_id, run, &delivery);
     let approval = project_approval_summary(facts, run_id);
     let status = TeamRunDiagnosticsStatus {
-        graph: diagnostics_graph_status(project(run.graph()).status),
+        graph: diagnostics_graph_status(graph_status(run.graph())),
         lifecycle: diagnostics_lifecycle_status(run.lifecycle().state()),
-        confidence: runtime_confidence(facts, run_id, run),
+        confidence: runtime_confidence(facts, run),
     };
 
     let mut counts = BTreeMap::new();
@@ -581,31 +582,19 @@ fn project_diagnostics(
     counts.insert("approvals".to_owned(), approval.total);
     counts.insert(
         "decisions".to_owned(),
-        bounded_count(
-            facts
-                .decisions()
-                .filter(|decision| decision.run_id() == run_id.as_str()),
-        ),
+        bounded_count(facts.decision_ledger().decisions_for_run(run_id.as_str())),
     );
     counts.insert(
         "evidence".to_owned(),
-        bounded_count(
-            facts
-                .evidence_records()
-                .filter(|record| record.run_id() == run_id.as_str()),
-        ),
+        bounded_count(facts.evidence().records_for_run(run_id.as_str())),
     );
     counts.insert(
         "artifacts".to_owned(),
-        bounded_count(
-            facts
-                .artifacts()
-                .filter(|record| record.run_id() == run_id.as_str()),
-        ),
+        bounded_count(facts.artifacts_for_run(run_id.as_str())),
     );
     counts.insert(
         "events".to_owned(),
-        bounded_count(facts.events_for_run(run_id.as_str()).into_iter()),
+        bounded_count(facts.events().events_for_run(run_id.as_str())),
     );
 
     TeamRunDiagnosticsProjection {
@@ -630,9 +619,7 @@ fn project_delivery_summary(
 ) -> TeamRunDiagnosticsDeliverySummary {
     let mut summary = TeamRunDiagnosticsDeliverySummary::default();
     for delivery in facts
-        .deliveries()
-        .deliveries()
-        .filter(|delivery| delivery.facts().run_id == run_id.as_str())
+        .deliveries_for_run(run_id.as_str())
         .take(MAX_DIAGNOSTICS_COUNT as usize)
     {
         increment(&mut summary.total);
@@ -677,9 +664,8 @@ fn project_retry_summary(
             .flat_map(|history| history.attempts().iter())
             .filter(|attempt| matches!(attempt.reason(), AttemptReason::Rework)),
     );
-    let retry_decisions = bounded_count(facts.decisions().filter(|decision| {
-        decision.run_id() == run_id.as_str() && decision.decision() == TeamDecisionType::Retry
-    }));
+    let retry_decisions = bounded_count(facts.decision_ledger().decisions_for_run(run_id.as_str())
+        .filter(|decision| decision.decision() == TeamDecisionType::Retry));
     TeamRunDiagnosticsRetrySummary {
         rework_attempts,
         retry_scheduled: delivery.retry_scheduled,
@@ -698,8 +684,7 @@ fn project_approval_summary(
 ) -> TeamRunDiagnosticsApprovalSummary {
     let mut summary = TeamRunDiagnosticsApprovalSummary::default();
     for approval in facts
-        .approvals()
-        .filter(|approval| approval.facts().run_id == run_id.as_str())
+        .approvals_for_run(run_id.as_str())
         .take(MAX_DIAGNOSTICS_COUNT as usize)
     {
         increment(&mut summary.total);
@@ -731,27 +716,9 @@ fn project_approval_summary(
 
 fn runtime_confidence(
     facts: &OrganizationFacts,
-    run_id: &GraphRunId,
     run: &crate::GraphRunFacts,
 ) -> TeamRunDiagnosticsConfidence {
-    if run.runtime().is_none()
-        || matches!(
-            run.lifecycle().state(),
-            GraphRunLifecycleState::Cancelling { .. }
-                | GraphRunLifecycleState::OutcomeUnknown { .. }
-        )
-        || facts.deliveries().deliveries().any(|delivery| {
-            delivery.facts().run_id == run_id.as_str()
-                && match delivery.phase() {
-                    DeliveryPhase::OutcomeUnknown { .. } => true,
-                    DeliveryPhase::TerminalObserved { observation } => matches!(
-                        observation.resolution(),
-                        TerminalObservationResolution::AwaitingAuthorizedGraphResolution
-                    ),
-                    _ => false,
-                }
-        })
-    {
+    if runtime_is_unknown(facts, run) {
         TeamRunDiagnosticsConfidence::Unknown
     } else {
         TeamRunDiagnosticsConfidence::Confirmed

@@ -1,8 +1,9 @@
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
+use std::path::Path;
 use workspace_module::{
     WorkspaceBinaryFailure, WorkspaceBinaryReceipt, WorkspaceDirectoryEntry,
-    WorkspaceDirectoryReceipt, WorkspaceListFailure, WorkspaceMediaFailure, WorkspaceMediaPath,
+    WorkspaceDirectoryFailure, WorkspaceDirectoryReceipt, WorkspaceListFailure, WorkspaceMediaFailure, WorkspaceMediaPath,
     WorkspaceMediaReceipt, WorkspaceMediaThumbnail, WorkspaceMediaThumbnailEntry,
     WorkspaceReadFailure, WorkspaceStatFailure, WorkspaceStatReceipt, WorkspaceTextReceipt,
     WorkspaceWriteFailure, WorkspaceWriteReceipt, ports::WorkspaceFuture,
@@ -15,6 +16,7 @@ pub(super) struct Binding {
     pub client: Client,
     pub agent_id: String,
     pub session_id: Option<String>,
+    root: String,
 }
 
 #[derive(Deserialize)]
@@ -40,18 +42,42 @@ struct Entry {
 }
 
 impl Binding {
-    pub fn new(client: Client, agent_id: String, session_id: Option<String>) -> Self {
-        Self {
-            client,
-            agent_id,
-            session_id,
+    pub async fn bind(
+        client: Client,
+        agent_id: String,
+        session_id: Option<String>,
+        expected_root: Option<&Path>,
+    ) -> Result<Self, WorkspaceDirectoryFailure> {
+        let mut params = json!({"agentId": agent_id, "path": ""});
+        if let Some(session_id) = &session_id {
+            params["sessionId"] = json!(session_id);
         }
+        let observed = client.call("workspace.stat", params).await
+            .map_err(|_| WorkspaceDirectoryFailure::Unavailable)?;
+        let root = observed["root"].as_str().filter(|root| {
+            !root.contains('\0') && Path::new(root).is_absolute()
+                && expected_root.is_none_or(|expected| expected == Path::new(root))
+        }).ok_or(WorkspaceDirectoryFailure::Unavailable)?;
+        if observed["agentId"] != agent_id || observed["path"] != "" || observed["kind"] != "directory"
+            || observed["sessionId"].as_str() != session_id.as_deref()
+        {
+            return Err(WorkspaceDirectoryFailure::Unavailable);
+        }
+        Ok(Self { client, agent_id, session_id, root: root.to_owned() })
+    }
+
+    fn params(&self, path: &str) -> Value {
+        let mut params = json!({"agentId": self.agent_id, "path": path});
+        if let Some(session_id) = &self.session_id {
+            params["sessionId"] = json!(session_id);
+        }
+        params
     }
 
     pub async fn bytes(&self, path: &str) -> Result<Vec<u8>, WorkspaceMediaFailure> {
         let path = path.replace('\\', "/");
         self.client
-            .read_file(&self.agent_id, &path)
+            .read_file(&self.agent_id, self.session_id.as_deref(), &path)
             .await
             .map_err(media::failure)
     }
@@ -59,7 +85,11 @@ impl Binding {
 
 impl workspace_module::WorkspaceBinding for Binding {
     fn resource_key(&self) -> Option<&str> {
-        Some(&self.agent_id)
+        Some(&self.root)
+    }
+
+    fn directory_matches(&self, root: &Path) -> bool {
+        root.is_absolute() && root == Path::new(&self.root)
     }
 
     fn read_text<'a>(
@@ -71,7 +101,7 @@ impl workspace_module::WorkspaceBinding for Binding {
             let path = relative_path.replace('\\', "/");
             let bytes = self
                 .client
-                .read_file(&self.agent_id, &path)
+                .read_file(&self.agent_id, self.session_id.as_deref(), &path)
                 .await
                 .map_err(|error| match error.kind() {
                     "invalid_params"
@@ -101,7 +131,7 @@ impl workspace_module::WorkspaceBinding for Binding {
             let path = relative_path.replace('\\', "/");
             let bytes = self
                 .client
-                .read_file(&self.agent_id, &path)
+                .read_file(&self.agent_id, self.session_id.as_deref(), &path)
                 .await
                 .map_err(|error| match error.kind() {
                     "invalid_params"
@@ -128,7 +158,7 @@ impl workspace_module::WorkspaceBinding for Binding {
                 .client
                 .call(
                     "workspace.stat",
-                    json!({ "agentId": self.agent_id, "path": path }),
+                    self.params(&path),
                 )
                 .await
                 .map_err(|error| match error.kind() {
@@ -137,6 +167,12 @@ impl workspace_module::WorkspaceBinding for Binding {
                     }
                     _ => WorkspaceStatFailure::Unavailable,
                 })?;
+            if value["agentId"] != self.agent_id || value["path"] != path
+                || value["sessionId"].as_str() != self.session_id.as_deref()
+                || value["root"].as_str() != Some(self.root.as_str())
+            {
+                return Err(WorkspaceStatFailure::Unavailable);
+            }
             let stat: Stat =
                 serde_json::from_value(value).map_err(|_| WorkspaceStatFailure::Unavailable)?;
             if !matches!(stat.kind.as_str(), "file" | "directory") {
@@ -162,7 +198,7 @@ impl workspace_module::WorkspaceBinding for Binding {
                 .client
                 .call(
                     "workspace.list",
-                    json!({ "agentId": self.agent_id, "path": path }),
+                    self.params(&path),
                 )
                 .await
                 .map_err(|error| match error.kind() {
@@ -172,6 +208,11 @@ impl workspace_module::WorkspaceBinding for Binding {
                     "workspace_not_directory" => WorkspaceListFailure::NotDirectory,
                     _ => WorkspaceListFailure::Unavailable,
                 })?;
+            if value["agentId"] != self.agent_id || value["path"] != path
+                || value["sessionId"].as_str() != self.session_id.as_deref()
+            {
+                return Err(WorkspaceListFailure::Unavailable);
+            }
             let listing: Listing =
                 serde_json::from_value(value).map_err(|_| WorkspaceListFailure::Unavailable)?;
             let mut entries = listing
@@ -215,7 +256,7 @@ impl workspace_module::WorkspaceBinding for Binding {
         Box::pin(async move {
             let path = relative_path.replace('\\', "/");
             self.client
-                .write_file(&self.agent_id, &path, content.as_bytes())
+                .write_file(&self.agent_id, self.session_id.as_deref(), &path, content.as_bytes())
                 .await
                 .map_err(|error| {
                     if error.delivery() == Delivery::Unknown || error.code() == Some(-32006) {
@@ -248,7 +289,7 @@ impl workspace_module::WorkspaceBinding for Binding {
             }
             let path = relative_path.replace('\\', "/");
             self.client
-                .write_file(&self.agent_id, &path, content)
+                .write_file(&self.agent_id, self.session_id.as_deref(), &path, content)
                 .await
                 .map_err(|error| {
                     if error.delivery() == Delivery::Unknown || error.code() == Some(-32006) {

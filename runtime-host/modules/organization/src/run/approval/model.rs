@@ -1,7 +1,6 @@
 use std::fmt;
 
 const MAX_APPROVAL_FACT_BYTES: usize = 256;
-const MAX_APPROVAL_NOTE_BYTES: usize = 256;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ApprovalRequest {
@@ -12,6 +11,7 @@ pub struct ApprovalRequest {
     pub reason: String,
     pub requested_action: String,
     pub risk_summary: String,
+    pub content: Option<super::ApprovalContent>,
     pub idempotency_key: String,
     pub requested_at: u64,
     pub subject: ApprovalSubject,
@@ -39,6 +39,74 @@ pub enum ApprovalEffect {
     ResumeStage,
     KeepNodeWaiting,
     RouteDecisionPorts,
+}
+
+pub(crate) enum ApprovalBinding<'a> {
+    StageContinuation(&'a str),
+    WorkNode {
+        node_id: &'a str,
+        execution_fence: &'a str,
+    },
+    HumanDecision {
+        node_id: &'a str,
+        execution_fence: &'a str,
+    },
+}
+
+impl ApprovalRequest {
+    pub(crate) fn binding(&self) -> Option<ApprovalBinding<'_>> {
+        if !is_bounded_fact(&self.approval_id)
+            || !is_bounded_fact(&self.run_id)
+            || !is_bounded_fact(&self.stage_id)
+            || !is_bounded_fact(&self.role_id)
+            || !is_bounded_fact(&self.reason)
+            || !is_bounded_fact(&self.requested_action)
+            || (self.risk_summary.trim().is_empty()
+                && !(self.risk_summary.is_empty() && self.content.is_some()))
+            || self.content.as_ref().is_some_and(|content| !content.is_valid())
+            || !is_bounded_fact(&self.idempotency_key)
+            || self
+                .execution_fence
+                .as_ref()
+                .is_some_and(|fence| !is_bounded_fact(fence))
+        {
+            return None;
+        }
+
+        // Node subjects retain their nonempty-only identifier rule, not the bounded fact rule.
+        match (
+            &self.subject,
+            self.origin,
+            self.effect,
+            self.execution_fence.as_deref(),
+        ) {
+            (
+                ApprovalSubject::Stage { stage_id },
+                ApprovalOrigin::StageContinuation,
+                ApprovalEffect::ResumeStage,
+                None,
+            ) if stage_id == &self.stage_id => Some(ApprovalBinding::StageContinuation(stage_id)),
+            (
+                ApprovalSubject::WorkNode { node_id },
+                ApprovalOrigin::WorkNode,
+                ApprovalEffect::KeepNodeWaiting,
+                Some(execution_fence),
+            ) if !node_id.is_empty() => Some(ApprovalBinding::WorkNode {
+                node_id,
+                execution_fence,
+            }),
+            (
+                ApprovalSubject::HumanDecision { node_id },
+                ApprovalOrigin::HumanDecision,
+                ApprovalEffect::RouteDecisionPorts,
+                Some(execution_fence),
+            ) if !node_id.is_empty() => Some(ApprovalBinding::HumanDecision {
+                node_id,
+                execution_fence,
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -119,7 +187,7 @@ impl Approval {
         &self.resolutions[self.transaction.map_or(0, |(_, len)| len)..]
     }
     pub(crate) fn import_header(&mut self, facts: ApprovalRequest, status: ApprovalStatus) -> Result<(), ApprovalRestoreError> {
-        if self.facts != facts || !facts_are_canonical(&facts) {
+        if self.facts != facts || facts.binding().is_none() {
             return Err(ApprovalRestoreError::InvalidSnapshot);
         }
         self.status = status;
@@ -180,22 +248,12 @@ impl Approval {
         _resolved_at: u64,
         cause: ApprovalResolutionCause,
     ) -> bool {
-        let Some((index, existing)) = self
-            .resolutions
-            .iter()
-            .enumerate()
-            .find(|(_, resolution)| resolution.idempotency_key == idempotency_key)
-        else {
+        let Some(existing) = self.resolution_for_idempotency(idempotency_key) else {
             return false;
         };
-        if existing.decision != decision || existing.cause != cause {
-            return false;
-        }
-        let inherited_note = index
-            .checked_sub(1)
-            .and_then(|previous| self.resolutions.get(previous))
-            .and_then(|resolution| resolution.note.as_deref());
-        existing.note.as_deref() == note.or(inherited_note)
+        existing.decision == decision
+            && existing.cause == cause
+            && existing.note.as_deref() == note
     }
 
     pub fn is_pending(&self) -> bool {
@@ -258,10 +316,7 @@ impl Approval {
         self.status = decision.status();
         self.resolutions.push(ApprovalResolution {
             decision,
-            note: note.or_else(|| {
-                self.resolution()
-                    .and_then(|resolution| resolution.note.clone())
-            }),
+            note,
             resolved_at,
             idempotency_key,
             cause,
@@ -278,80 +333,41 @@ impl Approval {
     }
 
     pub fn restore(snapshot: ApprovalDurableSnapshot) -> Result<Self, ApprovalRestoreError> {
-        let terminal_status = snapshot.status != ApprovalStatus::Pending;
-        if terminal_status != !snapshot.resolutions.is_empty()
-            || !facts_are_canonical(&snapshot.facts)
+        let approval = Self {
+            facts: snapshot.facts,
+            status: snapshot.status,
+            resolutions: snapshot.resolutions,
+            transaction: None,
+        };
+        approval.validate()?;
+        Ok(approval)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ApprovalRestoreError> {
+        let terminal_status = self.status != ApprovalStatus::Pending;
+        if terminal_status != !self.resolutions.is_empty()
+            || self.facts.binding().is_none()
         {
             return Err(ApprovalRestoreError::InvalidSnapshot);
         }
         let mut resolution_keys = std::collections::BTreeSet::new();
-        for resolution in &snapshot.resolutions {
+        for resolution in &self.resolutions {
             if !is_bounded_fact(&resolution.idempotency_key)
                 || resolution.note.as_ref().is_some_and(|note| !is_note(note))
-                || resolution.resolved_at < snapshot.facts.requested_at
+                || resolution.resolved_at < self.facts.requested_at
                 || !resolution_keys.insert(&resolution.idempotency_key)
             {
                 return Err(ApprovalRestoreError::InvalidSnapshot);
             }
         }
-        if snapshot
+        if self
             .resolutions
             .last()
-            .is_some_and(|resolution| resolution.decision.status() != snapshot.status)
+            .is_some_and(|resolution| resolution.decision.status() != self.status)
         {
             return Err(ApprovalRestoreError::InvalidSnapshot);
         }
-        Ok(Self {
-            facts: snapshot.facts,
-            status: snapshot.status,
-            resolutions: snapshot.resolutions,
-            transaction: None,
-        })
-    }
-}
-
-fn facts_are_canonical(facts: &ApprovalRequest) -> bool {
-    if !is_bounded_fact(&facts.approval_id)
-        || !is_bounded_fact(&facts.run_id)
-        || !is_bounded_fact(&facts.stage_id)
-        || !is_bounded_fact(&facts.role_id)
-        || !is_bounded_fact(&facts.reason)
-        || !is_bounded_fact(&facts.requested_action)
-        || !is_bounded_fact(&facts.risk_summary)
-        || !is_bounded_fact(&facts.idempotency_key)
-        || facts
-            .execution_fence
-            .as_ref()
-            .is_some_and(|fence| !is_bounded_fact(fence))
-    {
-        return false;
-    }
-
-    match (
-        &facts.subject,
-        facts.origin,
-        facts.effect,
-        &facts.execution_fence,
-    ) {
-        (
-            ApprovalSubject::Stage { stage_id },
-            ApprovalOrigin::StageContinuation,
-            ApprovalEffect::ResumeStage,
-            None,
-        ) => stage_id == &facts.stage_id,
-        (
-            ApprovalSubject::WorkNode { node_id },
-            ApprovalOrigin::WorkNode,
-            ApprovalEffect::KeepNodeWaiting,
-            Some(_),
-        ) => !node_id.is_empty(),
-        (
-            ApprovalSubject::HumanDecision { node_id },
-            ApprovalOrigin::HumanDecision,
-            ApprovalEffect::RouteDecisionPorts,
-            Some(_),
-        ) => !node_id.is_empty(),
-        _ => false,
+        Ok(())
     }
 }
 
@@ -359,8 +375,8 @@ fn is_bounded_fact(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= MAX_APPROVAL_FACT_BYTES
 }
 
-fn is_note(value: &str) -> bool {
-    !value.trim().is_empty() && value.len() <= MAX_APPROVAL_NOTE_BYTES
+pub(super) fn is_note(value: &str) -> bool {
+    !value.trim().is_empty()
 }
 
 impl fmt::Debug for ApprovalRequest {

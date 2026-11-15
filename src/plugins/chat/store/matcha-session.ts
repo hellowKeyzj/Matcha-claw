@@ -1,6 +1,6 @@
 import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
 import { hasVisibleUserOutput } from '@/plugins/message-rendering/chat-message-view';
-import { currentSessionSend, isSendPending } from '@/plugins/chat/store/send-state';
+import { currentSessionSend, isSendPending, recordSendTerminals } from '@/plugins/chat/store/send-state';
 import { bindSessionInputReceipts, isPendingUserItem, reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
 import type { SessionRenderUserMessageItem } from '@/types/session/render-item';
 import type { SessionMessageModel, SessionTextModel } from '@/plugins/chat/store/session-presentation';
@@ -103,7 +103,11 @@ export const resolveAbortRunId: SessionMessageModel['resolveAbortRunId'] = (reco
 
 export const terminalRunIds: SessionMessageModel['terminalRunIds'] = (exactRunIds) => exactRunIds;
 
-export const settleReceipts: SessionMessageModel['settleReceipts'] = (record) => {
+export const settleReceipts: SessionMessageModel['settleReceipts'] = (record, projection) => {
+  if (projection) {
+    const send = recordSendTerminals(currentSessionSend(record), projection.terminalRunIds);
+    if (send !== record.send) record = { ...record, send };
+  }
   const receipt = currentSessionSend(record)?.receipt;
   const sendRunId = receipt?.phase === 'accepted' || receipt?.phase === 'unknown' ? receipt.runId : null;
   const abort = record.abort?.identityKey === buildSessionIdentityKey(record.meta.sessionIdentity!) ? record.abort : null;

@@ -59,6 +59,13 @@ impl NativeTerminalReceiptTarget {
         &self.correlation
     }
 
+    pub(crate) fn matches_binding(&self, binding: &crate::RoleSessionReceipt) -> bool {
+        self.graph_run_id() == binding.team_run()
+            && self.proof.role_id == *binding.role()
+            && self.endpoint() == binding.endpoint()
+            && self.correlation().endpoint_session_id() == binding.endpoint_session_id()
+    }
+
     pub(crate) fn delivery_id(&self) -> &DeliveryId {
         &self.delivery_id
     }

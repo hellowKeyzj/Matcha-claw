@@ -102,7 +102,8 @@ export function WorkspaceProvider({ scopeKey, draftId, promotion, sessionIdentit
       const nextPage = withPageDraft(page, pages[index], sessionIdentity ? undefined : scope.draftId);
       if (index < 0) pages.push(nextPage);
       else pages[index] = nextPage;
-      const next = { ...previous, pages, pagePlacements: index < 0 ? { ...previous.pagePlacements, [page.id]: 'side' as const } : previous.pagePlacements };
+      const next = { ...previous, pages, pagePlacements: index < 0 ? { ...previous.pagePlacements, [page.id]: page.initialPane ?? 'side' } : previous.pagePlacements,
+        open: index < 0 && page.initialPane === 'main' && previous.activePageIds.side === null ? false : previous.open };
       return options?.activate === false ? next : activate(next, page.id);
     });
   }, [scope, sessionIdentity]);
@@ -126,7 +127,7 @@ export function WorkspaceProvider({ scopeKey, draftId, promotion, sessionIdentit
       const selectedProviderPane = getProviderPane(previous, providerId);
       for (const page of incoming.values()) {
         pages.push(withPageDraft(page, undefined, sessionIdentity ? undefined : scope.draftId));
-        pagePlacements[page.id] = selectedProviderPane;
+        pagePlacements[page.id] = page.initialPane ?? selectedProviderPane;
       }
       return { ...next, pages, pagePlacements };
     });

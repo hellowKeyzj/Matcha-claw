@@ -11,7 +11,7 @@ pub(super) fn advance<'a>(previous: Option<&'a str>, text: &'a str) -> Option<&'
     else { previous }
 }
 
-fn visible<'a>(text: &'a str, previous: Option<&str>) -> &'a str {
+pub(super) fn visible<'a>(text: &'a str, previous: Option<&str>) -> &'a str {
     previous.filter(|previous| !previous.is_empty()).and_then(|previous| text.strip_prefix(previous))
         .map_or(text, |tail| tail.trim_start_matches(whitespace))
 }
@@ -51,57 +51,16 @@ fn interval(messages: &[Persisted], run: &str, part: &Part) -> (usize, usize) {
     (messages.iter().rposition(|message| message.role() == MessageRole::User).map_or(0, |index| index + 1), messages.len())
 }
 
-fn replacement(messages: &[Persisted], run: &str, part: &Part, text: &str, rendered: &str) -> bool {
+pub(super) fn replacement(messages: &[Persisted], run: &str, part: &Part, text: &str, rendered: &str, extra: Option<&Message>) -> bool {
     let (start, end) = interval(messages, run, part);
     [text, rendered].iter().any(|text| {
         let text = text.trim_matches(whitespace);
-        !text.is_empty() && tail_length(messages[start.min(end)..end].iter().filter(|message|
-            message.role() == MessageRole::Assistant && message.run_id().is_none_or(|owner| owner == run)
-                && !message.hidden_control_reply() && message.display_item_id().is_none())
+        !text.is_empty() && tail_length(messages[start.min(end)..end].iter().map(|row| &row.message)
+            .chain(extra.filter(|_| end == messages.len())).filter(|message|
+                message.role() == MessageRole::Assistant && message.run_id().is_none_or(|owner| owner == run)
+                    && !message.hidden_control_reply() && message.display_item_id().is_none())
             .map(|message| message.text().trim_matches(whitespace)), text) == 0
     })
-}
-
-fn observed_coverage<'a>(messages: &'a [Persisted], run: &str, part: &Part, text: &str, start: usize) -> (usize, Option<&'a str>) {
-    let (mut floor, mut end) = interval(messages, run, part);
-    let owns_tool = |row: &Persisted, id: &str| row.content().iter().any(|block| matches!(block,
-        super::super::window::MessageContent::ToolUse { tool_call_id: Some(tool), .. } if tool == id));
-    if let Some(tool) = &part.before_tool
-        && let Some(index) = messages[floor.min(end)..end].iter().position(|row| owns_tool(row, tool))
-    { end = floor + index + 1; }
-    let mut anchor = part.after_boundary_run_id.as_deref().and_then(|boundary|
-        messages.iter().find(|row| user_run(row) == Some(boundary))).map(|row| row.id.as_str());
-    let mut offset = if anchor.is_some() { part.start } else { 0 };
-    if let Some(tool) = &part.after_tool {
-        if let Some(index) = messages[floor.min(end)..end].iter().position(|row| owns_tool(row, tool)) {
-            anchor = Some(messages[floor + index].id.as_str());
-            floor += index + 1;
-            offset = part.start;
-        } else if messages[floor.min(end)..end].iter().any(|row| row.event_run_id() == Some(run)
-            && row.role() == MessageRole::Assistant && row.identity_run_id() == Some(run))
-        {
-            offset = part.start;
-        }
-    }
-    let rows = messages[floor.min(end)..end].iter().filter(|row| row.role() == MessageRole::Assistant
-        && row.identity_run_id() == Some(run) && row.identity_message_id().is_some() && !row.is_imported()
-        && !row.hidden_control_reply() && row.display_item_id().is_none()
-        && (row.mirror_origin().is_none() || row.run_terminal()));
-    let mut covered = offset;
-    for row in rows.filter(|row| !row.text().is_empty()) {
-        let remaining = &text[covered..part.end];
-        let remaining = if covered > 0 { remaining.trim_start_matches(whitespace) } else { remaining };
-        if remaining.is_empty() { break; }
-        if remaining.starts_with(row.text()) {
-            covered = part.end - remaining.len() + row.text().len();
-            anchor = Some(row.id.as_str());
-        } else if row.text().starts_with(remaining) {
-            covered = part.end;
-            anchor = Some(row.id.as_str());
-            break;
-        } else if covered > offset { break; }
-    }
-    (covered.max(start), anchor)
 }
 
 fn cumulative_tail(messages: &[&Persisted], text: &str, run: &str) -> usize {
@@ -156,7 +115,6 @@ impl Body {
         }
         if let Some(boundary) = boundary { stream.latest_boundary_run_id = Some(boundary.to_owned()); }
         stream.boundary = true;
-        stream.body_closed = true;
         Some(())
     }
 
@@ -191,16 +149,10 @@ impl Body {
         let status = self.status(run);
         let keyed_required = self.live_run() == Some(run);
         let Some(stream) = self.streams.get_mut(run) else { return Some(()); };
-        if stream.text.as_deref().is_some_and(|text| stream.closed.iter().any(|closed|
-            (closed.tool_boundary || closed.boundary_run_id.is_some()) && !closed.text.is_empty()
-                && text.starts_with(&closed.text)))
-        {
-            for part in stream.all_parts_mut() { part.observed = true; }
-        }
         let mut current_replaced = false;
         if live {
             let rows = self.persisted.iter().filter(|message| message.role() == MessageRole::Assistant
-                && message.identity_message_id().is_some() && !message.is_imported() && message.run_id() == Some(run)
+                && message.identity_message_id().is_some() && !message.is_imported() && message.identity_run_id() == Some(run)
                 && message.display_item_id().is_none()).collect::<Vec<_>>();
             let prefix = stream.text().filter(|text| !text.is_empty()).map(|text| {
                 let remaining = cumulative_tail(&rows, text, run);
@@ -213,11 +165,9 @@ impl Body {
                 let accumulated = if stream.text.is_none() { stream.text() } else { stream.accumulated_text() };
                 let observed = (advance(accumulated, prefix) != accumulated).then(|| prefix.to_owned());
                 for index in replaced {
-                    for part in &mut stream.closed[index].parts {
-                        if part.observed { continue; }
+                    for part in &stream.closed[index].parts {
                         if let Some(id) = &part.id {
                             self.items.retain(|item| item.item_id() != id);
-                            part.covered = part.end;
                             if !self.retired.contains(id) { self.retired.push(id.clone()); }
                         }
                     }
@@ -246,31 +196,25 @@ impl Body {
         for (closed_index, closed) in stream.closed.iter().enumerate() {
             let tail = visible(&closed.text, previous);
             for (index, part) in closed.parts.iter().enumerate() {
-                let mut start = part.start.max(closed.text.len() - tail.len()).min(part.end);
-                let coverage = part.observed.then(|| observed_coverage(&self.persisted, run, part, &closed.text, start));
-                if let Some((covered, _)) = coverage { start = start.max(part.covered).max(covered); }
+                let start = part.start.max(closed.text.len() - tail.len()).min(part.end);
                 let rendered = closed.text.get(start..part.end)?;
                 let empty = rendered.trim_matches(whitespace).is_empty();
                 display.push((Some(closed_index), index, start, part.end, empty,
-                    !part.observed && !empty && replacement(&self.persisted, run, part, &closed.text, rendered),
-                    coverage.and_then(|(_, anchor)| anchor.map(str::to_owned))));
+                    !empty && replacement(&self.persisted, run, part, &closed.text, rendered, None)));
             }
             previous = advance(previous, &closed.text);
         }
         if let Some(text) = stream.text.as_deref() {
             let tail = visible(text, previous);
             for (index, part) in stream.parts.iter().enumerate() {
-                let mut start = part.start.max(text.len() - tail.len()).min(part.end);
-                let coverage = part.observed.then(|| observed_coverage(&self.persisted, run, part, text, start));
-                if let Some((covered, _)) = coverage { start = start.max(part.covered).max(covered); }
+                let start = part.start.max(text.len() - tail.len()).min(part.end);
                 let rendered = text.get(start..part.end)?;
                 let empty = rendered.trim_matches(whitespace).is_empty();
                 display.push((None, index, start, part.end, empty,
-                    !part.observed && ((!empty && !live && replacement(&self.persisted, run, part, text, rendered)) || current_replaced),
-                    coverage.and_then(|(_, anchor)| anchor.map(str::to_owned))));
+                    (!empty && !live && replacement(&self.persisted, run, part, text, rendered, None)) || current_replaced));
             }
         }
-        let all_replaced = display.iter().all(|(closed, index, _, _, empty, replaced, _)| {
+        let all_replaced = display.iter().all(|(closed, index, _, _, empty, replaced)| {
             let part = match closed { Some(closed) => &stream.closed[*closed].parts[*index], None => &stream.parts[*index] };
             *empty || *replaced || part.id.as_ref().is_some_and(|id| self.retired.contains(id))
         }) && (!keyed_required || self.items.iter().all(|item| {
@@ -280,68 +224,21 @@ impl Body {
                 || stream.all_parts().any(|part| part.id.as_ref() == Some(item_id))
         }));
         let mut close_current = false;
-        for (closed_index, part_index, start, end, empty, replaced, anchor) in display {
+        for (closed_index, part_index, start, end, empty, replaced) in display {
             let (parts, text) = if let Some(index) = closed_index {
                 let closed = &mut stream.closed[index];
                 (&mut closed.parts, closed.text.as_str())
             } else { (&mut stream.parts, stream.text.as_deref()?) };
-            let part = &mut parts[part_index];
+            let part = &parts[part_index];
             let id = part.id.as_ref()?;
-            if let Some(anchor) = anchor {
-                part.after = Some(anchor.clone());
-                if let Some(index) = self.items.iter().position(|item| item.item_id() == id)
-                    && let Some(after) = self.items.iter().position(|item| item.item_id() == anchor)
-                {
-                    let target = if part.content_before { after } else { after + 1 };
-                    let target = target - usize::from(index < target);
-                    if index != target {
-                        let item = self.items.remove(index);
-                        self.items.insert(target, item);
-                    }
-                }
-            }
             let index = self.items.iter().position(|item| item.item_id() == id);
-            if part.observed {
-                part.covered = start;
-                if let Some(index) = index {
-                    if let SessionItem::AssistantTurn { text: current, segments, status: current_status, .. } = &mut self.items[index] {
-                        let rendered = text.get(start..end)?;
-                        if current != rendered {
-                            let mut skip = current.len().saturating_sub(rendered.len());
-                            if current.ends_with(rendered) {
-                                segments.retain_mut(|segment| {
-                                    let SessionContent::Text { text } = segment else { return true; };
-                                    let removed = skip.min(text.len());
-                                    skip -= removed;
-                                    text.drain(..removed);
-                                    !text.is_empty()
-                                });
-                            } else if let Some(tail) = rendered.strip_prefix(current.as_str()) {
-                                if let Some(SessionContent::Text { text }) = segments.iter_mut().rev().find(|segment| matches!(segment, SessionContent::Text { .. })) {
-                                    text.push_str(tail);
-                                } else { segments.push(SessionContent::Text { text: tail.to_owned() }); }
-                            }
-                            *current = rendered.to_owned();
-                        }
-                        *current_status = status;
-                        if !segments.is_empty() { continue; }
-                    }
-                    self.items.remove(index);
-                }
-                if empty || self.retired.contains(id) {
-                    if !self.retired.contains(id) { self.retired.push(id.clone()); }
-                    continue;
-                }
-            }
             if replaced {
                 close_current |= !live && history_end.is_none() && all_replaced && closed_index.is_none();
-                part.covered = part.end;
                 if !self.retired.contains(id) { self.retired.push(id.clone()); }
             }
             if self.retired.contains(id) || empty {
                 if let Some(index) = index { self.items.remove(index); }
             } else {
-                part.covered = start;
                 let rendered = text.get(start..end)?;
                 if let Some(index) = index {
                     if matches!(&self.items[index], SessionItem::AssistantTurn { text, status: current_status, segments, .. }

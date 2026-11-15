@@ -393,7 +393,7 @@ async fn persisted_read(
         if let Some(list_id) = list_id {
             validate_list_id(list_id)?;
         }
-        let _guard = sessions.agent_guard(agent_id).await;
+        let _guard = sessions.agent_scope(agent_id).await;
         let native = sessions.native_files(session_id).await?;
         if native.agent_id != agent_id || native.session_id != session_id {
             return Err(rpc::Error::not_found("Agent session"));

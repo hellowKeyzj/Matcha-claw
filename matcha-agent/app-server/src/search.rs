@@ -50,7 +50,6 @@ pub async fn dispatch(
     config: &ConfigStore,
     sessions: &Sessions,
 ) -> rpc::Result {
-    let _guard = sessions.search_guard().await;
     match method {
         "search.project" => {
             #[derive(Deserialize)]
@@ -67,6 +66,7 @@ pub async fn dispatch(
             if let Some(projection) = &projection {
                 projection.validate()?;
             }
+            let guard = sessions.search_guard().await;
             if config.checked_snapshot().await?.search != projection {
                 config
                     .update(|config| {
@@ -75,15 +75,20 @@ pub async fn dispatch(
                     })
                     .await?;
             }
-            observation(projection.as_ref(), sessions, true).await
+            let instances = sessions.search_instances().await;
+            drop(guard);
+            observation(projection.as_ref(), config, sessions, instances, true).await
         }
         "search.observe" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Params {}
             let _: Params = rpc::params(params)?;
+            let guard = sessions.search_guard().await;
             let projection = config.checked_snapshot().await?.search;
-            observation(projection.as_ref(), sessions, false).await
+            let instances = sessions.search_instances().await;
+            drop(guard);
+            observation(projection.as_ref(), config, sessions, instances, false).await
         }
         _ => Err(rpc::Error::method(method)),
     }
@@ -91,18 +96,24 @@ pub async fn dispatch(
 
 async fn observation(
     projection: Option<&Projection>,
+    config: &ConfigStore,
     sessions: &Sessions,
+    (instances, transitioning): (Vec<crate::cli::Cli>, bool),
     apply: bool,
 ) -> rpc::Result {
-    let (instances, transitioning) = sessions.search_instances().await;
     let count = instances.len();
+    let identities: std::collections::BTreeSet<_> = instances
+        .iter()
+        .map(|instance| instance.instance_id().to_owned())
+        .collect();
     let mut pending = transitioning || (projection.is_some() && count == 0);
     let mut checks = tokio::task::JoinSet::new();
     for instance in instances {
         let projection = projection.cloned();
+        let config = config.clone();
         checks.spawn(async move {
             if apply {
-                instance.apply_search(projection.as_ref()).await
+                instance.reconcile_search(&config).await
             } else {
                 instance.observe_search(projection.as_ref()).await
             }
@@ -113,6 +124,12 @@ async fn observation(
             pending = true;
         }
     }
+    let _guard = sessions.search_guard().await;
+    let (current, current_transitioning) = sessions.search_instances().await;
+    pending |= config.checked_snapshot().await?.search.as_ref() != projection
+        || current_transitioning
+        || current.iter().map(|instance| instance.instance_id().to_owned())
+            .collect::<std::collections::BTreeSet<_>>() != identities;
     Ok(json!({
         "phase": if pending { "pendingRestart" }
             else if projection.is_some() { "ready" } else { "disabled" },

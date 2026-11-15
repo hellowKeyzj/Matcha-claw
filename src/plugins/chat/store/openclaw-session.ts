@@ -1,8 +1,9 @@
 import { sessionImageGenerationTask, type SessionAssistantTurnItem, type SessionRenderItem } from '@/types/session/render-item';
 import type { SessionInputReceipt, SessionWireItem } from '@/types/session/snapshot';
+import { currentSessionSend, isSendPending, recordSendTerminals } from '@/plugins/chat/store/send-state';
 import { bindSessionInputReceipts, isPendingUserItem, reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
 import { sanitizeAssistantDisplayText, sanitizeCanonicalUserText } from '@/plugins/chat/store/message-display';
-import type { SessionMessageProjection, SessionMessageState, SessionTextModel } from '@/plugins/chat/store/session-presentation';
+import type { SessionMessageProjection, SessionMessageState, SessionReceiptProjection, SessionTextModel } from '@/plugins/chat/store/session-presentation';
 import {
   isRunActive,
   type ChatSessionAbortState,
@@ -61,6 +62,8 @@ export function startSend(
     abort: null,
     runtime: {
       ...record.runtime,
+      // Native chat.send uses this input identity as its clientRunId, including before ACK.
+      activeRunId: send.clientId,
       runPhase: 'submitted',
       pendingTurnKey: assistantItem.key,
       pendingTurnLaneKey: 'main',
@@ -82,7 +85,7 @@ export function confirmSend(
   _retainReceipt: boolean,
   nextSend: ChatSessionSendState | null,
 ): SessionMessageState {
-  const admitted = admission === 'queued' || admission === 'started';
+  const admitted = admission !== 'ok';
   const terminalReceived = admitted && nextSend === null;
   const canBindRun = admitted && !terminalReceived;
   const clientAssistantKey = `renderer-assistant:${send.clientId}`;
@@ -94,10 +97,11 @@ export function confirmSend(
     && item.key !== clientAssistantKey
   ));
   const ownsPendingTurn = record.runtime.pendingTurnKey === clientAssistantKey
-    && record.runtime.activeRunId === null && isRunActive(record.runtime);
+    && (record.runtime.activeRunId === send.clientId || record.runtime.activeRunId === runId)
+    && isRunActive(record.runtime);
   const items = record.items.filter((item) => {
     if ((!canBindRun || hasRunAssistant || !isRunActive(record.runtime)
-      || (record.runtime.activeRunId !== null ? record.runtime.activeRunId !== runId : !ownsPendingTurn))
+      || !ownsPendingTurn)
       && item.kind === 'assistant-turn' && item.key === clientAssistantKey) {
       changed = true;
       return false;
@@ -123,9 +127,9 @@ export function confirmSend(
     }
     return item;
   });
-  // Admission is not transcript consumption; only Started/Queued can bind this local turn.
+  // Admission is not transcript consumption; an in-flight ACK still identifies this submission.
   const runtime = !canBindRun
-    ? ownsPendingTurn ? clearOptimisticRuntimeState(record.runtime, clientAssistantKey, terminalReceived) : record.runtime
+    ? ownsPendingTurn ? clearOptimisticRuntimeState(record.runtime, send.clientId, terminalReceived) : record.runtime
     : ownsPendingTurn ? {
       ...record.runtime,
       activeRunId: runId,
@@ -141,14 +145,15 @@ export function confirmSend(
 
 function clearOptimisticRuntimeState(
   runtime: ChatSessionRuntimeState,
-  optimisticAssistantItemKey: string,
+  clientId: string,
   terminalReceived = false,
 ): ChatSessionRuntimeState {
   // Send failure cannot settle a concurrent stop before its native terminal event.
   if (runtime.runPhase === 'stopping' && !terminalReceived) return runtime;
+  const optimisticAssistantItemKey = `renderer-assistant:${clientId}`;
   const ownsPendingTurn = runtime.pendingTurnKey === optimisticAssistantItemKey;
   const ownsActiveTurn = runtime.activeTurnItemKey === optimisticAssistantItemKey;
-  const ownsLocalPhase = ownsPendingTurn && runtime.activeRunId === null
+  const ownsLocalPhase = ownsPendingTurn && runtime.activeRunId === clientId
     && (runtime.runPhase === 'submitted' || terminalReceived);
   if (!ownsPendingTurn && !ownsActiveTurn && !ownsLocalPhase) {
     return runtime;
@@ -173,7 +178,7 @@ export function removeSend(record: ChatSessionRecord, clientId: string): Session
   ));
   return {
     items: items.length === record.items.length ? record.items : items,
-    runtime: clearOptimisticRuntimeState(record.runtime, assistantItemKey),
+    runtime: clearOptimisticRuntimeState(record.runtime, clientId),
     abort: record.abort ?? null,
   };
 }
@@ -196,8 +201,7 @@ function reconcileRuntimeProjection(
   current: ChatSessionRuntimeState,
   next: ChatSessionRuntimeState,
 ): ChatSessionRuntimeState {
-  const sameRun = current.activeRunId === next.activeRunId
-    || (current.activeRunId === null && current.pendingTurnKey !== null);
+  const sameRun = current.activeRunId === next.activeRunId;
   if (!sameRun || !isRunActive(next)) return next;
   const stopping = current.runPhase === 'stopping';
   const abortIssue = current.lastIssue?.code?.startsWith('chat.abort.') === true;
@@ -233,15 +237,28 @@ export function projectMessages(
 ): SessionMessageState {
   const current = record.runtime;
   const incoming = projection.runtime;
-  // Admission owns this wait until native output or an associated terminal takes over.
-  const yielded = incoming?.runPhase === 'idle' && incoming.activeRunId !== null
-    && incoming.activeRunId === current.activeRunId;
-  const preservePending = incoming !== null && !incoming.lastIssue && !yielded && !isRunActive(incoming) && isRunActive(current)
-    && current.pendingTurnKey !== null && !pendingTurnTerminated(current, projection.terminalRunIds);
+  // Input handoff and native execution may arrive in either order.
+  const sendPending = isSendPending(projection.send);
+  const send = currentSessionSend(record);
+  const yielded = !sendPending && incoming?.runPhase === 'idle' && incoming.activeRunId !== null
+    && (incoming.activeRunId === current.activeRunId || incoming.activeRunId === send?.clientId
+      || projection.send?.receipt.phase === 'handed-off' && incoming.activeRunId === projection.send.receipt.runId);
+  const handedOff = projection.send?.receipt.phase === 'handed-off' && incoming !== null
+    && isRunActive(incoming) && incoming.pendingTurnKey !== current.pendingTurnKey;
+  const receipt = projection.send?.receipt;
+  const settledPending = receipt?.phase === 'handed-off' && send !== null && incoming !== null
+    && !isRunActive(incoming) && (projection.failedRunIds.includes(send.clientId)
+      || receipt.runId !== null && projection.failedRunIds.includes(receipt.runId)
+      || projection.runTimings.some((timing) => timing.endedAtMs !== null
+        && (timing.runId === send.clientId || timing.runId === receipt.runId)));
+  const preservePending = incoming !== null && !incoming.lastIssue && !yielded && !settledPending && !isRunActive(incoming) && isRunActive(current)
+    && current.pendingTurnKey !== null
+    && (sendPending || receipt?.phase === 'handed-off' || !pendingTurnTerminated(current, projection.terminalRunIds));
   let runtime = incoming === null ? current : preservePending ? {
     ...current,
     runtimeNotice: incoming.runtimeNotice,
     imageGeneration: incoming.imageGeneration,
+    requestPending: incoming.requestPending,
   } : reconcileRuntimeProjection(current, incoming);
   if (record.abort?.phase === 'stopping' && record.abort.imageTaskIds?.length
     && current.runPhase === 'stopping' && incoming !== null && !incoming.lastIssue
@@ -253,10 +270,11 @@ export function projectMessages(
   const pendingAssistant = record.items.find((item): item is SessionAssistantTurnItem => (
     item.kind === 'assistant-turn' && item.key === current.pendingTurnKey
   ));
-  let nextItems = yielded ? items.filter((item) => item.key !== current.pendingTurnKey) : items;
-  if (!yielded && pendingAssistant && isRunActive(runtime)
+  let nextItems = yielded || handedOff || settledPending ? items.filter((item) => item.key !== current.pendingTurnKey) : items;
+  if (!yielded && !handedOff && !settledPending && pendingAssistant && isRunActive(runtime)
     && (pendingAssistant.status === 'streaming' || pendingAssistant.status === 'waiting_tool')
     && !projection.retiredItemIds.has(pendingAssistant.key)
+    && current.activeRunId === runtime.activeRunId
     && (!pendingAssistant.runId || pendingAssistant.runId === runtime.activeRunId)
     && !items.some((item) => item.key !== pendingAssistant.key
       && item.kind === 'assistant-turn' && item.runId && item.runId === runtime.activeRunId)) {
@@ -300,8 +318,8 @@ export function failAbort(
   };
 }
 
-export function hasPendingSend(_record: ChatSessionRecord): boolean {
-  return false;
+export function hasPendingSend(record: ChatSessionRecord): boolean {
+  return isSendPending(currentSessionSend(record));
 }
 
 export function deriveRuntime(record: ChatSessionRecord): ChatSessionRuntimeState {
@@ -315,8 +333,26 @@ export function terminalRunIds(
   return observedRunIds.length ? [...exactRunIds, ...observedRunIds] : exactRunIds;
 }
 
-export function settleReceipts(record: ChatSessionRecord): ChatSessionRecord {
-  return record;
+export function settleReceipts(record: ChatSessionRecord, projection?: SessionReceiptProjection): ChatSessionRecord {
+  const send = currentSessionSend(record);
+  if (!send || !isSendPending(send) || !projection) return record;
+  const receipt = send.receipt;
+  const runId = receipt.phase === 'accepted' || receipt.phase === 'unknown' ? receipt.runId : null;
+  const consumed = projection.inputReceipts.some((input) => input.inputId === send.clientId && input.state === 'consumed')
+    || projection.sourceItems.some((item) => item.kind === 'userMessage' && item.inputIds?.includes(send.clientId));
+  const runtime = projection.runtime;
+  const yielded = runtime?.runPhase === 'idle' && runtime.activeRunId !== null
+    && (runtime.activeRunId === send.clientId || runtime.activeRunId === runId);
+  const failed = projection.failedRunIds.includes(send.clientId)
+    || runId !== null && projection.failedRunIds.includes(runId);
+  const ended = projection.runTimings.some((timing) => timing.endedAtMs !== null
+    && (timing.runId === send.clientId || timing.runId === runId));
+  if (consumed || yielded || failed || ended) return {
+    ...record,
+    send: { ...send, receipt: { phase: 'handed-off', runId } },
+  };
+  const nextSend = recordSendTerminals(send, projection.failedRunIds);
+  return nextSend === send ? record : { ...record, send: nextSend };
 }
 
 export function resolveAbortRunId(record: ChatSessionRecord): string | undefined {

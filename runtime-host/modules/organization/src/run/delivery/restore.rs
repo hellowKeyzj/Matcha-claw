@@ -50,10 +50,6 @@ impl DeliverySnapshot {
         self
     }
 
-    pub(crate) fn task_native_execution(&self) -> Option<&crate::TaskNativeExecution> {
-        self.task_native_execution.as_ref()
-    }
-
     pub fn facts(&self) -> &DeliveryRequest {
         &self.facts
     }
@@ -329,15 +325,27 @@ impl Delivery {
     }
 
     pub fn restore(snapshot: DeliverySnapshot) -> Result<Self, RestoreDeliveryError> {
-        validate_snapshot(&snapshot)?;
-
-        Ok(Self {
+        let delivery = Self {
             facts: snapshot.facts,
             phase: snapshot.phase.into_phase(),
             completed_attempts: snapshot.completed_attempts,
             next_claim_generation: snapshot.next_claim_generation,
             task_native_execution: snapshot.task_native_execution,
-        })
+        };
+        delivery.validate_restored()?;
+        Ok(delivery)
+    }
+
+    pub(crate) fn completed_attempts(&self) -> u32 {
+        self.completed_attempts
+    }
+
+    pub(crate) fn next_claim_generation(&self) -> u64 {
+        self.next_claim_generation
+    }
+
+    pub(crate) fn validate_restored(&self) -> Result<(), RestoreDeliveryError> {
+        validate_delivery(self)
     }
 }
 
@@ -471,19 +479,19 @@ impl DeliveryClaimSnapshot {
     }
 }
 
-fn validate_snapshot(snapshot: &DeliverySnapshot) -> Result<(), RestoreDeliveryError> {
-    snapshot
+fn validate_delivery(delivery: &Delivery) -> Result<(), RestoreDeliveryError> {
+    delivery
         .facts
         .validate()
         .map_err(RestoreDeliveryError::InvalidRequest)?;
 
-    if let Some(native) = &snapshot.task_native_execution {
-        let correlation = match &snapshot.phase {
-            DeliveryPhaseSnapshot::Delivered { native_correlation, .. } => native_correlation.as_ref(),
-            DeliveryPhaseSnapshot::TerminalObserved { observation } => Some(observation.correlation()),
+    if let Some(native) = &delivery.task_native_execution {
+        let correlation = match &delivery.phase {
+            DeliveryPhase::Delivered { native_correlation, .. } => native_correlation.as_ref(),
+            DeliveryPhase::TerminalObserved { observation } => Some(observation.correlation()),
             _ => None,
         };
-        if native.native_request_id.as_deref() != Some(snapshot.facts.idempotency_key.as_str())
+        if native.native_request_id.as_deref() != Some(delivery.facts.idempotency_key.as_str())
             || native.native_message_id.as_ref().is_none_or(|id| id.trim().is_empty())
             || correlation.is_none_or(|correlation| {
                 correlation.endpoint_session_id().as_str() != native.endpoint_session_id
@@ -491,81 +499,81 @@ fn validate_snapshot(snapshot: &DeliverySnapshot) -> Result<(), RestoreDeliveryE
             })
         { return Err(RestoreDeliveryError::TerminalObservationCorrelationMismatch); }
     }
-    if snapshot.next_claim_generation == 0 || snapshot.next_claim_generation == u64::MAX {
+    if delivery.next_claim_generation == 0 || delivery.next_claim_generation == u64::MAX {
         return Err(RestoreDeliveryError::InvalidNextClaimGeneration);
     }
 
-    let claim_generation = u64::from(snapshot.completed_attempts) + 1;
+    let claim_generation = u64::from(delivery.completed_attempts) + 1;
     let next_generation_after_claim = claim_generation + 1;
 
-    match &snapshot.phase {
-        DeliveryPhaseSnapshot::Pending => {
-            if snapshot.completed_attempts != 0 || snapshot.next_claim_generation != 1 {
+    match &delivery.phase {
+        DeliveryPhase::Pending => {
+            if delivery.completed_attempts != 0 || delivery.next_claim_generation != 1 {
                 return Err(RestoreDeliveryError::PendingAttemptMismatch);
             }
         }
-        DeliveryPhaseSnapshot::RetryScheduled { failure, .. } => {
+        DeliveryPhase::RetryScheduled { failure, .. } => {
             if !failure.is_retryable() {
                 return Err(RestoreDeliveryError::RetryFailureNotRetryable);
             }
-            if snapshot.completed_attempts >= snapshot.facts.max_attempts {
+            if delivery.completed_attempts >= delivery.facts.max_attempts {
                 return Err(RestoreDeliveryError::InvalidCompletedAttempts);
             }
-            if snapshot.completed_attempts == 0
-                || snapshot.next_claim_generation != claim_generation
+            if delivery.completed_attempts == 0
+                || delivery.next_claim_generation != claim_generation
             {
                 return Err(RestoreDeliveryError::RetryAttemptMismatch);
             }
         }
-        DeliveryPhaseSnapshot::Delivering(claim) => {
-            if snapshot.completed_attempts >= snapshot.facts.max_attempts
-                || claim.delivery_id != snapshot.facts.delivery_id
+        DeliveryPhase::Delivering(claim) => {
+            if delivery.completed_attempts >= delivery.facts.max_attempts
+                || claim.delivery_id() != &delivery.facts.delivery_id
             {
                 return Err(RestoreDeliveryError::DeliveringClaimDeliveryMismatch);
             }
-            if claim.attempt != snapshot.completed_attempts + 1 {
+            if claim.attempt() != delivery.completed_attempts + 1 {
                 return Err(RestoreDeliveryError::DeliveringClaimAttemptMismatch);
             }
-            if claim.generation != claim_generation
-                || snapshot.next_claim_generation != next_generation_after_claim
+            if claim.generation() != claim_generation
+                || delivery.next_claim_generation != next_generation_after_claim
             {
                 return Err(RestoreDeliveryError::DeliveringClaimGenerationMismatch);
             }
         }
-        DeliveryPhaseSnapshot::Delivered { .. } => {
-            let legacy_delivered = snapshot.completed_attempts == 0
-                && snapshot.next_claim_generation == next_generation_after_claim;
-            if !legacy_delivered && snapshot.next_claim_generation != claim_generation {
+        DeliveryPhase::Delivered { .. } => {
+            let legacy_delivered = delivery.completed_attempts == 0
+                && delivery.next_claim_generation == next_generation_after_claim;
+            if !legacy_delivered && delivery.next_claim_generation != claim_generation {
                 return Err(RestoreDeliveryError::TerminalAttemptMismatch);
             }
         }
-        DeliveryPhaseSnapshot::OutcomeUnknown { .. } => {
-            if snapshot.completed_attempts == 0
-                || snapshot.next_claim_generation != claim_generation
+        DeliveryPhase::OutcomeUnknown { .. } => {
+            if delivery.completed_attempts == 0
+                || delivery.next_claim_generation != claim_generation
             {
                 return Err(RestoreDeliveryError::TerminalAttemptMismatch);
             }
         }
-        DeliveryPhaseSnapshot::TerminalObserved { observation } => {
-            if snapshot.completed_attempts == 0
-                || snapshot.next_claim_generation != claim_generation
+        DeliveryPhase::TerminalObserved { observation } => {
+            if delivery.completed_attempts == 0
+                || delivery.next_claim_generation != claim_generation
             {
                 return Err(RestoreDeliveryError::TerminalAttemptMismatch);
             }
-            validate_terminal_observation(snapshot, observation)?;
+            validate_terminal_observation(delivery, observation)?;
         }
-        DeliveryPhaseSnapshot::Failed { failure, .. } => {
-            if snapshot.completed_attempts == 0
-                || snapshot.next_claim_generation != claim_generation
+        DeliveryPhase::Failed { failure, .. } => {
+            if delivery.completed_attempts == 0
+                || delivery.next_claim_generation != claim_generation
                 || (failure.is_retryable()
-                    && snapshot.completed_attempts != snapshot.facts.max_attempts)
+                    && delivery.completed_attempts != delivery.facts.max_attempts)
             {
                 return Err(RestoreDeliveryError::TerminalAttemptMismatch);
             }
         }
-        DeliveryPhaseSnapshot::Cancelled { .. } => {
-            if snapshot.next_claim_generation != claim_generation
-                && snapshot.next_claim_generation != next_generation_after_claim
+        DeliveryPhase::Cancelled { .. } => {
+            if delivery.next_claim_generation != claim_generation
+                && delivery.next_claim_generation != next_generation_after_claim
             {
                 return Err(RestoreDeliveryError::TerminalAttemptMismatch);
             }
@@ -576,14 +584,14 @@ fn validate_snapshot(snapshot: &DeliverySnapshot) -> Result<(), RestoreDeliveryE
 }
 
 fn validate_terminal_observation(
-    snapshot: &DeliverySnapshot,
-    observation: &TerminalObservationSnapshot,
+    delivery: &Delivery,
+    observation: &TerminalObservation,
 ) -> Result<(), RestoreDeliveryError> {
-    if observation.delivery_id() != &snapshot.facts.delivery_id
-        || observation.graph_run_id() != snapshot.facts.run_id
-        || observation.node_id() != snapshot.facts.node_id
-        || observation.fence().node_execution_id().as_str() != snapshot.facts.node_execution_id
-        || observation.role_id() != snapshot.facts.role_id
+    if observation.delivery_id() != &delivery.facts.delivery_id
+        || observation.graph_run_id() != delivery.facts.run_id
+        || observation.node_id() != delivery.facts.node_id
+        || observation.fence().node_execution_id().as_str() != delivery.facts.node_execution_id
+        || observation.role_id() != delivery.facts.role_id
     {
         return Err(RestoreDeliveryError::TerminalObservationCorrelationMismatch);
     }

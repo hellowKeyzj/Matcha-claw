@@ -46,7 +46,7 @@ export type AgentRunner = {
 
 /** Progress event emitter. */
 export type ProgressEmitter = {
-  emit(event: ProgressEvent): void
+  emit(event: ProgressEvent, signal?: AbortSignal): void
 }
 
 /** Background task lifecycle. */
@@ -66,19 +66,28 @@ export type TaskRegistrar = {
     },
     host: HostHandle,
   ): { runId: string; signal: AbortSignal }
-  complete(runId: string, summary?: string): void
-  fail(runId: string, error: string): void
-  kill(runId: string): void
+  complete(runId: string, summary?: string, signal?: AbortSignal): void
+  fail(runId: string, error: string, signal?: AbortSignal): void
+  kill(runId: string, signal?: AbortSignal): void
   /**
    * Register an agent-level AbortController. Called by the backend when starting an agent, so that service
    * .kill(runId, agentId) can precisely abort a single agent (without affecting other agents in the same run).
    * Idempotent: re-registering with the same agentId overwrites.
    */
-  registerAgentAbort?(runId: string, agentId: number, ac: AbortController): void
+  registerAgentAbort?(
+    runId: string,
+    agentId: number,
+    ac: AbortController,
+    signal?: AbortSignal,
+  ): void
   /**
    * Unregister an agent-level AbortController (called when the agent completes/fails; idempotent).
    */
-  unregisterAgentAbort?(runId: string, agentId: number): void
+  unregisterAgentAbort?(
+    runId: string,
+    agentId: number,
+    signal?: AbortSignal,
+  ): void
   /**
    * Abort a single agent. Returns whether it hit (false = agent already completed/does not exist).
    * Does not affect other agents in the same run; the workflow continues (the aborted agent returns dead → null).

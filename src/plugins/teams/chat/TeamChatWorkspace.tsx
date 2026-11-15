@@ -32,6 +32,6 @@ export const TeamChatWorkspace = memo(function TeamChatWorkspace({ isActive, ena
   if (!visible || !isActive || !designTeamId || designTeamKnown) return null;
   return <div role="alert" className="flex items-center gap-2 p-3 text-sm text-destructive">
     {t('chat.teamNotFound')}
-    <Button variant="outline" size="sm" onClick={() => navigate('/teams')}>{t('chat.backToList')}</Button>
+    <Button variant="outline" size="sm" onClick={() => navigate('/', { state: { teamsSidebar: true } })}>{t('chat.backToList')}</Button>
   </div>;
 });

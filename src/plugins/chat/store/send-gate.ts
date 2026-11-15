@@ -27,7 +27,7 @@ export type CurrentChatSendGateSource =
     historyStatus: ChatSessionHistoryStatus | null;
     sendPending: boolean;
     runPhase: ChatRunPhase | null;
-    imageGenerationActive: boolean;
+    requestPending: boolean;
     activeRunId: string | null;
     pendingTurnKey: string | null;
     activeTurnItemKey: string | null;
@@ -65,7 +65,7 @@ export function readCurrentChatSendGateSource(state: ChatStoreState): CurrentCha
     historyStatus: record?.meta.historyStatus ?? null,
     sendPending: record ? hasPendingSessionSend(record) : false,
     runPhase: runtime?.runPhase ?? null,
-    imageGenerationActive: runtime?.imageGeneration?.active === true,
+    requestPending: runtime?.requestPending === true,
     activeRunId: runtime?.activeRunId ?? null,
     pendingTurnKey: runtime?.pendingTurnKey ?? null,
     activeTurnItemKey: runtime?.activeTurnItemKey ?? null,
@@ -89,7 +89,7 @@ export function areCurrentChatSendGateSourcesEquivalent(
       && left.historyStatus === right.historyStatus
       && left.sendPending === right.sendPending
       && left.runPhase === right.runPhase
-      && left.imageGenerationActive === right.imageGenerationActive
+      && left.requestPending === right.requestPending
       && left.activeRunId === right.activeRunId
       && left.pendingTurnKey === right.pendingTurnKey
       && left.activeTurnItemKey === right.activeTurnItemKey;
@@ -119,7 +119,7 @@ export function deriveChatSendGate(source: CurrentChatSendGateSource): ChatSendG
   }
   if (
     source.sendPending
-    || source.imageGenerationActive
+    || source.requestPending
     || (source.runPhase != null && isRunActive({ runPhase: source.runPhase }))
     || source.activeRunId != null && source.runPhase !== 'idle'
     || source.pendingTurnKey != null

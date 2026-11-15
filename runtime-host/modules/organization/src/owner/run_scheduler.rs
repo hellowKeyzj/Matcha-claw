@@ -1,18 +1,25 @@
 use organization::{
-    ActivityId, ActivityKind, ActivityPhase, ActivityTarget, GraphRunId, OrganizationStore, RoleId,
-    RoleSessionReceipt, StoreFault,
+    ActivityId, ActivityKind, ActivityPhase, ActivityRequest, ActivityTarget, GraphRunFacts, GraphRunId,
+    OrganizationStore, RoleId, RoleSessionReceipt, StoreFault,
 };
 
 use platform::trace::{identifier_hash, runtime_trace};
+#[cfg(test)]
 use runtime_directory::RuntimeDriverIdentity;
 use serde_json::json;
 
-use crate::owner::team_run::{TeamRunActivityTarget, TeamRunOwner};
-
 use super::step_runtime::{TeamRunStepPlan, TeamRunStepPlanner};
 
+pub(crate) fn schedule_run_activities(
+    store: &mut OrganizationStore,
+    run_id: GraphRunId,
+    now: u64,
+) -> Result<Vec<ActivityId>, StoreFault> {
+    schedule_ready_nodes(store, run_id.clone(), now)?;
+    Ok(pending_run_activity_ids(store, &run_id, now))
+}
+
 pub(crate) fn schedule_ready_nodes(
-    team_run: &TeamRunOwner,
     store: &mut OrganizationStore,
     run_id: GraphRunId,
     now: u64,
@@ -29,11 +36,10 @@ pub(crate) fn schedule_ready_nodes(
             "errorKind": super::actor::store_fault_label(error),
         }));
     })?;
-    commit_team_run_step_plan(team_run, store, &run_id, plan, now)
+    commit_team_run_step_plan(store, &run_id, plan, now)
 }
 
 fn commit_team_run_step_plan(
-    team_run: &TeamRunOwner,
     store: &mut OrganizationStore,
     run_id: &GraphRunId,
     plan: TeamRunStepPlan,
@@ -46,7 +52,7 @@ fn commit_team_run_step_plan(
     }));
     for (step_index, step) in control_steps.into_iter().enumerate() {
         let node_hash = platform::trace::enabled().then(|| identifier_hash(step.node_id().as_str()));
-        let outcome = team_run.apply_control_execution_step(store, run_id, step);
+        let outcome = store.apply_control_execution_step(run_id, step);
         runtime_trace("runtime.team_run.schedule.control.commit", || json!({
             "runHash": identifier_hash(run_id.as_str()), "stepIndex": step_index,
             "nodeHash": node_hash,
@@ -61,22 +67,24 @@ fn commit_team_run_step_plan(
         runtime_trace("runtime.team_run.schedule.activity.register", || json!({
             "runHash": identifier_hash(run_id.as_str()), "activityIndex": activity_index,
             "outcome": match &outcome {
-                Ok(organization::ActivityRegistrationOutcome::Recorded(_)) => "recorded",
-                Ok(organization::ActivityRegistrationOutcome::Replayed(_)) => "replayed",
-                Ok(organization::ActivityRegistrationOutcome::ConflictingIdempotencyKey) => "conflicting_idempotency_key",
-                Ok(organization::ActivityRegistrationOutcome::ConflictingActivityId { .. }) => "conflicting_activity_id",
+                Ok(Some(organization::ActivityRegistrationOutcome::Recorded(_))) => "recorded",
+                Ok(Some(organization::ActivityRegistrationOutcome::Replayed(_))) => "replayed",
+                Ok(Some(organization::ActivityRegistrationOutcome::ConflictingIdempotencyKey)) => "conflicting_idempotency_key",
+                Ok(Some(organization::ActivityRegistrationOutcome::ConflictingActivityId { .. })) => "conflicting_activity_id",
+                Ok(None) => "not_scheduled",
                 Err(error) => super::actor::store_fault_label(error),
             },
         }));
         match outcome? {
-            organization::ActivityRegistrationOutcome::Recorded(activity)
-            | organization::ActivityRegistrationOutcome::Replayed(activity) => {
+            Some(organization::ActivityRegistrationOutcome::Recorded(activity))
+            | Some(organization::ActivityRegistrationOutcome::Replayed(activity)) => {
                 activity_ids.push(activity.facts().activity_id.clone());
             }
-            organization::ActivityRegistrationOutcome::ConflictingIdempotencyKey
-            | organization::ActivityRegistrationOutcome::ConflictingActivityId { .. } => {
+            Some(organization::ActivityRegistrationOutcome::ConflictingIdempotencyKey)
+            | Some(organization::ActivityRegistrationOutcome::ConflictingActivityId { .. }) => {
                 return Err(StoreFault::InvalidFacts);
             }
+            None => {}
         }
     }
     Ok(activity_ids)
@@ -101,11 +109,13 @@ pub(crate) fn pending_run_activity_ids(
     if !run_allows_activity_execution(store, run_id) {
         return Vec::new();
     }
+    let Some(run) = store.facts().run(run_id) else {
+        return Vec::new();
+    };
     store
         .facts()
-        .activities()
-        .activities()
-        .filter(|activity| activity.facts().run_id == *run_id)
+        .activities_for_run(run_id.as_str())
+        .filter(|activity| !run.graph().is_rework_blocked(&activity.facts().node_id))
         .filter_map(|activity| match activity.phase() {
             ActivityPhase::Pending => Some(activity.facts().activity_id.clone()),
             ActivityPhase::RetryScheduled { retry_at, .. } if *retry_at <= now => {
@@ -140,29 +150,16 @@ pub(crate) fn activity_belongs_to(
         .is_some_and(|activity| activity.facts().run_id == *run_id)
 }
 
-pub(crate) fn activity_target(
-    store: &OrganizationStore,
-    activity_id: &ActivityId,
-) -> Option<TeamRunActivityTarget> {
-    let activity = store.facts().activities().activity(activity_id)?;
-    let run_id = activity.facts().run_id.clone();
-    let run = store.facts().run(&run_id)?;
-    let ActivityKind::AgentTask { role_id, .. } = &activity.facts().activity_kind else {
+pub(crate) fn activity_target<'a>(
+    store: &'a OrganizationStore,
+    activity: &ActivityRequest,
+) -> Option<(&'a GraphRunFacts, &'a RoleSessionReceipt)> {
+    let run = store.facts().run(&activity.run_id)?;
+    let ActivityKind::AgentTask { role_id, .. } = &activity.activity_kind else {
         return None;
     };
-    let binding =
-        binding_for_activity_target(run.runtime()?.bindings(), role_id, &activity.facts().target)?;
-    if binding.endpoint().as_str()
-        == RuntimeDriverIdentity::open_claw().runtime_endpoint_reference()
-    {
-        Some(TeamRunActivityTarget::OpenClaw { run_id })
-    } else if binding.endpoint().as_str()
-        == RuntimeDriverIdentity::matcha_agent().runtime_endpoint_reference()
-    {
-        Some(TeamRunActivityTarget::Matcha { run_id })
-    } else {
-        None
-    }
+    let binding = binding_for_activity_target(run.runtime()?.bindings(), role_id, &activity.target)?;
+    Some((run, binding))
 }
 
 #[cfg(test)]

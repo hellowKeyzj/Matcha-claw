@@ -3,6 +3,9 @@ import type { TeamWebhookAuthProjection } from '@/plugins/teams/services/team-ru
 import type { TeamRunGraphCanvasLabels } from '@/plugins/teams/pages/TeamRunGraphCanvas';
 
 export type TeamGraphCanvasNodeKind = 'start' | 'work' | 'review' | 'human_decision' | 'script_review' | 'join' | 'end';
+export type TeamGraphNodeTab = 'config' | 'output' | 'input' | 'activity' | 'approval';
+export type TeamGraphNodeDetailTab = Exclude<TeamGraphNodeTab, 'config'>;
+export type TeamNodeDeliverySelection = { artifactId: string; filePath?: string };
 export type TeamGraphStartTriggerMode = 'manual' | 'webhook' | 'cron';
 export type TeamGraphCronPresetId = 'every10Minutes' | 'every30Minutes' | 'hourly' | 'dailyAt9' | 'custom';
 export type TeamGraphCronCustomKind = 'intervalMinutes' | 'intervalHours' | 'dailyAt';
@@ -26,6 +29,7 @@ export type TeamAssignmentEditorProps = EditorPresentation & {
   outputArtifactKind: string;
   bindingRequired: boolean;
   sessionCreation: 'idle' | 'pending' | 'failed';
+  createSessionDisabledReason?: string;
   onCreateSession?: () => void;
   onBindingChange: (roleId: string, sessionRef: string) => void;
   onPromptChange: (value: string) => void;

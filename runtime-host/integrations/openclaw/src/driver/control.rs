@@ -117,6 +117,13 @@ impl OpenClawDriver {
         self.gateway.question_resolve(request).await
     }
 
+    pub async fn video_task_refresh(
+        &self,
+        request: crate::gateway::request::OpenClawVideoTaskRefreshGatewayRequest,
+    ) -> crate::port::OpenClawGatewayRequestOutcome {
+        self.gateway.video_task_refresh(request).await
+    }
+
     pub fn control_lease(&self) -> ControlLease {
         match self.owner().lease() {
             Some(lease) => ControlLease::probe(Arc::clone(&self.gateway), lease),

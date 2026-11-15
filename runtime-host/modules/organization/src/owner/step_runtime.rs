@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use organization::{
     ActivityKind, ActivityPhase, ActivityRequest, ActivityTarget, ControlExecutionStep,
-    DeliveryPhase, GraphRunFacts, GraphRunId, GraphRunLifecycleState, GraphState, NodeId,
-    NodeKind, OrganizationStore, RoleId, RoleSessionReceipt, RunStartGate, StoreFault,
+    GraphRunFacts, GraphRunId, GraphRunLifecycleState, GraphState, NodeId,
+    OrganizationStore, RoleId, RoleSessionReceipt, RunStartGate, StoreFault,
 };
 
 use platform::trace::{identifier_hash, runtime_trace};
@@ -78,7 +78,7 @@ impl<'a> TeamRunStepPlanner<'a> {
             });
         }
 
-        let control_steps = organization::run::control::plan_ready_control_execution(
+        let (control_plan, planned_graph) = crate::run::control::plan_ready_control_execution_state(
             run.graph().definition(),
             run.graph(),
             self.store.facts().evidence(),
@@ -107,16 +107,11 @@ impl<'a> TeamRunStepPlanner<'a> {
                 })
             });
             StoreFault::ControlExecution(error)
-        })?
-        .into_steps();
+        })?;
+        let control_steps = control_plan.into_steps();
         runtime_trace("runtime.team_run.schedule.control.plan.end", || json!({
             "runHash": identifier_hash(run.run_id().as_str()), "controlCount": control_steps.len(),
         }));
-        let planned_graph = graph_after_control_steps(run.graph(), &control_steps).inspect_err(|_| {
-            runtime_trace("runtime.team_run.schedule.control.reduce.error", || json!({
-                "runHash": identifier_hash(run.run_id().as_str()), "reason": "graph_reduce",
-            }));
-        })?;
         let ready_activity_requests =
             self.plan_ready_activity_requests(run, &planned_graph, now)?;
 
@@ -132,11 +127,48 @@ impl<'a> TeamRunStepPlanner<'a> {
         graph: &GraphState,
         now: u64,
     ) -> Result<Vec<ActivityRequest>, StoreFault> {
-        let active_session_slots = active_run_session_slots(self.store, run.run_id());
-        let selected = organization::run::scheduler::schedule_ready_nodes(
+        let mut reserved = active_run_session_slots(self.store, run.run_id());
+        let active_session_count = reserved.len();
+        let bindings = run
+            .runtime()
+            .map(|runtime| runtime.bindings())
+            .unwrap_or(&[]);
+        let selected = organization::run::scheduler::schedule_ready_nodes_with(
             graph,
             MAX_ACTIVE_ROLE_PROMPTS,
-            active_session_slots.len().min(MAX_ACTIVE_ROLE_PROMPTS),
+            active_session_count.min(MAX_ACTIVE_ROLE_PROMPTS),
+            |item| {
+                let trace_skip = |reason: &'static str| {
+                    runtime_trace("runtime.team_run.schedule.activity.skip", || json!({
+                        "runHash": identifier_hash(run.run_id().as_str()),
+                        "nodeHash": identifier_hash(item.node_id().as_str()),
+                        "reason": reason,
+                    }));
+                };
+                let ActivityKind::AgentTask {
+                    role_id,
+                    session_ref,
+                    ..
+                } = item.activity_kind()
+                else {
+                    trace_skip("not_agent_task");
+                    return None;
+                };
+                let Some(binding) =
+                    binding_for_node_executor(bindings, role_id, session_ref, item.node_id())
+                else {
+                    trace_skip("binding_missing");
+                    return None;
+                };
+                if !reserved.insert(session_slot_key(
+                    binding.role().as_str(),
+                    binding.session_ref().as_str(),
+                )) {
+                    trace_skip("session_slot_reserved");
+                    return None;
+                }
+                Some((item, binding))
+            },
         )
         .map_err(|error| {
             runtime_trace("runtime.team_run.schedule.activity.plan.error", || {
@@ -154,64 +186,21 @@ impl<'a> TeamRunStepPlanner<'a> {
         })?;
         runtime_trace("runtime.team_run.schedule.activity.selected", || json!({
             "runHash": identifier_hash(run.run_id().as_str()),
-            "activeSessionCount": active_session_slots.len(),
+            "activeSessionCount": active_session_count,
             "parallelLimit": MAX_ACTIVE_ROLE_PROMPTS,
             "readyQueueCount": graph.ready_queue().len(),
             "selectedCount": selected.len(),
         }));
-        let bindings = run
-            .runtime()
-            .map(|runtime| runtime.bindings())
-            .unwrap_or(&[]);
-        let mut reserved = active_session_slots;
         let mut activity_requests = Vec::new();
 
-        for item in selected {
-            let trace_skip = |reason: &'static str| {
-                runtime_trace("runtime.team_run.schedule.activity.skip", || json!({
-                    "runHash": identifier_hash(run.run_id().as_str()),
-                    "nodeHash": identifier_hash(item.node_id().as_str()),
-                    "reason": reason,
-                }));
-            };
-            let Some(node) = graph.definition().node(item.node_id()) else {
-                trace_skip("node_missing");
-                continue;
-            };
-            let ActivityKind::AgentTask {
-                role_id,
-                session_ref,
-                ..
-            } = item.activity_kind()
-            else {
-                trace_skip("not_agent_task");
-                continue;
-            };
-            let Some(binding) =
-                binding_for_node_executor(bindings, role_id, session_ref, item.node_id())
-            else {
-                trace_skip("binding_missing");
-                continue;
-            };
-            if !reserved.insert(session_slot_key(
-                binding.role().as_str(),
-                binding.session_ref().as_str(),
-            )) {
-                trace_skip("session_slot_reserved");
-                continue;
-            }
-            let activity = compose_activity_prompt(
-                self.store,
-                run,
-                graph,
-                item.bind_activity_target(
+        for (item, binding) in selected {
+            let activity = item.bind_activity_target(
                     ActivityTarget::new(binding.session_ref().as_str().to_owned())
                         .map_err(|_| StoreFault::InvalidFacts)?,
                     now,
-                    node.max_attempts().get(),
+                    organization::run::delivery::DELIVERY_MAX_ATTEMPTS,
                 )
-                .map_err(|_| StoreFault::InvalidFacts)?,
-            )?;
+                .map_err(|_| StoreFault::InvalidFacts)?;
             activity_requests.push(activity);
         }
 
@@ -219,156 +208,25 @@ impl<'a> TeamRunStepPlanner<'a> {
     }
 }
 
-fn graph_after_control_steps(
-    graph: &GraphState,
-    control_steps: &[ControlExecutionStep],
-) -> Result<GraphState, StoreFault> {
-    let mut planned_graph = graph.clone();
-    for step in control_steps {
-        planned_graph = organization::reduce(
-            planned_graph,
-            crate::run::control::graph_event_for_step(step),
-        )
-        .map_err(StoreFault::GraphReduce)?;
-    }
-    Ok(planned_graph)
-}
-
-fn compose_activity_prompt(
-    store: &OrganizationStore,
-    run: &GraphRunFacts,
-    graph: &GraphState,
-    request: ActivityRequest,
-) -> Result<ActivityRequest, StoreFault> {
-    let ActivityKind::AgentTask {
-        task_id,
-        role_id,
-        session_ref,
-        prompt: _,
-    } = &request.activity_kind
-    else {
-        return Ok(request);
-    };
-    let node = graph
-        .definition()
-        .node(&request.node_id)
-        .ok_or(StoreFault::InvalidFacts)?;
-    let upstream = upstream_prompt_contexts(store, run.run_id(), graph, &request);
-    let prompt = organization::run::scheduler::compose_agent_task_prompt_with_upstream_context(
-        run.team(),
-        node,
-        &request,
-        &upstream,
-    )
-    .ok_or(StoreFault::InvalidFacts)?;
-    Ok(ActivityRequest {
-        activity_kind: ActivityKind::AgentTask {
-            task_id: task_id.clone(),
-            role_id: role_id.clone(),
-            session_ref: session_ref.clone(),
-            prompt,
-        },
-        ..request
-    })
-}
-
-fn upstream_prompt_contexts<'a>(
-    store: &'a OrganizationStore,
-    run_id: &GraphRunId,
-    graph: &GraphState,
-    request: &ActivityRequest,
-) -> Vec<organization::run::scheduler::UpstreamPromptContext<'a>> {
-    let Some(attempt) = graph.current_attempt(&request.node_id) else {
-        return Vec::new();
-    };
-    if attempt.inputs().is_empty() {
-        return Vec::new();
-    }
-    let edges = graph
-        .definition()
-        .edges()
-        .iter()
-        .map(|edge| (edge.id(), edge))
-        .collect::<BTreeMap<_, _>>();
-    let attempts = graph
-        .executions()
-        .values()
-        .flat_map(|history| history.attempts())
-        .map(|attempt| ((attempt.node_id().as_str(), attempt.fence()), attempt))
-        .collect::<BTreeMap<_, _>>();
-    let mut outputs = BTreeMap::new();
-    for delivery in store.facts().deliveries().deliveries() {
-        if delivery.facts().run_id != run_id.as_str() {
-            continue;
-        }
-        let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
-            continue;
-        };
-        if matches!(
-            observation.resolution(),
-            organization::run::delivery::TerminalObservationResolution::GraphResolved(_)
-        ) {
-            if let Some(output) = observation.output() {
-                outputs
-                    .entry((observation.node_id(), observation.fence()))
-                    .or_insert(output);
-            }
-        }
-    }
-    let mut pending = attempt
-        .inputs()
-        .iter()
-        .rev()
-        .map(|input| (attempt.node_id(), input))
-        .collect::<Vec<_>>();
-    let mut visited_joins = BTreeSet::new();
-    let mut included_executions = BTreeSet::new();
-    let mut contexts = Vec::new();
-    while let Some((target_node_id, input)) = pending.pop() {
-        let Some(edge) = edges.get(input.edge_id()) else {
-            continue;
-        };
-        if edge.target_node_id() != target_node_id || !edge.payload().include_upstream_result() {
-            continue;
-        }
-        let source_key = (input.source_node_id().as_str(), input.source_fence());
-        let Some(source) = attempts.get(&source_key) else {
-            continue;
-        };
-        if source.node_kind() == NodeKind::Join {
-            if visited_joins.insert(source.fence()) {
-                pending.extend(
-                    source.inputs().iter().rev().map(|input| (source.node_id(), input)),
-                );
-            }
-        } else if included_executions.insert(source.fence().node_execution_id()) {
-            if let Some(output) = outputs.get(&source_key) {
-                contexts.push(organization::run::scheduler::UpstreamPromptContext {
-                    summary: output.summary(),
-                });
-            }
-        }
-    }
-    contexts
-}
-
 pub(crate) fn active_run_session_slots(
     store: &OrganizationStore,
     run_id: &GraphRunId,
 ) -> BTreeSet<String> {
+    let Some(run) = store.facts().run(run_id) else {
+        return BTreeSet::new();
+    };
     store
         .facts()
-        .activities()
-        .activities()
-        .filter(|activity| activity.facts().run_id == *run_id)
-        .filter(|activity| {
-            matches!(
-                activity.phase(),
-                ActivityPhase::Pending
-                    | ActivityPhase::RetryScheduled { .. }
-                    | ActivityPhase::Claimed(_)
-                    | ActivityPhase::Dispatched(_)
-            )
+        .activities_for_run(run_id.as_str())
+        .filter(|activity| match activity.phase() {
+            ActivityPhase::Pending | ActivityPhase::RetryScheduled { .. } => {
+                !run.graph().is_rework_blocked(&activity.facts().node_id)
+            }
+            ActivityPhase::Claimed(_)
+            | ActivityPhase::Dispatched(_)
+            | ActivityPhase::OutcomeUnknown { .. }
+            | ActivityPhase::TerminalObserved { .. } => true,
+            _ => false,
         })
         .filter_map(|activity| match &activity.facts().activity_kind {
             ActivityKind::AgentTask { role_id, .. } => {
@@ -421,92 +279,8 @@ mod tests {
     use super::*;
     use organization::EndpointSessionId;
     use organization::{
-        EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, ExecutorPolicy, GraphDefinition,
-        GraphRunId, ManagedAgentReference, NodeDefinition, RuntimeEndpointReference, TeamId,
-        WorkAssignment,
+        ManagedAgentReference, RuntimeEndpointReference, TeamId,
     };
-
-    #[test]
-    fn upstream_context_respects_edge_payload_policy() {
-        let source = NodeId::new("source");
-        let target = NodeId::new("target");
-        let disabled = EdgeDefinition::new(
-            EdgeId::new("disabled"),
-            source.clone(),
-            "completed",
-            target.clone(),
-            "input",
-            EdgeAction::Activate,
-        )
-        .with_payload(EdgePayloadPolicy::new(false));
-        let enabled = EdgeDefinition::new(
-            EdgeId::new("enabled"),
-            source.clone(),
-            "completed",
-            target.clone(),
-            "input",
-            EdgeAction::Activate,
-        );
-        let definition = GraphDefinition::new(
-            "graph:test",
-            "plan:test",
-            GraphRunId::new("run:one"),
-            "upstream filter",
-            vec![
-                NodeDefinition::work(
-                    source,
-                    "source",
-                    std::num::NonZeroU32::new(1).unwrap(),
-                    WorkAssignment::typed(
-                        "task:source",
-                        "source prompt",
-                        ExecutorPolicy::team_role("leader"),
-                        None,
-                    ),
-                ),
-                NodeDefinition::work(
-                    target.clone(),
-                    "target",
-                    std::num::NonZeroU32::new(1).unwrap(),
-                    WorkAssignment::typed(
-                        "task:target",
-                        "target prompt",
-                        ExecutorPolicy::team_role("leader"),
-                        None,
-                    ),
-                ),
-            ],
-            vec![disabled, enabled],
-        )
-        .unwrap();
-
-        for (edge_id, expected) in [("disabled", Vec::new()), ("enabled", vec!["source result"])] {
-            let definition = GraphDefinition::new(
-                definition.graph_id(), definition.workflow_plan_id(), definition.run_id().clone(), definition.title(),
-                definition.nodes().to_vec(),
-                definition.edges().iter().filter(|edge| edge.id().as_str() == edge_id).cloned().collect(),
-            ).unwrap();
-            let (_temp, mut store) = crate::owner::actor::tests::store_with_graph(
-                GraphState::initialize(definition, 1),
-            );
-            let (_claim, delivery_id, session) =
-                crate::owner::actor::tests::claim_native_activity(&mut store, 3);
-            store.accept_native_terminal_context(&delivery_id, session, "native:source".into()).unwrap();
-            crate::owner::actor::tests::settle_native_output(
-                &mut store,
-                &delivery_id,
-                organization::NativeTerminalStatus::Completed,
-                Some(r#"<team_message>{"summary":"source result","decision":"completed"}</team_message>"#.into()),
-                5,
-            );
-            let run_id = GraphRunId::new("run:one");
-            let graph = store.facts().run(&run_id).unwrap().graph();
-            let scheduled = organization::run::scheduler::schedule_ready_nodes(graph, 1, 0).unwrap();
-            let request = scheduled[0].bind_activity_target(ActivityTarget::new("rs0").unwrap(), 6, 1).unwrap();
-            let contexts = upstream_prompt_contexts(&store, &run_id, graph, &request);
-            assert_eq!(contexts.iter().map(|context| context.summary).collect::<Vec<_>>(), expected);
-        }
-    }
 
     #[test]
     fn node_executor_prefers_explicit_session_ref_for_same_role() {

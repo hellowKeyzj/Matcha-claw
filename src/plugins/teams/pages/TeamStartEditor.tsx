@@ -20,7 +20,7 @@ const START_CRON_PRESETS: Array<{ presetId: Exclude<TeamGraphCronPresetId, 'cust
 const START_CRON_CUSTOM_KIND_IDS: TeamGraphCronCustomKind[] = ['intervalMinutes', 'intervalHours', 'dailyAt'];
 const DEFAULT_CUSTOM_CRON_SCHEDULE: CustomCronSchedule = { kind: 'intervalMinutes', intervalMinutes: '10', intervalHours: '1', time: '09:00' };
 export const DEFAULT_CRON_SCHEDULE: CronScheduleDraft = { mode: 'simple', presetId: 'every10Minutes', custom: DEFAULT_CUSTOM_CRON_SCHEDULE };
-const FIELD_CLASS = 'min-w-0 w-full rounded-xl border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
+const FIELD_CLASS = 'h-[41px] min-w-0 w-full rounded-[9px] border border-[hsl(var(--shell-border))] bg-[hsl(var(--shell-surface))] px-3 py-2.5 text-xs leading-[1.6] text-foreground hover:border-[hsl(var(--shell-border-strong))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-[hsl(var(--shell-surface-muted))]';
 
 export function normalizeWebhookPathInput(value: string): string {
   return value.trim().replace(/^\/+/, '').replace(/\/+$/, '');
@@ -145,30 +145,32 @@ export function TeamStartEditor({
   const triggerLabels = { manual: labels.startTriggerManual, webhook: labels.startTriggerWebhook, cron: labels.startTriggerCron };
 
   return (
-    <div className="space-y-5 text-sm">
-      <label className="grid gap-2 text-xs font-medium text-muted-foreground">
-        {labels.startTriggerMode}
-        {editable ? (
-          <select
-            className={FIELD_CLASS}
-            value={triggerMode}
-            disabled={disabled}
-            aria-describedby={`${id}-trigger-hint`}
-            onChange={(event) => onTriggerModeChange(event.target.value as TeamGraphStartTriggerMode)}
-          >
-            <option value="manual">{labels.startTriggerManual}</option>
-            <option value="webhook">{labels.startTriggerWebhook}</option>
-            <option value="cron">{labels.startTriggerCron}</option>
-          </select>
-        ) : <span className="text-sm font-normal text-foreground">{triggerLabels[triggerMode]}</span>}
-      </label>
-      <p id={`${id}-trigger-hint`} className="text-xs leading-relaxed text-muted-foreground">{labels.startTriggerHint}</p>
+    <div className="space-y-[25px] text-xs max-[780px]:space-y-[22px]">
+      <div className="space-y-[9px]">
+        <label className="grid gap-[9px] text-xs font-medium">
+          {labels.startTriggerMode}
+          {editable ? (
+            <select
+              className={FIELD_CLASS}
+              value={triggerMode}
+              disabled={disabled}
+              aria-describedby={`${id}-trigger-hint`}
+              onChange={(event) => onTriggerModeChange(event.target.value as TeamGraphStartTriggerMode)}
+            >
+              <option value="manual">{labels.startTriggerManual}</option>
+              <option value="webhook">{labels.startTriggerWebhook}</option>
+              <option value="cron">{labels.startTriggerCron}</option>
+            </select>
+          ) : <span className="text-xs font-normal text-foreground">{triggerLabels[triggerMode]}</span>}
+        </label>
+        <p id={`${id}-trigger-hint`} className="text-[11px] leading-relaxed text-muted-foreground">{labels.startTriggerHint}</p>
+      </div>
 
       {triggerMode === 'cron' ? (
         <div className="space-y-3">
           {editable ? (
             <fieldset disabled={disabled} className="space-y-3">
-              <label className="grid gap-2 text-xs font-medium text-muted-foreground">
+              <label className="grid gap-[9px] text-xs font-medium text-[hsl(var(--shell-text-muted))]">
                 {labels.startCronSchedule}
                 <select
                   className={FIELD_CLASS}
@@ -182,8 +184,8 @@ export function TeamStartEditor({
                 </select>
               </label>
               {cronSchedule.mode === 'simple' && cronSchedule.presetId === 'custom' ? (
-                <div className="grid grid-cols-2 items-start gap-3">
-                  <label className="grid gap-2 text-xs font-medium text-muted-foreground">
+                <div className="grid items-start gap-3 sm:grid-cols-2">
+                  <label className="grid gap-[9px] text-xs font-medium text-[hsl(var(--shell-text-muted))]">
                     {labels.startCronCustomKind}
                     <select
                       className={FIELD_CLASS}
@@ -194,7 +196,7 @@ export function TeamStartEditor({
                     </select>
                   </label>
                   {cronSchedule.custom.kind === 'dailyAt' ? (
-                    <label className="grid gap-2 text-xs font-medium text-muted-foreground">
+                    <label className="grid gap-[9px] text-xs font-medium text-[hsl(var(--shell-text-muted))]">
                       {labels.startCronCustomTime}
                       <input
                         className={FIELD_CLASS}
@@ -207,7 +209,7 @@ export function TeamStartEditor({
                       />
                     </label>
                   ) : (
-                    <label className="grid gap-2 text-xs font-medium text-muted-foreground">
+                    <label className="grid gap-[9px] text-xs font-medium text-[hsl(var(--shell-text-muted))]">
                       {cronSchedule.custom.kind === 'intervalMinutes' ? labels.startCronCustomIntervalMinutes : labels.startCronCustomIntervalHours}
                       <input
                         className={FIELD_CLASS}
@@ -238,7 +240,7 @@ export function TeamStartEditor({
 
       {triggerMode === 'webhook' ? (
         <div className="space-y-5">
-          <label className="grid gap-2 text-xs font-medium text-muted-foreground">
+          <label className="grid gap-[9px] text-xs font-medium text-[hsl(var(--shell-text-muted))]">
             {labels.startWebhookPath}
             <input
               className={`${FIELD_CLASS} font-mono`}
@@ -254,7 +256,7 @@ export function TeamStartEditor({
           {pathError ? <p id={`${id}-path-error`} role="status" className="text-xs text-destructive">{pathError}</p> : null}
           {editable ? (
             <div className="space-y-2">
-              <label className="grid gap-2 text-xs font-medium text-muted-foreground">
+              <label className="grid gap-[9px] text-xs font-medium text-[hsl(var(--shell-text-muted))]">
                 {labels.startWebhookPublicBaseUrl}
                 <input
                   className={`${FIELD_CLASS} font-mono`}
@@ -279,14 +281,14 @@ export function TeamStartEditor({
               <dt className="font-medium text-muted-foreground">{labels.startWebhookToken}</dt>
               <dd className="flex items-center justify-between gap-3">
                 <span className="min-w-0 break-all font-mono text-foreground">{webhookAuth?.maskedToken || labels.startWebhookTokenUnavailable}</span>
-                <Button type="button" variant="outline" size="sm" className="shrink-0" disabled>{labels.copyWebhookToken}</Button>
+                <Button type="button" variant="outline" size="sm" className="h-[34px] shrink-0 rounded-[9px] px-3" disabled>{labels.copyWebhookToken}</Button>
               </dd>
             </div>
             <div className="space-y-1.5">
               <dt className="font-medium text-muted-foreground">{labels.startWebhookPublicUrl}</dt>
               <dd className="flex items-start justify-between gap-3">
                 <span className="min-w-0 break-all font-mono text-foreground">{webhookPublicUrl || labels.startWebhookPublicUrlUnavailable}</span>
-                <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={disabled || !webhookPublicUrl} onClick={onCopyWebhookPublicUrl}>
+                <Button type="button" variant="outline" size="sm" className="h-[34px] shrink-0 rounded-[9px] px-3" disabled={disabled || !webhookPublicUrl} onClick={onCopyWebhookPublicUrl}>
                   <span role="status">{copiedWebhookPublicUrl ? labels.copiedWebhookPublicUrl : labels.copyWebhookPublicUrl}</span>
                 </Button>
               </dd>

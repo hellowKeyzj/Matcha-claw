@@ -87,6 +87,12 @@ pub struct OpenClawQuestionResolveGatewayRequest {
     pub resolution_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenClawVideoTaskRefreshGatewayRequest {
+    pub session_identity: sessions_module::state::SessionIdentity,
+    pub task_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpenClawGatewayControlOutcome {
     Succeeded(Value),
@@ -95,6 +101,7 @@ pub enum OpenClawGatewayControlOutcome {
     Unavailable,
     CapacityExhausted,
     SurfaceRejected(Value),
+    VideoTaskRejected(Value),
 }
 
 pub fn project_gateway_request_outcome(
@@ -118,6 +125,9 @@ pub fn project_gateway_request_outcome(
         }
         crate::port::OpenClawGatewayRequestOutcome::SurfaceRejected(failure) => {
             OpenClawGatewayControlOutcome::SurfaceRejected(failure.public_error())
+        }
+        crate::port::OpenClawGatewayRequestOutcome::VideoTaskRejected { task_id, reason } => {
+            OpenClawGatewayControlOutcome::VideoTaskRejected(reason.public_result(&task_id))
         }
     }
 }
@@ -329,6 +339,19 @@ pub fn decode_question_resolve_request(
     })
 }
 
+pub fn decode_video_task_refresh_request(
+    input: Value,
+) -> Result<OpenClawVideoTaskRefreshGatewayRequest, InvalidGatewayRequest> {
+    let object = input.as_object().ok_or(InvalidGatewayRequest)?;
+    if object.len() != 2 || !object.contains_key("sessionIdentity") || !object.contains_key("taskId") {
+        return Err(InvalidGatewayRequest);
+    }
+    Ok(OpenClawVideoTaskRefreshGatewayRequest {
+        session_identity: decode_question_session_identity(object.get("sessionIdentity"))?,
+        task_id: bounded_surface_text(object.get("taskId"))?,
+    })
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingQuestionRecord {
@@ -410,6 +433,39 @@ pub(crate) fn project_question_resolve_result(value: Value) -> Result<Value, Inv
         return Err(InvalidGatewayRequest);
     }
     Ok(json!({ "status": "answered", "answers": answers }))
+}
+
+pub(crate) fn project_video_task_refresh_result(
+    value: Value,
+    task_id: &str,
+) -> Result<crate::port::OpenClawGatewayRequestOutcome, InvalidGatewayRequest> {
+    use crate::port::{OpenClawGatewayRequestOutcome, OpenClawVideoTaskRejection};
+
+    if value.get("toolName").and_then(Value::as_str) != Some("video_generate") {
+        return Err(InvalidGatewayRequest);
+    }
+    let rejected = |reason| OpenClawGatewayRequestOutcome::VideoTaskRejected { task_id: task_id.to_owned(), reason };
+    if value.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Ok(rejected(OpenClawVideoTaskRejection::QueryRejected));
+    }
+    let details = value.get("output").and_then(|output| output.get("details"))
+        .ok_or(InvalidGatewayRequest)?;
+    if value.get("ok").and_then(Value::as_bool) != Some(true)
+        || details.get("taskId").and_then(Value::as_str) != Some(task_id)
+    {
+        return Err(InvalidGatewayRequest);
+    }
+    let status = details.get("status").and_then(Value::as_str).ok_or(InvalidGatewayRequest)?;
+    if status == "error" {
+        let reason = serde_json::from_value::<OpenClawVideoTaskRejection>(
+            details.get("errorCode").cloned().ok_or(InvalidGatewayRequest)?,
+        ).map_err(|_| InvalidGatewayRequest)?;
+        return Ok(rejected(reason));
+    }
+    if !matches!(status, "queued" | "running" | "completed" | "failed" | "timed_out" | "cancelled") {
+        return Err(InvalidGatewayRequest);
+    }
+    Ok(OpenClawGatewayRequestOutcome::Succeeded(json!({ "taskId": task_id, "status": status })))
 }
 
 fn bounded_gateway_text(value: Option<&Value>) -> Result<String, InvalidGatewayRequest> {

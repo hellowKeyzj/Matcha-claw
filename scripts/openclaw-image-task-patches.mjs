@@ -22,6 +22,51 @@ function locate(dist, prefix, markers) {
   return files[0];
 }
 
+function patchGeneratedMediaWorkspaceTools(source) {
+  source = replace(source, '//#region src/agents/tools/generated-media-batch-persistence.ts', `//#region src/agents/tools/generated-media-batch-persistence.ts
+async function resolveGeneratedMediaWorkspace(options) {
+	if (options?.sessionPermissionPolicy?.mode === "read-only") throw new ToolInputError("Media generation requires a writable session workspace.");
+	if (!options?.workspaceDir) throw new ToolInputError("Media generation requires a session workspace.");
+	if (options?.sandboxed && !options.sandbox?.bridge) throw new ToolInputError("Media generation requires the session sandbox filesystem bridge.");
+	const workspaceDir = options.sandbox ? options.workspaceDir : await fs.realpath(options.workspaceDir);
+	const permissionRoot = options.fsPolicy?.root ?? options.sessionPermissionPolicy?.root;
+	if (!options.sandbox && permissionRoot) {
+		const root = await fs.realpath(permissionRoot);
+		if (path.relative(root, workspaceDir) && !isPathStrictlyInside(root, workspaceDir)) throw new ToolInputError("Media generation workspace is outside the session filesystem root.");
+	}
+	return {
+		workspaceDir,
+		sandbox: options.sandbox ? { root: options.sandbox.root, bridge: options.sandbox.bridge } : void 0
+	};
+}`);
+  source = replace(source, '\t\tworkspaceDir,\n\t\tpreparedModelRuntime: options?.preparedModelRuntime,\n\t\tsandbox,\n\t\tfsPolicy: options?.fsPolicy,\n\t\tonAsyncTaskStarted: mediaGenerationAsyncStartCallback', `\t\tworkspaceDir,
+		preparedModelRuntime: options?.preparedModelRuntime,
+		sandbox,
+		sandboxed: options?.sandboxed === true || Boolean(options?.sandboxRoot),
+		sessionPermissionPolicy: options?.sessionPermissionPolicy,
+		fsPolicy: options?.fsPolicy,
+		onAsyncTaskStarted: mediaGenerationAsyncStartCallback`);
+  for (const [kind, asset] of [['Image', 'image'], ['Music', 'track']]) {
+    const name = kind.toLowerCase();
+    const startMarker = `//#region src/agents/tools/${name}-generate-tool.ts`;
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf('\n//#endregion', start);
+    if (start < 0 || end < 0 || source.indexOf(startMarker, start + startMarker.length) >= 0) throw new Error(`${PATCH}: expected one ${name} generation tool region`);
+    let tool = source.slice(start, end);
+    const subdir = `GENERATED_${kind.toUpperCase()}_MEDIA_SUBDIR`;
+    tool = replace(tool, `const ${subdir} = "tool-${name}-generation";`, `const ${subdir} = "media/tool-${name}-generation";`);
+    tool = replace(tool, 'Output filename hint; basename preserved in managed media dir.', 'Output filename hint; basename preserved under the session workspace media directory.');
+    const status = `\t\t\tif (action === "status") return create${kind}GenerateStatusActionResult(options?.agentSessionKey, options?.requesterAgentId);`;
+    tool = replace(tool, status, `${status}\n\t\t\tconst { workspaceDir, sandbox } = await resolveGeneratedMediaWorkspace(options);`);
+    tool = replace(tool, `\t\t\t\t\teffectiveCfg,\n\t\t\t\t\tprompt,`, `\t\t\t\t\teffectiveCfg,\n\t\t\t\t\tworkspaceDir,\n\t\t\t\t\tsandbox,\n\t\t\t\t\tprompt,`);
+    tool = replace(tool, `\t\tsubdir: ${subdir},`, `\t\trootDir: params.workspaceDir,\n\t\tsandbox: params.sandbox,\n\t\tsubdir: ${subdir},`);
+    const save = `saveMediaBuffer(${asset}.buffer, ${asset}.mimeType, ${subdir}, mediaMaxBytes, params.filename || ${asset}.fileName)`;
+    tool = replace(tool, save, save.slice(0, -1) + ', void 0, params.workspaceDir, params.sandbox)');
+    source = source.slice(0, start) + tool + source.slice(end);
+  }
+  return source;
+}
+
 export function patchImageTaskTools(source) {
   // Search already seals this shared bundle; validate and preserve that seal.
   const stamp = source.match(/^\/\/ matcha-native-searxng-v3 sha256=([a-f0-9]{64})\n/);
@@ -103,8 +148,8 @@ function failMediaGenerationTaskRun(params) {`);
 \t}, createCapabilityProviderRuntimeDeps(params.providers));
 \tparams.signal?.throwIfAborted();
 \tif (params.taskHandle) imageGenerationTaskLifecycle`);
-  body = replace(body, '/** Gives generated-media batches all-or-nothing result semantics with best-effort rollback. */', `async function rollbackGeneratedImageCancellation(savedMedia, subdir, reason) {
-\tconst results = await Promise.allSettled(savedMedia.map((saved) => deleteMediaBuffer(saved.id, subdir)));
+  body = replace(body, '/** Gives generated-media batches all-or-nothing result semantics with best-effort rollback. */', `async function rollbackGeneratedImageCancellation(savedMedia, subdir, reason, rootDir, sandbox) {
+\tconst results = await Promise.allSettled(savedMedia.map((saved) => deleteMediaBuffer(saved.id, subdir, rootDir, sandbox)));
 \tconst failures = results.flatMap((result) => result.status === "rejected" ? [formatErrorMessage(result.reason)] : []);
 \tif (failures.length) {
 \t\tconst error = new Error(formatErrorMessage(reason) + "; generated image cleanup failed: " + failures.join("; "));
@@ -115,7 +160,7 @@ function failMediaGenerationTaskRun(params) {`);
 /** Gives generated-media batches all-or-nothing result semantics with best-effort rollback. */`);
   body = replace(body, '\t\tsubdir: GENERATED_IMAGE_MEDIA_SUBDIR,\n\t\tmode: "concurrent",', '\t\tsubdir: GENERATED_IMAGE_MEDIA_SUBDIR,\n\t\tsignal: params.signal,\n\t\tmode: "concurrent",');
   body = replace(body, '\tconst revisedPrompts = result.images.map((image) => image.revisedPrompt?.trim()).filter((entry) => Boolean(entry));', `\tif (params.signal?.aborted) {
-\t\tawait rollbackGeneratedImageCancellation(savedImages, GENERATED_IMAGE_MEDIA_SUBDIR, params.signal.reason);
+\t\tawait rollbackGeneratedImageCancellation(savedImages, GENERATED_IMAGE_MEDIA_SUBDIR, params.signal.reason, params.workspaceDir, params.sandbox);
 \t\tparams.signal.throwIfAborted();
 \t}
 \tif (params.taskHandle?.abortController) params.taskHandle.deliveringCompletion = true;
@@ -128,12 +173,13 @@ function failMediaGenerationTaskRun(params) {`);
 \t\t\treturn result.value;`);
   body = replace(body, '\tif (firstFailure) {\n\t\tawait Promise.allSettled(savedMedia.flatMap((saved) => saved ? [Promise.resolve().then(() => deleteMediaBuffer(saved.id, params.subdir))] : []));', `\tif (params.signal?.aborted) firstFailure ??= { error: params.signal.reason };
 \tif (firstFailure) {
-\t\tif (params.signal?.aborted) await rollbackGeneratedImageCancellation(savedMedia.filter(Boolean), params.subdir, firstFailure.error);
-\t\telse await Promise.allSettled(savedMedia.flatMap((saved) => saved ? [Promise.resolve().then(() => deleteMediaBuffer(saved.id, params.subdir))] : []));`);
+\t\tif (params.signal?.aborted) await rollbackGeneratedImageCancellation(savedMedia.filter(Boolean), params.subdir, firstFailure.error, params.rootDir, params.sandbox);
+\t\telse await Promise.allSettled(savedMedia.flatMap((saved) => saved ? [Promise.resolve().then(() => deleteMediaBuffer(saved.id, params.subdir, params.rootDir, params.sandbox))] : []));`);
   body = replace(body, '\t\t\t\tlifecycle: imageGenerationTaskLifecycle,\n\t\t\t\tgenerationLabel: "image",', `\t\t\t\tlifecycle: imageGenerationTaskLifecycle,
 \t\t\t\tgenerationLabel: "image",
 \t\t\t\tsignal,`);
   body = replace(body, '\t\t\t\trun: (taskHandle) => executeImageGenerationJob({\n\t\t\t\t\teffectiveCfg,', '\t\t\t\trun: (taskHandle) => executeImageGenerationJob({\n\t\t\t\t\tsignal: taskHandle?.signal ?? signal,\n\t\t\t\t\teffectiveCfg,');
+  body = patchGeneratedMediaWorkspaceTools(body);
   return stamp ? `// matcha-native-searxng-v3 sha256=${digest(body)}\n${body}` : body;
 }
 

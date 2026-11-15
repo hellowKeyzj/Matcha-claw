@@ -13,6 +13,7 @@ base64.workspace = true
 chrono.workspace = true
 cron.workspace = true
 foundation = { version = "0.1.0", path = "../../foundation" }
+futures-util.workspace = true
 getrandom.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }
 runtime-directory = { version = "0.1.0", path = "../runtime-directory" }

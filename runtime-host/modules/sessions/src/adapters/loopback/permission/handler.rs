@@ -42,6 +42,7 @@ pub(crate) async fn handle(
             Err(super::DecodeError::Unauthorized) => return Response::unauthorized(),
             Err(super::DecodeError::Invalid) => return Response::bad_request(),
         };
+    drop(verifier);
     let command = match request.into_command() {
         Ok(command) => command,
         Err(_) => return Response::bad_request(),
@@ -61,7 +62,6 @@ pub(crate) async fn handle(
             endpoint, action, crate::session_permission::SessionPermissionOutcome::Unsupported,
         ));
     }
-    drop(verifier);
     let outcome = match session.session_permission(command).await {
         Ok(outcome) => outcome,
         Err(_) => match action {

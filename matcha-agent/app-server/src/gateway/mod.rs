@@ -213,15 +213,30 @@ async fn upgrade(
         .into_response()
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileQuery {
+    session_id: Option<String>,
+}
+
 async fn read_file(
     State(gateway): State<Gateway>,
     Path((agent_id, path)): Path<(String, String)>,
+    Query(query): Query<FileQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(error) = gateway.authorize_file(&headers) {
         return http_error(error);
     }
-    match workspace::read_file(&gateway.config, &agent_id, &path).await {
+    match workspace::read_session_file(
+        &gateway.config,
+        &gateway.sessions,
+        &agent_id,
+        query.session_id.as_deref(),
+        &path,
+    )
+    .await
+    {
         Ok(bytes) => (
             [
                 (header::CONTENT_TYPE, "application/octet-stream"),
@@ -238,6 +253,7 @@ async fn read_file(
 async fn write_file(
     State(gateway): State<Gateway>,
     Path((agent_id, path)): Path<(String, String)>,
+    Query(query): Query<FileQuery>,
     request: Request,
 ) -> Response {
     if let Err(error) = gateway.authorize_file(request.headers()) {
@@ -255,7 +271,15 @@ async fn write_file(
     // Once the body is accepted, the commit outlives the HTTP response future.
     let operations = gateway.connections.clone();
     let write = operations.spawn(async move {
-        let result = workspace::write_file(&gateway.config, &agent_id, &path, &bytes).await;
+        let result = workspace::write_session_file(
+            &gateway.config,
+            &gateway.sessions,
+            &agent_id,
+            query.session_id.as_deref(),
+            &path,
+            &bytes,
+        )
+        .await;
         if let Err(error) = &result {
             let kind = error
                 .data

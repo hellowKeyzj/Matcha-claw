@@ -51,14 +51,14 @@ impl Changes {
     }
 
     pub async fn latest(&self) -> rpc::Result<u64> {
-        self.0.0.call(|connection| latest(connection)).await
+        self.0.0.read(|connection| latest(connection)).await
     }
 
     /// Exclusive cursor. A zero-sized page still validates the next durable sequence.
     pub async fn replay(&self, after_seq: u64, limit: usize) -> rpc::Result<Vec<ReceiptChange>> {
         let limit = i64::try_from(limit)
             .map_err(|_| Error::invalid("limit exceeds the database integer range"))?;
-        self.0.0.call(move |connection| {
+        self.0.0.read(move |connection| {
             let transaction = connection.transaction().map_err(storage)?;
             let latest = latest(&transaction)?;
             if after_seq > latest {

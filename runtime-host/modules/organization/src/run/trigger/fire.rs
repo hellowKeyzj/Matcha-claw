@@ -81,6 +81,7 @@ pub enum TriggerFireError {
     RunMismatch,
     RunNotStarted,
     SourceMismatch,
+    Busy,
     Reduce(ReduceError),
 }
 
@@ -91,6 +92,7 @@ impl fmt::Debug for TriggerFireError {
             Self::RunMismatch => "TriggerFireError::RunMismatch",
             Self::RunNotStarted => "TriggerFireError::RunNotStarted",
             Self::SourceMismatch => "TriggerFireError::SourceMismatch",
+            Self::Busy => "TriggerFireError::Busy",
             Self::Reduce(_) => "TriggerFireError::GraphStateViolation",
         };
         formatter.write_str(message)
@@ -106,6 +108,7 @@ impl fmt::Display for TriggerFireError {
             Self::SourceMismatch => {
                 "trigger fire request source does not match the armed TeamRun trigger"
             }
+            Self::Busy => "trigger scope is busy; this request was not admitted",
             Self::Reduce(_) => "trigger fire request violates the TeamRun graph state machine",
         };
         formatter.write_str(message)

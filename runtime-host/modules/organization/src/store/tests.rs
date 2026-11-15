@@ -251,7 +251,6 @@ fn graph_replace_reopen_preserves_full_definition_metadata_and_command_payload()
             .output_artifact_kind(),
         Some("artifact-report")
     );
-    super::codec::tests::assert_schema25_graph_metadata(restored);
     assert_eq!(
         restored.nodes()[3].review_assignment().unwrap().prompt(),
         "review instruction"
@@ -398,6 +397,7 @@ fn reopen_round_trip_preserves_teamrun_approval_and_event_ledgers_in_one_transac
         reason: "Review required".to_owned(),
         requested_action: "Release".to_owned(),
         risk_summary: "Production impact".to_owned(),
+        content: None,
         idempotency_key: "approval-command:one".to_owned(),
         requested_at: 2,
         subject: ApprovalSubject::Stage {
@@ -1000,6 +1000,7 @@ fn work_node_approval_resolution_does_not_complete_a_waiting_attempt() {
                         reason: "Review required".to_owned(),
                         requested_action: "Release".to_owned(),
                         risk_summary: "Production impact".to_owned(),
+                        content: None,
                         idempotency_key: "approval-request-key".to_owned(),
                         requested_at: 4,
                         subject: ApprovalSubject::WorkNode {
@@ -1436,8 +1437,9 @@ fn team_tombstone_is_logical_idempotent_and_preserves_materialization() {
     let after_tombstone = sqlite_snapshot(&path);
     assert!(store.facts().team(&team_id).unwrap().tombstoned());
     assert_eq!(
-        store.facts().materialization(&team_id),
-        Some(&terminal_materialization())
+        store.facts().materialization(&team_id)
+            .map(|materialization| materialization.receipts().collect::<Vec<_>>()),
+        Some(vec![&terminal_materialization()])
     );
     let lifecycle = store.facts().materialization_lifecycles().next().unwrap();
     assert!(matches!(
@@ -1460,8 +1462,9 @@ fn team_tombstone_is_logical_idempotent_and_preserves_materialization() {
     let reopened = OrganizationStore::open(&path).unwrap();
     assert!(reopened.facts().team(&team_id).unwrap().tombstoned());
     assert_eq!(
-        reopened.facts().materialization(&team_id),
-        Some(&terminal_materialization())
+        reopened.facts().materialization(&team_id)
+            .map(|materialization| materialization.receipts().collect::<Vec<_>>()),
+        Some(vec![&terminal_materialization()])
     );
     assert!(matches!(
         reopened.facts().materialization_lifecycles().next(),
@@ -1483,12 +1486,12 @@ fn manual_materialization_round_trips_and_keeps_external_agents_opaque() {
     let materialization = crate::compile_manual_team_materialization(
         TeamId::try_new("team:manual").unwrap(),
         "Selected Team",
-        RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
         vec![
             crate::ManualTeamRoleBinding::try_new(
                 RoleId::try_new("leader").unwrap(),
                 "Lead",
                 ManagedAgentReference::try_new("existing-lead").unwrap(),
+                RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                 true,
             )
             .unwrap(),
@@ -1496,6 +1499,7 @@ fn manual_materialization_round_trips_and_keeps_external_agents_opaque() {
                 RoleId::try_new("reviewer").unwrap(),
                 "Reviewer",
                 ManagedAgentReference::try_new("existing-reviewer").unwrap(),
+                RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                 false,
             )
             .unwrap(),
@@ -1504,7 +1508,7 @@ fn manual_materialization_round_trips_and_keeps_external_agents_opaque() {
     )
     .unwrap();
     let team = materialization.definition().team_id().clone();
-    let request = materialization.request().clone();
+    let request = materialization.requests()[0].clone();
 
     assert_eq!(
         store.create_team_materialization(materialization),
@@ -1555,12 +1559,12 @@ fn materialization_readback_confirms_an_ambiguous_durable_request_without_creati
     let materialization = crate::compile_manual_team_materialization(
         TeamId::try_new("team:readback").unwrap(),
         "Readback Team",
-        RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
         vec![
             crate::ManualTeamRoleBinding::try_new(
                 RoleId::try_new("leader").unwrap(),
                 "Lead",
                 ManagedAgentReference::try_new("existing-lead").unwrap(),
+                RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                 true,
             )
             .unwrap(),
@@ -1574,7 +1578,11 @@ fn materialization_readback_confirms_an_ambiguous_durable_request_without_creati
         Ok(MaterializationRecordOutcome::Recorded)
     );
     store
-        .record_team_materialization_outcome(&team, MaterializationOperationOutcome::OutcomeUnknown)
+        .record_team_materialization_outcome(
+            &team,
+            &RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
+            MaterializationOperationOutcome::OutcomeUnknown,
+        )
         .unwrap();
     let receipt = MaterializationReceipt::try_new(
         team.clone(),
@@ -1592,12 +1600,20 @@ fn materialization_readback_confirms_an_ambiguous_durable_request_without_creati
         store.confirm_team_materialization(receipt.clone()),
         Ok(MaterializationRecordOutcome::Recorded)
     );
-    assert_eq!(store.facts().materialization(&team), Some(&receipt));
+    assert_eq!(
+        store.facts().materialization(&team)
+            .map(|materialization| materialization.receipts().collect::<Vec<_>>()),
+        Some(vec![&receipt])
+    );
     assert_eq!(store.facts().runs().count(), 0);
     drop(store);
 
     let reopened = OrganizationStore::open(&path).unwrap();
-    assert_eq!(reopened.facts().materialization(&team), Some(&receipt));
+    assert_eq!(
+        reopened.facts().materialization(&team)
+            .map(|materialization| materialization.receipts().collect::<Vec<_>>()),
+        Some(vec![&receipt])
+    );
     assert!(reopened.materialization_receipt_recovery_teams().is_empty());
     assert_eq!(reopened.facts().runs().count(), 0);
     drop(reopened);
@@ -1611,12 +1627,12 @@ fn external_manual_removal_stays_opaque_and_does_not_create_runs() {
     let materialization = crate::compile_manual_team_materialization(
         TeamId::try_new("team:external").unwrap(),
         "Selected Team",
-        RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
         vec![
             crate::ManualTeamRoleBinding::try_new(
                 RoleId::try_new("leader").unwrap(),
                 "Lead",
                 ManagedAgentReference::try_new("existing-lead").unwrap(),
+                RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                 true,
             )
             .unwrap(),
@@ -1629,6 +1645,7 @@ fn external_manual_removal_stays_opaque_and_does_not_create_runs() {
     store
         .record_team_materialization_outcome(
             &team,
+            &RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
             MaterializationOperationOutcome::Confirmed {
                 receipt: MaterializationReceipt::try_new(
                     team.clone(),
@@ -1648,7 +1665,10 @@ fn external_manual_removal_stays_opaque_and_does_not_create_runs() {
         .tombstone_team(&team, IdempotencyKey::try_new("cleanup:external").unwrap())
         .unwrap();
 
-    let removal = store.team_materialization_removal(&team).unwrap();
+    let removal = store.team_materialization_removal(
+        &team,
+        &RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
+    ).unwrap();
     assert!(matches!(
         removal.receipt().roles()[0].ownership(),
         crate::RoleMaterializationOwnership::External
@@ -1674,7 +1694,10 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
         store.tombstone_team(&team, IdempotencyKey::try_new("cleanup:one").unwrap()),
         Ok(crate::TeamTombstoneOutcome::Tombstoned)
     );
-    assert!(store.team_materialization_removal(&team).is_none());
+    assert!(store.team_materialization_removal(
+        &team,
+        &RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+    ).is_none());
     store
         .begin_graph_run_cancellation(&GraphRunId::new("run:one"), "cancel:one", 2)
         .unwrap();
@@ -1686,12 +1709,18 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
             3,
         )
         .unwrap();
-    assert!(store.team_materialization_removal(&team).is_none());
+    assert!(store.team_materialization_removal(
+        &team,
+        &RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+    ).is_none());
     store
         .tombstone_graph_run(&GraphRunId::new("run:one"), "tombstone:one", 4)
         .unwrap();
     let removal = store
-        .team_materialization_removal(&team)
+        .team_materialization_removal(
+            &team,
+            &RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+        )
         .expect("confirmed tombstone has one removal after all runs tombstone");
     assert_eq!(removal.receipt(), &terminal_materialization());
     assert_eq!(removal.idempotency_key().as_str(), "cleanup:one");
@@ -1702,7 +1731,7 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
         Ok(crate::TeamTombstoneOutcome::Replayed)
     );
     assert_eq!(
-        store.team_materialization_removal(&team),
+        store.team_materialization_removal(&team, removal.receipt().endpoint()),
         Some(removal.clone())
     );
     assert_eq!(sqlite_snapshot(&path), tombstoned);
@@ -1710,6 +1739,7 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
     assert_eq!(
         store.record_team_materialization_cleanup_outcome(
             &team,
+            removal.receipt().endpoint(),
             MaterializationOperationOutcome::Confirmed {
                 receipt: terminal_materialization(),
             },
@@ -1720,6 +1750,7 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
     assert_eq!(
         store.record_team_materialization_cleanup_outcome(
             &team,
+            removal.receipt().endpoint(),
             MaterializationOperationOutcome::Confirmed {
                 receipt: terminal_materialization(),
             },
@@ -1766,12 +1797,12 @@ fn unknown_or_rejected_materializations_cannot_produce_removals() {
         let materialization = crate::compile_manual_team_materialization(
             TeamId::try_new(format!("team:{name}")).unwrap(),
             "Selected Team",
-            RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
             vec![
                 crate::ManualTeamRoleBinding::try_new(
                     RoleId::try_new("leader").unwrap(),
                     "Lead",
                     ManagedAgentReference::try_new("existing-lead").unwrap(),
+                    RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
                     true,
                 )
                 .unwrap(),
@@ -1782,7 +1813,11 @@ fn unknown_or_rejected_materializations_cannot_produce_removals() {
         let team = materialization.definition().team_id().clone();
         store.create_team_materialization(materialization).unwrap();
         store
-            .record_team_materialization_outcome(&team, outcome)
+            .record_team_materialization_outcome(
+                &team,
+                &RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
+                outcome,
+            )
             .unwrap();
         store
             .tombstone_team(
@@ -1791,7 +1826,10 @@ fn unknown_or_rejected_materializations_cannot_produce_removals() {
             )
             .unwrap();
 
-        assert!(store.team_materialization_removal(&team).is_none());
+        assert!(store.team_materialization_removal(
+            &team,
+            &RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
+        ).is_none());
         assert_eq!(store.facts().runs().count(), 0);
         drop(store);
         remove_test_path(&path);
@@ -3259,7 +3297,7 @@ fn activity_registration_accepts_deterministic_teamrun_completion_prompt_only() 
     accepted.activity_id = crate::ActivityId::new("activity:accepted").unwrap();
     accepted.idempotency_key = "activity:accepted".to_owned();
     let composed = crate::run::scheduler::compose_agent_task_prompt_with_upstream_context(
-        run.team(), run.graph().definition().node(&accepted.node_id).unwrap(), &accepted, &[],
+        run.team(), run.graph().definition().node(&accepted.node_id).unwrap(), &accepted, &[], store.facts().team_prompts(),
     ).unwrap();
     if let crate::ActivityKind::AgentTask { prompt, .. } = &mut accepted.activity_kind {
         *prompt = composed;
@@ -4750,6 +4788,7 @@ fn approval(approval_id: &str) -> Approval {
         reason: "Review required".to_owned(),
         requested_action: "Release".to_owned(),
         risk_summary: "Production impact".to_owned(),
+        content: None,
         idempotency_key: format!("request:{approval_id}"),
         requested_at: 1,
         subject: ApprovalSubject::Stage {

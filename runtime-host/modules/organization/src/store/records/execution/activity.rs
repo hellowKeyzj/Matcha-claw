@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
-    ActivityClaimSnapshot, ActivityDispatchSnapshot, ActivityFailure, ActivityId, ActivityKind,
-    ActivityPhaseSnapshot, ActivityRequest, ActivitySnapshot, ActivityTarget, NodeExecutionId,
-    NodeId,
+    ActivityClaim, ActivityClaimSnapshot, ActivityDispatchSnapshot, ActivityFailure, ActivityId,
+    ActivityKind, ActivityPhase, ActivityPhaseSnapshot, ActivityRequest, ActivitySnapshot,
+    ActivityTarget, NodeExecutionId, NodeId,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -13,6 +13,8 @@ struct Row {
     execution: String,
     fence: Fence,
     kind: Kind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_artifact_ids: Option<Vec<String>>,
     target: String,
     idempotency: String,
     created_at: u64,
@@ -134,12 +136,7 @@ impl ActivityOutcome {
 impl SettlementProof {
     fn from_domain(value: &crate::run::activity::SettlementProof) -> Result<Self, StoreFault> {
         Ok(Self {
-            claim: Claim {
-                id: value.claim.activity_id().as_str().to_owned(),
-                attempt: value.claim.attempt(),
-                generation: value.claim.generation(),
-                claimed_at: value.claim.claimed_at(),
-            },
+            claim: Claim::from_domain(&value.claim),
             receipt: super::delivery::Receipt::from_domain(&value.receipt),
             settlement: value.settlement.as_ref()
                 .map(Settlement::from_domain).transpose()?,
@@ -183,7 +180,7 @@ struct Claim {
     claimed_at: u64,
 }
 impl Claim {
-    fn from_domain(value: &ActivityClaimSnapshot) -> Self {
+    fn from_domain(value: &ActivityClaim) -> Self {
         Self {
             id: value.activity_id().as_str().to_owned(),
             attempt: value.attempt(),
@@ -235,11 +232,54 @@ enum Phase {
     Cancelled(u64),
 }
 
-pub(super) fn encode(value: &Activity, bodies: &Bodies<'_>) -> Result<Vec<u8>, StoreFault> {
-    let snapshot = value.snapshot();
-    let facts = snapshot.facts();
-    use ActivityPhaseSnapshot as P;
-    let phase = match snapshot.phase() {
+pub(crate) fn encode(
+    team: &TeamId,
+    value: &Activity,
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    encode_with_kind(team, value, None, contents)
+}
+
+pub(crate) fn encode_change(
+    team: &TeamId,
+    value: &Activity,
+    previous: Option<&Activity>,
+    record: Option<&StoredRecord>,
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let facts = value.facts();
+    let kind = match (previous, record) {
+        (Some(previous), Some(record))
+            if previous.facts() == facts
+                && record.key.kind == RecordKind::Activity
+                && record.key.scope.is_empty()
+                && record.key.id == facts.activity_id.as_str()
+                && record.team_id.as_deref() == Some(team.as_str())
+                && record.run_id.as_deref() == Some(facts.run_id.as_str()) =>
+        {
+            let row: Row = deserialize(&record.payload)?;
+            (row.id == facts.activity_id.as_str() && row.run == facts.run_id.as_str())
+                .then_some(row.kind)
+        }
+        _ => None,
+    };
+    encode_with_kind(team, value, kind.as_ref(), contents)
+}
+
+fn encode_with_kind(
+    team: &TeamId,
+    value: &Activity,
+    previous: Option<&Kind>,
+    contents: &ContentStore,
+) -> Result<StoredRecord, StoreFault> {
+    let facts = value.facts();
+    let bodies = Bodies {
+        contents,
+        team,
+        run: facts.run_id.clone(),
+    };
+    use ActivityPhase as P;
+    let phase = match value.phase() {
         P::Pending => Phase::Pending,
         P::Claimed(claim) => Phase::Claimed(Claim::from_domain(claim)),
         P::Dispatched(dispatch) => Phase::Dispatched {
@@ -269,29 +309,48 @@ pub(super) fn encode(value: &Activity, bodies: &Bodies<'_>) -> Result<Vec<u8>, S
             task: task_id.clone(),
             role: role_id.clone(),
             session: session_ref.clone(),
-            prompt: bodies.put(prompt)?,
+            prompt: bodies.put_reusing(prompt, match previous {
+                Some(Kind::Agent { task, role, session, prompt })
+                    if task == task_id && role == role_id && session == session_ref => Some(prompt),
+                _ => None,
+            })?,
         },
         ActivityKind::Control { action } => Kind::Control {
-            action: bodies.put(action)?,
+            action: bodies.put_reusing(action, match previous {
+                Some(Kind::Control { action }) => Some(action),
+                _ => None,
+            })?,
         },
     };
-    serialize(&Row {
+    let payload = serialize(&Row {
         id: facts.activity_id.as_str().to_owned(),
         run: facts.run_id.as_str().to_owned(),
         node: facts.node_id.as_str().to_owned(),
         execution: facts.node_execution_id.as_str().to_owned(),
         fence: Fence::from_domain(&facts.fence),
         kind,
+        input_artifact_ids: facts.input_artifact_ids.as_ref()
+            .map(|ids| ids.iter().map(|id| id.as_str().to_owned()).collect()),
         target: facts.target.as_str().to_owned(),
         idempotency: facts.idempotency_key.clone(),
         created_at: facts.created_at,
         max_attempts: facts.max_attempts,
         phase,
-        completed_attempts: snapshot.completed_attempts(),
-        next_generation: snapshot.next_claim_generation(),
-        settlement: snapshot.settlement_proof.as_ref()
+        completed_attempts: value.completed_attempts(),
+        next_generation: value.next_claim_generation(),
+        settlement: value.settlement_proof()
             .map(SettlementProof::from_domain).transpose()?,
-        native_terminal_claim: snapshot.native_terminal_claim.as_ref().map(Claim::from_domain),
+        native_terminal_claim: value.native_terminal_claim().map(Claim::from_domain),
+    })?;
+    Ok(StoredRecord {
+        key: RecordKey {
+            kind: RecordKind::Activity,
+            scope: String::new(),
+            id: facts.activity_id.as_str().to_owned(),
+        },
+        team_id: Some(team.as_str().to_owned()),
+        run_id: Some(facts.run_id.as_str().to_owned()),
+        payload,
     })
 }
 
@@ -320,6 +379,9 @@ pub(super) fn decode(bytes: &[u8], bodies: &Bodies<'_>) -> Result<Activity, Stor
         node_execution_id: NodeExecutionId::from_durable(row.execution),
         fence: row.fence.into_domain(),
         activity_kind: kind,
+        input_artifact_ids: row.input_artifact_ids.map(|ids| {
+            ids.into_iter().map(crate::run::ArtifactId::new).collect::<Result<Vec<_>, _>>()
+        }).transpose().map_err(|_| StoreFault::CorruptRecord)?,
         target: valid(ActivityTarget::new(row.target))?,
         idempotency_key: row.idempotency,
         created_at: row.created_at,

@@ -60,7 +60,7 @@ impl TeamSkillMaterializationFacts {
     }
 
     pub fn request(&self) -> &TeamMaterializationRequest {
-        self.materialization.request()
+        &self.materialization.requests()[0]
     }
 }
 
@@ -153,13 +153,14 @@ impl ManualTeamMaterializationFacts {
                     role.role,
                     role.member_name,
                     role.agent,
+                    endpoint.clone(),
                     role.leader,
                 )
                 .map_err(|_| TeamMaterializationError::Invalid)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let materialization =
-            compile_manual_team(team_id, team_name, endpoint, bindings, idempotency_key)?;
+            compile_manual_team(team_id, team_name, bindings, idempotency_key)?;
         Ok(Self { materialization })
     }
 
@@ -168,7 +169,7 @@ impl ManualTeamMaterializationFacts {
     }
 
     pub fn request(&self) -> &TeamMaterializationRequest {
-        self.materialization.request()
+        &self.materialization.requests()[0]
     }
 }
 

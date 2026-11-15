@@ -4,12 +4,12 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DeliveryFailure, DeliveryId, DeliveryPhase, DeliveryReceiptReference, ExecutionFence,
+    ActivityId, DeliveryFailure, DeliveryId, DeliveryPhase, DeliveryReceiptReference, ExecutionFence,
     GraphDefinition, GraphRunFacts, GraphRunId, GraphState, GraphStatus, IdempotencyKey,
     NativeDeliveryCorrelation, NativeTerminalStatus, NodeId, OrganizationStore,
     RuntimeEndpointReference, StoreFault, TeamId, TeamNodeOutput, TeamRevision,
     run::{
-        delivery::TerminalObservationResolution, graph::project, lifecycle::GraphRunLifecycleState,
+        delivery::TerminalObservationResolution, graph::graph_status, lifecycle::GraphRunLifecycleState,
     },
 };
 
@@ -562,17 +562,17 @@ pub(crate) fn inspect(
         );
     }
     let mut receipt = TaskExecutionReceipt::new(identity, TaskExecutionState::Pending);
-    receipt.graph_status = Some(project(run.graph()).status);
+    receipt.graph_status = Some(graph_status(run.graph()));
+    let mut all_activities_settled = true;
     for delivery in store.facts().deliveries().deliveries() {
         let facts = delivery.facts();
         let node_id = NodeId::new(facts.node_id.clone());
         if facts.team_id != run.team().as_str() || facts.run_id != run.run_id().as_str() {
             continue;
         }
-        let activity =
-            store.facts().activities().activities().find(|activity| {
-                activity.facts().activity_id.as_str() == facts.delivery_id.as_str()
-            });
+        let activity = ActivityId::new(facts.delivery_id.as_str())
+            .ok()
+            .and_then(|activity_id| store.facts().activities().activity(&activity_id));
         let Some(activity) = activity else {
             receipt.state = TaskExecutionState::Unknown;
             continue;
@@ -631,6 +631,8 @@ pub(crate) fn inspect(
             | DeliveryPhase::TerminalObserved { .. }
             | DeliveryPhase::OutcomeUnknown { .. } => TaskActivityState::Unknown,
         };
+        all_activities_settled &= matches!(state, TaskActivityState::Terminal { .. })
+            || matches!(delivery.phase(), DeliveryPhase::Failed { .. });
         receipt.activities.push(TaskActivityReceipt {
             delivery_id: facts.delivery_id.clone(),
             request_id: IdempotencyKey::try_new(facts.idempotency_key.clone())
@@ -663,11 +665,7 @@ pub(crate) fn inspect(
     ) || (matches!(
         receipt.graph_status,
         Some(GraphStatus::Completed | GraphStatus::Failed)
-    ) && !receipt.activities.is_empty()
-        && receipt
-            .activities
-            .iter()
-            .all(|activity| matches!(activity.state, TaskActivityState::Terminal { .. })))
+    ) && !receipt.activities.is_empty() && all_activities_settled)
     {
         receipt.state = TaskExecutionState::Terminal;
     } else if receipt.activities.iter().any(|activity| {

@@ -62,6 +62,7 @@ impl CanonicalIngressResult {
             source_epoch: provenance.source_epoch(),
             source_cursor: provenance.source_cursor(),
             run_id,
+            resumed_run_id: None,
             provenance,
             changes: vec![CanonicalSessionChange::TranscriptMessage { message }],
         }))
@@ -87,6 +88,7 @@ impl CanonicalIngressResult {
             source_epoch: provenance.source_epoch(),
             source_cursor: provenance.source_cursor(),
             run_id: None,
+            resumed_run_id: None,
             provenance,
             changes: vec![CanonicalSessionChange::RecoveryRequired {
                 reason: CanonicalRecoveryReason::NativeUnknown,
@@ -105,6 +107,7 @@ pub struct CanonicalSessionDelta {
     source_cursor: Option<u64>,
     run_id: Option<RunId>,
     provenance: SessionEventProvenance,
+    resumed_run_id: Option<RunId>,
     changes: Vec<CanonicalSessionChange>,
 }
 
@@ -129,6 +132,10 @@ impl CanonicalSessionDelta {
     pub fn provenance(&self) -> &SessionEventProvenance {
         &self.provenance
     }
+
+    pub(crate) fn resumed_run_id(&self) -> Option<&RunId> { self.resumed_run_id.as_ref() }
+
+    pub(crate) fn resume_run(&mut self, run_id: RunId) { self.resumed_run_id = Some(run_id); }
 
     pub fn changes(&self) -> &[CanonicalSessionChange] {
         &self.changes
@@ -395,6 +402,14 @@ pub enum CanonicalSessionChange {
         stop_reason: Option<String>,
         error_detail: Option<Value>,
     },
+    RunErrorUpdated {
+        run_id: RunId,
+        phase: sessions_module::state::RunPhase,
+        error_kind: Option<SessionErrorKind>,
+        error_message: Option<String>,
+        stop_reason: Option<String>,
+        error_detail: Option<Value>,
+    },
     RecoveryRequired {
         reason: CanonicalRecoveryReason,
     },
@@ -424,6 +439,7 @@ impl fmt::Debug for CanonicalSessionChange {
         match self {
             Self::RunStarted { .. } => formatter.debug_struct("RunStarted").finish(),
             Self::RunYielded { .. } => formatter.debug_struct("RunYielded").finish(),
+            Self::RunErrorUpdated { .. } => formatter.debug_struct("RunErrorUpdated").finish(),
             Self::RunTimingUpdated { .. } => formatter.debug_struct("RunTimingUpdated").finish(),
             Self::AssistantTurnChunk {
                 kind,
@@ -601,6 +617,7 @@ impl CanonicalSessionDeltaProducer {
             source_epoch: provenance.source_epoch(),
             source_cursor: provenance.source_cursor(),
             run_id: event.run_id.clone(),
+            resumed_run_id: None,
             provenance,
             changes,
         })
@@ -792,6 +809,7 @@ impl CanonicalSessionDeltaProducer {
             source_epoch: provenance.source_epoch(),
             source_cursor: None,
             run_id: None,
+            resumed_run_id: None,
             provenance,
             changes: vec![CanonicalSessionChange::RecoveryRequired { reason }],
         }

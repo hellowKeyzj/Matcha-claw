@@ -5,6 +5,10 @@ import {
   isOpenClawQuestionResolveInput,
 } from '../../../../src/types/openclaw-question';
 import {
+  decodeOpenClawVideoTaskRefreshResult, isOpenClawVideoTaskRefreshInput,
+  type OpenClawVideoTaskRefreshInput,
+} from '../../../../src/types/openclaw-video-task';
+import {
   decodeBrowserMutationResult, decodeBrowserOperationFailure, decodeBrowserScreenshot, decodeBrowserStartResult,
   decodeBrowserStatus, decodeBrowserTab, decodeBrowserTabs, isBrowserRequestInput, type BrowserRequestInput,
 } from '../../../../src/types/openclaw-browser';
@@ -37,6 +41,9 @@ export type OpenClawGatewayCapabilityResponse = Readonly<{
 }>;
 
 type GatewayRequest = Readonly<{ id: string; operationId: string; input: unknown }>;
+type VideoTaskCapabilityRequest = GatewayRequest & {
+  id: 'openclaw.videoTask'; operationId: 'video.task.refresh'; input: OpenClawVideoTaskRefreshInput;
+};
 type SurfaceCapabilityRequest = GatewayRequest & (
   | { id: 'openclaw.mcpApp'; input: OpenClawMcpAppRequest }
   | { id: 'openclaw.canvas'; input: OpenClawCanvasRequest }
@@ -56,6 +63,12 @@ export function isOpenClawSurfaceCapabilityRequest(value: unknown): value is Sur
     && value.operationId === value.input.operationId;
 }
 
+export function isOpenClawVideoTaskCapabilityRequest(value: unknown): value is VideoTaskCapabilityRequest {
+  return isRecord(value) && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
+    && value.id === 'openclaw.videoTask' && value.operationId === 'video.task.refresh'
+    && isOpenClawLocalScope(value.scope) && value.target === null && isOpenClawVideoTaskRefreshInput(value.input);
+}
+
 export function createOpenClawGatewayTransport(
   issuer: RuntimeHostDeliveryIssuer,
   runtimeHostTransportPort: number,
@@ -69,7 +82,7 @@ export function createOpenClawGatewayTransport(
       const surface = isOpenClawSurfaceCapabilityRequest(input) ? input : null;
       const mutating = surface
         ? input.operationId === 'mcp.app.callTool' || input.operationId === 'mcp.app.updateModelContext'
-        : input.operationId === 'question.resolve'
+        : input.operationId === 'question.resolve' || input.operationId === 'video.task.refresh'
           || (input.id === 'openclaw.browser' && isBrowserRequestInput(input.input) && input.input.method !== 'GET');
       const delivery = await sendLoopbackJsonDelivery({
         port: runtimeHostTransportPort,
@@ -120,6 +133,10 @@ function decisionFor(value: unknown): LoopbackDecision | null {
     return { endpoint: EXECUTE_PATH, scope: value.id, capability: value.operationId,
       subject: buildSessionIdentityKey(value.input.sessionIdentity) };
   }
+  if (isOpenClawVideoTaskCapabilityRequest(value)) {
+    return { endpoint: EXECUTE_PATH, scope: 'openclaw.videoTask', capability: 'video.task.refresh',
+      subject: JSON.stringify([buildSessionIdentityKey(value.input.sessionIdentity), value.input.taskId]) };
+  }
   if (value.id === 'openclaw.question'
     && ((value.operationId === 'question.list' && isOpenClawQuestionListInput(value.input))
       || (value.operationId === 'question.resolve' && isOpenClawQuestionResolveInput(value.input)))) {
@@ -146,6 +163,10 @@ function decodeResult(request: GatewayRequest, value: unknown): unknown | null {
         && sessionIdentitiesEqual(result.sessionIdentity, request.input.sessionIdentity) ? result : null;
     }
     return result;
+  }
+  if (request.id === 'openclaw.videoTask' && isOpenClawVideoTaskRefreshInput(request.input)) {
+    const result = decodeOpenClawVideoTaskRefreshResult(value);
+    return result?.taskId === request.input.taskId ? result : null;
   }
   if (request.id === 'openclaw.question') return request.operationId === 'question.list'
     ? decodeOpenClawQuestionListResult(value) : decodeOpenClawQuestionResolveResult(value);

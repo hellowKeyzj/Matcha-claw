@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::session::protocol::DisplayContent;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
     Latest,
@@ -268,7 +270,6 @@ pub struct Message {
     input_id: Option<String>,
     stop_reason: Option<String>,
     final_content: Option<FinalContent>,
-    tool_continuation: bool,
     steer_target_run_id: Option<String>,
     after_sequence: Option<Option<u64>>,
     sequence: Option<u64>,
@@ -285,6 +286,8 @@ pub struct Message {
     mirror_origin: Option<String>,
     run_terminal: bool,
     is_imported: bool,
+    external_source: Option<String>,
+    display_content: DisplayContent,
     hidden_control_reply: bool,
     truncated: bool,
     large_text: Option<LargeTextFacts>,
@@ -292,8 +295,7 @@ pub struct Message {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct FinalContent {
-    pub text: [u8; 32],
-    pub other: [u8; 32],
+    pub message_identity: [u8; 32],
     pub text_only: bool,
 }
 
@@ -329,7 +331,6 @@ impl Message {
             input_id: None,
             stop_reason: None,
             final_content: None,
-            tool_continuation: false,
             steer_target_run_id: None,
             after_sequence: None,
             run_id,
@@ -347,6 +348,8 @@ impl Message {
             mirror_origin: None,
             run_terminal: false,
             is_imported: false,
+            external_source: None,
+            display_content: DisplayContent::Empty,
             hidden_control_reply: false,
             truncated: false,
             large_text: None,
@@ -381,24 +384,22 @@ impl Message {
             true
         });
         self.after_sequence = Some(after_sequence);
-        self.final_content = self.final_content.take().and_then(|mut content| {
-            if !content.text_only { return None; }
-            use sha2::Digest;
-            let text = self.text.trim_matches(|ch| matches!(ch, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
-                | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'));
-            if text.is_empty() { return None; }
-            content.text = sha2::Sha256::digest(text.as_bytes()).into();
-            Some(content)
-        });
         self
     }
 
-    pub(super) fn with_content_identity(mut self, key: Option<String>, stop: Option<String>, content: Option<FinalContent>, continuation: bool) -> Self {
+    pub(super) fn with_content_identity(mut self, key: Option<String>, stop: Option<String>, content: Option<FinalContent>, display: DisplayContent) -> Self {
         self.idempotency_key = key;
         self.stop_reason = stop;
         self.final_content = content;
-        self.tool_continuation = continuation;
+        self.display_content = display;
         self
+    }
+
+    pub(crate) fn has_displayable_content(&self) -> bool { self.display_content.has_displayable_content() }
+    pub(in crate::session) fn projection_content(&self) -> &DisplayContent { &self.display_content }
+
+    pub(crate) fn is_projection_error_message(&self, error_message: Option<&str>) -> bool {
+        self.role == MessageRole::Assistant && self.display_content.is_error_message(error_message)
     }
 
     pub(super) fn with_input_id(mut self, input_id: Option<String>) -> Self {
@@ -416,12 +417,14 @@ impl Message {
     pub(crate) fn input_id(&self) -> Option<&str> { self.input_id.as_deref() }
     pub(crate) fn idempotency_key(&self) -> Option<&str> { self.idempotency_key.as_deref() }
     pub(crate) fn stop_reason(&self) -> Option<&str> { self.stop_reason.as_deref() }
-    pub(crate) const fn tool_continuation(&self) -> bool { self.tool_continuation }
     pub(crate) fn terminal_stop(&self) -> bool {
         matches!(self.stop_reason(), Some("stop" | "length" | "error" | "aborted" | "end_turn"))
     }
-    pub(crate) fn final_content_identity(&self) -> Option<([u8; 32], [u8; 32])> {
-        self.final_content.as_ref().map(|content| (content.text, content.other))
+    pub(crate) fn final_message_identity(&self) -> Option<[u8; 32]> {
+        self.final_content.as_ref().map(|content| content.message_identity)
+    }
+    pub(crate) fn text_only_final(&self) -> bool {
+        self.final_content.as_ref().is_some_and(|content| content.text_only)
     }
 
     pub(crate) fn identity_message_id(&self) -> Option<&str> { self.identity_message_id.as_deref() }
@@ -476,12 +479,14 @@ impl Message {
         self.run_terminal
     }
 
-    pub(crate) fn with_imported(mut self, is_imported: bool) -> Self {
+    pub(crate) fn with_imported(mut self, is_imported: bool, external_source: Option<String>) -> Self {
         self.is_imported = is_imported;
+        self.external_source = external_source;
         self
     }
 
     pub const fn is_imported(&self) -> bool { self.is_imported }
+    pub(crate) fn external_source(&self) -> Option<&str> { self.external_source.as_deref() }
 
     pub(crate) fn with_hidden_control_reply(mut self, hidden: bool) -> Self {
         self.hidden_control_reply = hidden;
@@ -676,6 +681,7 @@ pub struct SessionState {
     has_active_run: Option<bool>,
     active_run_ids: Option<Vec<String>>,
     run_timings: Vec<crate::session::protocol::NativeRunTiming>,
+    work_pending: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -704,6 +710,7 @@ impl SessionState {
             has_active_run: None,
             active_run_ids: None,
             run_timings: Vec::new(),
+            work_pending: None,
         }
     }
 
@@ -731,6 +738,13 @@ impl SessionState {
     }
 
     pub(crate) fn run_timings(&self) -> &[crate::session::protocol::NativeRunTiming] { &self.run_timings }
+
+    pub(crate) fn with_work_pending(mut self, work_pending: Option<bool>) -> Self {
+        self.work_pending = work_pending;
+        self
+    }
+
+    pub(crate) const fn work_pending(&self) -> Option<bool> { self.work_pending }
 
     pub const fn has_active_run(&self) -> Option<bool> { self.has_active_run }
 
